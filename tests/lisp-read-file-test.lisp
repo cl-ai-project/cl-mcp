@@ -1,11 +1,11 @@
 ;;;; tests/lisp-read-file-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/lisp-read-file-test
+(defpackage #:cl-mcp/tests/lisp-read-file-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/lisp-read-file
+  (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file))
 
-(in-package #:lisp-mcp-server/tests/lisp-read-file-test)
+(in-package #:cl-mcp/tests/lisp-read-file-test)
 
 (deftest lisp-read-file-collapses-lisp
   (testing "collapses Lisp definitions and reports meta"

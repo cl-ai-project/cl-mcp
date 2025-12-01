@@ -1,4 +1,4 @@
-# lisp-mcp-server REQUIREMENTS
+# cl-mcp REQUIREMENTS
 
 本書は、AI Agent が Common Lisp 環境で REPL 駆動開発を行うための MCP (Model Context Protocol) サーバー実装要件をまとめたものです。ライセンスは MIT、配布は Quicklisp を前提とします。
 
@@ -13,7 +13,7 @@
 - 機能面: `tools` を中心に、最小限の `resources`/`prompts` を提供可能とする設計。
 
 ## 3. トランスポート/起動
-- 既存 REPL から `(asdf:load-system :lisp-mcp-server)`→`(lisp-mcp-server:run &key transport ...)` で起動。
+- 既存 REPL から `(asdf:load-system :cl-mcp)`→`(cl-mcp:run &key transport ...)` で起動。
 - 既定は `:stdio`（クライアントの標準入出力と接続される環境を想定）。REPL 併用時の衝突を避けるため、開発利便性として `:tcp`（127.0.0.1:port, JSON-RPC over length‑prefixed stream）も提供。後方互換のためトランスポートは抽象化する。
 
 ## 4. 対応環境
@@ -53,7 +53,7 @@
 - ユーザー入力/環境/内部の 3 区分で条件型を定義し、再試行ヒントを付与。キャンセル/タイムアウトを尊重。
 
 ## 10. ビルド/配布
-- ASDF システム: `lisp-mcp-server` と `lisp-mcp-server/tests`。
+- ASDF システム: `cl-mcp` と `cl-mcp/tests`。
 - Quicklisp での配布を目指し、依存は保守的に選定。
 
 ## 11. テスト/CI

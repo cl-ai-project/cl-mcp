@@ -1,13 +1,13 @@
 ;;;; src/validate.lisp
 
-(defpackage #:lisp-mcp-server/src/validate
+(defpackage #:cl-mcp/src/validate
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/fs
+  (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
   (:export #:check-parens
            #:*check-parens-max-bytes*))
 
-(in-package #:lisp-mcp-server/src/validate)
+(in-package #:cl-mcp/src/validate)
 
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters check-parens will scan in one call.")

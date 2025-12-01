@@ -1,17 +1,17 @@
 ;;;; src/protocol.lisp
 
-(defpackage #:lisp-mcp-server/src/protocol
+(defpackage #:cl-mcp/src/protocol
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/core #:version)
-  (:import-from #:lisp-mcp-server/src/log #:log-event)
-  (:import-from #:lisp-mcp-server/src/repl #:repl-eval)
-  (:import-from #:lisp-mcp-server/src/fs
+  (:import-from #:cl-mcp/src/core #:version)
+  (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/repl #:repl-eval)
+  (:import-from #:cl-mcp/src/fs
                 #:fs-read-file #:fs-write-file #:fs-list-directory)
-  (:import-from #:lisp-mcp-server/src/lisp-read-file
+  (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
-  (:import-from #:lisp-mcp-server/src/code
+  (:import-from #:cl-mcp/src/code
                 #:code-find-definition #:code-describe-symbol)
-  (:import-from #:lisp-mcp-server/src/validate
+  (:import-from #:cl-mcp/src/validate
                 #:check-parens)
   (:import-from #:yason #:encode #:parse)
   (:export
@@ -23,7 +23,7 @@
    #:make-state
    #:process-json-line))
 
-(in-package #:lisp-mcp-server/src/protocol)
+(in-package #:cl-mcp/src/protocol)
 
 (defparameter +protocol-version+ "2025-06-18")
 (defparameter +supported-protocol-versions+
@@ -80,7 +80,7 @@
         (%result id
                  (%make-ht
                   "protocolVersion" chosen
-                  "serverInfo" (%make-ht "name" "lisp-mcp-server" "version" (version))
+                  "serverInfo" (%make-ht "name" "cl-mcp" "version" (version))
                   "capabilities" caps)))))
 
 (defun handle-notification (state method params)

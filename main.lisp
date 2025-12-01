@@ -1,30 +1,30 @@
 ;;;; main.lisp
 
-(defpackage #:lisp-mcp-server/main
-  (:nicknames #:lisp-mcp-server/main #:lisp-mcp-server #:mcp)
+(defpackage #:cl-mcp/main
+  (:nicknames #:cl-mcp/main #:cl-mcp #:mcp)
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/core
+  (:import-from #:cl-mcp/src/core
                 #:version)
-  (:import-from #:lisp-mcp-server/src/log
+  (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:set-log-level-from-env)
-  (:import-from #:lisp-mcp-server/src/fs
+  (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
                 #:fs-list-directory
                 #:*project-root*)
-  (:import-from #:lisp-mcp-server/src/lisp-read-file
+  (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
-  (:import-from #:lisp-mcp-server/src/code
+  (:import-from #:cl-mcp/src/code
                 #:code-find-definition
                 #:code-describe-symbol)
-  (:import-from #:lisp-mcp-server/src/repl
+  (:import-from #:cl-mcp/src/repl
                 #:repl-eval)
-  (:import-from #:lisp-mcp-server/src/validate
+  (:import-from #:cl-mcp/src/validate
                 #:check-parens)
-  (:import-from #:lisp-mcp-server/src/protocol
+  (:import-from #:cl-mcp/src/protocol
                 #:process-json-line)
-  (:import-from #:lisp-mcp-server/src/tcp
+  (:import-from #:cl-mcp/src/tcp
                 #:serve-tcp
                 #:*tcp-server-thread*
                 #:*tcp-server-port*
@@ -32,7 +32,7 @@
                 #:start-tcp-server-thread
                 #:ensure-tcp-server-thread
                 #:stop-tcp-server-thread)
-  (:import-from #:lisp-mcp-server/src/run
+  (:import-from #:cl-mcp/src/run
                 #:run)
   (:export #:run
            #:version
@@ -61,4 +61,4 @@
            #:ensure-tcp-server-thread
            #:stop-tcp-server-thread))
 
-(in-package #:lisp-mcp-server/main)
+(in-package #:cl-mcp/main)

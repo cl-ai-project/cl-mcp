@@ -1,5 +1,5 @@
-# lisp-mcp-server
-[![CI](https://github.com/masatoi/lisp-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/masatoi/lisp-mcp-server/actions/workflows/ci.yml)
+# cl-mcp
+[![CI](https://github.com/masatoi/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/masatoi/cl-mcp/actions/workflows/ci.yml)
 
 A minimal Model Context Protocol (MCP) server for Common Lisp. It provides a
 newline‑delimited JSON‑RPC 2.0 transport over stdio or TCP, a small protocol
@@ -37,16 +37,16 @@ Note: The repository currently uses `yason` for JSON.
 Load and run from an existing REPL:
 
 ```lisp
-(ql:quickload :lisp-mcp-server)
+(ql:quickload :cl-mcp)
 
 ;; Start TCP transport on an ephemeral port, print chosen port. This make a new thread.
-(lisp-mcp-server:start-tcp-server-thread :port 12345)
+(cl-mcp:start-tcp-server-thread :port 12345)
 ```
 
 Or run a minimal stdio loop (one JSON‑RPC line per request):
 
 ```lisp
-(lisp-mcp-server:run :transport :stdio)
+(cl-mcp:run :transport :stdio)
 ```
 
 ### Try it with the bundled clients
@@ -140,7 +140,7 @@ Notes:
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
 
 Input:
-- `symbol` (string, required): prefer package-qualified, e.g., `"lisp-mcp-server:version"`
+- `symbol` (string, required): prefer package-qualified, e.g., `"cl-mcp:version"`
 - `package` (string, optional): used when `symbol` is unqualified; must exist
 
 Output:
@@ -166,14 +166,14 @@ Output:
 Example:
 
 ```bash
-MCP_LOG_LEVEL=debug sbcl --eval '(ql:quickload :lisp-mcp-server)' ...
+MCP_LOG_LEVEL=debug sbcl --eval '(ql:quickload :cl-mcp)' ...
 ```
 
 ## Running Tests
 
 ```sh
 ros install fukamachi/rove
-rove lisp-mcp-server.asd
+rove cl-mcp.asd
 ```
 
 CI / sandbox note:
@@ -201,7 +201,7 @@ allows writing there or configure SBCL’s cache directory accordingly.
 - `src/` — packages, logging, REPL, protocol, TCP, run entrypoint
 - `tests/` — Rove test suites invoked by ASDF `test-op`
 - `scripts/` — helper clients and a stdio↔TCP bridge
-- `lisp-mcp-server.asd` — main and test systems (delegates `test-op` to Rove)
+- `cl-mcp.asd` — main and test systems (delegates `test-op` to Rove)
 
 ## Security Notes
 - Reader and runtime evaluation are both enabled. Treat this as a trusted,

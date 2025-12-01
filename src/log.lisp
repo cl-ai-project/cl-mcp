@@ -1,6 +1,6 @@
 ;;;; src/log.lisp
 
-(defpackage #:lisp-mcp-server/src/log
+(defpackage #:cl-mcp/src/log
   (:use #:cl)
   (:import-from #:uiop #:getenv)
   (:import-from #:yason #:encode #:*parse-json-arrays-as-vectors*)
@@ -12,7 +12,7 @@
    #:*log-stream*
    #:*log-context*))
 
-(in-package #:lisp-mcp-server/src/log)
+(in-package #:cl-mcp/src/log)
 
 (defparameter *log-level* :debug)
 (defparameter *log-stream* *error-output*)

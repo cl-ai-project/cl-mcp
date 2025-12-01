@@ -1,8 +1,8 @@
 ;;;; src/lisp-read-file.lisp
 
-(defpackage #:lisp-mcp-server/src/lisp-read-file
+(defpackage #:cl-mcp/src/lisp-read-file
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/fs
+  (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-ppcre
@@ -15,7 +15,7 @@
   (:export #:lisp-read-file
            #:lisp-source-path-p))
 
-(in-package #:lisp-mcp-server/src/lisp-read-file)
+(in-package #:cl-mcp/src/lisp-read-file)
 
 (defparameter *lisp-source-extensions*
   '("lisp" "lsp" "cl" "asd" "ros")

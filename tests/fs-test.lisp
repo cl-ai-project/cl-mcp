@@ -1,13 +1,13 @@
 ;;;; tests/fs-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/fs-test
+(defpackage #:cl-mcp/tests/fs-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/fs
+  (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
                 #:fs-list-directory))
 
-(in-package #:lisp-mcp-server/tests/fs-test)
+(in-package #:cl-mcp/tests/fs-test)
 
 (deftest fs-read-file-project
   (testing "fs-read-file reads project file with content"
@@ -53,7 +53,7 @@
 
 (deftest fs-read-file-rejects-huge-limit
   (testing "limit over max signals error"
-    (let ((max lisp-mcp-server/src/fs::*fs-read-max-bytes*))
+    (let ((max cl-mcp/src/fs::*fs-read-max-bytes*))
       (ok (handler-case (progn (fs-read-file "src/core.lisp" :limit (1+ max)) nil)
             (error () t))))))
 

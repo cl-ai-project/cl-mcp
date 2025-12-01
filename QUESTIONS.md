@@ -61,8 +61,8 @@ Quicklispを前提とします、またqlotを使います
 ## 11. 配布・運用
 - 配布形態（ソース、Quicklisp、バイナリ、Docker など）と運用環境の前提は？
 > 配布形態はQuicklisp
-> 既に起動してあるREPLからlisp-mcp-serverのシステムを読み込み、エントリーポイントの関数を呼出すことで実行したい
-> (asdf:load-system :lisp-mcp-server)
+> 既に起動してあるREPLからcl-mcpのシステムを読み込み、エントリーポイントの関数を呼出すことで実行したい
+> (asdf:load-system :cl-mcp)
 > (lisp-mpc-server:run ...)
 - 設定方法（環境変数、設定ファイル、コマンドライン引数）の優先度は？ホットリロード要件はありますか？
 

@@ -1,4 +1,4 @@
-# **lisp-mcp-server REQUIREMENTS**
+# **cl-mcp REQUIREMENTS**
 
 本書は、AI Agent が Common Lisp 環境で REPL 駆動開発を行うための MCP (Model Context Protocol) サーバー実装要件をまとめたものです。
 
@@ -74,12 +74,12 @@ MCPサーバー側でファイルシステムへのアクセス制御を行う�
 
 * **概要**: シンボルの定義場所（ファイルパスと行番号）を特定する。
 * **引数**:
-  * symbol (string): 関数名や変数名（例: "lisp-mcp-server:version"）。
+  * symbol (string): 関数名や変数名（例: "cl-mcp:version"）。
   * package (string, optional): 検索時のカレントパッケージ。存在しないパッケージを指定するとエラーになるため、確実にロード済みのパッケージ名を渡すか、パッケージ修飾子付きシンボル名を使う。
 * **戻り値**:
   * path (string): プロジェクト内なら相対パス、依存ライブラリなら絶対パス。
   * line (integer): 行番号。
-* **実装**: SBCL の sb-introspect:find-definition-source を利用。名前解決は Common Lisp の read で行うため、`lisp-mcp-server`（トップレベルパッケージのニックネーム）など有効なパッケージを必ず指定すること。
+* **実装**: SBCL の sb-introspect:find-definition-source を利用。名前解決は Common Lisp の read で行うため、`cl-mcp`（トップレベルパッケージのニックネーム）など有効なパッケージを必ず指定すること。
 
 #### **code.describe (code-describe)**
 
@@ -118,8 +118,8 @@ MCPサーバー側でファイルシステムへのアクセス制御を行う�
 
 ### **7.1 テスト実行**
 
-* コマンドラインでは `rove lisp-mcp-server.asd` を使用して全スイートを実行する。
-* SBCL/ASDF 経由での実行は `(asdf:test-system "lisp-mcp-server")` でも可（内部で Rove が呼ばれる）。
+* コマンドラインでは `rove cl-mcp.asd` を使用して全スイートを実行する。
+* SBCL/ASDF 経由での実行は `(asdf:test-system "cl-mcp")` でも可（内部で Rove が呼ばれる）。
 
 ## **8\. 開発ロードマップ**
 
