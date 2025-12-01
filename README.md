@@ -15,6 +15,7 @@ clients to drive Common Lisp development via MCP.
 - Tools API
   - `repl-eval` — evaluate forms
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
+  - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
   - `code-find` / `code-describe` — sb-introspect based symbol lookup/metadata
 - Transports: `:stdio` and `:tcp`
 - Structured JSON logs with level control via env var
@@ -119,6 +120,31 @@ Input:
 - `path` (string, required): project root or an ASDF system source dir.
 
 Returns: `entries` array plus human-readable `content`.
+
+### `lisp-read-file`
+Read a file with Lisp-aware collapsing and optional pattern-based expansion.
+
+Inputs:
+- `path` (string, required): absolute path or project-relative.
+- `collapsed` (boolean, default `true`): when `true` and the file is Lisp source
+  (`.lisp`, `.asd`, `.ros`, `.cl`, `.lsp`), return only top-level signatures
+  (e.g., `(defun name (args) ...)`) while keeping `in-package` forms fully
+  shown.
+- `namePattern` (string, optional): CL-PPCRE regex; matching definition names are
+  expanded even in collapsed mode.
+- `contentPattern` (string, optional): CL-PPCRE regex applied to form bodies; if
+  it matches, the full form is expanded. For non-Lisp files, this triggers a
+  grep-like text filter with ±5 lines of context.
+- `offset` / `limit` (integer, optional): slice window used when `collapsed` is
+  `false`; defaults to `offset=0`, `limit=2000` lines.
+
+Output fields:
+- `content`: formatted text (collapsed Lisp view, raw slice, or filtered text).
+- `path`: normalized native pathname.
+- `mode`: one of `lisp-collapsed`, `raw`, `text-filtered`, `lisp-snippet`,
+  `text-snippet` depending on inputs and file type.
+- `meta`: includes `total_forms`/`expanded_forms` for collapsed Lisp, or
+  `total_lines` plus `truncated` flag for slices/filters.
 
 ### `check-parens`
 Check balanced parentheses/brackets in a file slice or provided code; returns the first mismatch position.
