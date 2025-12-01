@@ -1,5 +1,5 @@
 # cl-mcp
-[![CI](https://github.com/masatoi/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/masatoi/cl-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml)
 
 A minimal Model Context Protocol (MCP) server for Common Lisp. It provides a
 newline‑delimited JSON‑RPC 2.0 transport over stdio or TCP, a small protocol
