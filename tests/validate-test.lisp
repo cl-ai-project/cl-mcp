@@ -1,11 +1,11 @@
 ;;;; tests/validate-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/validate-test
+(defpackage #:cl-mcp/tests/validate-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/validate
+  (:import-from #:cl-mcp/src/validate
                 #:check-parens))
 
-(in-package #:lisp-mcp-server/tests/validate-test)
+(in-package #:cl-mcp/tests/validate-test)
 
 (defun %ok? (ht) (gethash "ok" ht))
 (defun %kind (ht) (gethash "kind" ht))

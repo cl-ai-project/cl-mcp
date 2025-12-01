@@ -1,16 +1,16 @@
 ;;;; tests/integration-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/integration-test
+(defpackage #:cl-mcp/tests/integration-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:yason #:parse))
 
-(in-package #:lisp-mcp-server/tests/integration-test)
+(in-package #:cl-mcp/tests/integration-test)
 
 (deftest repl-eval-debug-flow
   (testing "agent fixes wrong arity using code-find and fs-read-file"
     ;; 1) Intentionally call version with a wrong argument to get an error.
-    (let* ((req1 "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(lisp-mcp-server:version :extra)\"}}}")
+    (let* ((req1 "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(cl-mcp:version :extra)\"}}}")
            (resp1 (process-json-line req1))
            (obj1 (parse resp1))
            (result1 (gethash "result" obj1))
@@ -22,7 +22,7 @@
       (ok (stringp text1))
       (ok (search "argument" text1)))
     ;; 2) Locate the definition of version.
-    (let* ((req2 "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find\",\"arguments\":{\"symbol\":\"lisp-mcp-server:version\"}}}")
+    (let* ((req2 "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")
            (resp2 (process-json-line req2))
            (obj2 (parse resp2))
            (result2 (gethash "result" obj2)))
@@ -41,7 +41,7 @@
       (ok (stringp text3))
       (ok (search "(defun version" text3)))
     ;; 4) Call version correctly (no arguments) and succeed.
-    (let* ((req4 "{\"jsonrpc\":\"2.0\",\"id\":103,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(lisp-mcp-server:version)\"}}}")
+    (let* ((req4 "{\"jsonrpc\":\"2.0\",\"id\":103,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(cl-mcp:version)\"}}}")
            (resp4 (process-json-line req4))
            (obj4 (parse resp4))
            (result4 (gethash "result" obj4))
@@ -95,7 +95,7 @@
 
 (deftest namespaced-code-describe
   (testing "namespaced tool name with package parameter"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":130,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp_mcp.code-describe\",\"arguments\":{\"symbol\":\"lisp-mcp-server:version\"}}}"))
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":130,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp_mcp.code-describe\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (res (gethash "result" obj)))

@@ -1,8 +1,8 @@
 ;;;; tests/tcp-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/tcp-test
+(defpackage #:cl-mcp/tests/tcp-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/tcp
+  (:import-from #:cl-mcp/src/tcp
                 #:serve-tcp
                 #:start-tcp-server-thread
                 #:ensure-tcp-server-thread
@@ -12,7 +12,7 @@
   (:import-from #:bordeaux-threads #:make-thread #:join-thread)
   (:import-from #:usocket))
 
-(in-package #:lisp-mcp-server/tests/tcp-test)
+(in-package #:cl-mcp/tests/tcp-test)
 
 (defun socket-available-p ()
   "Return T if we can bind a TCP socket on localhost."

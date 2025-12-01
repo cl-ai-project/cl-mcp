@@ -1,11 +1,11 @@
 ;;;; tests/logging-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/logging-test
+(defpackage #:cl-mcp/tests/logging-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line)
-  (:import-from #:lisp-mcp-server/src/log #:*log-level* #:*log-stream*))
+  (:import-from #:cl-mcp/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/log #:*log-level* #:*log-stream*))
 
-(in-package #:lisp-mcp-server/tests/logging-test)
+(in-package #:cl-mcp/tests/logging-test)
 
 (deftest logging-rpc-dispatch
   (testing "process-json-line emits debug logs when level=debug"

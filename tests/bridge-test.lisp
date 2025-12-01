@@ -1,11 +1,11 @@
 ;;;; tests/bridge-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/bridge-test
+(defpackage #:cl-mcp/tests/bridge-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/main #:serve-tcp)
+  (:import-from #:cl-mcp/main #:serve-tcp)
   (:import-from #:bordeaux-threads #:make-thread))
 
-(in-package #:lisp-mcp-server/tests/bridge-test)
+(in-package #:cl-mcp/tests/bridge-test)
 
 (deftest stdio-bridge-no-idle-timeout
   (ok t)

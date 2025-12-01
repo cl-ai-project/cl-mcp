@@ -33,7 +33,7 @@ validation:
 
       Critical project conventions:
       - Follow the Google Common Lisp Style Guide.
-      - Use `lisp-mcp-server/src/*` package naming matching the directory structure.
+      - Use `cl-mcp/src/*` package naming matching the directory structure.
       - Logging must use `src/log:log-event` (structured JSON), never `format t`.
       - Protocol messages must be newline-delimited JSON-RPC 2.0.
 
@@ -44,23 +44,23 @@ validation:
 
           ✅ CORRECT: Package name matches file path (Package Inferred System style)
           - File: src/protocol.lisp
-          - Package: `lisp-mcp-server/src/protocol`
+          - Package: `cl-mcp/src/protocol`
 
           - File: tests/protocol-test.lisp
-          - Package: `lisp-mcp-server/tests/protocol-test`
+          - Package: `cl-mcp/tests/protocol-test`
 
           ❌ WRONG: Divergent naming
           - File: src/utils.lisp -> (defpackage :mcp-utils ...)
 
           Defpackage Style:
           ```lisp
-          (defpackage #:lisp-mcp-server/src/example
+          (defpackage #:cl-mcp/src/example
             (:use #:cl)
-            (:import-from #:lisp-mcp-server/src/log
+            (:import-from #:cl-mcp/src/log
                           #:log-event)
             (:export #:exported-function
                      #:*exported-variable*))
-          (in-package #:lisp-mcp-server/src/example)
+          (in-package #:cl-mcp/src/example)
           ```
           - Always use `#:cl` first in `:use`.
           - Use explicit `:import-from` rather than `:use` for internal modules.
@@ -77,11 +77,11 @@ validation:
 
           Example `tests/core-test.lisp`:
           ```lisp
-          (defpackage #:lisp-mcp-server/tests/core-test
+          (defpackage #:cl-mcp/tests/core-test
             (:use #:cl #:rove)
-            (:import-from #:lisp-mcp-server/src/core #:version))
+            (:import-from #:cl-mcp/src/core #:version))
 
-          (in-package #:lisp-mcp-server/tests/core-test)
+          (in-package #:cl-mcp/tests/core-test)
 
           (deftest version-check
             (testing "version returns string"
@@ -91,7 +91,7 @@ validation:
           ⚠️ CRITICAL:
           - Do not use `cl-test` or `fiveam`; use `rove`.
           - Ensure tests do not leave background threads running (cleanup with `unwind-protect`).
-          - Tests must be runnable via `(asdf:test-system "lisp-mcp-server")`.
+          - Tests must be runnable via `(asdf:test-system "cl-mcp")`.
 
       - name: security_and_safety
         prompt: |
@@ -99,7 +99,7 @@ validation:
 
           1. **Strict File Access**:
              - Never use `open` or `with-open-file` on arbitrary paths directly in tools.
-             - ALWAYS use `lisp-mcp-server/src/fs` wrappers (`fs-read-file`, `fs-write-file`).
+             - ALWAYS use `cl-mcp/src/fs` wrappers (`fs-read-file`, `fs-write-file`).
              - Ensure paths are validated against `*project-root*` or ASDF registered systems.
 
           2. **Reader Safety**:
@@ -127,7 +127,7 @@ validation:
 
           ✅ CORRECT: Structured JSON logging to stderr
           ```lisp
-          (import-from #:lisp-mcp-server/src/log #:log-event)
+          (import-from #:cl-mcp/src/log #:log-event)
 
           ;; Keys should be string literals, values can be any printable object
           (log-event :info "rpc.dispatch" "method" method-name "id" request-id)

@@ -1,8 +1,8 @@
 ;;;; src/code.lisp
 
-(defpackage #:lisp-mcp-server/src/code
+(defpackage #:cl-mcp/src/code
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/log #:log-event)
+  (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:uiop
                 #:read-file-string
                 #:getcwd
@@ -11,7 +11,7 @@
    #:code-find-definition
    #:code-describe-symbol))
 
-(in-package #:lisp-mcp-server/src/code)
+(in-package #:cl-mcp/src/code)
 
 (defun %ensure-package (package)
   "Resolve PACKAGE designator to a package object.

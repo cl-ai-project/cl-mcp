@@ -1,8 +1,8 @@
 ;;;; src/fs.lisp
 
-(defpackage #:lisp-mcp-server/src/fs
+(defpackage #:cl-mcp/src/fs
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/log #:log-event)
+  (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:getcwd
@@ -22,12 +22,12 @@
            #:fs-write-file
            #:fs-list-directory))
 
-(in-package #:lisp-mcp-server/src/fs)
+(in-package #:cl-mcp/src/fs)
 
 (defparameter *project-root*
   (or (ignore-errors
         (uiop:ensure-directory-pathname
-         (asdf:system-source-directory "lisp-mcp-server")))
+         (asdf:system-source-directory "cl-mcp")))
       (uiop:ensure-directory-pathname (uiop:getcwd)))
   "Absolute pathname of the project root. Prefer the ASDF system source
 directory; fall back to the current working directory at load time.")

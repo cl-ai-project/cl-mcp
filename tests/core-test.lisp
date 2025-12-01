@@ -1,11 +1,11 @@
 ;;;; tests/core-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/core-test
+(defpackage #:cl-mcp/tests/core-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/core #:version)
-  (:import-from #:lisp-mcp-server/src/run))
+  (:import-from #:cl-mcp/src/core #:version)
+  (:import-from #:cl-mcp/src/run))
 
-(in-package #:lisp-mcp-server/tests/core-test)
+(in-package #:cl-mcp/tests/core-test)
 
 (deftest version-available
   (testing "version returns a non-empty string"
@@ -18,14 +18,14 @@
     ;; block on *standard-input* during automated runs.
     (let* ((in (make-string-input-stream ""))
            (out (make-string-output-stream)))
-      (ok (eq t (lisp-mcp-server/src/run:run :transport :stdio :in in :out out))))))
+      (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out))))))
 
 (deftest stdio-one-message
   (testing "run processes one line from :in and writes to :out"
     (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
            (in (make-string-input-stream req))
            (out (make-string-output-stream)))
-      (ok (eq t (lisp-mcp-server/src/run:run :transport :stdio :in in :out out)))
+      (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out)))
       (let* ((s (get-output-stream-string out)))
         (ok (> (length s) 0))
         (ok (search "\"result\"" s))))))

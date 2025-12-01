@@ -1,14 +1,14 @@
 ;;;; src/core.lisp
 
-(defpackage #:lisp-mcp-server/src/core
+(defpackage #:cl-mcp/src/core
   (:use #:cl)
   (:export #:version #:+server-version+))
 
-(in-package #:lisp-mcp-server/src/core)
+(in-package #:cl-mcp/src/core)
 
 (defparameter +server-version+
   "0.1.0"
-  "Semantic version of lisp-mcp-server.")
+  "Semantic version of cl-mcp.")
 
 (declaim (ftype (function () simple-string) version))
 (defun version ()

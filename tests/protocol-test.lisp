@@ -1,11 +1,11 @@
 ;;;; tests/protocol-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/protocol-test
+(defpackage #:cl-mcp/tests/protocol-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:yason #:parse))
 
-(in-package #:lisp-mcp-server/tests/protocol-test)
+(in-package #:cl-mcp/tests/protocol-test)
 
 (defparameter *init-req*
   "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"test-client\",\"version\":\"0.1\"}}}")

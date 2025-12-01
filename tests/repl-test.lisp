@@ -1,10 +1,10 @@
 ;;;; tests/repl-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/repl-test
+(defpackage #:cl-mcp/tests/repl-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/repl #:repl-eval))
+  (:import-from #:cl-mcp/src/repl #:repl-eval))
 
-(in-package #:lisp-mcp-server/tests/repl-test)
+(in-package #:cl-mcp/tests/repl-test)
 
 (defparameter *timeout-flag* nil)
 
@@ -70,7 +70,7 @@
   (testing "timeout stops the worker thread so side effects never run"
     (setf *timeout-flag* nil)
     (multiple-value-bind (printed value stdout stderr)
-        (repl-eval "(progn (sleep 2) (setf lisp-mcp-server/tests/repl-test::*timeout-flag* :done))"
+        (repl-eval "(progn (sleep 2) (setf cl-mcp/tests/repl-test::*timeout-flag* :done))"
                    :timeout-seconds 0.1)
       (ok (search "timed out" printed))
       (ok (eql value :timeout))

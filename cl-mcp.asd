@@ -1,6 +1,6 @@
-;;;; lisp-mcp-server.asd
+;;;; cl-mcp.asd
 
-(asdf:defsystem "lisp-mcp-server"
+(asdf:defsystem "cl-mcp"
   :class :package-inferred-system
   :description "Model Context Protocol server for Common Lisp"
   :author ""
@@ -11,5 +11,5 @@
                :yason
                :usocket
                :bordeaux-threads
-               "lisp-mcp-server/main")
-  :in-order-to ((test-op (test-op "lisp-mcp-server/tests"))))
+               "cl-mcp/main")
+  :in-order-to ((test-op (test-op "cl-mcp/tests"))))

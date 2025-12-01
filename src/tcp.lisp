@@ -1,9 +1,9 @@
 ;;;; src/tcp.lisp
 
-(defpackage #:lisp-mcp-server/src/tcp
+(defpackage #:cl-mcp/src/tcp
   (:use #:cl)
-  (:import-from #:lisp-mcp-server/src/log #:log-event)
-  (:import-from #:lisp-mcp-server/src/protocol #:make-state #:process-json-line)
+  (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:usocket)
   (:export
@@ -17,7 +17,7 @@
    #:stop-tcp-server-thread
    #:serve-tcp))
 
-(in-package #:lisp-mcp-server/src/tcp)
+(in-package #:cl-mcp/src/tcp)
 
 (defparameter *tcp-server-thread* nil
   "Background TCP server thread created by START-TCP-SERVER-THREAD.")
@@ -137,7 +137,7 @@ successfully started, or NIL if the start attempt failed."
 (defun %process-stream (stream socket conn-id remote)
   (let ((state (make-state))
         (log-context (list "conn" conn-id "remote" remote)))
-    (let ((lisp-mcp-server/src/log:*log-context* log-context))
+    (let ((cl-mcp/src/log:*log-context* log-context))
       (loop
         for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)
         do (cond

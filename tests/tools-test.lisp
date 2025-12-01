@@ -1,11 +1,11 @@
 ;;;; tests/tools-test.lisp
 
-(defpackage #:lisp-mcp-server/tests/tools-test
+(defpackage #:cl-mcp/tests/tools-test
   (:use #:cl #:rove)
-  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:yason #:parse))
 
-(in-package #:lisp-mcp-server/tests/tools-test)
+(in-package #:cl-mcp/tests/tools-test)
 
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
@@ -72,7 +72,7 @@
 
 (deftest tools-call-code-find
   (testing "tools/call code-find returns path and line"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find\",\"arguments\":{\"symbol\":\"lisp-mcp-server:version\"}}}"))
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (or (gethash "result" obj)
@@ -86,7 +86,7 @@
 
 (deftest tools-call-code-describe
   (testing "tools/call code-describe returns symbol metadata"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"code-describe\",\"arguments\":{\"symbol\":\"lisp-mcp-server:version\"}}}"))
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"code-describe\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (or (gethash "result" obj)
