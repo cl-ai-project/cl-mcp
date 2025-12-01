@@ -1,0 +1,169 @@
+version: 2
+
+trigger:
+  paths:
+    - 'src/**/*.lisp'
+    - 'tests/**/*.lisp'
+    - 'scripts/**/*.py'
+    - 'scripts/**/*.lisp'
+    - '*.asd'
+    - 'AGENTS.md'
+    - 'REQUIREMENTS.md'
+  base_branches:
+    exclude:
+      - 'release'
+
+validation:
+  limits:
+    max_total_changed_lines: 400
+    max_delete_ratio: 0.5
+    max_files_changed: 10
+    severity: warning
+
+  ai:
+    system_prompt: |
+      You are a senior Common Lisp engineer specialized in building Model Context Protocol (MCP) servers.
+      Your goal is to ensure the code is portable, secure, and rigorously tested using Rove.
+
+      Key principles:
+      - **TDD-First**: Write Rove tests before implementation.
+      - **Security**: Strict sandboxing for File System tools; no runtime `eval` outside the REPL tool.
+      - **Reliability**: Use Conditions and Restarts; never crash the main loop or TCP thread.
+      - **Architecture**: Modular design (Core, Protocol, Transport, Tools) managed via ASDF.
+
+      Critical project conventions:
+      - Follow the Google Common Lisp Style Guide.
+      - Use `lisp-mcp-server/src/*` package naming matching the directory structure.
+      - Logging must use `src/log:log-event` (structured JSON), never `format t`.
+      - Protocol messages must be newline-delimited JSON-RPC 2.0.
+
+    rules:
+      - name: package_structure
+        prompt: |
+          Package and File Structure Rules:
+
+          ✅ CORRECT: Package name matches file path (Package Inferred System style)
+          - File: src/protocol.lisp
+          - Package: `lisp-mcp-server/src/protocol`
+
+          - File: tests/protocol-test.lisp
+          - Package: `lisp-mcp-server/tests/protocol-test`
+
+          ❌ WRONG: Divergent naming
+          - File: src/utils.lisp -> (defpackage :mcp-utils ...)
+
+          Defpackage Style:
+          ```lisp
+          (defpackage #:lisp-mcp-server/src/example
+            (:use #:cl)
+            (:import-from #:lisp-mcp-server/src/log
+                          #:log-event)
+            (:export #:exported-function
+                     #:*exported-variable*))
+          (in-package #:lisp-mcp-server/src/example)
+          ```
+          - Always use `#:cl` first in `:use`.
+          - Use explicit `:import-from` rather than `:use` for internal modules.
+          - Export symbols explicitly.
+
+      - name: testing_standards
+        prompt: |
+          Rove Testing Rules (from AGENTS.md):
+
+          ✅ CORRECT: Rove Test Structure
+          - Test files mirror source files in `tests/`.
+          - Use `(deftest ...)` suites named after the functionality.
+          - Use `(ok ...)` for assertions.
+
+          Example `tests/core-test.lisp`:
+          ```lisp
+          (defpackage #:lisp-mcp-server/tests/core-test
+            (:use #:cl #:rove)
+            (:import-from #:lisp-mcp-server/src/core #:version))
+
+          (in-package #:lisp-mcp-server/tests/core-test)
+
+          (deftest version-check
+            (testing "version returns string"
+              (ok (stringp (version)))))
+          ```
+
+          ⚠️ CRITICAL:
+          - Do not use `cl-test` or `fiveam`; use `rove`.
+          - Ensure tests do not leave background threads running (cleanup with `unwind-protect`).
+          - Tests must be runnable via `(asdf:test-system "lisp-mcp-server")`.
+
+      - name: security_and_safety
+        prompt: |
+          Security and Safety Rules (Requirements & Code Guide):
+
+          1. **Strict File Access**:
+             - Never use `open` or `with-open-file` on arbitrary paths directly in tools.
+             - ALWAYS use `lisp-mcp-server/src/fs` wrappers (`fs-read-file`, `fs-write-file`).
+             - Ensure paths are validated against `*project-root*` or ASDF registered systems.
+
+          2. **Reader Safety**:
+             - When reading untrusted strings (e.g., from RPC), `*read-eval*` must be `NIL`.
+             - Example:
+             ```lisp
+             (let ((*read-eval* nil)
+                   (*readtable* (copy-readtable nil)))
+               (read-from-string input))
+             ```
+             - Exception: The `repl-eval` tool allows `*read-eval*` but isolates it.
+
+          3. **No Arbitrary Eval**:
+             - Do not use `(eval ...)` in `src/protocol.lisp` or `src/fs.lisp`.
+             - Only `src/repl.lisp` is authorized to use `eval`.
+
+      - name: logging_conventions
+        prompt: |
+          Logging Conventions:
+
+          ❌ WRONG: Unstructured text to stdout
+          ```lisp
+          (format t "Something happened: ~A~%" val)
+          ```
+
+          ✅ CORRECT: Structured JSON logging to stderr
+          ```lisp
+          (import-from #:lisp-mcp-server/src/log #:log-event)
+
+          ;; Keys should be string literals, values can be any printable object
+          (log-event :info "rpc.dispatch" "method" method-name "id" request-id)
+          (log-event :error "fs.read.fail" "path" path "error" (princ-to-string e))
+          ```
+          - Events use dot.notation (e.g., `tcp.accept`, `tools.call`).
+          - Log level is controlled via `src/log:*log-level*`.
+
+      - name: json_rpc_handling
+        prompt: |
+          JSON-RPC 2.0 Handling:
+
+          - The server communicates via newline-delimited JSON.
+          - Use `yason` for JSON encoding/decoding.
+          - Ensure all JSON-RPC errors follow the spec (code, message, data).
+
+          Error Pattern:
+          ```lisp
+          (defun %error (id code message &optional data)
+            ;; Must return a hash-table compatible with Yason
+            (let ((err (make-hash-table ...)))
+               ;; populate code, message
+               err))
+          ```
+          - Do not allow Lisp conditions (errors) to bubble up to the top-level loop; catch them and return a `-32603` (Internal Error) JSON response.
+          - Use `handler-case` in `process-json-line`.
+
+      - name: common_lisp_style
+        prompt: |
+          General Common Lisp Style:
+          - **Naming**: `kebab-case` for symbols. `*earmuffs*` for global specials. `+constants+`.
+          - **Indent**: 2 spaces.
+          - **Functions**: Prefer higher-order functions (`mapcar`, `remove-if`) over explicit loops where readable.
+          - **Comments**:
+            - `;;;;` Header
+            - `;;;` Top-level
+            - `;;` Indented
+            - `;` Inline
+          - **Docstrings**: Mandatory for all exported functions and structure slots.
