@@ -1,4 +1,5 @@
 # lisp-mcp-server
+[![CI](https://github.com/masatoi/lisp-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/masatoi/lisp-mcp-server/actions/workflows/ci.yml)
 
 A minimal Model Context Protocol (MCP) server for Common Lisp. It provides a
 newline‑delimited JSON‑RPC 2.0 transport over stdio or TCP, a small protocol
@@ -11,7 +12,10 @@ clients to drive Common Lisp development via MCP.
 ## Features
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
-- Tools API with one built-in tool: `repl-eval`
+- Tools API
+  - `repl-eval` — evaluate forms
+  - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
+  - `code-find` / `code-describe` — sb-introspect based symbol lookup/metadata
 - Transports: `:stdio` and `:tcp`
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -19,7 +23,8 @@ clients to drive Common Lisp development via MCP.
 ## Protocol Support
 - Protocol versions recognized: `2025-06-18`, `2025-03-26`, `2024-11-05`
   - On `initialize`, if the client’s `protocolVersion` is supported it is echoed
-    back; otherwise the server’s preferred version is selected.
+    back; if it is **not** supported the server returns `error.code = -32602`
+    with `data.supportedVersions`.
 
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
@@ -33,14 +38,9 @@ Load and run from an existing REPL:
 
 ```lisp
 (ql:quickload :lisp-mcp-server)
-(asdf:load-system :lisp-mcp-server)
 
-;; Start TCP transport on an ephemeral port, print chosen port
-(lisp-mcp-server:run :transport :tcp
-                     :port 12345
-                     :accept-once nil
-                     :on-listening (lambda (p)
-                                     (format t "~&port=~A~%" p)))
+;; Start TCP transport on an ephemeral port, print chosen port. This make a new thread.
+(lisp-mcp-server:start-tcp-server-thread :port 12345)
 ```
 
 Or run a minimal stdio loop (one JSON‑RPC line per request):
@@ -75,6 +75,10 @@ Input schema (JSON):
 - `package` (string, optional): package to evaluate in (default `CL-USER`)
 - `printLevel` (integer|null): binds `*print-level*`
 - `printLength` (integer|null): binds `*print-length*`
+Output fields:
+- `content`: last value as text (existing)
+- `stdout`: concatenated standard output from evaluation
+- `stderr`: concatenated standard error from evaluation
 
 Example JSON‑RPC request:
 
@@ -89,6 +93,72 @@ Response (excerpt):
 {"result":{"content":[{"type":"text","text":"3"}]}}
 ```
 
+### `fs-read-file`
+Read text from an allow‑listed path.
+
+Input:
+- `path` (string, required): project‑relative or absolute inside a registered ASDF system’s source tree
+- `offset` / `limit` (integer, optional): substring window
+
+Policy: reads are allowed only when the resolved path is under the project root or under `asdf:system-source-directory` of a registered system.
+Dependency libs: reading source in Quicklisp/ASDF dependencies is permitted **only via `fs-read-file`**; do not shell out for metadata (`wc`, `stat`, etc.). File length is intentionally not returned—page through content with `limit`/`offset` when needed.
+
+### `fs-write-file`
+Write text to a file under the project root (directories auto-created).
+
+Input:
+- `path` (string, required): **must be relative** to the project root
+- `content` (string, required)
+
+Policy: writes outside the project root are rejected.
+
+### `fs-list-directory`
+List entries in a directory (files/directories only, skips hidden and build artifacts).
+
+Input:
+- `path` (string, required): project root or an ASDF system source dir.
+
+Returns: `entries` array plus human-readable `content`.
+
+### `check-parens`
+Check balanced parentheses/brackets in a file slice or provided code; returns the first mismatch position.
+
+Input:
+- `path` (string, optional): absolute path inside the project or registered ASDF system (mutually exclusive with `code`)
+- `code` (string, optional): raw code string (mutually exclusive with `path`)
+- `offset` / `limit` (integer, optional): window when reading from `path`
+
+Output:
+- `ok` (boolean)
+- when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` | `too-large`), `expected`, `found`, and `position` (`offset`, `line`, `column`).
+
+Notes:
+- Uses the same read allow-list and 2 MB cap as `fs-read-file`.
+- Ignores delimiters inside strings, `;` line comments, and `#| ... |#` block comments.
+
+### `code-find`
+Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
+
+Input:
+- `symbol` (string, required): prefer package-qualified, e.g., `"lisp-mcp-server:version"`
+- `package` (string, optional): used when `symbol` is unqualified; must exist
+
+Output:
+- `path` (relative when inside project, absolute otherwise)
+- `line` (integer or null if unknown)
+
+### `code-describe`
+Return symbol metadata (name, type, arglist, documentation).
+
+Input:
+- `symbol` (string, required)
+- `package` (string, optional): must exist when `symbol` is unqualified
+
+Output:
+- `type` ("function" | "macro" | "variable" | "unbound")
+- `arglist` (string)
+- `documentation` (string|null)
+
 ## Logging
 - Structured JSON line logs to `*error-output*`.
 - Control level via env var `MCP_LOG_LEVEL` with one of: `debug`, `info`, `warn`, `error`.
@@ -100,14 +170,21 @@ MCP_LOG_LEVEL=debug sbcl --eval '(ql:quickload :lisp-mcp-server)' ...
 ```
 
 ## Running Tests
-This project uses Rove and ASDF’s `test-op`.
 
-From a REPL with Quicklisp:
-
-```lisp
-(asdf:load-asd #P"lisp-mcp-server.asd")
-(asdf:test-system "lisp-mcp-server")
+```sh
+ros install fukamachi/rove
+rove lisp-mcp-server.asd
 ```
+
+CI / sandbox note:
+- Socket-restricted environments may fail `tests/tcp-test.lisp`. Run core suites without TCP via:
+  ```sh
+  rove tests/core-test.lisp tests/protocol-test.lisp tests/tools-test.lisp tests/repl-test.lisp tests/fs-test.lisp tests/code-test.lisp tests/logging-test.lisp
+  ```
+- Run TCP-specific tests only where binding to localhost is permitted:
+  ```sh
+  rove tests/tcp-test.lisp
+  ```
 
 What’s covered:
 - Version/API surface sanity
@@ -130,6 +207,9 @@ allows writing there or configure SBCL’s cache directory accordingly.
 - Reader and runtime evaluation are both enabled. Treat this as a trusted,
   local-development tool; untrusted input can execute arbitrary code in the
   host Lisp image.
+- File access:
+  - Reads: project root, or `asdf:system-source-directory` of registered systems.
+  - Writes: project root only; absolute paths are rejected.
 - If exposure beyond trusted usage is planned, add allowlists, resource/time
   limits, and output caps.
 
@@ -145,8 +225,8 @@ allows writing there or configure SBCL’s cache directory accordingly.
 
 ## Roadmap
 - Error taxonomy as condition types mapped to JSON‑RPC errors
-- Additional tools (read‑only file access, symbol lookup, etc.)
 - CI (GitHub Actions) matrix for SBCL/macOS/Linux
+- Bounds/quotas for tool outputs (content length caps)
 
 ## License
 MIT

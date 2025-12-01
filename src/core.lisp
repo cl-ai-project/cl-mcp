@@ -1,5 +1,10 @@
 ;;;; src/core.lisp
-(in-package :lisp-mcp-server)
+
+(defpackage #:lisp-mcp-server/src/core
+  (:use #:cl)
+  (:export #:version #:+server-version+))
+
+(in-package #:lisp-mcp-server/src/core)
 
 (defparameter +server-version+
   "0.1.0"
@@ -9,4 +14,3 @@
 (defun version ()
   "Return server version string."
   +server-version+)
-

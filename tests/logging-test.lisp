@@ -1,15 +1,20 @@
 ;;;; tests/logging-test.lisp
-(in-package :lisp-mcp-server/tests)
+
+(defpackage #:lisp-mcp-server/tests/logging-test
+  (:use #:cl #:rove)
+  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line)
+  (:import-from #:lisp-mcp-server/src/log #:*log-level* #:*log-stream*))
+
+(in-package #:lisp-mcp-server/tests/logging-test)
 
 (deftest logging-rpc-dispatch
   (testing "process-json-line emits debug logs when level=debug"
     (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
            (sink (make-string-output-stream)))
-      (let ((mcp::*log-level* :debug)
-            (mcp::*log-stream* sink))
-        (ok (stringp (mcp:process-json-line req)))
+      (let ((*log-level* :debug)
+            (*log-stream* sink))
+        (ok (stringp (process-json-line req)))
         (let* ((s (get-output-stream-string sink)))
           (ok (> (length s) 0))
           (ok (search "\"event\":\"rpc.dispatch\"" s))
           (ok (search "\"event\":\"rpc.result\"" s)))))))
-

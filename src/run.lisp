@@ -1,17 +1,25 @@
 ;;;; src/run.lisp
-(in-package :lisp-mcp-server)
+
+(defpackage #:lisp-mcp-server/src/run
+  (:use #:cl)
+  (:import-from #:lisp-mcp-server/src/log #:log-event)
+  (:import-from #:lisp-mcp-server/src/protocol #:process-json-line #:make-state)
+  (:import-from #:lisp-mcp-server/src/tcp #:serve-tcp)
+  (:export #:run))
+
+(in-package #:lisp-mcp-server/src/run)
 
 ;; MVP placeholder: provide a minimal RUN entry point signature only.
 ;; Real transport/protocol handling will be implemented TDD-first later.
 
 (declaim (ftype (function (&key (:transport (member :stdio :tcp))
-                                  (:in stream) (:out stream)
-                                  (:host string) (:port (or integer null))
-                                  (:accept-once t) (:on-listening function))
+                                (:in stream) (:out stream)
+                                (:host string) (:port (or integer null))
+                                (:accept-once t) (:on-listening function))
                           (values boolean &optional))
                 run))
 (defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
-                  (host "127.0.0.1") (port 0) (accept-once t) on-listening)
+                 (host "127.0.0.1") (port 0) (accept-once t) on-listening)
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
 and writes responses to OUT. Returns T when input is exhausted (EOF).
 

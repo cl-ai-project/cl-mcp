@@ -25,6 +25,8 @@ import socket
 import sys
 import threading
 import time
+import atexit
+import signal
 
 
 def eprint(*a, **k):
@@ -32,6 +34,34 @@ def eprint(*a, **k):
 
 
 def bridge(host: str, port: int, connect_timeout: float = 5.0) -> int:
+    cleanup_called = threading.Event()
+
+    def cleanup(sock, sock_file_r, sock_file_w):
+        # Idempotent cleanup to ensure EOF is sent and descriptors close.
+        if cleanup_called.is_set():
+            return
+        cleanup_called.set()
+        try:
+            if sock_file_w:
+                try:
+                    sock_file_w.flush()
+                except Exception:
+                    pass
+                try:
+                    sock.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+        finally:
+            for f in (sock_file_r, sock_file_w):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     try:
         sock = socket.create_connection((host, port), timeout=connect_timeout)
         # Disable read timeouts after connect: MCP connections can idle for long periods.
@@ -48,6 +78,17 @@ def bridge(host: str, port: int, connect_timeout: float = 5.0) -> int:
     sock_file_r = sock.makefile('r', encoding='utf-8', newline='')
     sock_file_w = sock.makefile('w', encoding='utf-8', newline='\n')
 
+    # Register cleanup for normal exit and most signals (SIGKILL cannot be handled).
+    atexit.register(lambda: cleanup(sock, sock_file_r, sock_file_w))
+
+    def handle_signal(signum, _frame):
+        eprint(f"[bridge] signal {signum}, closing socket")
+        cleanup(sock, sock_file_r, sock_file_w)
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handle_signal)
+
     stop = threading.Event()
 
     def pump_stdin_to_tcp():
@@ -61,14 +102,7 @@ def bridge(host: str, port: int, connect_timeout: float = 5.0) -> int:
         except Exception as e:
             eprint(f"[bridge] stdin→tcp error: {e}")
         finally:
-            try:
-                sock_file_w.flush()
-            except Exception:
-                pass
-            try:
-                sock.shutdown(socket.SHUT_WR)
-            except Exception:
-                pass
+            cleanup(sock, sock_file_r, sock_file_w)
             stop.set()
 
     def pump_tcp_to_stdout():
@@ -91,6 +125,7 @@ def bridge(host: str, port: int, connect_timeout: float = 5.0) -> int:
         except Exception as e:
             eprint(f"[bridge] tcp→stdout error: {e}")
         finally:
+            cleanup(sock, sock_file_r, sock_file_w)
             stop.set()
 
     t1 = threading.Thread(target=pump_stdin_to_tcp, name="stdin→tcp", daemon=True)
@@ -101,18 +136,7 @@ def bridge(host: str, port: int, connect_timeout: float = 5.0) -> int:
         while not stop.is_set():
             time.sleep(0.05)
     finally:
-        try:
-            sock_file_r.close()
-        except Exception:
-            pass
-        try:
-            sock_file_w.close()
-        except Exception:
-            pass
-        try:
-            sock.close()
-        except Exception:
-            pass
+        cleanup(sock, sock_file_r, sock_file_w)
     return 0
 
 

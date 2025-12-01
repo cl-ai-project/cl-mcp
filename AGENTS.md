@@ -6,7 +6,13 @@
 The core system lives under `src/`, grouped by responsibility (`log`, `repl`, `protocol`, `tcp`, `core`, `run`). Each file is serially loaded via `lisp-mcp-server.asd`; add new packages here and export symbols explicitly. Tests reside in `tests/` with mirrored filenames (`*-test.lisp`) for Rove. Helper clients and bridges are in `scripts/`. Keep assets such as sample transcripts or captures under `tests/fixtures/` if introduced.
 
 ## Build, Test, and Development Commands
-From a REPL or SBCL batch, load the system with `(asdf:load-asd #P"lisp-mcp-server.asd")` followed by `(asdf:load-system "lisp-mcp-server")`. Run the server interactively via `(lisp-mcp-server:run :transport :stdio)` or `:tcp`. Execute the test suite with `(asdf:test-system "lisp-mcp-server")`; this delegates to Rove and returns a non-zero status on failure. Use `MCP_LOG_LEVEL=debug sbcl ...` to surface structured logs during troubleshooting.
+Use `rove lisp-mcp-server.asd` to run the test on the command line.
+
+### Running Individual Tests
+- From the MCP REPL, wrap the test invocation so stdout is captured:  
+  `(with-output-to-string (*standard-output*) (rove:run-test 'lisp-mcp-server/tests/integration-test::repl-eval-printlength))`
+- The wrapper lets you see per-assertion output even when the REPL only returns the final value. Replace the test symbol to target other cases.
+- In sandboxed environments where TCP bind is denied, expect `tests/tcp-test.lisp` to fail; run other suites individually to iterate.
 
 ## Coding Style & Naming Conventions
 Follow the Google Common Lisp Style Guide: 2-space indent, ≤100 columns, blank line between top-level forms. Each `*.lisp` begins with `(in-package ...)` then module-specific `declaim`. Use lower-case lisp-case for functions, `-p` predicates, `+constants+`, and `*specials*`. Avoid runtime `eval` and dynamic symbol interning; prefer restarts over `signal`. Public functions and classes require docstrings; document conditions and restarts in situ.
