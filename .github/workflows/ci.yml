@@ -25,4 +25,4 @@ jobs:
 
       - name: Run Tests
         run: |
-          rove lisp-mcp-server.asd
+          rove cl-mcp.asd
