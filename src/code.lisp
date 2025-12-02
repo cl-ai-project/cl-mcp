@@ -3,6 +3,7 @@
 (defpackage #:cl-mcp/src/code
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/fs #:*project-root*)
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
@@ -83,13 +84,13 @@ Returns NIL when the file cannot be read."
         nil))))
 
 (defun %normalize-path (pathname)
-  "Return a namestring, relative to the project when possible.
-Prefers current working directory, then the cl-mcp system source directory,
-and falls back to an absolute path."
+  "Return a namestring, relative to *project-root* when possible.
+Falls back to CWD, then cl-mcp system source directory, else absolute."
   (when pathname
     (let* ((pn (uiop:ensure-pathname pathname))
            (bases (remove nil
-                          (list (uiop:getcwd)
+                          (list *project-root*
+                                (uiop:getcwd)
                                 (ignore-errors (asdf:system-source-directory :cl-mcp))))))
       (dolist (base bases (uiop:native-namestring pn))
         (when (uiop:subpathp pn base)

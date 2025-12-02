@@ -5,6 +5,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:uiop
                 #:ensure-directory-pathname
+                #:getenv
                 #:getcwd
                 #:subpathp
                 #:ensure-pathname
@@ -25,12 +26,18 @@
 (in-package #:cl-mcp/src/fs)
 
 (defparameter *project-root*
-  (or (ignore-errors
-        (uiop:ensure-directory-pathname
-         (asdf:system-source-directory "cl-mcp")))
-      (uiop:ensure-directory-pathname (uiop:getcwd)))
-  "Absolute pathname of the project root. Prefer the ASDF system source
-directory; fall back to the current working directory at load time.")
+  (let* ((env-root (uiop:getenv "MCP_PROJECT_ROOT"))
+         (cwd (ignore-errors (uiop:getcwd)))
+         (asdf-root (ignore-errors (asdf:system-source-directory "cl-mcp"))))
+    (or (and env-root (uiop:ensure-directory-pathname env-root))
+        (and cwd (uiop:ensure-directory-pathname cwd))
+        (and asdf-root (uiop:ensure-directory-pathname asdf-root))
+        (error "Unable to determine project root")))
+  "Absolute pathname of the project root.
+Resolution order:
+1) MCP_PROJECT_ROOT env var (when set)
+2) Current working directory at load time
+3) ASDF system source directory for cl-mcp")
 
 (defparameter *hidden-prefixes* '("." ".git" ".hg" ".svn" ".cache" ".fasl"))
 (defparameter *skip-extensions* '("fasl" "ufasl" "x86f" "cfasl"))
