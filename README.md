@@ -251,7 +251,6 @@ allows writing there or configure SBCL’s cache directory accordingly.
 
 ## Roadmap
 - Error taxonomy as condition types mapped to JSON‑RPC errors
-- CI (GitHub Actions) matrix for SBCL/macOS/Linux
 - Bounds/quotas for tool outputs (content length caps)
 
 ## License

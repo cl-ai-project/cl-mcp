@@ -8,17 +8,29 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Roswell
+      - name: Install Roswell (Linux)
+        if: runner.os == 'Linux'
         env:
           LISP: sbcl-bin/2.5.0
         run: |
           curl -L https://raw.githubusercontent.com/roswell/roswell/master/scripts/install-for-ci.sh | sh
+          echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
+
+      - name: Install Roswell (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install roswell
+          ros install sbcl-bin/2.5.0
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
       - name: Install Dependencies
