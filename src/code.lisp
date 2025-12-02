@@ -3,6 +3,8 @@
 (defpackage #:cl-mcp/src/code
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:asdf
+                #:system-source-directory)
   (:import-from #:uiop
                 #:read-file-string
                 #:getcwd
@@ -81,13 +83,17 @@ Returns NIL when the file cannot be read."
         nil))))
 
 (defun %normalize-path (pathname)
-  "Return a namestring, relative to the current working directory when possible."
+  "Return a namestring, relative to the project when possible.
+Prefers current working directory, then the cl-mcp system source directory,
+and falls back to an absolute path."
   (when pathname
-    (let* ((cwd (uiop:getcwd))
-           (pn (uiop:ensure-pathname pathname)))
-      (if (and cwd (uiop:subpathp pn cwd))
-          (uiop:native-namestring (uiop:enough-pathname pn cwd))
-          (uiop:native-namestring pn)))))
+    (let* ((pn (uiop:ensure-pathname pathname))
+           (bases (remove nil
+                          (list (uiop:getcwd)
+                                (ignore-errors (asdf:system-source-directory :cl-mcp))))))
+      (dolist (base bases (uiop:native-namestring pn))
+        (when (uiop:subpathp pn base)
+          (return (uiop:native-namestring (uiop:enough-pathname pn base))))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) &optional))
