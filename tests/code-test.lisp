@@ -36,15 +36,16 @@
 
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns at least one project reference"
-    ;; Ensure at least one known reference exists for the target symbol by
-    ;; defining, compiling, and CALLING a tiny helper. XREF collects runtime
-    ;; information, so the function must actually execute to register the call.
-    (unless (fboundp 'cl-mcp/tests/code-test::xref-anchor)
-      (defun cl-mcp/tests/code-test::xref-anchor ()
-        (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
+    ;; Ensure XREF information exists by defining, compiling, and calling
+    ;; a helper function. Use eval to force fresh definition each time.
+    (eval '(defun cl-mcp/tests/code-test::xref-anchor ()
+             (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
     (compile 'cl-mcp/tests/code-test::xref-anchor)
-    ;; Actually invoke it to populate XREF (required on macOS)
-    (ignore-errors (cl-mcp/tests/code-test::xref-anchor))
+    ;; Call it to populate XREF (required on macOS SBCL)
+    (handler-case
+        (cl-mcp/tests/code-test::xref-anchor)
+      (error (e)
+        (format *error-output* "~&XREF anchor call failed: ~A~%" e)))
     (multiple-value-bind (refs count)
         (code-find-references "cl-mcp:process-json-line")
       (ok (>= count 1))

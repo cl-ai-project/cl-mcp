@@ -103,13 +103,16 @@
 
 (deftest tools-call-code-find-references
   (testing "tools/call code-find-references returns references"
-    ;; Ensure XREF data exists by defining, compiling, and calling a helper function
-    (unless (fboundp 'cl-mcp/tests/tools-test::xref-anchor)
-      (defun cl-mcp/tests/tools-test::xref-anchor ()
-        (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
+    ;; Ensure XREF information exists by defining, compiling, and calling
+    ;; a helper function. Use eval to force fresh definition each time.
+    (eval '(defun cl-mcp/tests/tools-test::xref-anchor ()
+             (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
     (compile 'cl-mcp/tests/tools-test::xref-anchor)
-    ;; Actually invoke to populate XREF (required on macOS)
-    (ignore-errors (cl-mcp/tests/tools-test::xref-anchor))
+    ;; Call it to populate XREF (required on macOS SBCL)
+    (handler-case
+        (cl-mcp/tests/tools-test::xref-anchor)
+      (error (e)
+        (format *error-output* "~&XREF anchor call failed: ~A~%" e)))
     (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find-references\",\"arguments\":{\"symbol\":\"cl-mcp:process-json-line\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
