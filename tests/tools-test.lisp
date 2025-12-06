@@ -101,6 +101,21 @@
         (ok (stringp (gethash "arglist" result)))
         (ok (stringp (gethash "documentation" result)))))))
 
+(deftest tools-call-code-find-references
+  (testing "tools/call code-find-references returns references"
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find-references\",\"arguments\":{\"symbol\":\"cl-mcp:process-json-line\"}}}"))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (refs (gethash "refs" result)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (arrayp refs))
+        (ok (> (length refs) 0))
+        (let ((first (aref refs 0)))
+          (ok (stringp (gethash "path" first)))
+          (ok (integerp (gethash "line" first)))
+          (ok (stringp (gethash "type" first))))))))
+
 (deftest tools-call-repl-eval
   (testing "tools/call executes repl.eval and returns text content"
     (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(+ 1 2)\"}}}"))
