@@ -29,7 +29,7 @@
 
 (deftest lisp-read-file-raw-text-mode
   (testing "raw mode slices text by offset and limit"
-    (let* ((result (lisp-read-file "codex-todo.md" :collapsed nil :offset 0 :limit 3))
+    (let* ((result (lisp-read-file "README.md" :collapsed nil :offset 0 :limit 3))
            (meta (gethash "meta" result)))
       (ok (string= (gethash "mode" result) "raw"))
       (ok (hash-table-p meta))
@@ -38,7 +38,7 @@
 
 (deftest lisp-read-file-content-pattern
   (testing "content-pattern filters non-Lisp text with context"
-    (let* ((result (lisp-read-file "codex-todo.md" :content-pattern "lisp-read-file"))
+    (let* ((result (lisp-read-file "README.md" :content-pattern "lisp-read-file"))
            (content (gethash "content" result)))
       (ok (string= (gethash "mode" result) "text-filtered"))
       (ok (stringp content))

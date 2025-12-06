@@ -9,10 +9,13 @@
   (:import-from #:uiop
                 #:read-file-string
                 #:getcwd
-                #:ensure-pathname)
+                #:ensure-pathname
+                #:subpathp
+                #:ensure-directory-pathname)
   (:export
    #:code-find-definition
-   #:code-describe-symbol))
+   #:code-describe-symbol
+   #:code-find-references))
 
 (in-package #:cl-mcp/src/code)
 
@@ -59,8 +62,8 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
   #+sbcl
   (or (find-package :sb-introspect)
       (ignore-errors
-        (require :sb-introspect)
-        (find-package :sb-introspect)))
+       (require :sb-introspect)
+       (find-package :sb-introspect)))
   #-sbcl
   nil)
 
@@ -113,7 +116,7 @@ Values are PATH (string) and LINE (integer), or NILs when not found."
            (offset (and pkg (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
            (source (or (and find-by-name
                             (first (ignore-errors (funcall find-by-name sym :function))))
-                        (and find (ignore-errors (funcall find sym))))))
+                       (and find (ignore-errors (funcall find sym))))))
       (when (and source path-fn)
         (let* ((pathname (funcall path-fn source))
                (char-offset (and offset (funcall offset source)))
@@ -164,3 +167,84 @@ Signals an error when the symbol is unbound."
                   ((boundp sym) (documentation sym 'variable))
                   (t nil))))
       (values name type arglist doc))))
+
+(defun %path-inside-project-p (pathname)
+  "Return T when PATHNAME is inside *project-root*."
+  (and pathname
+       *project-root*
+       (uiop:subpathp (uiop:ensure-pathname pathname :want-relative nil)
+                      (uiop:ensure-directory-pathname *project-root*))))
+
+(defun %line-snippet (pathname line)
+  "Return LINE text (1-based) from PATHNAME, or NIL when unavailable."
+  (when (and pathname line (> line 0))
+    (handler-case
+        (with-open-file (in pathname :direction :input :element-type 'character)
+          (loop for idx from 1
+                for l = (read-line in nil :eof)
+                until (eq l :eof)
+                do (when (= idx line) (return l))))
+      (file-error () nil))))
+
+(defun %definition->path/line (source path-fn offset-fn)
+  "Return PATH and LINE for an SB-INTROSPECT definition SOURCE."
+  (let* ((pathname (and path-fn (funcall path-fn source)))
+         (char-offset (and offset-fn (funcall offset-fn source)))
+         (line (%offset->line pathname char-offset))
+         (path (%normalize-path pathname)))
+    (values pathname path line)))
+
+(defun %finder->type (name)
+  "Map SB-INTROSPECT XREF function name to output type."
+  (cond
+    ((string= name "WHO-CALLS") "call")
+    ((string= name "WHO-MACROEXPANDS") "macro")
+    ((string= name "WHO-BINDS") "bind")
+    ((string= name "WHO-REFERENCES") "reference")
+    ((string= name "WHO-SETS") "set")
+    (t (string-downcase name))))
+
+(declaim (ftype (function (string &key (:package (or null package symbol string))
+                                 (:project-only (member t nil)))
+                          (values vector fixnum &optional))
+                code-find-references))
+(defun code-find-references (symbol-name &key package (project-only t))
+  "Return a vector of reference objects and the count for SYMBOL-NAME.
+Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"."
+  (let* ((sym (%parse-symbol symbol-name :package package))
+         (results '()))
+    #+sbcl
+    (let* ((pkg (%ensure-sb-introspect))
+           (finders '("WHO-CALLS"
+                      "WHO-MACROEXPANDS"
+                      "WHO-BINDS"
+                      "WHO-REFERENCES"
+                      "WHO-SETS"))
+           (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
+           (offset-fn (and pkg (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
+           (seen (make-hash-table :test #'equal)))
+      (dolist (finder finders)
+        (let ((fn (and pkg (find-symbol finder pkg))))
+          (when fn
+            (dolist (source (ignore-errors (funcall fn sym)))
+              (let* ((definition (if (consp source) (cdr source) source)))
+                (multiple-value-bind (pathname path line)
+                    (%definition->path/line definition path-fn offset-fn)
+                  (when (and path line
+                             (or (not project-only)
+                                 (%path-inside-project-p pathname)))
+                    (let* ((type (%finder->type finder))
+                           (context (%line-snippet pathname line))
+                           (key (format nil "~A:~A:~A" path line type)))
+                      (unless (gethash key seen)
+                        (setf (gethash key seen) t)
+                        (let ((h (make-hash-table :test #'equal)))
+                          (setf (gethash "path" h) path
+                                (gethash "line" h) line
+                                (gethash "type" h) type
+                                (gethash "context" h) (or context ""))
+                          (push h results)))))))))))
+      #-sbcl
+      (error "code-find-references requires SBCL")
+      (let* ((vec (coerce (nreverse results) 'vector)))
+        (values vec (length vec))))))

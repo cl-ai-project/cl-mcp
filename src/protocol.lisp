@@ -9,6 +9,8 @@
                 #:fs-read-file #:fs-write-file #:fs-list-directory)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
+  (:shadowing-import-from #:cl-mcp/src/code
+                          #:code-find-references)
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition #:code-describe-symbol)
   (:import-from #:cl-mcp/src/validate
@@ -259,6 +261,29 @@ and is loaded"))
                              "properties" p
                              "required" (vector "symbol")))))
 
+(defun tools-descriptor-code-references ()
+  (%make-ht
+   "name" "code-find-references"
+   "description"
+   "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds, references, sets).
+Use package-qualified symbols when possible; set projectOnly=false to include external libs."
+   "inputSchema" (let ((p (make-hash-table :test #'equal)))
+                   (setf (gethash "symbol" p)
+                         (%make-ht "type" "string"
+                                   "description"
+                                   "Symbol name like \"cl-mcp:run\" (package-qualified preferred)"))
+                   (setf (gethash "package" p)
+                         (%make-ht "type" "string"
+                                   "description"
+                                   "Optional package used when SYMBOL is unqualified"))
+                   (setf (gethash "projectOnly" p)
+                         (%make-ht "type" "boolean"
+                                   "description"
+                                   "When true (default), only include references under the project root"))
+                   (%make-ht "type" "object"
+                             "properties" p
+                             "required" (vector "symbol")))))
+
 (defun tools-descriptor-check-parens ()
   (%make-ht
    "name" "check-parens"
@@ -291,6 +316,7 @@ and is loaded"))
                         (tools-descriptor-lisp-read-file)
                         (tools-descriptor-code-find)
                         (tools-descriptor-code-describe)
+                        (tools-descriptor-code-references)
                         (tools-descriptor-check-parens))))
     (%result id (%make-ht "tools" tools))))
 
@@ -475,6 +501,47 @@ Returns a downcased local tool name (string)."
          (error (e)
            (%error id -32603
                    (format nil "Internal error during code-describe: ~A" e)))))
+
+      ((member local '("code-find-references" "code_find_references" "code-references"
+                       "code_references" "references")
+               :test #'string=)
+       (handler-case
+           (let* ((symbol (and args (gethash "symbol" args)))
+                  (pkg (and args (gethash "package" args)))
+                  (project-only-present nil)
+                  (project-only
+                    (multiple-value-bind (val presentp)
+                        (and args (gethash "projectOnly" args))
+                      (setf project-only-present presentp)
+                      (if presentp val t))))
+             (unless (stringp symbol)
+               (return-from handle-tools-call
+                 (%error id -32602 "symbol must be a string")))
+             (when (and project-only-present (not (member project-only '(t nil))))
+               (return-from handle-tools-call
+                 (%error id -32602 "projectOnly must be boolean")))
+             (multiple-value-bind (refs count)
+                 (code-find-references symbol :package pkg :project-only project-only)
+               (let* ((summary-lines (map 'list
+                                          (lambda (h)
+                                            (format nil "~A:~D ~A ~A"
+                                                    (gethash "path" h)
+                                                    (gethash "line" h)
+                                                    (gethash "type" h)
+                                                    (gethash "context" h)))
+                                          refs))
+                      (summary (if summary-lines
+                                   (format nil "~{~A~%~}" summary-lines)
+                                   "")))
+                 (%result id (%make-ht
+                              "refs" refs
+                              "count" count
+                              "symbol" symbol
+                              "projectOnly" project-only
+                              "content" (%text-content summary))))))
+         (error (e)
+           (%error id -32603
+                   (format nil "Internal error during code-find-references: ~A" e)))))
 
       ((member local '("check-parens" "check_parens" "parens") :test #'string=)
        (handler-case

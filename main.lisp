@@ -17,7 +17,8 @@
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition
-                #:code-describe-symbol)
+                #:code-describe-symbol
+                #:code-find-references)
   (:import-from #:cl-mcp/src/repl
                 #:repl-eval)
   (:import-from #:cl-mcp/src/validate
@@ -46,6 +47,7 @@
            ;; Code intelligence
            #:code-find-definition
            #:code-describe-symbol
+           #:code-find-references
            ;; Logging controls
            #:set-log-level-from-env
            ;; REPL interfaces
