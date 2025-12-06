@@ -39,8 +39,9 @@
     ;; Ensure at least one known reference exists for the target symbol by
     ;; defining and compiling a tiny helper that calls it. This avoids xref
     ;; flakiness when the symbol has not been compiled elsewhere in the session.
-    (eval '(defun cl-mcp/tests/code-test::xref-anchor ()
-             (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
+    (unless (fboundp 'cl-mcp/tests/code-test::xref-anchor)
+      (defun cl-mcp/tests/code-test::xref-anchor ()
+        (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
     (compile 'cl-mcp/tests/code-test::xref-anchor)
     (multiple-value-bind (refs count)
         (code-find-references "cl-mcp:process-json-line")
