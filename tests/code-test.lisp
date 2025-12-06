@@ -37,18 +37,21 @@
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns at least one project reference"
     ;; Ensure at least one known reference exists for the target symbol by
-    ;; defining and compiling a tiny helper that calls it. This avoids xref
-    ;; flakiness when the symbol has not been compiled elsewhere in the session.
+    ;; defining, compiling, and CALLING a tiny helper. XREF collects runtime
+    ;; information, so the function must actually execute to register the call.
     (unless (fboundp 'cl-mcp/tests/code-test::xref-anchor)
       (defun cl-mcp/tests/code-test::xref-anchor ()
         (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
     (compile 'cl-mcp/tests/code-test::xref-anchor)
+    ;; Actually invoke it to populate XREF (required on macOS)
+    (ignore-errors (cl-mcp/tests/code-test::xref-anchor))
     (multiple-value-bind (refs count)
         (code-find-references "cl-mcp:process-json-line")
       (ok (>= count 1))
       (ok (vectorp refs))
-      (let ((first (aref refs 0)))
-        (ok (hash-table-p first))
-        (ok (stringp (gethash "path" first)))
-        (ok (integerp (gethash "line" first)))
-        (ok (stringp (gethash "type" first)))))))
+      (when (> count 0)
+        (let ((first (aref refs 0)))
+          (ok (hash-table-p first))
+          (ok (stringp (gethash "path" first)))
+          (ok (integerp (gethash "line" first)))
+          (ok (stringp (gethash "type" first))))))))
