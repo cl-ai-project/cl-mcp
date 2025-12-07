@@ -3,7 +3,8 @@
 (defpackage #:cl-mcp/tests/validate-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/validate
-                #:check-parens))
+                #:check-parens
+                #:*check-parens-max-bytes*))
 
 (in-package #:cl-mcp/tests/validate-test)
 
@@ -45,3 +46,11 @@
   (testing "parens inside strings and comments are ignored"
     (let ((res (check-parens :code "(format nil \"(\") ; )\n(list 1 2)")))
       (ok (%ok? res)))))
+
+(deftest check-parens-too-large-returns-nil
+  (testing "too large input returns ok as nil (boolean false)"
+    (let ((*check-parens-max-bytes* 1))
+      (let ((res (check-parens :code "abcd")))
+        (ok (null (%ok? res)))
+        (ok (not (eq (%ok? res) :false)))
+        (ok (string= (%kind res) "too-large"))))))

@@ -102,7 +102,7 @@ Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\", 
          (base-off (or offset 0)))
     (when (> (length text) *check-parens-max-bytes*)
       (let ((h (make-hash-table :test #'equal)))
-        (setf (gethash "ok" h) :false
+        (setf (gethash "ok" h) nil
               (gethash "kind" h) "too-large"
               (gethash "expected" h) nil
               (gethash "found" h) nil)
