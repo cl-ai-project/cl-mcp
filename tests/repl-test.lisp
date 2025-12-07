@@ -98,3 +98,12 @@
       (ok (<= (length printed) (+ 5 (length "...(truncated)"))))
       (ok (string= stdout ""))
       (ok (string= stderr "")))))
+
+(deftest repl-eval-captures-compiler-warnings
+  (testing "compiler warnings are routed to stderr"
+    (let* ((fn (gensym "WARN-FN-"))
+           (code (format nil "(defun ~A (x) (+ x undefined-var))" fn)))
+      (multiple-value-bind (_printed _value stdout stderr)
+          (repl-eval code)
+        (declare (ignore _printed _value stdout))
+        (ok (search "undefined-var" (string-downcase stderr) :test #'char-equal))))))
