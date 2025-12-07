@@ -5,7 +5,8 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
-                #:fs-list-directory))
+                #:fs-list-directory
+                #:fs-resolve-read-path))
 
 (in-package #:cl-mcp/tests/fs-test)
 
@@ -56,6 +57,16 @@
     (let ((max cl-mcp/src/fs::*fs-read-max-bytes*))
       (ok (handler-case (progn (fs-read-file "src/core.lisp" :limit (1+ max)) nil)
             (error () t))))))
+
+(deftest fs-list-directory-error-includes-resolved-path
+  (testing "error message shows resolved absolute path"
+    (let* ((rel "no-such-dir-for-test")
+           (resolved (namestring (fs-resolve-read-path rel))))
+      (ok (handler-case
+               (progn (fs-list-directory rel) nil)
+             (error (e)
+               (let ((msg (princ-to-string e)))
+                 (and (search rel msg) (search resolved msg)))))))))
 
 (deftest fs-write-file-prevents-traversal
   (testing "writing outside project root is rejected"

@@ -164,7 +164,8 @@ Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)
     (unless pn
       (error "Read not permitted for path ~A" path))
     (unless (uiop:directory-exists-p pn)
-      (error "Directory ~A does not exist or is not readable" path))
+      (error "Directory ~A (resolved to ~A) does not exist or is not readable"
+             path (namestring pn)))
     (let* ((patterns (list #P"*" #P"*.*"))  ; grab dirs and files (with types)
            (entries (loop for pat in patterns
                           append (directory (uiop:merge-pathnames* pat pn))))
