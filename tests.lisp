@@ -8,6 +8,7 @@
   (:import-from #:cl-mcp/tests/logging-test)
   (:import-from #:cl-mcp/tests/protocol-test)
   (:import-from #:cl-mcp/tests/repl-test)
+  (:import-from #:cl-mcp/tests/cst-test)
   (:import-from #:cl-mcp/tests/lisp-read-file-test)
   (:import-from #:cl-mcp/tests/edit-lisp-form-test)
   (:import-from #:cl-mcp/tests/validate-test)
