@@ -13,6 +13,8 @@
                 #:fs-write-file
                 #:fs-list-directory
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/edit-lisp-form
+                #:edit-lisp-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/code
@@ -43,6 +45,7 @@
            #:fs-list-directory
            #:lisp-read-file
            #:*project-root*
+           #:edit-lisp-form
            #:check-parens
            ;; Code intelligence
            #:code-find-definition
