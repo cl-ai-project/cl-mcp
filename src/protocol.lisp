@@ -542,19 +542,21 @@ Returns a downcased local tool name (string)."
              (unless (stringp symbol)
                (return-from handle-tools-call
                  (%error id -32602 "symbol must be a string")))
-             (multiple-value-bind (name type arglist doc)
+             (multiple-value-bind (name type arglist doc path line)
                  (code-describe-symbol symbol :package pkg)
                (%result id (%make-ht
                             "name" name
                             "type" type
                             "arglist" arglist
                             "documentation" doc
+                            "path" path
+                            "line" line
                             "content" (%text-content
-                                       (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]"
-                                               name type arglist doc))))))
-         (error (e)
-           (%error id -32603
-                   (format nil "Internal error during code-describe: ~A" e)))))
+                                       (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                                               name type arglist doc path line))))))
+        (error (e)
+          (%error id -32603
+                  (format nil "Internal error during code-describe: ~A" e)))))
 
       ((member local '("code-find-references" "code_find_references" "code-references"
                        "code_references" "references")
