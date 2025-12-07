@@ -21,7 +21,8 @@
            #:fs-resolve-read-path
            #:fs-read-file
            #:fs-write-file
-           #:fs-list-directory))
+           #:fs-list-directory
+           #:fs-get-project-info))
 
 (in-package #:cl-mcp/src/fs)
 
@@ -183,3 +184,26 @@ Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)
                       (if (uiop:directory-pathname-p p) "directory" "file"))
                 (push h results))))))
       (coerce (nreverse results) 'vector))))
+
+(defun fs-get-project-info ()
+  "Return project root and working directory information.
+Returns a hash-table with keys:
+  - project_root: absolute path to project root
+  - cwd: current working directory
+  - project_root_source: how project root was determined (env|cwd|asdf)
+  - relative_cwd: cwd relative to project_root (when inside project)"
+  (let* ((cwd (ignore-errors (uiop:getcwd)))
+         (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
+         (root-source (cond
+                        (env-root "env")
+                        (cwd "cwd")
+                        (t "asdf")))
+         (h (make-hash-table :test #'equal)))
+    (setf (gethash "project_root" h) (namestring *project-root*)
+          (gethash "cwd" h) (and cwd (namestring cwd))
+          (gethash "project_root_source" h) root-source)
+    (let ((root (uiop:ensure-directory-pathname *project-root*)))
+      (when (and cwd (uiop:subpathp cwd root))
+        (setf (gethash "relative_cwd" h)
+              (uiop:native-namestring (uiop:enough-pathname cwd root)))))
+    h))
