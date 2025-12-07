@@ -2,12 +2,16 @@
 
 (defpackage #:cl-mcp/src/edit-lisp-form
   (:use #:cl)
+  (:shadowing-import-from #:cl-mcp/src/cst
+                          #:cst-node
+                          #:cst-node-kind
+                          #:cst-node-value
+                          #:cst-node-start
+                          #:cst-node-end)
   (:import-from #:alexandria
                 #:string-trim)
-  (:import-from #:eclector.parse-result
-                #:parse-result-client
-                #:make-expression-result
-                #:make-skipped-input-result)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
@@ -24,33 +28,6 @@
   (:export #:edit-lisp-form))
 
 (in-package #:cl-mcp/src/edit-lisp-form)
-
-(defstruct cst-node
-  kind
-  value
-  children
-  (start 0 :type fixnum)
-  (end 0 :type fixnum))
-
-(defvar *cst-methods-installed* nil)
-
-(defun %ensure-cst-methods ()
-  (unless *cst-methods-installed*
-    (eval
-     '(defmethod make-expression-result ((client parse-result-client)
-                                         result children source)
-        (declare (ignore client children))
-        (destructuring-bind (start . end) source
-          (make-cst-node :kind :expr :value result :children children
-                         :start start :end end))))
-    (eval
-     '(defmethod make-skipped-input-result ((client parse-result-client)
-                                            stream reason children source)
-        (declare (ignore client stream children))
-        (destructuring-bind (start . end) source
-          (make-cst-node :kind :skipped :value reason :children nil
-                         :start start :end end))))
-    (setf *cst-methods-installed* t)))
 
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
@@ -89,21 +66,6 @@
       ((symbolp name)
        (list (%normalize-string name)))
       (t (list (%normalize-string name))))))
-
-(defun %parse-top-level-forms (content)
-  "Parse CONTENT into a list of CST-NODE values using Eclector with CST tracking."
-  (%ensure-cst-methods)
-  (let ((nodes '())
-        (client (make-instance 'parse-result-client)))
-    (let ((*read-eval* nil)
-          (*readtable* (copy-readtable nil)))
-      (with-input-from-string (stream content)
-        (loop
-          (multiple-value-bind (node)
-              (eclector.parse-result:read client stream nil :eof)
-            (when (eq node :eof)
-              (return (nreverse nodes)))
-            (push node nodes)))))))
 
 (defun %ensure-trailing-newline (string)
   (if (and (> (length string) 0)
@@ -193,7 +155,7 @@ CONTENT are required."
     (%validate-content content)
     (multiple-value-bind (abs rel) (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
-             (nodes (%parse-top-level-forms original))
+             (nodes (parse-top-level-forms original))
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
