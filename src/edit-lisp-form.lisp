@@ -87,7 +87,6 @@
 
 (defun %parse-top-level-forms (content)
   "Parse CONTENT into a list of CST-NODE values using Eclector with CST tracking."
-  (%ensure-cst-methods)
   (let ((nodes '())
         (client (make-instance 'parse-result-client)))
     (with-input-from-string (stream content)
