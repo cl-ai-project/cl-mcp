@@ -11,5 +11,12 @@
                :yason
                :usocket
                :bordeaux-threads
+               :eclector
                "cl-mcp/main")
   :in-order-to ((test-op (test-op "cl-mcp/tests"))))
+
+;; Alias system so package-inferred dependencies on the ECLECTOR.PARSE-RESULT
+;; package resolve via the main Eclector distribution available in Quicklisp.
+(asdf:defsystem "eclector.parse-result"
+  :description "Compatibility shim: route eclector.parse-result to eclector"
+  :depends-on ("eclector"))

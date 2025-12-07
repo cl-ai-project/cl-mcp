@@ -7,6 +7,8 @@
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file #:fs-write-file #:fs-list-directory)
+  (:import-from #:cl-mcp/src/edit-lisp-form
+                #:edit-lisp-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:shadowing-import-from #:cl-mcp/src/code
@@ -308,6 +310,38 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
                                    "Maximum characters to read from path"))
                    (%make-ht "type" "object" "properties" p))))
 
+(defun tools-descriptor-edit-lisp-form ()
+  (%make-ht
+   "name" "edit-lisp-form"
+   "description"
+   "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.\nSupports replace, insert_before, and insert_after while preserving formatting and comments."
+   "inputSchema"
+   (let ((p (make-hash-table :test #'equal)))
+     (setf (gethash "file_path" p)
+           (%make-ht "type" "string"
+                     "description"
+                     "Target file path (absolute recommended)"))
+     (setf (gethash "form_type" p)
+           (%make-ht "type" "string"
+                     "description"
+                     "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\""))
+     (setf (gethash "form_name" p)
+           (%make-ht "type" "string"
+                     "description"
+                     "Form name to match; for defmethod include specializers, e.g., \"print-object (my-class t)\""))
+     (setf (gethash "operation" p)
+           (%make-ht "type" "string"
+                     "enum" (vector "replace" "insert_before" "insert_after")
+                     "description"
+                     "Operation to perform"))
+     (setf (gethash "content" p)
+           (%make-ht "type" "string"
+                     "description"
+                     "Full Lisp form to insert or replace with"))
+     (%make-ht "type" "object"
+               "properties" p
+               "required" (vector "file_path" "form_type" "form_name" "operation" "content")))))
+
 (defun handle-tools-list (id)
   (let* ((tools (vector (tools-descriptor-repl)
                         (tools-descriptor-fs-read)
@@ -317,7 +351,8 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
                         (tools-descriptor-code-find)
                         (tools-descriptor-code-describe)
                         (tools-descriptor-code-references)
-                        (tools-descriptor-check-parens))))
+                        (tools-descriptor-check-parens)
+                        (tools-descriptor-edit-lisp-form))))
     (%result id (%make-ht "tools" tools))))
 
 (defun %normalize-tool-name (name)
@@ -560,6 +595,36 @@ Returns a downcased local tool name (string)."
          (error (e)
            (%error id -32603
                    (format nil "Internal error during check-parens: ~A" e)))))
+ 
+      ((member local '("edit-lisp-form" "edit_lisp_form" "edit.lisp-form" "edit.lisp_form")
+               :test #'string=)
+       (handler-case
+           (let* ((path (and args (gethash "file_path" args)))
+                  (form-type (and args (gethash "form_type" args)))
+                  (form-name (and args (gethash "form_name" args)))
+                  (operation (and args (gethash "operation" args)))
+                  (content (and args (gethash "content" args))))
+             (unless (and (stringp path) (stringp form-type) (stringp form-name)
+                          (stringp operation) (stringp content))
+               (return-from handle-tools-call
+                 (%error id -32602 "file_path, form_type, form_name, operation, and content must be strings")))
+             (let ((updated (edit-lisp-form :file-path path
+                                            :form-type form-type
+                                            :form-name form-name
+                                            :operation operation
+                                            :content content)))
+               (%result id (%make-ht
+                            "path" path
+                            "operation" operation
+                            "form_type" form-type
+                            "form_name" form-name
+                            "bytes" (length updated)
+                            "content" (%text-content
+                                       (format nil "Applied ~A to ~A ~A (~D chars)"
+                                               operation form-type path (length updated)))))))
+         (error (e)
+           (%error id -32603
+                   (format nil "Internal error during edit-lisp-form: ~A" e)))))
 
       (t
        (%error id -32601 (format nil "Tool ~A not found" name))))))
