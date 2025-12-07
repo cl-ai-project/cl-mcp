@@ -2,6 +2,14 @@
 
 (defpackage #:cl-mcp/src/lisp-read-file
   (:use #:cl)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node
+                #:cst-node-kind
+                #:cst-node-value
+                #:cst-node-start
+                #:cst-node-end
+                #:cst-node-start-line)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
@@ -98,9 +106,38 @@
      (format nil "(~(~A~) ...)" (car form)))
     (t (prin1-to-string form))))
 
-(defun %format-lisp-form (form name-scanner content-scanner)
-  "Return two values: display string and whether FORM was expanded."
-  (let* ((head (and (consp form) (car form)))
+(defun %comment-node-p (node)
+  (and (typep node 'cst-node)
+       (eq (cst-node-kind node) :skipped)
+       (let ((reason (cst-node-value node)))
+         (or (eq reason :block-comment)
+             (eq reason :s-expression-comment)
+             (and (consp reason) (eq (car reason) :line-comment))))))
+
+(defun %comment-text (node text)
+  (subseq text (cst-node-start node) (cst-node-end node)))
+
+(defun %ensure-trailing-newline (string)
+  (if (and (> (length string) 0)
+           (char= (char string (1- (length string))) #\Newline))
+      string
+      (concatenate 'string string "\n")))
+
+(defun %line-number-width (line-count)
+  (max 1 (length (write-to-string line-count))))
+
+(defun %add-line-numbers (text start-line width)
+  (with-output-to-string (out)
+    (with-input-from-string (stream text)
+      (loop for line = (read-line stream nil nil)
+            while line
+            for idx from start-line do
+              (format out "~VD: ~A~%" width idx line)))))
+
+(defun %format-lisp-form (node name-scanner content-scanner line-width)
+  "Return two values: display string and whether NODE was expanded."
+  (let* ((form (cst-node-value node))
+         (head (and (consp form) (car form)))
          (names (%definition-names form))
          (full-string nil)
          (name-match (and name-scanner
@@ -109,48 +146,90 @@
                              (let ((repr (or full-string
                                              (setf full-string (%form->string form)))))
                                (scan content-scanner repr))))
-         (expand? (or name-match content-match (eq head 'in-package))))
-    (values (cond
-              (expand? (or full-string (%form->string form)))
-              ((member head '(defun defmacro defvar defparameter defconstant defclass
-                               defstruct defgeneric defmethod))
-               (%collapse-def-form form))
-              ((eq head 'in-package)
-               (%form->string form))
-              (t (%collapse-generic form)))
-            expand?)))
+         (expand? (or name-match content-match (eq head 'in-package)))
+         (display (cond
+                    (expand?
+                     (%add-line-numbers (or full-string (%form->string form))
+                                        (cst-node-start-line node)
+                                        line-width))
+                    ((member head '(defun defmacro defvar defparameter defconstant defclass
+                                     defstruct defgeneric defmethod))
+                     (%collapse-def-form form))
+                    ((eq head 'in-package)
+                     (%form->string form))
+                    (t (%collapse-generic form)))))
+    (values display expand?)))
 
-(defun %read-top-level-forms (text)
-  "Return a list of top-level forms read from TEXT.
-Reader evaluation is disabled for safety."
-  (let ((*readtable* (copy-readtable nil))
-        (*read-eval* nil))
-    (loop with pos = 0
-          with forms = '()
-          do (multiple-value-bind (form next) (read-from-string text nil :eof :start pos)
-               (if (eq form :eof)
-                   (return (nreverse forms))
-                   (progn
-                     (when (= next pos)
-                       (error "Reader made no progress at position ~D" pos))
-                     (push form forms)
-                     (setf pos next)))))))
+(defun %line-stats (text)
+  "Return three values: source lines, comment lines, and blank lines for TEXT."
+  (let ((source 0)
+        (comment 0)
+        (blank 0))
+    (with-input-from-string (stream text)
+      (loop for line = (read-line stream nil nil)
+            while line do
+              (incf source)
+              (let* ((trimmed (string-trim '(#\Space #\Tab #\Return #\Newline) line))
+                     (empty? (string= trimmed "")))
+                (cond
+                  (empty? (incf blank))
+                  ((and (> (length trimmed) 0)
+                        (or (char= (char trimmed 0) #\;)
+                            (and (>= (length trimmed) 2)
+                                 (char= (char trimmed 0) #\#)
+                                 (char= (char trimmed 1) #\|))
+                            (and (>= (length trimmed) 2)
+                                 (char= (char trimmed 0) #\|)
+                                 (char= (char trimmed 1) #\#))))
+                   (incf comment))))))
+    (values source comment blank)))
 
-(defun %format-lisp-file (text name-scanner content-scanner)
-  (let* ((forms (%read-top-level-forms text))
-         (expanded 0)
-         (display (with-output-to-string (out)
-                    (dolist (form forms)
-                      (multiple-value-bind (line expanded?) (%format-lisp-form form name-scanner content-scanner)
-                        (when expanded? (incf expanded))
-                        (write-string line out)
-                        (terpri out))))))
-    (values display
-            (let ((meta (make-hash-table :test #'equal)))
-              (setf (gethash "total_forms" meta) (length forms)
-                    (gethash "expanded_forms" meta) expanded
-                    (gethash "truncated" meta) nil)
-              meta))))
+(defun %format-lisp-file (text name-scanner content-scanner include-comments comment-context)
+  (multiple-value-bind (source-lines-count comment-lines blank-lines)
+      (%line-stats text)
+    (let* ((nodes (parse-top-level-forms text))
+           (line-width (%line-number-width source-lines-count))
+           (expanded 0)
+           (total-forms 0)
+           (display (with-output-to-string (out)
+                      (let ((pending-comments '()))
+                        (dolist (node nodes)
+                          (cond
+                            ((and include-comments (%comment-node-p node))
+                             (let ((comment (%ensure-trailing-newline
+                                             (%comment-text node text))))
+                               (cond
+                                 ((string= comment-context "all")
+                                  (write-string comment out))
+                                 ((string= comment-context "preceding")
+                                  (push comment pending-comments)))))
+                            ((and (typep node 'cst-node)
+                                  (eq (cst-node-kind node) :expr))
+                             (incf total-forms)
+                             (when (and include-comments pending-comments)
+                               (dolist (comment (nreverse pending-comments))
+                                 (write-string comment out))
+                               (setf pending-comments '()))
+                             (multiple-value-bind (line expanded?)
+                                 (%format-lisp-form node name-scanner content-scanner line-width)
+                               (when expanded? (incf expanded))
+                               (write-string (%ensure-trailing-newline line) out)))
+                            (t
+                             (setf pending-comments '()))))
+                        (when (and include-comments
+                                   (string/= comment-context "none")
+                                   pending-comments)
+                          (dolist (comment (nreverse pending-comments))
+                            (write-string comment out)))))))
+      (values display
+              (let ((meta (make-hash-table :test #'equal)))
+                (setf (gethash "total_forms" meta) total-forms
+                      (gethash "expanded_forms" meta) expanded
+                      (gethash "truncated" meta) nil
+                      (gethash "comment_lines" meta) comment-lines
+                      (gethash "blank_lines" meta) blank-lines
+                      (gethash "source_lines" meta) source-lines-count)
+                meta)))))
 
 (defun %read-lines-slice (pathname offset limit)
   "Return three values: sliced text, truncated?, and total line count."
@@ -204,13 +283,21 @@ Reader evaluation is disabled for safety."
                               (return))))))
         (values (format nil "~{~A~%~}" (nreverse selected)) truncated)))))
 
-(defun lisp-read-file (path &key (collapsed t) name-pattern content-pattern offset limit)
+(defun lisp-read-file (path &key (collapsed t) name-pattern content-pattern offset limit
+                             (include-comments nil) (comment-context "preceding"))
   "Read PATH with Lisp-aware collapsed formatting.
-Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"meta\"."
+When COLLAPSED is true, NAME-PATTERN or CONTENT-PATTERN expand matching forms,
+and INCLUDE-COMMENTS controls whether preceding or all comments are kept based
+on COMMENT-CONTEXT. Returns a hash-table payload with keys \"content\", \"path\",
+\"mode\", and \"meta\"."
   (unless (stringp path)
     (error "path must be a string"))
   (unless (member collapsed '(t nil))
     (error "collapsed must be boolean"))
+  (unless (member include-comments '(t nil))
+    (error "include-comments must be boolean"))
+  (unless (member comment-context '("preceding" "all" "none") :test #'string=)
+    (error "comment-context must be \"preceding\", \"all\", or \"none\""))
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer when provided"))
   (when (and offset (< offset 0))
@@ -227,7 +314,7 @@ Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"me
           ((and collapsed (lisp-source-path-p resolved))
            (let ((text (fs-read-file resolved)))
              (multiple-value-bind (display meta-table)
-                 (%format-lisp-file text name-scanner content-scanner)
+                 (%format-lisp-file text name-scanner content-scanner include-comments comment-context)
                (setf mode "lisp-collapsed")
                (values display meta-table))))
           ((not collapsed)

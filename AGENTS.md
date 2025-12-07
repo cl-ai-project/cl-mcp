@@ -6,7 +6,7 @@
 The core system lives under `src/`, grouped by responsibility (`log`, `repl`, `protocol`, `tcp`, `core`, `run`). Each file is serially loaded via `cl-mcp.asd`; add new packages here and export symbols explicitly. Tests reside in `tests/` with mirrored filenames (`*-test.lisp`) for Rove. Helper clients and bridges are in `scripts/`. Keep assets such as sample transcripts or captures under `tests/fixtures/` if introduced.
 
 ## Build, Test, and Development Commands
-Use `rove cl-mcp.asd` to run the test on the command line.
+Use cl-mcp REPL, invoke individual suites with `(rove:run 'cl-mcp/tests/<package>)` via `repl-eval` so tests run inside the agent without shelling out.
 
 ### Running Individual Tests
 - From the MCP REPL, wrap the test invocation so stdout is captured:  
