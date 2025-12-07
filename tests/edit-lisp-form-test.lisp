@@ -114,3 +114,29 @@
                     nil)
                 (error () t)))
           (ok (string= before (fs-read-file path))))))))
+
+(deftest edit-lisp-form-read-eval-disabled
+  (testing "read-time evaluation is disabled when parsing source"
+    (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
+           (content (format nil
+                            "#.(progn (with-open-file (s \"~A\" :direction :output :if-exists :supersede :if-does-not-exist :create) (write-line \"executed\" s)) '(defun target () :ok))~%\
+(defun target () :ok)~%"
+                            flag-path)))
+      (ignore-errors (delete-file flag-path))
+      (unwind-protect
+           (with-temp-file "tests/tmp/edit-form-read-eval.lisp"
+             content
+             (lambda (path)
+               (let ((before (fs-read-file path)))
+                 (ok (handler-case
+                         (progn
+                           (edit-lisp-form :file-path path
+                                           :form-type "defun"
+                                           :form-name "target"
+                                           :operation "replace"
+                                           :content "(defun target () :updated)")
+                           nil)
+                       (error () t)))
+                 (ok (string= before (fs-read-file path)))
+                 (ok (not (probe-file flag-path))))))
+        (ignore-errors (delete-file flag-path))))))

@@ -89,13 +89,15 @@
   "Parse CONTENT into a list of CST-NODE values using Eclector with CST tracking."
   (let ((nodes '())
         (client (make-instance 'parse-result-client)))
-    (with-input-from-string (stream content)
-      (loop
-        (multiple-value-bind (node)
-            (eclector.parse-result:read client stream nil :eof)
-          (when (eq node :eof)
-            (return (nreverse nodes)))
-          (push node nodes))))))
+    (let ((*read-eval* nil)
+          (*readtable* (copy-readtable nil)))
+      (with-input-from-string (stream content)
+        (loop
+          (multiple-value-bind (node)
+              (eclector.parse-result:read client stream nil :eof)
+            (when (eq node :eof)
+              (return (nreverse nodes)))
+            (push node nodes)))))))
 
 (defun %ensure-trailing-newline (string)
   (if (and (> (length string) 0)
