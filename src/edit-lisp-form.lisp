@@ -32,25 +32,20 @@
   (start 0 :type fixnum)
   (end 0 :type fixnum))
 
-(defvar *cst-methods-installed* nil)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defmethod make-expression-result ((client parse-result-client)
+                                     result children source)
+    (declare (ignore client children))
+    (destructuring-bind (start . end) source
+      (make-cst-node :kind :expr :value result :children children
+                     :start start :end end)))
 
-(defun %ensure-cst-methods ()
-  (unless *cst-methods-installed*
-    (eval
-     '(defmethod make-expression-result ((client parse-result-client)
-                                         result children source)
-        (declare (ignore client children))
-        (destructuring-bind (start . end) source
-          (make-cst-node :kind :expr :value result :children children
-                         :start start :end end))))
-    (eval
-     '(defmethod make-skipped-input-result ((client parse-result-client)
-                                            stream reason children source)
-        (declare (ignore client stream children))
-        (destructuring-bind (start . end) source
-          (make-cst-node :kind :skipped :value reason :children nil
-                         :start start :end end))))
-    (setf *cst-methods-installed* t)))
+  (defmethod make-skipped-input-result ((client parse-result-client)
+                                        stream reason children source)
+    (declare (ignore client stream children))
+    (destructuring-bind (start . end) source
+      (make-cst-node :kind :skipped :value reason :children nil
+                     :start start :end end))))
 
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
