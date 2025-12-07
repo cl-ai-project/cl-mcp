@@ -18,8 +18,7 @@
 
 (in-package #:cl-mcp/src/cst)
 
-(defstruct (cst-node
-             (:documentation "Concrete syntax tree node wrapping Eclector parse results with offsets and line numbers."))
+(defstruct cst-node
   kind
   value
   children
