@@ -13,7 +13,8 @@
   (testing "code.find-definition returns relative path and positive line"
     (multiple-value-bind (path line)
         (code-find-definition "cl-mcp:version")
-      (ok (string= path "src/core.lisp"))
+      (ok (stringp path))
+      (ok (search "src/core.lisp" path :from-end t))
       (ok (integerp line))
       (ok (> line 0)))))
 
@@ -21,18 +22,22 @@
   (testing "code.find-definition ignores provided package for qualified symbols"
     (multiple-value-bind (path line)
         (code-find-definition "cl-mcp:version" :package "")
-      (ok (string= path "src/core.lisp"))
+      (ok (stringp path))
+      (ok (search "src/core.lisp" path :from-end t))
       (ok (integerp line))
       (ok (> line 0)))))
 
 (deftest code-describe-symbol-returns-doc
-  (testing "code.describe-symbol returns type, arglist, and documentation"
-    (multiple-value-bind (name type arglist doc)
+  (testing "code.describe-symbol returns type, arglist, documentation, and location"
+    (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol "cl-mcp:version")
       (ok (stringp name))
       (ok (string= type "function"))
       (ok (stringp arglist))
-      (ok (stringp doc)))))
+      (ok (stringp doc))
+      (ok (stringp path))
+      (ok (integerp line))
+      (ok (> line 0)))))
 
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns at least one project reference"

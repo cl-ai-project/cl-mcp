@@ -55,16 +55,22 @@ Options:
              (let ((last-value nil)
                    (stdout (make-string-output-stream))
                    (stderr (make-string-output-stream)))
-               (handler-bind ((error (lambda (e)
-                                       (setf last-value
-                                             (with-output-to-string (out)
-                                               (format out "~A~%" e)
-                                               (uiop:print-backtrace :stream out :condition e)))
-                                       (return-from do-eval
-                                         (values last-value
-                                                 last-value
-                                                 (get-output-stream-string stdout)
-                                                 (progn (write-string "" stderr)
+               (handler-bind ((warning (lambda (w)
+                                        (format stderr "~&Warning: ~A~%" w)
+                                        (when (find-restart 'muffle-warning)
+                                          (invoke-restart 'muffle-warning))))
+                              (error (lambda (e)
+                                      (setf last-value
+                                            (with-output-to-string (out)
+                                              (let ((*print-readably* nil))
+                                                (format out "~A~%" e)
+                                                (uiop:print-backtrace :stream out
+                                                                      :condition e))))
+                                      (return-from do-eval
+                                        (values last-value
+                                                last-value
+                                                (get-output-stream-string stdout)
+                                                (progn (write-string "" stderr)
                                                         (get-output-stream-string stderr)))))))
                  (let* ((pkg (etypecase package
                                (package package)
@@ -74,14 +80,38 @@ Options:
                      (error "Package ~S does not exist" package))
                    (let ((*package* pkg)
                          (*read-eval* (not safe-read))
-                         (*print-readably* t))
-                     (let ((forms (%read-all input (not safe-read))))
+                         (*print-readably* nil))
+                    (let ((forms (%read-all input (not safe-read))))
                        (let ((*standard-output* stdout)
                              (*error-output* stderr))
+                         #+sbcl
+                         (let* ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
+                                (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
+                                (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
+                                (old-err (and err-sym (boundp err-sym) (symbol-value err-sym)))
+                                (old-note (and note-sym (boundp note-sym) (symbol-value note-sym)))
+                                (old-trace (and trace-sym (boundp trace-sym) (symbol-value trace-sym))))
+                           (unwind-protect
+                                (progn
+                                  (when (and err-sym (boundp err-sym))
+                                    (setf (symbol-value err-sym) stderr))
+                                  (when (and note-sym (boundp note-sym))
+                                    (setf (symbol-value note-sym) stderr))
+                                  (when (and trace-sym (boundp trace-sym))
+                                    (setf (symbol-value trace-sym) stderr))
+                                  (dolist (form forms)
+                                    (setf last-value (eval form))))
+                             (when (and err-sym (boundp err-sym))
+                               (setf (symbol-value err-sym) old-err))
+                             (when (and note-sym (boundp note-sym))
+                               (setf (symbol-value note-sym) old-note))
+                             (when (and trace-sym (boundp trace-sym))
+                               (setf (symbol-value trace-sym) old-trace))))
+                         #-sbcl
                          (dolist (form forms)
                            (setf last-value (eval form)))))))
-                 (let ((*print-level* print-level)
-                       (*print-length* print-length)
+               (let ((*print-level* print-level)
+                     (*print-length* print-length)
                        (*print-readably* nil))
                    (values (truncate-output (prin1-to-string last-value))
                            last-value

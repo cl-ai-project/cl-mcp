@@ -129,11 +129,12 @@ Values are PATH (string) and LINE (integer), or NILs when not found."
     (error "code-find-definition requires SBCL")))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
-                          (values string string (or null string) (or null string) &optional))
+                          (values string string (or null string) (or null string)
+                                  (or null string) (or null integer) &optional))
                 code-describe-symbol))
 (defun code-describe-symbol (symbol-name &key package)
-  "Return NAME, TYPE, ARGLIST string and DOCUMENTATION for SYMBOL-NAME.
-Signals an error when the symbol is unbound."
+  "Return NAME, TYPE, ARGLIST, DOCUMENTATION, PATH, and LINE for SYMBOL-NAME.
+Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
   (let* ((sym (%parse-symbol symbol-name :package package))
          (name (princ-to-string sym))
          (type (cond
@@ -166,7 +167,9 @@ Signals an error when the symbol is unbound."
                    (documentation sym 'function))
                   ((boundp sym) (documentation sym 'variable))
                   (t nil))))
-      (values name type arglist doc))))
+      (multiple-value-bind (path line)
+          (code-find-definition symbol-name :package package)
+        (values name type arglist doc path line)))))
 
 (defun %path-inside-project-p (pathname)
   "Return T when PATHNAME is inside *project-root*."

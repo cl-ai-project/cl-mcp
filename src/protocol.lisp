@@ -6,7 +6,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/fs
-                #:fs-read-file #:fs-write-file #:fs-list-directory)
+                #:fs-read-file #:fs-write-file #:fs-list-directory #:fs-get-project-info)
   (:import-from #:cl-mcp/src/edit-lisp-form
                 #:edit-lisp-form)
   (:import-from #:cl-mcp/src/lisp-read-file
@@ -189,6 +189,15 @@ Use absolute paths inside the project or an ASDF system."
 ASDF system"))
                    (%make-ht "type" "object" "properties" p "required" (vector "path")))))
 
+(defun tools-descriptor-fs-project-info ()
+  (%make-ht
+   "name" "fs-get-project-info"
+   "description"
+   "Get project root and current working directory information for path resolution context."
+   "inputSchema" (%make-ht "type" "object"
+                           "properties" (make-hash-table :test #'equal)
+                           "required" (vector))))
+
 (defun tools-descriptor-lisp-read-file ()
   (%make-ht
    "name" "lisp-read-file"
@@ -347,6 +356,7 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
                         (tools-descriptor-fs-read)
                         (tools-descriptor-fs-write)
                         (tools-descriptor-fs-list)
+                        (tools-descriptor-fs-project-info)
                         (tools-descriptor-lisp-read-file)
                         (tools-descriptor-code-find)
                         (tools-descriptor-code-describe)
@@ -428,10 +438,19 @@ Returns a downcased local tool name (string)."
                             "text" (gethash "content" result)
                             "path" (gethash "path" result)
                             "mode" (gethash "mode" result)
-                            "meta" (gethash "meta" result)))))
+                           "meta" (gethash "meta" result)))))
+        (error (e)
+          (%error id -32603
+                  (format nil "Internal error during lisp-read-file: ~A" e)))))
+
+      ((member local '("fs-get-project-info" "fs_get_project_info" "fs.project-info" "project-info")
+               :test #'string=)
+       (handler-case
+           (let ((result (fs-get-project-info)))
+             (%result id result))
          (error (e)
            (%error id -32603
-                   (format nil "Internal error during lisp-read-file: ~A" e)))))
+                   (format nil "Internal error during fs-get-project-info: ~A" e)))))
 
       ((member local '("fs-read-file" "fs_read_file" "read_file" "read") :test #'string=)
        (handler-case
@@ -523,19 +542,21 @@ Returns a downcased local tool name (string)."
              (unless (stringp symbol)
                (return-from handle-tools-call
                  (%error id -32602 "symbol must be a string")))
-             (multiple-value-bind (name type arglist doc)
+             (multiple-value-bind (name type arglist doc path line)
                  (code-describe-symbol symbol :package pkg)
                (%result id (%make-ht
                             "name" name
                             "type" type
                             "arglist" arglist
                             "documentation" doc
+                            "path" path
+                            "line" line
                             "content" (%text-content
-                                       (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]"
-                                               name type arglist doc))))))
-         (error (e)
-           (%error id -32603
-                   (format nil "Internal error during code-describe: ~A" e)))))
+                                       (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                                               name type arglist doc path line))))))
+        (error (e)
+          (%error id -32603
+                  (format nil "Internal error during code-describe: ~A" e)))))
 
       ((member local '("code-find-references" "code_find_references" "code-references"
                        "code_references" "references")

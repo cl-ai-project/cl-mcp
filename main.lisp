@@ -12,6 +12,7 @@
                 #:fs-read-file
                 #:fs-write-file
                 #:fs-list-directory
+                #:fs-get-project-info
                 #:*project-root*)
   (:import-from #:cl-mcp/src/edit-lisp-form
                 #:edit-lisp-form)
@@ -43,6 +44,7 @@
            #:fs-read-file
            #:fs-write-file
            #:fs-list-directory
+           #:fs-get-project-info
            #:lisp-read-file
            #:*project-root*
            #:edit-lisp-form
