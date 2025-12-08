@@ -73,6 +73,21 @@
       string
       (concatenate 'string string (string #\Newline))))
 
+(defun %ensure-blank-separation (prefix between)
+  "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
+Keeps existing whitespace intact and adds the minimal number of newlines
+necessary to leave one blank line between top-level forms."
+  (flet ((trailing-newlines (str)
+           (loop for i downfrom (1- (length str)) to 0
+                 while (char= (char str i) #\Newline)
+                 count 1)))
+    (let* ((combined (concatenate 'string prefix between))
+           (missing (max 0 (- 2 (trailing-newlines combined)))))
+      (if (zerop missing)
+          between
+          (concatenate 'string between
+                       (make-string missing :initial-element #\Newline))))))
+
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools."
   (let* ((resolved (fs-resolve-read-path file-path))
@@ -121,13 +136,11 @@
       (:replace
        (concatenate 'string (subseq text 0 start) snippet (subseq text end)))
       (:insert-before
-       (let* ((needs-nl (and (> start 0)
-                             (not (char= (char text (1- start)) #\Newline))))
-              (prefix (if needs-nl
-                          (concatenate 'string (subseq text 0 start)
-                                       (string #\Newline))
-                          (subseq text 0 start))))
-         (concatenate 'string prefix snippet (subseq text start))))
+       (let* ((prefix (subseq text 0 start))
+              (sep (if (zerop start)
+                       ""
+                       (%ensure-blank-separation prefix ""))))
+         (concatenate 'string prefix sep snippet (subseq text start))))
       (:insert-after
        (let* ((suffix (subseq text end))
               (ws-end (or (position-if-not
@@ -135,18 +148,11 @@
                              (member ch '(#\Space #\Tab #\Newline #\Return)))
                            suffix)
                           (length suffix)))
-              (between (subseq suffix 0 ws-end))
+              (between (%ensure-blank-separation (subseq text 0 end)
+                                                 (subseq suffix 0 ws-end)))
               (rest (subseq suffix ws-end))
-              (prefix (subseq text 0 end))
-              (needs-nl (and (zerop (length between))
-                             (> (length prefix) 0)
-                             (not (char= (char prefix (1- (length prefix))) #\Newline)))))
-         (concatenate 'string
-                      prefix
-                      (if needs-nl (string #\Newline) "")
-                      between
-                      snippet
-                      rest))))))
+              (prefix (subseq text 0 end)))
+         (concatenate 'string prefix between snippet rest))))))
 
 (defun edit-lisp-form (&key file-path form-type form-name operation content)
   "Structured edit of a top-level Lisp form.

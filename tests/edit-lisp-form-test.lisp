@@ -102,6 +102,51 @@
           (ok next-pos)
           (ok (< open-pos next-pos)))))))
 
+(deftest edit-lisp-form-insert-after-adds-blank-line
+  (testing "insert_after ensures a blank line when inserting after the final form"
+    (with-temp-file "tests/tmp/edit-form-insert-after-blank-line.lisp"
+        "(defun alpha () :a)\n"
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "alpha"
+                        :operation "insert_after"
+                        :content "(defun beta () :b)")
+        (let* ((text (fs-read-file path))
+               (alpha-pos (search "(defun alpha () :a)" text))
+               (beta-pos (search "(defun beta () :b)" text))
+               (after-alpha (and alpha-pos (+ alpha-pos (length "(defun alpha () :a)"))))
+               (between (and after-alpha beta-pos (subseq text after-alpha beta-pos))))
+          (ok alpha-pos)
+          (ok beta-pos)
+          (ok between)
+          (ok (search (format nil "~C~C" #\Newline #\Newline) between))
+          (ok (null (search (make-string 3 :initial-element #\Newline) between)))
+        )))))
+
+(deftest edit-lisp-form-insert-after-keeps-existing-blank-line
+  (testing "insert_after does not add extra blank lines when whitespace already exists"
+    (with-temp-file "tests/tmp/edit-form-insert-after-preserve-blank.lisp"
+        "(defun alpha () :a)\n\n(defun gamma () :g)\n"
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "alpha"
+                        :operation "insert_after"
+                        :content "(defun beta () :b)")
+        (let* ((text (fs-read-file path))
+               (alpha-pos (search "(defun alpha () :a)" text))
+               (beta-pos (search "(defun beta () :b)" text))
+               (after-alpha (and alpha-pos (+ alpha-pos (length "(defun alpha () :a)"))))
+               (between (and after-alpha beta-pos (subseq text after-alpha beta-pos))))
+          (ok alpha-pos)
+          (ok beta-pos)
+          (ok between)
+          (ok (search (format nil "~C~C" #\Newline #\Newline) between))
+          (ok (null (search (make-string 3 :initial-element #\Newline) between)))
+          (ok (search "(defun gamma () :g)" text)))
+      ))))
+
 (deftest edit-lisp-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"
     (with-temp-file "tests/tmp/edit-form-missing.lisp"
