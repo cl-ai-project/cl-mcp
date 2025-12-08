@@ -15,8 +15,11 @@ clients to drive Common Lisp development via MCP.
 - Tools API
   - `repl-eval` — evaluate forms
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
+  - `fs-get-project-info` — report project root and cwd info for path normalization
   - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
-  - `code-find` / `code-describe` — sb-introspect based symbol lookup/metadata
+  - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
+  - `edit-lisp-form` — structure-aware edits to top-level forms using Eclector CST
+  - `check-parens` — detect mismatched delimiters in code slices
 - Transports: `:stdio` and `:tcp`
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -76,6 +79,9 @@ Input schema (JSON):
 - `package` (string, optional): package to evaluate in (default `CL-USER`)
 - `printLevel` (integer|null): binds `*print-level*`
 - `printLength` (integer|null): binds `*print-length*`
+- `timeoutSeconds` (number|null): abort evaluation after this many seconds
+- `maxOutputLength` (integer|null): truncate `content`/`stdout`/`stderr` to this many characters
+- `safeRead` (boolean|null): when `true`, disables `*read-eval*` while reading forms
 Output fields:
 - `content`: last value as text (existing)
 - `stdout`: concatenated standard output from evaluation
@@ -121,6 +127,16 @@ Input:
 
 Returns: `entries` array plus human-readable `content`.
 
+### `fs-get-project-info`
+Report project root and current working directory information for clients that need
+to normalize relative paths.
+
+Output:
+- `project_root` (string): resolved project root
+- `cwd` (string|null): current working directory
+- `project_root_source` (string): one of `env`, `cwd`, or `asdf`
+- `relative_cwd` (string|null): cwd relative to project root when inside it
+
 ### `lisp-read-file`
 Read a file with Lisp-aware collapsing and optional pattern-based expansion.
 
@@ -162,6 +178,22 @@ Notes:
 - Uses the same read allow-list and 2 MB cap as `fs-read-file`.
 - Ignores delimiters inside strings, `;` line comments, and `#| ... |#` block comments.
 
+### `edit-lisp-form`
+Perform structure-aware edits to a top-level form using Eclector CST parsing while
+preserving surrounding formatting and comments.
+
+Input:
+- `file_path` (string, required): absolute path or project-relative path
+- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
+- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
+- `content` (string, required): full form text to insert
+
+Output:
+- `path`, `operation`, `form_type`, `form_name`
+- `bytes`: size of the updated file content
+- `content`: human-readable summary string of the applied change
+
 ### `code-find`
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
 
@@ -184,6 +216,21 @@ Output:
 - `type` ("function" | "macro" | "variable" | "unbound")
 - `arglist` (string)
 - `documentation` (string|null)
+
+### `code-find-references`
+Return cross-reference locations for a symbol using SBCL `sb-introspect`.
+
+Input:
+- `symbol` (string, required)
+- `package` (string, optional): package used when `symbol` is unqualified
+- `projectOnly` (boolean, default `true`): limit results to files under the project root
+
+Output:
+- `refs` (array): each element includes `path`, `line`, `type` (`call`, `macro`, `bind`, `reference`, `set`), and `context`
+- `count` (integer): number of references returned
+- `symbol`: echoed symbol name
+- `projectOnly`: whether results were filtered to the project
+- `content`: newline-separated human-readable summary of references
 
 ## Logging
 - Structured JSON line logs to `*error-output*`.
