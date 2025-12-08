@@ -81,6 +81,27 @@
           (ok after)
           (ok (< primary after)))))))
 
+(deftest edit-lisp-form-insert-after-preserves-newlines
+  (testing "insert_after keeps following whitespace so new form starts on its own line"
+    (with-temp-file "tests/tmp/edit-form-insert-after-newlines.lisp"
+        (format nil "(defun summarize-tasks ()~%  :ok)~%~%(defun next () :next)~%")
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "summarize-tasks"
+                        :operation "insert_after"
+                        :content "(defun open-tasks (tasks)
+  \"Return tasks whose status is :open.\"
+  (remove-if-not (lambda (task) (eql :open (task-status task))) tasks))")
+        (let* ((text (fs-read-file path))
+               (open-pos (search "defun open-tasks" text))
+               (next-pos (search "defun next" text)))
+          (ok (search (format nil ")~%~%(defun open-tasks") text))
+          (ok (null (search (format nil ")~%(defun open-tasks") text)))
+          (ok open-pos)
+          (ok next-pos)
+          (ok (< open-pos next-pos)))))))
+
 (deftest edit-lisp-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"
     (with-temp-file "tests/tmp/edit-form-missing.lisp"

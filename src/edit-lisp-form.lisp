@@ -71,7 +71,7 @@
   (if (and (> (length string) 0)
            (char= (char string (1- (length string))) #\Newline))
       string
-      (concatenate 'string string "\n")))
+      (concatenate 'string string (string #\Newline))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools."
@@ -124,18 +124,29 @@
        (let* ((needs-nl (and (> start 0)
                              (not (char= (char text (1- start)) #\Newline))))
               (prefix (if needs-nl
-                          (concatenate 'string (subseq text 0 start) "\n")
+                          (concatenate 'string (subseq text 0 start)
+                                       (string #\Newline))
                           (subseq text 0 start))))
          (concatenate 'string prefix snippet (subseq text start))))
       (:insert-after
-       (let* ((needs-nl (and (< end (length text))
-                             (not (char= (char text end) #\Newline))))
-              (suffix (subseq text end)))
+       (let* ((suffix (subseq text end))
+              (ws-end (or (position-if-not
+                           (lambda (ch)
+                             (member ch '(#\Space #\Tab #\Newline #\Return)))
+                           suffix)
+                          (length suffix)))
+              (between (subseq suffix 0 ws-end))
+              (rest (subseq suffix ws-end))
+              (prefix (subseq text 0 end))
+              (needs-nl (and (zerop (length between))
+                             (> (length prefix) 0)
+                             (not (char= (char prefix (1- (length prefix))) #\Newline)))))
          (concatenate 'string
-                      (subseq text 0 end)
-                      (if needs-nl "\n" "")
+                      prefix
+                      (if needs-nl (string #\Newline) "")
+                      between
                       snippet
-                      suffix))))))
+                      rest))))))
 
 (defun edit-lisp-form (&key file-path form-type form-name operation content)
   "Structured edit of a top-level Lisp form.
