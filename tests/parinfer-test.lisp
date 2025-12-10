@@ -28,9 +28,20 @@
       (ok (string= (string-trim '(#\Newline) output) "(list 1 2)")))))
 
 (deftest indent-mode-strings-comments
-  (testing "ignores parens in strings and comments"
+  (testing "ignores parens in strings and comments for stack tracking"
     (let* ((input (format nil "(defun foo ()~%  \"(\" ; (~%  :ok"))
            (output (apply-indent-mode input)))
+      ;; Should close the defun form properly, ignoring parens in string/comment
       (ok (search ":ok)" output))
-      (ok (= (count #\( output) 2)) ; defun, ( in string
+      ;; Physical parens: (defun, foo(), "(", ; ( = 4 open
+      (ok (= (count #\( output) 4))
+      ;; Physical parens: foo(), defun) = 2 close
+      ;; String/comment parens don't affect code structure
       (ok (= (count #\) output) 2)))))
+
+(deftest indent-mode-drops-excessive-parens
+  (testing "drops excessive closing parens"
+    (let* ((input "(defun foo () :ok))")
+           (output (apply-indent-mode input)))
+      (ok (string= (string-trim '(#\Newline) output) "(defun foo () :ok)"))
+      (ok (= (count #\( output) (count #\) output))))))

@@ -24,8 +24,8 @@
 
 (defun apply-indent-mode (text)
   "Apply a minimal Parinfer-like indent mode to TEXT.
-Closes open forms when indentation decreases, preserves user-supplied
-parens, and ignores parentheses inside strings or comments."
+Closes open forms when indentation decreases, drops excessive closing parens,
+and ignores parentheses inside strings or comments."
   (let* ((lines (uiop:split-string text :separator '(#\Newline)))
          (state (%make-state))
          (processed-lines '())
@@ -51,27 +51,50 @@ parens, and ignores parentheses inside strings or comments."
                           (make-string pending-closes :initial-element #\)))))
           (setf pending-closes 0))
 
-        ;; scan line, tracking strings/escapes and user parens
-        (loop for ch across line
-              for i from 0
-              do (cond
-                   ((state-escape state)
-                    (setf (state-escape state) nil))
-                   ((char= ch #\\)
-                    (setf (state-escape state) t))
-                   ((char= ch #\")
-                    (setf (state-in-string state)
-                          (not (state-in-string state))))
-                   ((and (not (state-in-string state)) (char= ch #\;))
-                    (return)) ; comment starts; ignore rest
-                   ((and (not (state-in-string state)) (char= ch #\())
-                    (push i (state-stack state)))
-                   ((and (not (state-in-string state)) (char= ch #\)))
-                    (when (state-stack state)
-                      (pop (state-stack state))))))
+        ;; Rebuild the line character by character, dropping excessive parens
+        (let ((output (make-string-output-stream)))
+          (loop for ch across line
+                for col from 0
+                do (cond
+                     ((state-escape state)
+                      (write-char ch output)
+                      (setf (state-escape state) nil))
 
-        (setf (state-escape state) nil)
-        (push line processed-lines)))
+                     ((char= ch #\\)
+                      (write-char ch output)
+                      (setf (state-escape state) t))
+
+                     ((char= ch #\")
+                      (write-char ch output)
+                      (setf (state-in-string state)
+                            (not (state-in-string state))))
+
+                     ((and (not (state-in-string state)) (char= ch #\;))
+                      ;; Comment: output rest of line and stop
+                      (loop for i from col below (length line)
+                            do (write-char (char line i) output))
+                      (return))
+
+                     ((and (not (state-in-string state)) (char= ch #\())
+                      (write-char ch output)
+                      ;; Push the expected minimum indent for content inside this paren
+                      ;; which is col + 1 (next column after the opening paren)
+                      (push (1+ col) (state-stack state)))
+
+                     ((and (not (state-in-string state)) (char= ch #\)))
+                      ;; Only output closing paren if stack is not empty
+                      (if (state-stack state)
+                          (progn
+                            (pop (state-stack state))
+                            (write-char ch output))
+                          ;; Excessive paren: skip it (do not output)
+                          nil))
+
+                     (t
+                      (write-char ch output))))
+
+          (setf (state-escape state) nil)
+          (push (get-output-stream-string output) processed-lines))))
 
     ;; close any remaining open parens at EOF
     (let ((remaining (length (state-stack state))))
