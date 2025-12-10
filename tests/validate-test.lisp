@@ -49,7 +49,7 @@
 
 (deftest lisp-check-parens-too-large-returns-nil
   (testing "too large input returns ok as nil (boolean false)"
-    (let ((*lisp-check-parens-max-bytes* 1))
+    (let ((*check-parens-max-bytes* 1))
       (let ((res (lisp-check-parens :code "abcd")))
         (ok (null (%ok? res)))
         (ok (not (eq (%ok? res) :false)))
