@@ -16,6 +16,7 @@ clients to drive Common Lisp development via MCP.
   - `repl-eval` — evaluate forms
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
   - `fs-get-project-info` — report project root and cwd info for path normalization
+  - `fs-set-project-root` — set the server's project root and working directory
   - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
   - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
   - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
@@ -136,6 +137,25 @@ Output:
 - `cwd` (string|null): current working directory
 - `project_root_source` (string): one of `env`, `cwd`, or `asdf`
 - `relative_cwd` (string|null): cwd relative to project root when inside it
+
+### `fs-set-project-root`
+Synchronize the server's project root and working directory with the client's location.
+
+Input:
+- `path` (string, required): absolute path to the project root directory
+
+This tool allows AI agents to explicitly set the server's working directory, ensuring
+path resolution works correctly. The server updates both `*project-root*` and the
+current working directory (via `uiop:chdir`).
+
+Output:
+- `project_root` (string): new project root path
+- `cwd` (string): new current working directory
+- `previous_root` (string): previous project root path
+- `status` (string): confirmation message
+
+**Best Practice for AI Agents:** Call `fs-set-project-root` at the beginning of your
+session with your current working directory to ensure file operations work correctly.
 
 ### `lisp-read-file`
 Read a file with Lisp-aware collapsing and optional pattern-based expansion.
@@ -295,6 +315,43 @@ allows writing there or configure SBCL’s cache directory accordingly.
 - No output on stdio: remember the protocol is one JSON‑RPC message per line.
   Each request must end with a newline and the server will answer with exactly
   one line (or nothing for notifications).
+
+## AI Agent Configuration
+
+When using cl-mcp with AI agents like Claude Code, you should configure the agent to
+synchronize the project root at the start of each session.
+
+### Recommended Setup
+
+Add server-specific instructions to your MCP client configuration. For Claude Code,
+edit your `mcp.json` or configuration file:
+
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "ros",
+      "args": ["run", "-l", "cl-mcp", "-e", "(cl-mcp:run)"],
+      "env": {
+        "MCP_PROJECT_ROOT": "${workspaceFolder}"
+      },
+      "instructions": "IMPORTANT: At the start of your session, call fs-set-project-root with the absolute path of your current working directory (e.g., /home/user/project) to synchronize the server's project root. This ensures all file operations work correctly."
+    }
+  }
+}
+```
+
+### Alternative: Environment Variable
+
+You can also set `MCP_PROJECT_ROOT` environment variable before starting the server:
+
+```bash
+export MCP_PROJECT_ROOT=/path/to/your/project
+ros run -l cl-mcp -e "(cl-mcp:run)"
+```
+
+The server will use this path during initialization, though calling `fs-set-project-root`
+explicitly is still recommended for dynamic project switching.
 
 ## Roadmap
 - Error taxonomy as condition types mapped to JSON‑RPC errors

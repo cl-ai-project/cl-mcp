@@ -7,7 +7,7 @@
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/fs
                 #:*project-root*
-                #:fs-read-file #:fs-write-file #:fs-list-directory #:fs-get-project-info)
+                #:fs-read-file #:fs-write-file #:fs-list-directory #:fs-get-project-info #:fs-set-project-root)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
@@ -225,6 +225,19 @@ ASDF system"))
                            "properties" (make-hash-table :test #'equal)
                            "required" (vector))))
 
+(defun tools-descriptor-fs-set-project-root ()
+  (%make-ht
+   "name" "fs-set-project-root"
+   "description"
+   "Set the server's project root directory to the specified path.
+Use this to synchronize the server's working directory with the client's project location.
+The server will change its current working directory to the specified path."
+   "inputSchema" (let ((p (make-hash-table :test #'equal)))
+                   (setf (gethash "path" p)
+                         (%make-ht "type" "string"
+                                   "description"
+                                   "Absolute path to the project root directory"))
+                   (%make-ht "type" "object" "properties" p "required" (vector "path")))))
 (defun tools-descriptor-lisp-read-file ()
   (%make-ht
    "name" "lisp-read-file"
@@ -394,6 +407,7 @@ ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ens
                         (tools-descriptor-fs-write)
                         (tools-descriptor-fs-list)
                         (tools-descriptor-fs-project-info)
+                        (tools-descriptor-fs-set-project-root)
                         (tools-descriptor-lisp-read-file)
                         (tools-descriptor-code-find)
                         (tools-descriptor-code-describe)
@@ -482,7 +496,6 @@ Returns a downcased local tool name (string)."
       ((member local '("fs-get-project-info" "fs_get_project_info") :test #'string=)
        (handler-case
            (let* ((info (fs-get-project-info))
-                  (json-str (%encode-json info))
                   (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
                                    (gethash "project_root" info)
                                    (or (gethash "cwd" info) "(none)")
@@ -492,11 +505,31 @@ Returns a downcased local tool name (string)."
                           "project_root" (gethash "project_root" info)
                           "cwd" (gethash "cwd" info)
                           "project_root_source" (gethash "project_root_source" info)
-                          "relative_cwd" (gethash "relative_cwd" info)
-                          "json" json-str)))
+                          "relative_cwd" (gethash "relative_cwd" info))))
          (error (e)
            (%error id -32603
                    (format nil "Internal error during fs-get-project-info: ~A" e)))))
+
+      ((member local '("fs-set-project-root" "fs_set_project_root") :test #'string=)
+       (handler-case
+           (let* ((path (and args (gethash "path" args))))
+             (unless (stringp path)
+               (return-from handle-tools-call
+                 (%error id -32602 "path must be a string")))
+             (let* ((info (fs-set-project-root path))
+                    (summary (format nil "~A~%New project root: ~A~%New CWD: ~A"
+                                     (gethash "status" info)
+                                     (gethash "project_root" info)
+                                     (gethash "cwd" info))))
+               (%result id (%make-ht
+                            "content" (%text-content summary)
+                            "project_root" (gethash "project_root" info)
+                            "cwd" (gethash "cwd" info)
+                            "previous_root" (gethash "previous_root" info)
+                            "status" (gethash "status" info)))))
+         (error (e)
+           (%error id -32603
+                   (format nil "Internal error during fs-set-project-root: ~A" e)))))
 
       ((member local '("fs-read-file" "fs_read_file") :test #'string=)
        (handler-case
