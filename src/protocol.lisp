@@ -98,8 +98,10 @@
    "name" "repl-eval"
    "description"
    "Evaluate Common Lisp forms and return the last value as printed text.
-Provide an existing package (e.g., CL-USER) and set printLevel/printLength
-when you need to control truncation. Captures stdout/stderr in the response."
+Use this for testing, inspection, debugging, or loading systems (ql:quickload).
+Provide an existing package (e.g., CL-USER) and set printLevel/printLength when needed.
+WARNING: Definitions created here are TRANSIENT and lost on server restart.
+To modify code permanently, you MUST use 'edit-lisp-form' or 'fs-write-file' to save changes to files."
    "inputSchema"
    (%make-ht
     "type" "object"
@@ -163,7 +165,9 @@ ASDF system"))
 (defun tools-descriptor-fs-write ()
   (%make-ht
    "name" "fs-write-file"
-   "description" "Write text content to a file relative to project root."
+   "description" "Write text content to a file relative to project root.
+Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
+For editing EXISTING Lisp source code, you MUST use 'edit-lisp-form' instead to preserve structure and comments."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "path" p)
                          (%make-ht "type" "string"
@@ -202,7 +206,10 @@ ASDF system"))
   (%make-ht
    "name" "lisp-read-file"
    "description"
-   "Read a file with Lisp-aware collapsed view, optionally expanding forms matching patterns."
+   "Read a file with Lisp-aware collapsed view to save context window tokens.
+ALWAYS prefer this tool over 'fs-read-file' when reading .lisp or .asd files, unless you need exact raw bytes.
+Use 'name_pattern' to locate specific definitions (e.g., functions, classes) without reading the entire file.
+Use 'collapsed=true' (default) to see only signatures, or 'collapsed=false' for full source."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "path" p)
                          (%make-ht "type" "string"
@@ -235,8 +242,9 @@ ASDF system"))
    "name" "code-find"
    "description"
    "Locate the definition of a symbol (path and line) using sb-introspect.
-Quickload/load the library first; prefer package-qualified symbols or supply the
-package argument."
+Quickload/load the library first; prefer package-qualified symbols or supply the package argument.
+NOTE: If the symbol is not found, the system might not be loaded yet.
+Try using 'lisp-read-file' with 'name_pattern' to search the file system directly as a fallback."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "symbol" p)
                          (%make-ht "type" "string"
@@ -256,8 +264,9 @@ and is loaded"))
    "name" "code-describe"
    "description"
    "Describe a symbol: type, arglist, and documentation.
-Ensure the defining library is loaded; pass a package or a package-qualified
-symbol to avoid resolution errors."
+Ensure the defining library is loaded; pass a package or a package-qualified symbol to avoid resolution errors.
+NOTE: If the symbol is not found, the system might not be loaded yet.
+Try using 'lisp-read-file' with 'name_pattern' to search the file system directly as a fallback."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "symbol" p)
                          (%make-ht "type" "string"
@@ -299,7 +308,9 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
   (%make-ht
    "name" "check-parens"
    "description"
-   "Check balanced parentheses/brackets in a file slice or provided code; returns the first mismatch position."
+   "Check balanced parentheses/brackets in a file slice or provided code.
+Use this to DIAGNOSE syntax errors in existing files or validate code snippets before/after editing.
+Returns the first mismatch position if unbalanced, or success if balanced."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "path" p)
                          (%make-ht "type" "string"
@@ -323,7 +334,10 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
   (%make-ht
    "name" "edit-lisp-form"
    "description"
-   "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.\nSupports replace, insert_before, and insert_after while preserving formatting and comments."
+   "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
+Supports replace, insert_before, and insert_after while preserving formatting and comments.
+PREFERRED METHOD for editing existing Lisp source code - automatically repairs missing closing parentheses using parinfer.
+ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ensure safety and structure preservation."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "file_path" p)
