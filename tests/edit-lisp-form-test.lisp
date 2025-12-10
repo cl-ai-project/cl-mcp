@@ -206,3 +206,50 @@
                  (ok (string= before (fs-read-file path)))
                  (ok (not (probe-file flag-path))))))
         (ignore-errors (delete-file flag-path))))))
+
+(deftest edit-lisp-form-auto-repair-missing-parens
+  (testing "missing closing parentheses are automatically added via parinfer"
+    (with-temp-file "tests/tmp/edit-form-auto-repair.lisp"
+        (format nil "(defun original (x)~%  (+ x 1))~%")
+      (lambda (path)
+        ;; Provide content with missing closing parens
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "original"
+                        :operation "replace"
+                        :content (format nil "(defun original (x)~%  (* x 2"))
+        (let ((updated (fs-read-file path)))
+          ;; Verify the function was replaced and parens were auto-completed
+          (ok (search "(* x 2)" updated))
+          (ok (null (search "(+ x 1)" updated)))
+          ;; Verify the updated content is valid Lisp (can be read)
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+(deftest edit-lisp-form-auto-repair-nested-missing-parens
+  (testing "nested forms with missing parens are auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-nested.lisp"
+        (format nil "(defun helper () :ok)~%")
+      (lambda (path)
+        ;; Insert a function with multiple missing closing parens
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "helper"
+                        :operation "insert_after"
+                        :content (format nil "(defun process (data)~%  (when data~%    (print data)~%    (+ 1 2"))
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun helper () :ok)" updated))
+          (ok (search "(defun process (data)" updated))
+          ;; Verify all forms in the file are valid
+          (ok (handler-case
+                  (let ((*read-eval* nil)
+                        (forms 0))
+                    (with-input-from-string (s updated)
+                      (loop for form = (read s nil :eof)
+                            until (eq form :eof)
+                            do (incf forms)))
+                    (= forms 2))
+                (error () nil))))))))
