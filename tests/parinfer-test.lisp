@@ -94,3 +94,29 @@
     (let* ((input (format nil "(defun bar ()~%  ; ) ) )~%  ; ( ( (~%  42"))
            (output (apply-indent-mode input)))
       (ok (search "42)" output)))))
+
+(deftest indent-mode-same-indent-preservation
+  (testing "preserves forms with same-level continuation (idempotency critical)"
+    ;; This test verifies the fix for >= -> > in dedent logic
+    ;; Without the fix, (foo\n bar\n baz) would be corrupted to (foo)\n bar\n baz
+    (let* ((input (format nil "(foo~% bar~% baz)"))
+           (output1 (apply-indent-mode input))
+           (output2 (apply-indent-mode output1))
+           (output3 (apply-indent-mode output2)))
+      (ok (string= input output1) "First application preserves valid code")
+      (ok (string= output1 output2) "Idempotent on second application")
+      (ok (string= output2 output3) "Idempotent on third application")))
+  (testing "preserves one-space aligned arguments"
+    ;; Common Lisp style with 1-space continuation
+    (let* ((input (format nil "(function arg1~% arg2~% arg3)"))
+           (output1 (apply-indent-mode input))
+           (output2 (apply-indent-mode output1)))
+      (ok (string= input output1) "Preserves 1-space alignment")
+      (ok (string= output1 output2) "Idempotent with 1-space alignment")))
+  (testing "still closes on actual dedent"
+    ;; Verify we didn't break normal dedent behavior
+    (let* ((input (format nil "(outer~%  (inner~%    content~%  more)"))
+           (output (apply-indent-mode input)))
+      (ok (search "(inner" output))
+      (ok (search "content)" output) "Closes inner form on dedent")
+      (ok (search "more)" output) "Closes outer form"))))

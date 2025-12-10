@@ -27,7 +27,7 @@
 Closes open forms when indentation decreases, drops excessive closing parens,
 and ignores parentheses inside strings or comments."
   (let* ((ends-with-newline (and (plusp (length text))
-                                  (char= (char text (1- (length text))) #\Newline)))
+                                 (char= (char text (1- (length text))) #\Newline)))
          (lines (uiop:split-string text :separator '(#\Newline)))
          (state (%make-state))
          (processed-lines '())
@@ -37,10 +37,10 @@ and ignores parentheses inside strings or comments."
       (let* ((indent (%count-leading-spaces line))
              (is-code-line (not (%line-empty-or-comment-p line))))
 
-        ;; close forms when dedenting
+        ;; close forms when dedenting (indent actually decreases)
         (when is-code-line
           (loop while (and (state-stack state)
-                           (>= (car (state-stack state)) indent))
+                           (> (car (state-stack state)) indent))
                 do (pop (state-stack state))
                    (incf pending-closes)))
 
