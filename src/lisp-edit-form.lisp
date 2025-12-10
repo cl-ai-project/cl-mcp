@@ -1,6 +1,6 @@
-;;;; src/edit-lisp-form.lisp
+;;;; src/lisp-edit-form.lisp
 
-(defpackage #:cl-mcp/src/edit-lisp-form
+(defpackage #:cl-mcp/src/lisp-edit-form
   (:use #:cl)
   (:shadowing-import-from #:cl-mcp/src/cst
                           #:cst-node
@@ -27,9 +27,9 @@
                 #:merge-pathnames*
                 #:native-namestring
                 #:subpathp)
-  (:export #:edit-lisp-form))
+  (:export #:lisp-edit-form))
 
-(in-package #:cl-mcp/src/edit-lisp-form)
+(in-package #:cl-mcp/src/lisp-edit-form)
 
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
@@ -127,7 +127,7 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
                   (try-parse repaired)
                 (if repaired-result
                     (progn
-                      (log-event :info "edit-lisp-form"
+                      (log-event :info "lisp-edit-form"
                                  "auto-repair" "success"
                                  "original-error" (princ-to-string err))
                       repaired-result)
@@ -175,7 +175,7 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
 
-(defun edit-lisp-form (&key file-path form-type form-name operation content)
+(defun lisp-edit-form (&key file-path form-type form-name operation content)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
@@ -199,7 +199,7 @@ be automatically added using parinfer."
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
         (let ((updated (%apply-operation original target op-key validated-content)))
-          (log-event :debug "edit-lisp-form" "path" (namestring abs)
+          (log-event :debug "lisp-edit-form" "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
                      "form_name" form-name

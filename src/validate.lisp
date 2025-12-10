@@ -4,13 +4,13 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
-  (:export #:check-parens
+  (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
 (in-package #:cl-mcp/src/validate)
 
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
-  "Maximum number of characters check-parens will scan in one call.")
+  "Maximum number of characters lisp-check-parens will scan in one call.")
 
 (defun %closing (opener)
   (ecase opener
@@ -87,7 +87,7 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                 :offset off :line l :column c))))
     (list :ok t)))
 
-(defun check-parens (&key path code offset limit)
+(defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\", \"found\", and \"position\"."
   (when (and path code)
@@ -111,7 +111,7 @@ Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\", 
                 (gethash "line" pos) 1
                 (gethash "column" pos) 1)
           (setf (gethash "position" h) pos))
-        (return-from check-parens h)))
+        (return-from lisp-check-parens h)))
     (destructuring-bind (&key ok kind expected found offset line column) (%scan-parens text :base-offset base-off)
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "ok" h) (and ok t))
