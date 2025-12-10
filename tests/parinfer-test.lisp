@@ -45,3 +45,52 @@
            (output (apply-indent-mode input)))
       (ok (string= (string-trim '(#\Newline) output) "(defun foo () :ok)"))
       (ok (= (count #\( output) (count #\) output))))))
+
+(deftest indent-mode-idempotency
+  (testing "applying twice produces same result"
+    (let* ((input (format nil "(defun foo ()~%  (let ((x 1))~%    (+ x 1"))
+           (output1 (apply-indent-mode input))
+           (output2 (apply-indent-mode output1)))
+      (ok (string= output1 output2))))
+  (testing "idempotent on already balanced code"
+    (let* ((input (format nil "(defun foo ()~%  (let ((x 1))~%    (+ x 1)))"))
+           (output (apply-indent-mode input)))
+      (ok (string= (string-trim '(#\Newline) input)
+                   (string-trim '(#\Newline) output))))))
+
+(deftest indent-mode-escaped-quotes
+  (testing "handles escaped quotes inside strings"
+    (let* ((input "(print \"Say \\\"hello\\\" (to me)\")")
+           (output (apply-indent-mode input)))
+      (ok (string= (string-trim '(#\Newline) output)
+                   "(print \"Say \\\"hello\\\" (to me)\")"))
+      (ok (= (count #\( output) (count #\) output)))))
+  (testing "handles complex string escapes"
+    (let* ((input "(print \"Path: C:\\\\Users\\\\test\\\"file.txt\\\"\")")
+           (output (apply-indent-mode input)))
+      (ok (= (count #\( output) (count #\) output))))))
+
+(deftest indent-mode-inline-structures
+  (testing "preserves inline structures correctly"
+    (let* ((input "(when t (print 1) (print 2))")
+           (output (apply-indent-mode input)))
+      (ok (string= (string-trim '(#\Newline) output)
+                   "(when t (print 1) (print 2))"))
+      (ok (= (count #\( output) (count #\) output)))))
+  (testing "handles nested inline expressions"
+    (let* ((input "(foo (bar (baz)))")
+           (output (apply-indent-mode input)))
+      (ok (string= (string-trim '(#\Newline) output)
+                   "(foo (bar (baz)))"))
+      (ok (= (count #\( output) (count #\) output))))))
+
+(deftest indent-mode-comment-unbalanced
+  (testing "handles unbalanced parens in comments"
+    (let* ((input (format nil "(defun foo ()~%  ;; (unbalanced~%  :ok"))
+           (output (apply-indent-mode input)))
+      (ok (search ":ok)" output))
+      (ok (= (count #\( output) 3)))) ; (defun, foo(), "(unbalanced
+  (testing "ignores multiple comment parens"
+    (let* ((input (format nil "(defun bar ()~%  ; ) ) )~%  ; ( ( (~%  42"))
+           (output (apply-indent-mode input)))
+      (ok (search "42)" output)))))

@@ -26,7 +26,9 @@
   "Apply a minimal Parinfer-like indent mode to TEXT.
 Closes open forms when indentation decreases, drops excessive closing parens,
 and ignores parentheses inside strings or comments."
-  (let* ((lines (uiop:split-string text :separator '(#\Newline)))
+  (let* ((ends-with-newline (and (plusp (length text))
+                                  (char= (char text (1- (length text))) #\Newline)))
+         (lines (uiop:split-string text :separator '(#\Newline)))
          (state (%make-state))
          (processed-lines '())
          (pending-closes 0))
@@ -105,4 +107,8 @@ and ignores parentheses inside strings or comments."
                         (first processed-lines)
                         (make-string remaining :initial-element #\)))))))
 
-    (format nil "~{~A~%~}" (nreverse processed-lines))))
+    ;; Format output, preserving whether input ended with newline
+    (let ((result (format nil "~{~A~^~%~}" (nreverse processed-lines))))
+      (if ends-with-newline
+          (concatenate 'string result (string #\Newline))
+          result))))
