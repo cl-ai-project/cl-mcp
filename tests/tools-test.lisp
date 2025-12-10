@@ -163,17 +163,17 @@
         (ok (string= (gethash "type" first) "text"))
         (ok (string= (gethash "text" first) "5"))))))
 
-(deftest tools-call-check-parens-ok
-  (testing "tools/call check-parens returns ok true for balanced code"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"check-parens\",\"arguments\":{\"code\":\"(defun foo () (list 1 2))\"}}}"))
+(deftest tools-call-lisp-check-parens-ok
+  (testing "tools/call lisp-check-parens returns ok true for balanced code"
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp-check-parens\",\"arguments\":{\"code\":\"(defun foo () (list 1 2))\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj)))
         (ok (eql (gethash "ok" result) t))))))
 
-(deftest tools-call-check-parens-mismatch
-  (testing "tools/call check-parens reports mismatch"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"check-parens\",\"arguments\":{\"code\":\"(defun foo () [1 2))\"}}}"))
+(deftest tools-call-lisp-check-parens-mismatch
+  (testing "tools/call lisp-check-parens reports mismatch"
+    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp-check-parens\",\"arguments\":{\"code\":\"(defun foo () [1 2))\"}}}"))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj)))

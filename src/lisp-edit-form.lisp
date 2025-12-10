@@ -127,7 +127,7 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
                   (try-parse repaired)
                 (if repaired-result
                     (progn
-                      (log-event :info "edit-lisp-form"
+                      (log-event :info "lisp-edit-form"
                                  "auto-repair" "success"
                                  "original-error" (princ-to-string err))
                       repaired-result)
@@ -199,7 +199,7 @@ be automatically added using parinfer."
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
         (let ((updated (%apply-operation original target op-key validated-content)))
-          (log-event :debug "edit-lisp-form" "path" (namestring abs)
+          (log-event :debug "lisp-edit-form" "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
                      "form_name" form-name

@@ -613,7 +613,7 @@ Returns a downcased local tool name (string)."
            (%error id -32603
                    (format nil "Internal error during code-find-references: ~A" e)))))
 
-      ((member local '("lisp-check-parens" "lisp_check_parens" "check-parens" "check_parens" "parens") :test #'string=)
+      ((member local '("lisp-check-parens" "lisp_check_parens") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args)))
                   (code (and args (gethash "code" args)))
@@ -629,9 +629,9 @@ Returns a downcased local tool name (string)."
                (%result id result)))
          (error (e)
            (%error id -32603
-                   (format nil "Internal error during check-parens: ~A" e)))))
+                   (format nil "Internal error during lisp-check-parens: ~A" e)))))
  
-      ((member local '("lisp-edit-form" "lisp_edit_form" "edit-lisp-form" "edit_lisp_form" "edit.lisp-form" "edit.lisp_form")
+      ((member local '("lisp-edit-form" "lisp_edit_form")
                :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "file_path" args)))
