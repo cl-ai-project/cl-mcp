@@ -39,6 +39,13 @@ clients to drive Common Lisp development via MCP.
 Note: The repository currently uses `yason` for JSON.
 
 ## Quick Start
+
+**IMPORTANT**: Set the `MCP_PROJECT_ROOT` environment variable before starting:
+
+```bash
+export MCP_PROJECT_ROOT=/path/to/your/project
+```
+
 Load and run from an existing REPL:
 
 ```lisp
@@ -50,9 +57,14 @@ Load and run from an existing REPL:
 
 Or run a minimal stdio loop (one JSON‑RPC line per request):
 
-```lisp
-(cl-mcp:run :transport :stdio)
+```bash
+# With environment variable
+export MCP_PROJECT_ROOT=$(pwd)
+ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
 ```
+
+**Alternative**: If you don't set `MCP_PROJECT_ROOT`, you must call `fs-set-project-root`
+tool immediately after connecting to initialize the project root.
 
 ### Try it with the bundled clients
 - Python TCP one‑shot client (initialize):
@@ -347,7 +359,7 @@ You can also set `MCP_PROJECT_ROOT` environment variable before starting the ser
 
 ```bash
 export MCP_PROJECT_ROOT=/path/to/your/project
-ros run -l cl-mcp -e "(cl-mcp:run)"
+ros run -s cl-mcp -e "(cl-mcp:run)"
 ```
 
 The server will use this path during initialization, though calling `fs-set-project-root`
