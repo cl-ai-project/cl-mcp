@@ -167,7 +167,7 @@
 (deftest edit-lisp-form-invalid-content-errors
   (testing "invalid content is rejected before touching the file"
     (with-temp-file "tests/tmp/edit-form-invalid.lisp"
-        "(defun sample () :ok)\n"
+        (format nil "(defun sample () :ok)~%")
       (lambda (path)
         (let ((before (fs-read-file path)))
           (ok (handler-case
@@ -176,7 +176,8 @@
                                     :form-type "defun"
                                     :form-name "sample"
                                     :operation "replace"
-                                    :content "(defun sample (")
+                                    ;; Multiple forms - cannot be single valid form
+                                    :content (format nil "(defun sample () 1) (defun other () 2)"))
                     nil)
                 (error () t)))
           (ok (string= before (fs-read-file path))))))))
