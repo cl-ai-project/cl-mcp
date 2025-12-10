@@ -11,3 +11,6 @@
 
 .serena/
 .cache/
+.mcp.json
+tmp-integration-write.txt
+tmp-tools-write.txt
