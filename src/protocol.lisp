@@ -6,6 +6,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/fs
+                #:*project-root*
                 #:fs-read-file #:fs-write-file #:fs-list-directory #:fs-get-project-info)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
@@ -68,6 +69,28 @@
 
 (defun handle-initialize (state id params)
   (declare (ignore state))
+  ;; Sync rootPath from client if provided
+  (when params
+    (let* ((root-path (gethash "rootPath" params))
+           (root-uri (gethash "rootUri" params))
+           (root (or root-path
+                     (and root-uri
+                          (if (uiop:string-prefix-p "file://" root-uri)
+                              (subseq root-uri 7)
+                              root-uri)))))
+      (when (and root (stringp root) (plusp (length root)))
+        (handler-case
+            (let ((root-dir (uiop:ensure-directory-pathname root)))
+              (when (uiop:directory-exists-p root-dir)
+                (setf cl-mcp/src/fs:*project-root* root-dir)
+                (uiop:chdir root-dir)
+                (log-event :info "initialize.sync-root"
+                           "rootPath" (namestring root-dir)
+                           "source" (if root-path "rootPath" "rootUri"))))
+          (error (e)
+            (log-event :warn "initialize.sync-root-failed"
+                       "path" root
+                       "error" (princ-to-string e)))))))
   (let* ((client-ver (and params (gethash "protocolVersion" params)))
          (supported (and client-ver (find client-ver +supported-protocol-versions+
                                           :test #'string=)))
@@ -458,8 +481,19 @@ Returns a downcased local tool name (string)."
 
       ((member local '("fs-get-project-info" "fs_get_project_info") :test #'string=)
        (handler-case
-           (let ((result (fs-get-project-info)))
-             (%result id result))
+           (let* ((info (fs-get-project-info))
+                  (json-str (%encode-json info))
+                  (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
+                                   (gethash "project_root" info)
+                                   (or (gethash "cwd" info) "(none)")
+                                   (gethash "project_root_source" info))))
+             (%result id (%make-ht
+                          "content" (%text-content summary)
+                          "project_root" (gethash "project_root" info)
+                          "cwd" (gethash "cwd" info)
+                          "project_root_source" (gethash "project_root_source" info)
+                          "relative_cwd" (gethash "relative_cwd" info)
+                          "json" json-str)))
          (error (e)
            (%error id -32603
                    (format nil "Internal error during fs-get-project-info: ~A" e)))))
@@ -619,8 +653,25 @@ Returns a downcased local tool name (string)."
              (when (and (null path) (null code))
                (return-from handle-tools-call
                  (%error id -32602 "Either path or code is required")))
-             (let ((result (lisp-check-parens :path path :code code :offset offset :limit limit)))
-               (%result id result)))
+             (let* ((result (lisp-check-parens :path path :code code :offset offset :limit limit))
+                    (ok (gethash "ok" result))
+                    (summary (if ok
+                                 "Parentheses are balanced"
+                                 (let* ((kind (gethash "kind" result))
+                                        (expected (gethash "expected" result))
+                                        (found (gethash "found" result))
+                                        (pos (gethash "position" result))
+                                        (line (and pos (gethash "line" pos)))
+                                        (col (and pos (gethash "column" pos))))
+                                   (format nil "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D"
+                                           kind expected found line col)))))
+               (%result id (%make-ht
+                            "content" (%text-content summary)
+                            "ok" ok
+                            "kind" (gethash "kind" result)
+                            "expected" (gethash "expected" result)
+                            "found" (gethash "found" result)
+                            "position" (gethash "position" result)))))
          (error (e)
            (%error id -32603
                    (format nil "Internal error during lisp-check-parens: ~A" e)))))
