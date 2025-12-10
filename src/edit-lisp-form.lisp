@@ -19,6 +19,8 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
+  (:import-from #:cl-mcp/src/parinfer
+                #:apply-indent-mode)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -71,7 +73,22 @@
   (if (and (> (length string) 0)
            (char= (char string (1- (length string))) #\Newline))
       string
-      (concatenate 'string string "\n")))
+      (concatenate 'string string (string #\Newline))))
+
+(defun %ensure-blank-separation (prefix between)
+  "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
+Keeps existing whitespace intact and adds the minimal number of newlines
+necessary to leave one blank line between top-level forms."
+  (flet ((trailing-newlines (str)
+           (loop for i downfrom (1- (length str)) to 0
+                 while (char= (char str i) #\Newline)
+                 count 1)))
+    (let* ((combined (concatenate 'string prefix between))
+           (missing (max 0 (- 2 (trailing-newlines combined)))))
+      (if (zerop missing)
+          between
+          (concatenate 'string between
+                       (make-string missing :initial-element #\Newline))))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools."
@@ -83,21 +100,40 @@
            (rel-namestring (native-namestring relative)))
       (values resolved rel-namestring))))
 
-(defun %validate-content (content)
-  "Ensure CONTENT is a single valid form; signal an error when malformed."
+(defun %validate-and-repair-content (content)
+  "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
+using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content."
   (let ((*read-eval* nil)
         (*readtable* (copy-readtable nil)))
-    (handler-case
-        (multiple-value-bind (form pos)
-            (cl:read-from-string content nil :eof)
-          (when (eq form :eof)
-            (error "content is empty"))
-          (let ((rest (string-trim '(#\Space #\Tab #\Newline) (subseq content pos))))
-            (when (> (length rest) 0)
-              (error "content contains extra characters after the first form"))))
-      (error (e)
-        (error "content parse error: ~A" e))))
-  t)
+    (flet ((try-parse (text)
+             (handler-case
+                 (multiple-value-bind (form pos)
+                     (cl:read-from-string text nil :eof)
+                   (when (eq form :eof)
+                     (error "content is empty"))
+                   (let ((rest (string-trim '(#\Space #\Tab #\Newline) (subseq text pos))))
+                     (when (> (length rest) 0)
+                       (error "content contains extra characters after the first form")))
+                   text)
+               (error (e)
+                 (values nil e)))))
+      (multiple-value-bind (result err)
+          (try-parse content)
+        (if result
+            result
+            ;; First parse failed, try parinfer repair
+            (let ((repaired (apply-indent-mode content)))
+              (multiple-value-bind (repaired-result repaired-err)
+                  (try-parse repaired)
+                (if repaired-result
+                    (progn
+                      (log-event :info "edit-lisp-form"
+                                 "auto-repair" "success"
+                                 "original-error" (princ-to-string err))
+                      repaired-result)
+                    ;; Repair failed, signal the original error
+                    (error "content parse error: ~A (repair also failed: ~A)"
+                           err repaired-err)))))))))
 
 (defun %find-target (nodes form-type form-name)
   (let ((target (string-downcase form-name)))
@@ -121,27 +157,30 @@
       (:replace
        (concatenate 'string (subseq text 0 start) snippet (subseq text end)))
       (:insert-before
-       (let* ((needs-nl (and (> start 0)
-                             (not (char= (char text (1- start)) #\Newline))))
-              (prefix (if needs-nl
-                          (concatenate 'string (subseq text 0 start) "\n")
-                          (subseq text 0 start))))
-         (concatenate 'string prefix snippet (subseq text start))))
+       (let* ((prefix (subseq text 0 start))
+              (sep (if (zerop start)
+                       ""
+                       (%ensure-blank-separation prefix ""))))
+         (concatenate 'string prefix sep snippet (subseq text start))))
       (:insert-after
-       (let* ((needs-nl (and (< end (length text))
-                             (not (char= (char text end) #\Newline))))
-              (suffix (subseq text end)))
-         (concatenate 'string
-                      (subseq text 0 end)
-                      (if needs-nl "\n" "")
-                      snippet
-                      suffix))))))
+       (let* ((suffix (subseq text end))
+              (ws-end (or (position-if-not
+                           (lambda (ch)
+                             (member ch '(#\Space #\Tab #\Newline #\Return)))
+                           suffix)
+                          (length suffix)))
+              (between (%ensure-blank-separation (subseq text 0 end)
+                                                 (subseq suffix 0 ws-end)))
+              (rest (subseq suffix ws-end))
+              (prefix (subseq text 0 end)))
+         (concatenate 'string prefix between snippet rest))))))
 
 (defun edit-lisp-form (&key file-path form-type form-name operation content)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
-CONTENT are required."
+CONTENT are required. If CONTENT has missing closing parentheses, they will
+be automatically added using parinfer."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name)
                (stringp operation) (stringp content))
     (error "All parameters (file_path, form_type, form_name, operation, content) must be strings"))
@@ -151,15 +190,15 @@ CONTENT are required."
                    ((string= op-normalized "insert_before") :insert-before)
                    ((string= op-normalized "insert_after") :insert-after)
                    (t (error "Unsupported operation: ~A" operation))))
-         (form-type-str (string-downcase form-type)))
-    (%validate-content content)
+         (form-type-str (string-downcase form-type))
+         (validated-content (%validate-and-repair-content content)))
     (multiple-value-bind (abs rel) (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
              (nodes (parse-top-level-forms original))
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
-        (let ((updated (%apply-operation original target op-key content)))
+        (let ((updated (%apply-operation original target op-key validated-content)))
           (log-event :debug "edit-lisp-form" "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type

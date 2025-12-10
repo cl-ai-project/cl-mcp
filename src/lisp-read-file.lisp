@@ -121,7 +121,7 @@
   (if (and (> (length string) 0)
            (char= (char string (1- (length string))) #\Newline))
       string
-      (concatenate 'string string "\n")))
+      (concatenate 'string string (string #\Newline))))
 
 (defun %line-number-width (line-count)
   (max 1 (length (write-to-string line-count))))

@@ -22,6 +22,8 @@
                 #:code-find-definition
                 #:code-describe-symbol
                 #:code-find-references)
+  (:import-from #:cl-mcp/src/parinfer
+                #:apply-indent-mode)
   (:import-from #:cl-mcp/src/repl
                 #:repl-eval)
   (:import-from #:cl-mcp/src/validate
@@ -53,6 +55,8 @@
            #:code-find-definition
            #:code-describe-symbol
            #:code-find-references
+           ;; Parinfer
+           #:apply-indent-mode
            ;; Logging controls
            #:set-log-level-from-env
            ;; REPL interfaces

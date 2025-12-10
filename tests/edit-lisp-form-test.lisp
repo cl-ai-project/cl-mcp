@@ -81,6 +81,72 @@
           (ok after)
           (ok (< primary after)))))))
 
+(deftest edit-lisp-form-insert-after-preserves-newlines
+  (testing "insert_after keeps following whitespace so new form starts on its own line"
+    (with-temp-file "tests/tmp/edit-form-insert-after-newlines.lisp"
+        (format nil "(defun summarize-tasks ()~%  :ok)~%~%(defun next () :next)~%")
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "summarize-tasks"
+                        :operation "insert_after"
+                        :content "(defun open-tasks (tasks)
+  \"Return tasks whose status is :open.\"
+  (remove-if-not (lambda (task) (eql :open (task-status task))) tasks))")
+        (let* ((text (fs-read-file path))
+               (open-pos (search "defun open-tasks" text))
+               (next-pos (search "defun next" text)))
+          (ok (search (format nil ")~%~%(defun open-tasks") text))
+          (ok (null (search (format nil ")~%(defun open-tasks") text)))
+          (ok open-pos)
+          (ok next-pos)
+          (ok (< open-pos next-pos)))))))
+
+(deftest edit-lisp-form-insert-after-adds-blank-line
+  (testing "insert_after ensures a blank line when inserting after the final form"
+    (with-temp-file "tests/tmp/edit-form-insert-after-blank-line.lisp"
+        "(defun alpha () :a)\n"
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "alpha"
+                        :operation "insert_after"
+                        :content "(defun beta () :b)")
+        (let* ((text (fs-read-file path))
+               (alpha-pos (search "(defun alpha () :a)" text))
+               (beta-pos (search "(defun beta () :b)" text))
+               (after-alpha (and alpha-pos (+ alpha-pos (length "(defun alpha () :a)"))))
+               (between (and after-alpha beta-pos (subseq text after-alpha beta-pos))))
+          (ok alpha-pos)
+          (ok beta-pos)
+          (ok between)
+          (ok (search (format nil "~C~C" #\Newline #\Newline) between))
+          (ok (null (search (make-string 3 :initial-element #\Newline) between)))
+        )))))
+
+(deftest edit-lisp-form-insert-after-keeps-existing-blank-line
+  (testing "insert_after does not add extra blank lines when whitespace already exists"
+    (with-temp-file "tests/tmp/edit-form-insert-after-preserve-blank.lisp"
+        "(defun alpha () :a)\n\n(defun gamma () :g)\n"
+      (lambda (path)
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "alpha"
+                        :operation "insert_after"
+                        :content "(defun beta () :b)")
+        (let* ((text (fs-read-file path))
+               (alpha-pos (search "(defun alpha () :a)" text))
+               (beta-pos (search "(defun beta () :b)" text))
+               (after-alpha (and alpha-pos (+ alpha-pos (length "(defun alpha () :a)"))))
+               (between (and after-alpha beta-pos (subseq text after-alpha beta-pos))))
+          (ok alpha-pos)
+          (ok beta-pos)
+          (ok between)
+          (ok (search (format nil "~C~C" #\Newline #\Newline) between))
+          (ok (null (search (make-string 3 :initial-element #\Newline) between)))
+          (ok (search "(defun gamma () :g)" text)))
+      ))))
+
 (deftest edit-lisp-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"
     (with-temp-file "tests/tmp/edit-form-missing.lisp"
@@ -101,7 +167,7 @@
 (deftest edit-lisp-form-invalid-content-errors
   (testing "invalid content is rejected before touching the file"
     (with-temp-file "tests/tmp/edit-form-invalid.lisp"
-        "(defun sample () :ok)\n"
+        (format nil "(defun sample () :ok)~%")
       (lambda (path)
         (let ((before (fs-read-file path)))
           (ok (handler-case
@@ -110,7 +176,8 @@
                                     :form-type "defun"
                                     :form-name "sample"
                                     :operation "replace"
-                                    :content "(defun sample (")
+                                    ;; Multiple forms - cannot be single valid form
+                                    :content (format nil "(defun sample () 1) (defun other () 2)"))
                     nil)
                 (error () t)))
           (ok (string= before (fs-read-file path))))))))
@@ -140,3 +207,50 @@
                  (ok (string= before (fs-read-file path)))
                  (ok (not (probe-file flag-path))))))
         (ignore-errors (delete-file flag-path))))))
+
+(deftest edit-lisp-form-auto-repair-missing-parens
+  (testing "missing closing parentheses are automatically added via parinfer"
+    (with-temp-file "tests/tmp/edit-form-auto-repair.lisp"
+        (format nil "(defun original (x)~%  (+ x 1))~%")
+      (lambda (path)
+        ;; Provide content with missing closing parens
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "original"
+                        :operation "replace"
+                        :content (format nil "(defun original (x)~%  (* x 2"))
+        (let ((updated (fs-read-file path)))
+          ;; Verify the function was replaced and parens were auto-completed
+          (ok (search "(* x 2)" updated))
+          (ok (null (search "(+ x 1)" updated)))
+          ;; Verify the updated content is valid Lisp (can be read)
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+(deftest edit-lisp-form-auto-repair-nested-missing-parens
+  (testing "nested forms with missing parens are auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-nested.lisp"
+        (format nil "(defun helper () :ok)~%")
+      (lambda (path)
+        ;; Insert a function with multiple missing closing parens
+        (edit-lisp-form :file-path path
+                        :form-type "defun"
+                        :form-name "helper"
+                        :operation "insert_after"
+                        :content (format nil "(defun process (data)~%  (when data~%    (print data)~%    (+ 1 2"))
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun helper () :ok)" updated))
+          (ok (search "(defun process (data)" updated))
+          ;; Verify all forms in the file are valid
+          (ok (handler-case
+                  (let ((*read-eval* nil)
+                        (forms 0))
+                    (with-input-from-string (s updated)
+                      (loop for form = (read s nil :eof)
+                            until (eq form :eof)
+                            do (incf forms)))
+                    (= forms 2))
+                (error () nil))))))))
