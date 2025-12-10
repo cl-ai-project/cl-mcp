@@ -1,6 +1,6 @@
-;;;; src/edit-lisp-form.lisp
+;;;; src/lisp-edit-form.lisp
 
-(defpackage #:cl-mcp/src/edit-lisp-form
+(defpackage #:cl-mcp/src/lisp-edit-form
   (:use #:cl)
   (:shadowing-import-from #:cl-mcp/src/cst
                           #:cst-node
@@ -27,9 +27,9 @@
                 #:merge-pathnames*
                 #:native-namestring
                 #:subpathp)
-  (:export #:edit-lisp-form))
+  (:export #:lisp-edit-form))
 
-(in-package #:cl-mcp/src/edit-lisp-form)
+(in-package #:cl-mcp/src/lisp-edit-form)
 
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
@@ -175,7 +175,7 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
 
-(defun edit-lisp-form (&key file-path form-type form-name operation content)
+(defun lisp-edit-form (&key file-path form-type form-name operation content)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and

@@ -1,9 +1,9 @@
-;;;; tests/edit-lisp-form-test.lisp
+;;;; tests/lisp-edit-form-test.lisp
 
-(defpackage #:cl-mcp/tests/edit-lisp-form-test
+(defpackage #:cl-mcp/tests/lisp-edit-form-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/edit-lisp-form
-                #:edit-lisp-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form
+                #:lisp-edit-form)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -14,7 +14,7 @@
                 #:native-namestring
                 #:ensure-directories-exist))
 
-(in-package #:cl-mcp/tests/edit-lisp-form-test)
+(in-package #:cl-mcp/tests/lisp-edit-form-test)
 
 (setf cl-mcp/src/fs:*project-root*
       (uiop:ensure-directory-pathname (system-source-directory :cl-mcp)))
@@ -33,12 +33,12 @@
          (funcall thunk abs)
       (ignore-errors (delete-file abs)))))
 
-(deftest edit-lisp-form-replace-defun
+(deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
     (with-temp-file "tests/tmp/edit-form-replace.lisp"
         "(defun target (x)\n  (+ x 1))\n\n(defun untouched () :ok)\n"
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "target"
                         :operation "replace"
@@ -47,12 +47,12 @@
           (ok (search "(* x 2)" updated))
           (ok (null (search "(+ x 1)" updated))))))))
 
-(deftest edit-lisp-form-insert-before
+(deftest lisp-edit-form-insert-before
   (testing "insert_before inserts helper before target defun"
     (with-temp-file "tests/tmp/edit-form-insert-before.lisp"
         "(defun target (x)\n  (+ x 1))\n"
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "target"
                         :operation "insert_before"
@@ -64,12 +64,12 @@
           (ok target-pos)
           (ok (< helper-pos target-pos)))))))
 
-(deftest edit-lisp-form-insert-after-defmethod
+(deftest lisp-edit-form-insert-after-defmethod
   (testing "insert_after matches defmethod with specializers"
     (with-temp-file "tests/tmp/edit-form-insert-after.lisp"
         "(defmethod describe ((obj widget))\n  (list :widget obj))\n"
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defmethod"
                         :form-name "describe ((obj widget))"
                         :operation "insert_after"
@@ -81,12 +81,12 @@
           (ok after)
           (ok (< primary after)))))))
 
-(deftest edit-lisp-form-insert-after-preserves-newlines
+(deftest lisp-edit-form-insert-after-preserves-newlines
   (testing "insert_after keeps following whitespace so new form starts on its own line"
     (with-temp-file "tests/tmp/edit-form-insert-after-newlines.lisp"
         (format nil "(defun summarize-tasks ()~%  :ok)~%~%(defun next () :next)~%")
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "summarize-tasks"
                         :operation "insert_after"
@@ -102,12 +102,12 @@
           (ok next-pos)
           (ok (< open-pos next-pos)))))))
 
-(deftest edit-lisp-form-insert-after-adds-blank-line
+(deftest lisp-edit-form-insert-after-adds-blank-line
   (testing "insert_after ensures a blank line when inserting after the final form"
     (with-temp-file "tests/tmp/edit-form-insert-after-blank-line.lisp"
         "(defun alpha () :a)\n"
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "alpha"
                         :operation "insert_after"
@@ -124,12 +124,12 @@
           (ok (null (search (make-string 3 :initial-element #\Newline) between)))
         )))))
 
-(deftest edit-lisp-form-insert-after-keeps-existing-blank-line
+(deftest lisp-edit-form-insert-after-keeps-existing-blank-line
   (testing "insert_after does not add extra blank lines when whitespace already exists"
     (with-temp-file "tests/tmp/edit-form-insert-after-preserve-blank.lisp"
         "(defun alpha () :a)\n\n(defun gamma () :g)\n"
       (lambda (path)
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "alpha"
                         :operation "insert_after"
@@ -147,7 +147,7 @@
           (ok (search "(defun gamma () :g)" text)))
       ))))
 
-(deftest edit-lisp-form-missing-form-errors
+(deftest lisp-edit-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"
     (with-temp-file "tests/tmp/edit-form-missing.lisp"
         "(defun present () :ok)\n"
@@ -155,7 +155,7 @@
         (let ((before (fs-read-file path)))
           (ok (handler-case
                   (progn
-                    (edit-lisp-form :file-path path
+                    (lisp-edit-form :file-path path
                                     :form-type "defun"
                                     :form-name "absent"
                                     :operation "replace"
@@ -164,7 +164,7 @@
                 (error () t)))
           (ok (string= before (fs-read-file path))))))))
 
-(deftest edit-lisp-form-invalid-content-errors
+(deftest lisp-edit-form-invalid-content-errors
   (testing "invalid content is rejected before touching the file"
     (with-temp-file "tests/tmp/edit-form-invalid.lisp"
         (format nil "(defun sample () :ok)~%")
@@ -172,7 +172,7 @@
         (let ((before (fs-read-file path)))
           (ok (handler-case
                   (progn
-                    (edit-lisp-form :file-path path
+                    (lisp-edit-form :file-path path
                                     :form-type "defun"
                                     :form-name "sample"
                                     :operation "replace"
@@ -182,7 +182,7 @@
                 (error () t)))
           (ok (string= before (fs-read-file path))))))))
 
-(deftest edit-lisp-form-read-eval-disabled
+(deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
            (content (format nil
@@ -197,7 +197,7 @@
                (let ((before (fs-read-file path)))
                  (ok (handler-case
                          (progn
-                           (edit-lisp-form :file-path path
+                           (lisp-edit-form :file-path path
                                            :form-type "defun"
                                            :form-name "target"
                                            :operation "replace"
@@ -208,13 +208,13 @@
                  (ok (not (probe-file flag-path))))))
         (ignore-errors (delete-file flag-path))))))
 
-(deftest edit-lisp-form-auto-repair-missing-parens
+(deftest lisp-edit-form-auto-repair-missing-parens
   (testing "missing closing parentheses are automatically added via parinfer"
     (with-temp-file "tests/tmp/edit-form-auto-repair.lisp"
         (format nil "(defun original (x)~%  (+ x 1))~%")
       (lambda (path)
         ;; Provide content with missing closing parens
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "original"
                         :operation "replace"
@@ -230,13 +230,13 @@
                     t)
                 (error () nil))))))))
 
-(deftest edit-lisp-form-auto-repair-nested-missing-parens
+(deftest lisp-edit-form-auto-repair-nested-missing-parens
   (testing "nested forms with missing parens are auto-repaired"
     (with-temp-file "tests/tmp/edit-form-auto-repair-nested.lisp"
         (format nil "(defun helper () :ok)~%")
       (lambda (path)
         ;; Insert a function with multiple missing closing parens
-        (edit-lisp-form :file-path path
+        (lisp-edit-form :file-path path
                         :form-type "defun"
                         :form-name "helper"
                         :operation "insert_after"

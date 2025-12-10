@@ -14,8 +14,8 @@
                 #:fs-list-directory
                 #:fs-get-project-info
                 #:*project-root*)
-  (:import-from #:cl-mcp/src/edit-lisp-form
-                #:edit-lisp-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form
+                #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/code
@@ -27,7 +27,7 @@
   (:import-from #:cl-mcp/src/repl
                 #:repl-eval)
   (:import-from #:cl-mcp/src/validate
-                #:check-parens)
+                #:lisp-check-parens)
   (:import-from #:cl-mcp/src/protocol
                 #:process-json-line)
   (:import-from #:cl-mcp/src/tcp
@@ -49,8 +49,8 @@
            #:fs-get-project-info
            #:lisp-read-file
            #:*project-root*
-           #:edit-lisp-form
-           #:check-parens
+           #:lisp-edit-form
+           #:lisp-check-parens
            ;; Code intelligence
            #:code-find-definition
            #:code-describe-symbol

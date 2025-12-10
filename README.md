@@ -18,8 +18,8 @@ clients to drive Common Lisp development via MCP.
   - `fs-get-project-info` — report project root and cwd info for path normalization
   - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
   - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
-  - `edit-lisp-form` — structure-aware edits to top-level forms using Eclector CST
-  - `check-parens` — detect mismatched delimiters in code slices
+  - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
+  - `lisp-check-parens` — detect mismatched delimiters in code slices
 - Transports: `:stdio` and `:tcp`
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -162,7 +162,7 @@ Output fields:
 - `meta`: includes `total_forms`/`expanded_forms` for collapsed Lisp, or
   `total_lines` plus `truncated` flag for slices/filters.
 
-### `check-parens`
+### `lisp-check-parens`
 Check balanced parentheses/brackets in a file slice or provided code; returns the first mismatch position.
 
 Input:
@@ -178,7 +178,7 @@ Notes:
 - Uses the same read allow-list and 2 MB cap as `fs-read-file`.
 - Ignores delimiters inside strings, `;` line comments, and `#| ... |#` block comments.
 
-### `edit-lisp-form`
+### `lisp-edit-form`
 Perform structure-aware edits to a top-level form using Eclector CST parsing while
 preserving surrounding formatting and comments.
 

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "type": "stdio",
+      "command": "/usr/bin/python3",
+      "args": [
+        "/home/wiz/.roswell/local-projects/cl-ai-project/cl-mcp/scripts/stdio_tcp_bridge.py",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "12346"
+      ],
+      "env": {}
+    }
+  }
+}

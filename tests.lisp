@@ -10,7 +10,7 @@
   (:import-from #:cl-mcp/tests/repl-test)
   (:import-from #:cl-mcp/tests/cst-test)
   (:import-from #:cl-mcp/tests/lisp-read-file-test)
-  (:import-from #:cl-mcp/tests/edit-lisp-form-test)
+  (:import-from #:cl-mcp/tests/lisp-edit-form-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)

@@ -7,8 +7,8 @@
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file #:fs-write-file #:fs-list-directory #:fs-get-project-info)
-  (:import-from #:cl-mcp/src/edit-lisp-form
-                #:edit-lisp-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form
+                #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:shadowing-import-from #:cl-mcp/src/code
@@ -16,7 +16,7 @@
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition #:code-describe-symbol)
   (:import-from #:cl-mcp/src/validate
-                #:check-parens)
+                #:lisp-check-parens)
   (:import-from #:yason #:encode #:parse)
   (:export
    #:+protocol-version+
@@ -101,7 +101,7 @@
 Use this for testing, inspection, debugging, or loading systems (ql:quickload).
 Provide an existing package (e.g., CL-USER) and set printLevel/printLength when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
-To modify code permanently, you MUST use 'edit-lisp-form' or 'fs-write-file' to save changes to files."
+To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file' to save changes to files."
    "inputSchema"
    (%make-ht
     "type" "object"
@@ -167,7 +167,7 @@ ASDF system"))
    "name" "fs-write-file"
    "description" "Write text content to a file relative to project root.
 Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
-For editing EXISTING Lisp source code, you MUST use 'edit-lisp-form' instead to preserve structure and comments."
+For editing EXISTING Lisp source code, you MUST use 'lisp-edit-form' instead to preserve structure and comments."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "path" p)
                          (%make-ht "type" "string"
@@ -304,9 +304,9 @@ Use package-qualified symbols when possible; set projectOnly=false to include ex
                              "properties" p
                              "required" (vector "symbol")))))
 
-(defun tools-descriptor-check-parens ()
+(defun tools-descriptor-lisp-check-parens ()
   (%make-ht
-   "name" "check-parens"
+   "name" "lisp-check-parens"
    "description"
    "Check balanced parentheses/brackets in a file slice or provided code.
 Use this to DIAGNOSE syntax errors in existing files or validate code snippets before/after editing.
@@ -330,9 +330,9 @@ Returns the first mismatch position if unbalanced, or success if balanced."
                                    "Maximum characters to read from path"))
                    (%make-ht "type" "object" "properties" p))))
 
-(defun tools-descriptor-edit-lisp-form ()
+(defun tools-descriptor-lisp-edit-form ()
   (%make-ht
-   "name" "edit-lisp-form"
+   "name" "lisp-edit-form"
    "description"
    "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
 Supports replace, insert_before, and insert_after while preserving formatting and comments.
@@ -375,8 +375,8 @@ ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ens
                         (tools-descriptor-code-find)
                         (tools-descriptor-code-describe)
                         (tools-descriptor-code-references)
-                        (tools-descriptor-check-parens)
-                        (tools-descriptor-edit-lisp-form))))
+                        (tools-descriptor-lisp-check-parens)
+                        (tools-descriptor-lisp-edit-form))))
     (%result id (%make-ht "tools" tools))))
 
 (defun %normalize-tool-name (name)
@@ -613,7 +613,7 @@ Returns a downcased local tool name (string)."
            (%error id -32603
                    (format nil "Internal error during code-find-references: ~A" e)))))
 
-      ((member local '("check-parens" "check_parens" "parens") :test #'string=)
+      ((member local '("lisp-check-parens" "lisp_check_parens" "check-parens" "check_parens" "parens") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args)))
                   (code (and args (gethash "code" args)))
@@ -625,13 +625,13 @@ Returns a downcased local tool name (string)."
              (when (and (null path) (null code))
                (return-from handle-tools-call
                  (%error id -32602 "Either path or code is required")))
-             (let ((result (check-parens :path path :code code :offset offset :limit limit)))
+             (let ((result (lisp-check-parens :path path :code code :offset offset :limit limit)))
                (%result id result)))
          (error (e)
            (%error id -32603
                    (format nil "Internal error during check-parens: ~A" e)))))
  
-      ((member local '("edit-lisp-form" "edit_lisp_form" "edit.lisp-form" "edit.lisp_form")
+      ((member local '("lisp-edit-form" "lisp_edit_form" "edit-lisp-form" "edit_lisp_form" "edit.lisp-form" "edit.lisp_form")
                :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "file_path" args)))
@@ -643,7 +643,7 @@ Returns a downcased local tool name (string)."
                           (stringp operation) (stringp content))
                (return-from handle-tools-call
                  (%error id -32602 "file_path, form_type, form_name, operation, and content must be strings")))
-             (let ((updated (edit-lisp-form :file-path path
+             (let ((updated (lisp-edit-form :file-path path
                                             :form-type form-type
                                             :form-name form-name
                                             :operation operation
@@ -659,7 +659,7 @@ Returns a downcased local tool name (string)."
                                                operation form-type path (length updated)))))))
          (error (e)
            (%error id -32603
-                   (format nil "Internal error during edit-lisp-form: ~A" e)))))
+                   (format nil "Internal error during lisp-edit-form: ~A" e)))))
 
       (t
        (%error id -32601 (format nil "Tool ~A not found" name))))))
