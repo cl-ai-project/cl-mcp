@@ -394,7 +394,7 @@ Returns a downcased local tool name (string)."
          (local (and name (%normalize-tool-name name))))
     (when name (log-event :debug "tools.call" "name" name "local" local))
     (cond
-      ((member local '("repl-eval" "repl.eval" "repl_eval") :test #'string=)
+      ((member local '("repl-eval" "repl_eval") :test #'string=)
        (let* ((code (and args (gethash "code" args)))
               (pkg  (and args (gethash "package" args)))
               (pl   (and args (gethash "printLevel" args)))
@@ -421,8 +421,7 @@ Returns a downcased local tool name (string)."
              (%error id -32603
                      (format nil "Internal error during REPL evaluation: ~A" e))))))
 
-      ((member local '("lisp-read-file" "lisp_read_file" "lisp.read_file" "lisp-read")
-               :test #'string=)
+      ((member local '("lisp-read-file" "lisp_read_file") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args)))
                   (collapsed-present nil)
@@ -457,8 +456,7 @@ Returns a downcased local tool name (string)."
           (%error id -32603
                   (format nil "Internal error during lisp-read-file: ~A" e)))))
 
-      ((member local '("fs-get-project-info" "fs_get_project_info" "fs.project-info" "project-info")
-               :test #'string=)
+      ((member local '("fs-get-project-info" "fs_get_project_info") :test #'string=)
        (handler-case
            (let ((result (fs-get-project-info)))
              (%result id result))
@@ -466,7 +464,7 @@ Returns a downcased local tool name (string)."
            (%error id -32603
                    (format nil "Internal error during fs-get-project-info: ~A" e)))))
 
-      ((member local '("fs-read-file" "fs_read_file" "read_file" "read") :test #'string=)
+      ((member local '("fs-read-file" "fs_read_file") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args)))
                   (offset (and args (gethash "offset" args)))
@@ -484,7 +482,7 @@ Returns a downcased local tool name (string)."
          (error (e)
            (%error id -32603 (format nil "Internal error during fs-read-file: ~A" e)))))
 
-      ((member local '("fs-write-file" "fs_write_file" "write_file" "write") :test #'string=)
+      ((member local '("fs-write-file" "fs_write_file") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args)))
                   (content (and args (gethash "content" args))))
@@ -501,8 +499,7 @@ Returns a downcased local tool name (string)."
          (error (e)
            (%error id -32603 (format nil "Internal error during fs_write_file: ~A" e)))))
 
-      ((member local '("fs-list-directory" "fs_list_directory" "list_directory" "list" "ls")
-               :test #'string=)
+      ((member local '("fs-list-directory" "fs_list_directory") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "path" args))))
              (unless (stringp path)
@@ -527,7 +524,7 @@ Returns a downcased local tool name (string)."
          (error (e)
            (%error id -32603 (format nil "Internal error during fs-list-directory: ~A" e)))))
 
-      ((member local '("code-find" "code_find" "find" "find_definition") :test #'string=)
+      ((member local '("code-find" "code_find") :test #'string=)
        (handler-case
            (let* ((symbol (and args (gethash "symbol" args)))
                   (pkg (and args (gethash "package" args))))
@@ -548,8 +545,7 @@ Returns a downcased local tool name (string)."
            (%error id -32603
                    (format nil "Internal error during code-find: ~A" e)))))
 
-      ((member local '("code-describe" "code_describe" "describe" "describe_symbol")
-               :test #'string=)
+      ((member local '("code-describe" "code_describe") :test #'string=)
        (handler-case
            (let* ((symbol (and args (gethash "symbol" args)))
                   (pkg (and args (gethash "package" args))))
@@ -572,9 +568,7 @@ Returns a downcased local tool name (string)."
           (%error id -32603
                   (format nil "Internal error during code-describe: ~A" e)))))
 
-      ((member local '("code-find-references" "code_find_references" "code-references"
-                       "code_references" "references")
-               :test #'string=)
+      ((member local '("code-find-references" "code_find_references") :test #'string=)
        (handler-case
            (let* ((symbol (and args (gethash "symbol" args)))
                   (pkg (and args (gethash "package" args)))
@@ -631,8 +625,7 @@ Returns a downcased local tool name (string)."
            (%error id -32603
                    (format nil "Internal error during lisp-check-parens: ~A" e)))))
  
-      ((member local '("lisp-edit-form" "lisp_edit_form")
-               :test #'string=)
+      ((member local '("lisp-edit-form" "lisp_edit_form") :test #'string=)
        (handler-case
            (let* ((path (and args (gethash "file_path" args)))
                   (form-type (and args (gethash "form_type" args)))
