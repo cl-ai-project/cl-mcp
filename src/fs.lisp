@@ -235,20 +235,22 @@ Returns a hash-table with updated path information:
   (unless (stringp path)
     (error "path must be a string"))
   (let* ((prev-root *project-root*)
-         (new-root (uiop:ensure-directory-pathname path)))
-    (unless (uiop:directory-exists-p new-root)
+         (temp-root (uiop:ensure-directory-pathname path)))
+    (unless (uiop:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
-    ;; Update the project root parameter
-    (setf *project-root* new-root)
-    ;; Change the current working directory
-    (uiop:chdir new-root)
-    (log-event :info "fs.set-project-root"
-               "previous" (if prev-root (namestring prev-root) "(not set)")
-               "new" (namestring new-root))
-    ;; Return updated path information
-    (let ((h (make-hash-table :test #'equal)))
-      (setf (gethash "project_root" h) (namestring new-root)
-            (gethash "cwd" h) (namestring (uiop:getcwd))
-            (gethash "previous_root" h) (if prev-root (namestring prev-root) "(not set)")
-            (gethash "status" h) (format nil "Project root set to ~A" (namestring new-root)))
-      h)))
+    ;; Convert to absolute path using truename
+    (let ((new-root (truename temp-root)))
+      ;; Update the project root parameter
+      (setf *project-root* new-root)
+      ;; Change the current working directory
+      (uiop:chdir new-root)
+      (log-event :info "fs.set-project-root"
+                 "previous" (if prev-root (namestring prev-root) "(not set)")
+                 "new" (namestring new-root))
+      ;; Return updated path information
+      (let ((h (make-hash-table :test #'equal)))
+        (setf (gethash "project_root" h) (namestring new-root)
+              (gethash "cwd" h) (namestring (uiop:getcwd))
+              (gethash "previous_root" h) (if prev-root (namestring prev-root) "(not set)")
+              (gethash "status" h) (format nil "Project root set to ~A" (namestring new-root)))
+        h))))

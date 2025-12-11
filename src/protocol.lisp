@@ -231,7 +231,8 @@ ASDF system"))
    "description"
    "Set the server's project root directory to the specified path.
 Use this to synchronize the server's working directory with the client's project location.
-The server will change its current working directory to the specified path."
+The server will change its current working directory to the specified path.
+RESTRICTION: You MUST only provide your current working directory (e.g. obtained via pwd). Do not use arbitrary paths."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
                    (setf (gethash "path" p)
                          (%make-ht "type" "string"

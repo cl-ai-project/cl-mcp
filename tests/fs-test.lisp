@@ -190,3 +190,67 @@
                (let ((msg (princ-to-string e)))
                  (and (search "Project root is not set" msg)
                       (search "fs-set-project-root" msg)))))))))
+
+(deftest fs-set-project-root-converts-relative-to-absolute
+  (testing "fs-set-project-root converts relative paths to absolute paths"
+    (let* ((original-root cl-mcp/src/fs:*project-root*)
+           (original-cwd (getcwd))
+           (expected-absolute (truename (ensure-directory-pathname "."))))
+      (unwind-protect
+           (progn
+             ;; Set project root using relative path "."
+             (let ((result (fs-set-project-root ".")))
+               ;; Verify the result contains an absolute path
+               (ok (hash-table-p result))
+               (ok (stringp (gethash "project_root" result)))
+
+               ;; The returned path should be absolute (starts with /)
+               (ok (uiop:absolute-pathname-p
+                    (uiop:ensure-pathname (gethash "project_root" result))))
+
+               ;; The returned path should match the expected absolute path
+               (ok (string= (gethash "project_root" result)
+                           (namestring expected-absolute)))
+
+               ;; Verify *project-root* is also absolute
+               (ok (uiop:absolute-pathname-p cl-mcp/src/fs:*project-root*))
+
+               ;; Verify file operations work with the absolute path
+               (let ((info (fs-get-project-info)))
+                 (ok (stringp (gethash "project_root" info)))
+                 (ok (uiop:absolute-pathname-p
+                      (uiop:ensure-pathname (gethash "project_root" info)))))))
+        ;; Restore original state
+        (setf cl-mcp/src/fs:*project-root* original-root)
+        (when original-cwd
+          (ignore-errors (uiop:chdir original-cwd)))))))
+
+(deftest fs-set-project-root-relative-path-subdirectory
+  (testing "fs-set-project-root handles relative subdirectory paths"
+    (with-test-project-root
+      (let* ((original-root cl-mcp/src/fs:*project-root*)
+             (original-cwd (getcwd))
+             ;; Assume "src" directory exists in the project
+             (relative-path "src")
+             (expected-absolute (truename (ensure-directory-pathname relative-path))))
+        (unwind-protect
+             (progn
+               (let ((result (fs-set-project-root relative-path)))
+                 ;; Verify the result contains an absolute path
+                 (ok (hash-table-p result))
+                 (ok (stringp (gethash "project_root" result)))
+
+                 ;; The returned path should be absolute
+                 (ok (uiop:absolute-pathname-p
+                      (uiop:ensure-pathname (gethash "project_root" result))))
+
+                 ;; The returned path should match the expected absolute path
+                 (ok (string= (gethash "project_root" result)
+                             (namestring expected-absolute)))
+
+                 ;; Verify *project-root* is also absolute
+                 (ok (uiop:absolute-pathname-p cl-mcp/src/fs:*project-root*))))
+          ;; Restore original state
+          (setf cl-mcp/src/fs:*project-root* original-root)
+          (when original-cwd
+            (ignore-errors (uiop:chdir original-cwd))))))))
