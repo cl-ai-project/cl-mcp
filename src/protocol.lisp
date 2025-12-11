@@ -189,6 +189,7 @@ ASDF system"))
   (%make-ht
    "name" "fs-write-file"
    "description" "Write text content to a file relative to project root.
+Parent directories are automatically created if they do not exist.
 Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
 For editing EXISTING Lisp source code, you MUST use 'lisp-edit-form' instead to preserve structure and comments."
    "inputSchema" (let ((p (make-hash-table :test #'equal)))
