@@ -7,6 +7,7 @@
                 #:ensure-directory-pathname
                 #:getenv
                 #:getcwd
+                #:chdir
                 #:subpathp
                 #:ensure-pathname
                 #:merge-pathnames*
@@ -22,23 +23,18 @@
            #:fs-read-file
            #:fs-write-file
            #:fs-list-directory
-           #:fs-get-project-info))
+           #:fs-get-project-info
+           #:fs-set-project-root))
 
 (in-package #:cl-mcp/src/fs)
 
 (defparameter *project-root*
-  (let* ((env-root (uiop:getenv "MCP_PROJECT_ROOT"))
-         (cwd (ignore-errors (uiop:getcwd)))
-         (asdf-root (ignore-errors (asdf:system-source-directory "cl-mcp"))))
-    (or (and env-root (uiop:ensure-directory-pathname env-root))
-        (and cwd (uiop:ensure-directory-pathname cwd))
-        (and asdf-root (uiop:ensure-directory-pathname asdf-root))
-        (error "Unable to determine project root")))
+  (let ((env-root (uiop:getenv "MCP_PROJECT_ROOT")))
+    (when env-root
+      (uiop:ensure-directory-pathname env-root)))
   "Absolute pathname of the project root.
-Resolution order:
-1) MCP_PROJECT_ROOT env var (when set)
-2) Current working directory at load time
-3) ASDF system source directory for cl-mcp")
+Must be set via MCP_PROJECT_ROOT environment variable or by calling fs-set-project-root.
+If NIL, all file operations will fail with an error instructing to set the project root.")
 
 (defparameter *hidden-prefixes* '("." ".git" ".hg" ".svn" ".cache" ".fasl"))
 (defparameter *skip-extensions* '("fasl" "ufasl" "x86f" "cfasl"))
@@ -48,6 +44,26 @@ Resolution order:
 (defun %fd-count ()
   (ignore-errors (length (directory #P"/proc/self/fd/*"))))
 
+(defun %ensure-project-root ()
+  "Ensure *project-root* is set. Signal an error with instructions if not.
+This guard function should be called at the beginning of all file operations."
+  (unless *project-root*
+    (error "Project root is not set.
+
+SOLUTION:
+call fs-set-project-root tool with your current working directory:
+   Method: tools/call
+   Tool: fs-set-project-root
+   Arguments: {\"path\": \"/absolute/path/to/your/project\"}
+
+CURRENT SERVER STATE:
+- Current working directory: ~A
+- Registered ASDF systems: ~D
+
+For AI agents: Call fs-set-project-root at the start of your session with your
+current working directory to synchronize the server's project root."
+           (or (ignore-errors (namestring (uiop:getcwd))) "(unknown)")
+           (length (asdf:registered-systems)))))
 (defun %path-inside-p (child parent)
   "Return T when CHILD pathname is a subpath of directory PARENT."
   (uiop:subpathp child parent))
@@ -55,6 +71,7 @@ Resolution order:
 (defun %canonical-path (path &key relative-to)
   "Turn PATH designator into a physical absolute pathname.
 If RELATIVE-TO is provided and PATH is relative, merge it with RELATIVE-TO."
+  (%ensure-project-root)
   (let* ((pn (uiop:ensure-pathname path :want-relative nil
                                    :ensure-directory nil :ensure-absolute nil))
          (abs (if (uiop:absolute-pathname-p pn)
@@ -65,6 +82,7 @@ If RELATIVE-TO is provided and PATH is relative, merge it with RELATIVE-TO."
 (defun %allowed-read-path-p (pn)
   "Return PN if readable per policy, else NIL.
 Allows project-root subpaths and source dirs of registered ASDF systems."
+  (%ensure-project-root)
   (let* ((abs (%canonical-path pn))
          (project-ok (%path-inside-p abs (uiop:ensure-directory-pathname *project-root*))))
     (when project-ok (return-from %allowed-read-path-p abs))
@@ -79,6 +97,7 @@ Allows project-root subpaths and source dirs of registered ASDF systems."
 (defun %ensure-write-path (path)
   "Ensure PATH is relative to project root and return absolute pathname.
 Signals an error if outside project root or absolute."
+  (%ensure-project-root)
   (let* ((pn (uiop:ensure-pathname path :want-relative t))
          (abs (%canonical-path pn :relative-to *project-root*))
          (real (or (ignore-errors (truename abs)) abs)))
@@ -192,12 +211,10 @@ Returns a hash-table with keys:
   - cwd: current working directory
   - project_root_source: how project root was determined (env|cwd|asdf)
   - relative_cwd: cwd relative to project_root (when inside project)"
+  (%ensure-project-root)
   (let* ((cwd (ignore-errors (uiop:getcwd)))
          (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
-         (root-source (cond
-                        (env-root "env")
-                        (cwd "cwd")
-                        (t "asdf")))
+         (root-source (if env-root "env" "explicit"))
          (h (make-hash-table :test #'equal)))
     (setf (gethash "project_root" h) (namestring *project-root*)
           (gethash "cwd" h) (and cwd (namestring cwd))
@@ -207,3 +224,31 @@ Returns a hash-table with keys:
         (setf (gethash "relative_cwd" h)
               (uiop:native-namestring (uiop:enough-pathname cwd root)))))
     h))
+
+(defun fs-set-project-root (path)
+  "Set the project root to PATH and change the current working directory.
+Returns a hash-table with updated path information:
+  - project_root: the new absolute project root path
+  - cwd: the new current working directory
+  - previous_root: the previous project root path (or \"(not set)\" if was nil)
+  - status: confirmation message"
+  (unless (stringp path)
+    (error "path must be a string"))
+  (let* ((prev-root *project-root*)
+         (new-root (uiop:ensure-directory-pathname path)))
+    (unless (uiop:directory-exists-p new-root)
+      (error "Directory ~A does not exist" path))
+    ;; Update the project root parameter
+    (setf *project-root* new-root)
+    ;; Change the current working directory
+    (uiop:chdir new-root)
+    (log-event :info "fs.set-project-root"
+               "previous" (if prev-root (namestring prev-root) "(not set)")
+               "new" (namestring new-root))
+    ;; Return updated path information
+    (let ((h (make-hash-table :test #'equal)))
+      (setf (gethash "project_root" h) (namestring new-root)
+            (gethash "cwd" h) (namestring (uiop:getcwd))
+            (gethash "previous_root" h) (if prev-root (namestring prev-root) "(not set)")
+            (gethash "status" h) (format nil "Project root set to ~A" (namestring new-root)))
+      h)))

@@ -9,15 +9,25 @@
                 #:fs-write-file
                 #:fs-list-directory
                 #:fs-resolve-read-path
-                #:fs-get-project-info))
+                #:fs-get-project-info
+                #:fs-set-project-root))
 
 (in-package #:cl-mcp/tests/fs-test)
 
 (defmacro with-test-project-root (&body body)
-  `(let ((cl-mcp/src/fs:*project-root*
-          (or (ignore-errors (ensure-directory-pathname (system-source-directory "cl-mcp")))
-              (ensure-directory-pathname (getcwd)))))
-     ,@body))
+  `(let* ((original-root cl-mcp/src/fs:*project-root*)
+          (original-cwd (ignore-errors (getcwd)))
+          (test-root (or (ignore-errors (ensure-directory-pathname (system-source-directory "cl-mcp")))
+                         (ensure-directory-pathname (getcwd)))))
+     (unwind-protect
+          (progn
+            ;; Set project root explicitly for the test
+            (setf cl-mcp/src/fs:*project-root* test-root)
+            ,@body)
+       ;; Restore original state
+       (setf cl-mcp/src/fs:*project-root* original-root)
+       (when original-cwd
+         (ignore-errors (uiop:chdir original-cwd))))))
 
 (deftest fs-read-file-project
   (testing "fs-read-file reads project file with content"
@@ -92,10 +102,91 @@
         (ok (stringp (gethash "project_root" info)))
         (ok (stringp (gethash "cwd" info)))
         (ok (member (gethash "project_root_source" info)
-                    '("env" "cwd" "asdf") :test #'string=))))))
+                    '("env" "explicit") :test #'string=))))))
 
 (deftest fs-write-file-prevents-traversal
   (testing "writing outside project root is rejected"
     (with-test-project-root
       (ok (handler-case (progn (fs-write-file "../outside.txt" "nope") nil)
             (error () t))))))
+
+(deftest fs-set-project-root-changes-root
+  (testing "fs-set-project-root updates project root and cwd"
+    (with-test-project-root
+      (let* ((original-root cl-mcp/src/fs:*project-root*)
+             (original-cwd (getcwd))
+             (test-dir (namestring original-root)))
+        (unwind-protect
+             (let ((result (fs-set-project-root test-dir)))
+               (ok (hash-table-p result))
+               (ok (stringp (gethash "project_root" result)))
+               (ok (stringp (gethash "cwd" result)))
+               (ok (stringp (gethash "previous_root" result)))
+               (ok (stringp (gethash "status" result)))
+               (ok (string= (gethash "project_root" result) test-dir))
+               (ok (string= (gethash "cwd" result) test-dir)))
+          ;; Restore original state
+          (setf cl-mcp/src/fs:*project-root* original-root)
+          (ignore-errors (uiop:chdir original-cwd)))))))
+
+(deftest fs-set-project-root-validates-directory
+  (testing "fs-set-project-root rejects non-existent directory"
+    (with-test-project-root
+      (ok (handler-case
+               (progn (fs-set-project-root "/nonexistent/directory/path") nil)
+             (error () t))))))
+
+(deftest fs-set-project-root-validates-string
+  (testing "fs-set-project-root rejects non-string argument"
+    (with-test-project-root
+      (ok (handler-case
+               (progn (fs-set-project-root 123) nil)
+             (error () t))))))
+
+(deftest fs-set-project-root-syncs-with-get-info
+  (testing "fs-set-project-root result matches fs-get-project-info"
+    (with-test-project-root
+      (let* ((original-root cl-mcp/src/fs:*project-root*)
+             (original-cwd (getcwd))
+             (test-dir (namestring original-root)))
+        (unwind-protect
+             (progn
+               (fs-set-project-root test-dir)
+               (let ((info (fs-get-project-info)))
+                 (ok (string= (gethash "project_root" info) test-dir))
+                 (ok (string= (gethash "cwd" info) test-dir))))
+          ;; Restore original state
+          (setf cl-mcp/src/fs:*project-root* original-root)
+          (ignore-errors (uiop:chdir original-cwd)))))))
+
+(deftest fs-operations-require-project-root
+  (testing "file operations fail with helpful error when project root is not set"
+    (let ((cl-mcp/src/fs:*project-root* nil))
+      ;; Test that fs-read-file fails
+      (ok (handler-case
+               (progn (fs-read-file "src/core.lisp") nil)
+             (error (e)
+               (let ((msg (princ-to-string e)))
+                 (and (search "Project root is not set" msg)
+                      (search "fs-set-project-root" msg))))))
+      ;; Test that fs-write-file fails
+      (ok (handler-case
+               (progn (fs-write-file "test.txt" "content") nil)
+             (error (e)
+               (let ((msg (princ-to-string e)))
+                 (and (search "Project root is not set" msg)
+                      (search "fs-set-project-root" msg))))))
+      ;; Test that fs-list-directory fails
+      (ok (handler-case
+               (progn (fs-list-directory ".") nil)
+             (error (e)
+               (let ((msg (princ-to-string e)))
+                 (and (search "Project root is not set" msg)
+                      (search "fs-set-project-root" msg))))))
+      ;; Test that fs-get-project-info fails
+      (ok (handler-case
+               (progn (fs-get-project-info) nil)
+             (error (e)
+               (let ((msg (princ-to-string e)))
+                 (and (search "Project root is not set" msg)
+                      (search "fs-set-project-root" msg)))))))))
