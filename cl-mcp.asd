@@ -3,9 +3,9 @@
 (asdf:defsystem "cl-mcp"
   :class :package-inferred-system
   :description "Model Context Protocol server for Common Lisp"
-  :author ""
+  :author "cxxxr, Satoshi Imai"
   :license "MIT"
-  :version "0.2.0"
+  :version "1.0.0"
   :depends-on (:alexandria
                :cl-ppcre
                :yason
