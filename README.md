@@ -328,6 +328,46 @@ allows writing there or configure SBCL’s cache directory accordingly.
   Each request must end with a newline and the server will answer with exactly
   one line (or nothing for notifications).
 
+## Recommended System Prompts
+
+The `prompts/` directory contains recommended system prompts for AI agents working with cl-mcp.
+
+### REPL-Driven Development Prompt
+
+**File**: [`prompts/repl-driven-development.md`](prompts/repl-driven-development.md)
+
+This comprehensive guide teaches AI agents how to effectively use cl-mcp's tools for interactive Common Lisp development. It covers:
+
+- **Initial setup**: Project root configuration and session initialization
+- **Core philosophy**: The "Tiny Steps with Rich Feedback" approach (EXPLORE → DEVELOP → EDIT → VERIFY)
+- **Tool usage guidelines**: When to use `lisp-edit-form` vs `fs-write-file`, `lisp-read-file` vs `fs-read-file`, and `repl-eval` best practices
+- **Common Lisp specifics**: Package handling, dependency loading, pathname resolution
+- **Recommended workflows**: Step-by-step guides for common tasks (modifying functions, debugging, running tests, adding features)
+- **Troubleshooting**: Diagnosis and solutions for common errors
+- **Performance considerations**: Token-efficient strategies for large codebases
+
+**Usage**:
+
+1. **For Claude Code users**: Reference this prompt in your `CLAUDE.md` or `AGENTS.md`:
+   ```markdown
+   @/path/to/cl-mcp/prompts/repl-driven-development.md
+   ```
+
+2. **For other AI agents**: Include the prompt content in your agent's system instructions or configuration file.
+
+3. **For MCP client configuration**: Add instructions field to your `mcp.json`:
+   ```json
+   {
+     "mcpServers": {
+       "cl-mcp": {
+         "instructions": "Follow the guidelines in prompts/repl-driven-development.md for Common Lisp development with this server."
+       }
+     }
+   }
+   ```
+
+The prompt is designed to help AI agents make optimal use of cl-mcp's structural editing and introspection capabilities, avoiding common pitfalls like overwriting files or working in the wrong package context.
+
 ## AI Agent Configuration
 
 When using cl-mcp with AI agents like Claude Code, you should configure the agent to
