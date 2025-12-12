@@ -14,6 +14,7 @@ clients to drive Common Lisp development via MCP.
 - MCP initialize handshake with capability discovery
 - Tools API
   - `repl-eval` — evaluate forms
+  - `asdf-system-info` / `asdf-list-systems` — inspect registered ASDF systems and dependencies
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
   - `fs-get-project-info` — report project root and cwd info for path normalization
   - `fs-set-project-root` — set the server's project root and working directory
@@ -34,9 +35,7 @@ clients to drive Common Lisp development via MCP.
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (for dependencies)
-- Dependencies (via ASDF/Quicklisp): `alexandria`, `yason`, `usocket`, `bordeaux-threads`, `rove` (tests)
-
-Note: The repository currently uses `yason` for JSON.
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`; tests — `rove`.
 
 ## Quick Start
 
@@ -51,7 +50,7 @@ Load and run from an existing REPL:
 ```lisp
 (ql:quickload :cl-mcp)
 
-;; Start TCP transport on an ephemeral port, print chosen port. This make a new thread.
+;; Start TCP transport on port 12345 in a new thread.
 (cl-mcp:start-tcp-server-thread :port 12345)
 ```
 
@@ -113,6 +112,33 @@ Response (excerpt):
 {"result":{"content":[{"type":"text","text":"3"}]}}
 ```
 
+### `asdf-system-info`
+Return detailed information about an ASDF system, including dependencies and source locations.
+
+Input:
+- `system_name` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"alexandria"`)
+
+Output fields:
+- `name` (string)
+- `version` / `description` / `author` / `license` (string|null)
+- `depends_on` (array): direct dependencies
+- `defsystem_depends_on` (array): defsystem dependencies
+- `source_file` / `source_directory` (string|null)
+- `loaded` (boolean)
+
+Example JSON‑RPC request:
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call",
+ "params":{"name":"asdf-system-info","arguments":{"system_name":"cl-mcp"}}}
+```
+
+### `asdf-list-systems`
+List all registered ASDF systems (may be large).
+
+Input: none
+
+Output: array of lower-case system names.
+
 ### `fs-read-file`
 Read text from an allow‑listed path.
 
@@ -147,14 +173,14 @@ to normalize relative paths.
 Output:
 - `project_root` (string): resolved project root
 - `cwd` (string|null): current working directory
-- `project_root_source` (string): one of `env`, `cwd`, or `asdf`
+- `project_root_source` (string): one of `env` or `explicit`
 - `relative_cwd` (string|null): cwd relative to project root when inside it
 
 ### `fs-set-project-root`
 Synchronize the server's project root and working directory with the client's location.
 
 Input:
-- `path` (string, required): absolute path to the project root directory
+- `path` (string, required): path to the project root directory (absolute preferred; relative is resolved to an absolute directory)
 
 This tool allows AI agents to explicitly set the server's working directory, ensuring
 path resolution works correctly. The server updates both `*project-root*` and the
