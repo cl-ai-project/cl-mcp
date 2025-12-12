@@ -175,15 +175,18 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
 
-(defun lisp-edit-form (&key file-path form-type form-name operation content)
+(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
 CONTENT are required. If CONTENT has missing closing parentheses, they will
-be automatically added using parinfer."
+be automatically added using parinfer. When DRY-RUN is true, no changes are
+written; instead, a preview hash-table is returned."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name)
                (stringp operation) (stringp content))
     (error "All parameters (file_path, form_type, form_name, operation, content) must be strings"))
+  (unless (member dry-run '(t nil))
+    (error "dry-run must be boolean"))
   (let* ((op-normalized (string-downcase operation))
          (op-key (cond
                    ((string= op-normalized "replace") :replace)
@@ -198,11 +201,26 @@ be automatically added using parinfer."
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
-        (let ((updated (%apply-operation original target op-key validated-content)))
+        (let* ((start (cst-node-start target))
+               (end (cst-node-end target))
+               (target-snippet (subseq original start end))
+               (updated (%apply-operation original target op-key validated-content))
+               (would-change (not (string= original updated))))
           (log-event :debug "lisp-edit-form" "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
                      "form_name" form-name
-                     "bytes" (length updated))
-          (fs-write-file rel updated)
-          updated)))))
+                     "bytes" (length updated)
+                     "dry_run" dry-run
+                     "would_change" would-change)
+          (if dry-run
+              (let ((result (make-hash-table :test #'equal)))
+                (setf (gethash "would_change" result) would-change
+                      (gethash "original" result) target-snippet
+                      (gethash "preview" result) updated
+                      (gethash "file_path" result) (namestring abs)
+                      (gethash "operation" result) op-normalized)
+                result)
+              (progn
+                (fs-write-file rel updated)
+                updated)))))))
