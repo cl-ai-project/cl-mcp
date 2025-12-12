@@ -1,7 +1,7 @@
 # Repository Guidelines
 
+@prompts/repl-driven-development.md
 @agents/common-lisp-expert.md
-@prompts//repl-driven-development.md
 
 ## Project Structure & Module Organization
 The core system lives under `src/`, grouped by responsibility (`log`, `repl`, `protocol`, `tcp`, `core`, `run`). Each file is serially loaded via `cl-mcp.asd`; add new packages here and export symbols explicitly. Tests reside in `tests/` with mirrored filenames (`*-test.lisp`) for Rove. Helper clients and bridges are in `scripts/`. Keep assets such as sample transcripts or captures under `tests/fixtures/` if introduced.
