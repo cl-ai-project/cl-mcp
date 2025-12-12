@@ -12,6 +12,9 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
+  (:import-from #:cl-mcp/src/asdf-tools
+                #:asdf-system-info
+                #:asdf-list-systems)
   (:shadowing-import-from #:cl-mcp/src/code
                           #:code-find-references)
   (:import-from #:cl-mcp/src/code
@@ -161,6 +164,37 @@ there"))
                       "When true, disables #. reader evaluation for safety"))
       p))))
 
+
+
+(defun tools-descriptor-asdf-system-info ()
+  (%make-ht
+   "name" "asdf-system-info"
+   "description"
+   "Get detailed information about an ASDF system including dependencies, version, and source location."
+   "inputSchema"
+   (%make-ht
+    "type" "object"
+    "properties"
+    (let ((p (make-hash-table :test #'equal)))
+      (setf (gethash "system_name" p)
+            (%make-ht
+             "type" "string"
+             "description"
+             "Name of the ASDF system (e.g., \"cl-mcp\", \"alexandria\")"))
+      p)
+    "required" (vector "system_name"))))
+
+
+
+(defun tools-descriptor-asdf-list-systems ()
+  (%make-ht
+   "name" "asdf-list-systems"
+   "description" "List all registered ASDF systems."
+   "inputSchema"
+   (%make-ht
+    "type" "object"
+    "properties" (make-hash-table :test #'equal)
+    "required" (vector))))
 (defun tools-descriptor-fs-read ()
   (%make-ht
    "name" "fs-read-file"
@@ -399,23 +433,30 @@ ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ens
            (%make-ht "type" "string"
                      "description"
                      "Full Lisp form to insert or replace with"))
+     (setf (gethash "dry_run" p)
+           (%make-ht "type" "boolean"
+                     "description"
+                     "When true, return a preview without writing to disk"))
      (%make-ht "type" "object"
                "properties" p
                "required" (vector "file_path" "form_type" "form_name" "operation" "content")))))
 
 (defun handle-tools-list (id)
-  (let* ((tools (vector (tools-descriptor-repl)
-                        (tools-descriptor-fs-read)
-                        (tools-descriptor-fs-write)
-                        (tools-descriptor-fs-list)
-                        (tools-descriptor-fs-project-info)
-                        (tools-descriptor-fs-set-project-root)
-                        (tools-descriptor-lisp-read-file)
-                        (tools-descriptor-code-find)
-                        (tools-descriptor-code-describe)
-                        (tools-descriptor-code-references)
-                        (tools-descriptor-lisp-check-parens)
-                        (tools-descriptor-lisp-edit-form))))
+  (let* ((tools
+          (vector (tools-descriptor-repl)
+                  (tools-descriptor-asdf-system-info)
+                  (tools-descriptor-asdf-list-systems)
+                  (tools-descriptor-fs-read)
+                  (tools-descriptor-fs-write)
+                  (tools-descriptor-fs-list)
+                  (tools-descriptor-fs-project-info)
+                  (tools-descriptor-fs-set-project-root)
+                  (tools-descriptor-lisp-read-file)
+                  (tools-descriptor-code-find)
+                  (tools-descriptor-code-describe)
+                  (tools-descriptor-code-references)
+                  (tools-descriptor-lisp-check-parens)
+                  (tools-descriptor-lisp-edit-form))))
     (%result id (%make-ht "tools" tools))))
 
 (defun %normalize-tool-name (name)
@@ -427,6 +468,36 @@ Returns a downcased local tool name (string)."
          (idx (max (or dot -1) (or sl -1))))
     (subseq s (1+ idx))))
 
+
+
+(defun handle-asdf-tools-call (id params)
+  "Handle ASDF-related tool calls.
+Returns a JSON-RPC response hash-table when handled, or NIL to defer." 
+  (let* ((name (and params (gethash "name" params)))
+         (args (and params (gethash "arguments" params)))
+         (local (and name (%normalize-tool-name name))))
+    (cond
+      ((member local '("asdf-system-info" "asdf_system_info" "system-info")
+               :test #'string=)
+       (handler-case
+           (let* ((system-name (and args (gethash "system_name" args))))
+             (unless system-name
+               (return-from handle-asdf-tools-call
+                 (%error id -32602 "Missing required parameter: system_name")))
+             (%result id (asdf-system-info system-name)))
+         (error (e)
+           (%error id -32603
+                   (format nil "Internal error during asdf-system-info: ~A" e)))))
+
+      ((member local '("asdf-list-systems" "asdf_list_systems" "list-systems")
+               :test #'string=)
+       (handler-case
+           (%result id (asdf-list-systems))
+         (error (e)
+           (%error id -32603
+                   (format nil "Internal error during asdf-list-systems: ~A" e)))))
+
+      (t nil))))
 (defun handle-tools-call (id params)
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
@@ -717,25 +788,49 @@ Returns a downcased local tool name (string)."
                   (form-type (and args (gethash "form_type" args)))
                   (form-name (and args (gethash "form_name" args)))
                   (operation (and args (gethash "operation" args)))
-                  (content (and args (gethash "content" args))))
+                  (content (and args (gethash "content" args)))
+                  (dry-run-present nil)
+                  (dry-run (multiple-value-bind (val presentp)
+                                  (and args (gethash "dry_run" args))
+                                (setf dry-run-present presentp)
+                                (if presentp val nil))))
              (unless (and (stringp path) (stringp form-type) (stringp form-name)
                           (stringp operation) (stringp content))
                (return-from handle-tools-call
                  (%error id -32602 "file_path, form_type, form_name, operation, and content must be strings")))
+             (when (and dry-run-present (not (member dry-run '(t nil))))
+               (return-from handle-tools-call
+                 (%error id -32602 "dry_run must be boolean")))
              (let ((updated (lisp-edit-form :file-path path
                                             :form-type form-type
                                             :form-name form-name
                                             :operation operation
-                                            :content content)))
-               (%result id (%make-ht
-                            "path" path
-                            "operation" operation
-                            "form_type" form-type
-                            "form_name" form-name
-                            "bytes" (length updated)
-                            "content" (%text-content
-                                       (format nil "Applied ~A to ~A ~A (~D chars)"
-                                               operation form-type path (length updated)))))))
+                                            :content content
+                                            :dry-run dry-run)))
+               (if dry-run
+                   (let* ((preview (gethash "preview" updated))
+                          (would-change (gethash "would_change" updated))
+                          (original-form (gethash "original" updated))
+                          (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])"
+                                           operation form-type path would-change)))
+                     (%result id (%make-ht
+                                  "path" path
+                                  "operation" operation
+                                  "form_type" form-type
+                                  "form_name" form-name
+                                  "would_change" would-change
+                                  "original" original-form
+                                  "preview" preview
+                                  "content" (%text-content summary))))
+                   (%result id (%make-ht
+                                "path" path
+                                "operation" operation
+                                "form_type" form-type
+                                "form_name" form-name
+                                "bytes" (length updated)
+                                "content" (%text-content
+                                           (format nil "Applied ~A to ~A ~A (~D chars)"
+                                                   operation form-type path (length updated))))))))
          (error (e)
            (%error id -32603
                    (format nil "Internal error during lisp-edit-form: ~A" e)))))
@@ -747,7 +842,9 @@ Returns a downcased local tool name (string)."
   (cond
     ((string= method "initialize") (handle-initialize state id params))
     ((string= method "tools/list") (handle-tools-list id))
-    ((string= method "tools/call") (handle-tools-call id params))
+    ((string= method "tools/call")
+     (or (handle-asdf-tools-call id params)
+         (handle-tools-call id params)))
     ((string= method "ping") (%result id (%make-ht)))
     (t (%error id -32601 (format nil "Method ~A not found" method)))))
 

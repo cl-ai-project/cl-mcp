@@ -47,6 +47,25 @@
           (ok (search "(* x 2)" updated))
           (ok (null (search "(+ x 1)" updated))))))))
 
+(deftest lisp-edit-form-dry-run-preview
+  (testing "dry-run returns preview without writing the file"
+    (with-temp-file "tests/tmp/edit-form-dry-run.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((before (fs-read-file path))
+               (result (lisp-edit-form :file-path path
+                                       :form-type "defun"
+                                       :form-name "target"
+                                       :operation "replace"
+                                       :content "(defun target () :new)"
+                                       :dry-run t))
+               (after (fs-read-file path)))
+          (ok (hash-table-p result))
+          (ok (gethash "would_change" result))
+          (ok (string= before after))
+          (ok (string= "(defun target () :old)" (gethash "original" result)))
+          (ok (search ":new" (gethash "preview" result))))))))
+
 (deftest lisp-edit-form-insert-before
   (testing "insert_before inserts helper before target defun"
     (with-temp-file "tests/tmp/edit-form-insert-before.lisp"

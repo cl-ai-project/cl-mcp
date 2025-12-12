@@ -75,6 +75,21 @@ You are strictly prohibited from using:
 - `insert_before`: Insert new form before the matched form
 - `insert_after`: Insert new form after the matched form
 
+**Dry-run safety switch**
+- Pass `dry_run: true` to preview edits without touching the file. Useful when unsure the matcher will hit the right form.
+- The call returns a hash-table with keys: `"would_change"` (boolean), `"original"` (matched form text), `"preview"` (post-edit file text), `"file_path"`, `"operation"`.
+- Example:
+  ```json
+  {"name": "lisp-edit-form",
+   "arguments": {"file_path": "src/core.lisp",
+                 "form_type": "defun",
+                 "form_name": "process",
+                 "operation": "replace",
+                 "content": "(defun process (x) (handle x))",
+                 "dry_run": true}}
+  ```
+- If `"would_change"` is `false`, nothing would be modified; otherwise inspect `"preview"` then rerun with `dry_run` omitted to persist.
+
 ### 2. Reading Code
 
 **PREFER `lisp-read-file` over `fs-read-file`.**
@@ -128,7 +143,16 @@ Use `repl-eval` for:
   ```json
   {"code": "(ql:quickload :my-system)", "package": "CL-USER"}
   ```
-- **Check loaded systems:**
+- **Inspect ASDF system metadata/dependencies:** Prefer the dedicated tool:
+  ```json
+  {"name": "asdf-system-info", "arguments": {"system_name": "my-system"}}
+  ```
+  This returns `depends_on`, `defsystem_depends_on`, `source_file`, `source_directory`, and `loaded`.
+- **List registered systems:** Prefer the dedicated tool (output may be large):
+  ```json
+  {"name": "asdf-list-systems", "arguments": {}}
+  ```
+- **Fallback:** If you need raw ASDF state, use `repl-eval`:
   ```json
   {"code": "(asdf:registered-systems)", "package": "CL-USER"}
   ```
