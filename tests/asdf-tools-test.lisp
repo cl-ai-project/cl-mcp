@@ -34,3 +34,45 @@
            (lst (coerce systems 'list)))
       (ok (vectorp systems))
       (ok (find "cl-mcp" lst :test #'string=)))))
+
+(deftest asdf-list-systems-suppresses-asdf-noise
+  (testing "asdf-list-systems suppresses stdout/stderr noise from ASDF"
+    (let ((orig (symbol-function 'asdf:registered-systems)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'asdf:registered-systems)
+                   (lambda ()
+                     (format t "NOISE")
+                     (format *error-output* "ERR")
+                     (funcall orig)))
+             (let* ((err (make-string-output-stream))
+                    (*error-output* err)
+                    (*trace-output* err)
+                    systems
+                    (out (with-output-to-string (*standard-output*)
+                           (setf systems (asdf-list-systems)))))
+               (ok (vectorp systems))
+               (ok (string= "" out))
+               (ok (string= "" (get-output-stream-string err)))))
+        (setf (symbol-function 'asdf:registered-systems) orig)))))
+
+(deftest asdf-system-info-suppresses-asdf-noise
+  (testing "asdf-system-info suppresses stdout/stderr noise from ASDF"
+    (let ((orig (symbol-function 'asdf:find-system)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'asdf:find-system)
+                   (lambda (&rest args)
+                     (format t "NOISE")
+                     (format *error-output* "ERR")
+                     (apply orig args)))
+             (let* ((err (make-string-output-stream))
+                    (*error-output* err)
+                    (*trace-output* err)
+                    info
+                    (out (with-output-to-string (*standard-output*)
+                           (setf info (asdf-system-info "cl-mcp")))))
+               (ok (hash-table-p info))
+               (ok (string= "" out))
+               (ok (string= "" (get-output-stream-string err)))))
+        (setf (symbol-function 'asdf:find-system) orig)))))

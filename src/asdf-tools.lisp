@@ -25,6 +25,22 @@
 
 (declaim (inline %coerce-system-name %maybe-string %deps->vector))
 
+(defmacro %with-quiet-asdf-io (() &body body)
+  "Run BODY while suppressing ASDF/UIOP chatter on standard streams.
+
+In :stdio transport mode, *standard-output* carries JSON-RPC. Any stray text
+(e.g., ASDF compile/load messages) can corrupt the protocol and disconnect the
+client, so we discard output during ASDF operations."
+  `(let ((null (make-broadcast-stream)))
+     (let ((*standard-output* null)
+           (*error-output* null)
+           (*trace-output* null)
+           (*load-verbose* nil)
+           (*load-print* nil)
+           (*compile-verbose* nil)
+           (*compile-print* nil))
+       ,@body)))
+
 (defun %coerce-system-name (name)
   (etypecase name
     (string name)
@@ -59,31 +75,34 @@ The returned hash-table uses string keys:
 Missing optional fields are returned as NIL (encoded as null)."
   (let ((coerced (%coerce-system-name system-name)))
     (handler-case
-        (let* ((sys (find-system coerced))
-               (h (make-hash-table :test #'equal))
-               (depends (ignore-errors (system-depends-on sys)))
-               (defsystem-depends (ignore-errors (system-defsystem-depends-on sys)))
-               (src-file (ignore-errors (system-source-file sys)))
-               (src-dir (ignore-errors (system-source-directory sys))))
-          (setf (gethash "name" h) (component-name sys)
-                (gethash "version" h) (component-version sys)
-                (gethash "description" h)
-                (%maybe-string (ignore-errors (system-description sys)))
-                (gethash "author" h)
-                (%maybe-string (ignore-errors (system-author sys)))
-                (gethash "license" h)
-                (%maybe-string (ignore-errors (system-license sys)))
-                (gethash "depends_on" h)
-                (%deps->vector (or depends '()))
-                (gethash "defsystem_depends_on" h)
-                (%deps->vector (or defsystem-depends '()))
-                (gethash "source_file" h)
-                (and src-file (native-namestring src-file))
-                (gethash "source_directory" h)
-                (and src-dir
-                     (native-namestring (ensure-directory-pathname src-dir)))
-                (gethash "loaded" h) (component-loaded-p sys))
-          h)
+        (%with-quiet-asdf-io ()
+          (let* ((sys (find-system coerced))
+                 (h (make-hash-table :test #'equal))
+                 (depends (ignore-errors (system-depends-on sys)))
+                 (defsystem-depends
+                   (ignore-errors (system-defsystem-depends-on sys)))
+                 (src-file (ignore-errors (system-source-file sys)))
+                 (src-dir (ignore-errors (system-source-directory sys))))
+            (setf (gethash "name" h) (component-name sys)
+                  (gethash "version" h) (component-version sys)
+                  (gethash "description" h)
+                  (%maybe-string (ignore-errors (system-description sys)))
+                  (gethash "author" h)
+                  (%maybe-string (ignore-errors (system-author sys)))
+                  (gethash "license" h)
+                  (%maybe-string (ignore-errors (system-license sys)))
+                  (gethash "depends_on" h)
+                  (%deps->vector (or depends '()))
+                  (gethash "defsystem_depends_on" h)
+                  (%deps->vector (or defsystem-depends '()))
+                  (gethash "source_file" h)
+                  (and src-file (native-namestring src-file))
+                  (gethash "source_directory" h)
+                  (and src-dir
+                       (native-namestring
+                        (ensure-directory-pathname src-dir)))
+                  (gethash "loaded" h) (component-loaded-p sys))
+            h))
       (error (e)
         (error "Failed to find system ~A: ~A" coerced e)))))
 
@@ -91,11 +110,12 @@ Missing optional fields are returned as NIL (encoded as null)."
   "Return a vector of all registered ASDF system names.
 
 Names are lower-case strings."
-  (coerce
-   (mapcar (lambda (s)
-             (string-downcase
-              (etypecase s
-                (string s)
-                (symbol (symbol-name s)))))
-           (registered-systems))
-   'vector))
+  (%with-quiet-asdf-io ()
+    (coerce
+     (mapcar (lambda (s)
+               (string-downcase
+                (etypecase s
+                  (string s)
+                  (symbol (symbol-name s)))))
+             (registered-systems))
+     'vector)))
