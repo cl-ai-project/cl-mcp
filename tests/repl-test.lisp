@@ -107,3 +107,17 @@
           (repl-eval code)
         (declare (ignore _printed _value stdout))
         (ok (search "undefined-var" (string-downcase stderr) :test #'char-equal))))))
+
+
+
+(deftest repl-eval-suppresses-compiler-trace-output
+  (testing "compiler trace output is discarded"
+    #+sbcl
+    (multiple-value-bind (_printed _value stdout stderr)
+        (repl-eval
+         "(let ((s (find-symbol \"*COMPILER-TRACE-OUTPUT*\" \"SB-C\")))\n  (when s\n    (format (symbol-value s) \"TRACE-OUT\"))\n  :ok)")
+      (declare (ignore _printed _value))
+      (ok (string= stdout ""))
+      (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
+    #-sbcl
+    (skip "SBCL-only: SB-C::*COMPILER-TRACE-OUTPUT*")))

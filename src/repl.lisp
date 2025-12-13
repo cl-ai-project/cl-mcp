@@ -49,7 +49,8 @@ Options:
              (if (and max-output-length
                       (integerp max-output-length)
                       (> (length s) max-output-length))
-                 (concatenate 'string (subseq s 0 max-output-length) "...(truncated)")
+                 (concatenate 'string (subseq s 0 max-output-length)
+                              "...(truncated)")
                  s))
            (do-eval ()
              (let ((last-value nil)
@@ -65,13 +66,12 @@ Options:
                                               (let ((*print-readably* nil))
                                                 (format out "~A~%" e)
                                                 (uiop:print-backtrace :stream out
-                                                                      :condition e))))
+                                                                    :condition e))))
                                       (return-from do-eval
                                         (values last-value
                                                 last-value
                                                 (get-output-stream-string stdout)
-                                                (progn (write-string "" stderr)
-                                                        (get-output-stream-string stderr)))))))
+                                                (get-output-stream-string stderr))))))
                  (let* ((pkg (etypecase package
                                (package package)
                                (symbol (find-package package))
@@ -81,42 +81,49 @@ Options:
                    (let ((*package* pkg)
                          (*read-eval* (not safe-read))
                          (*print-readably* nil))
-                    (let ((forms (%read-all input (not safe-read))))
+                     (let ((forms (%read-all input (not safe-read))))
                        (let ((*standard-output* stdout)
-                             (*error-output* stderr))
+                             (*error-output* stderr)
+                             (*compile-verbose* nil)
+                             (*compile-print* nil))
                          #+sbcl
-                         (let* ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
-                                (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
-                                (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
-                                (old-err (and err-sym (boundp err-sym) (symbol-value err-sym)))
-                                (old-note (and note-sym (boundp note-sym) (symbol-value note-sym)))
-                                (old-trace (and trace-sym (boundp trace-sym) (symbol-value trace-sym))))
-                           (unwind-protect
-                                (progn
-                                  (when (and err-sym (boundp err-sym))
-                                    (setf (symbol-value err-sym) stderr))
-                                  (when (and note-sym (boundp note-sym))
-                                    (setf (symbol-value note-sym) stderr))
-                                  (when (and trace-sym (boundp trace-sym))
-                                    (setf (symbol-value trace-sym) stderr))
-                                  (dolist (form forms)
-                                    (setf last-value (eval form))))
-                             (when (and err-sym (boundp err-sym))
-                               (setf (symbol-value err-sym) old-err))
-                             (when (and note-sym (boundp note-sym))
-                               (setf (symbol-value note-sym) old-note))
-                             (when (and trace-sym (boundp trace-sym))
-                               (setf (symbol-value trace-sym) old-trace))))
+                         (let* ((err-sym
+                                  (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
+                                (note-sym
+                                  (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
+                                (trace-sym
+                                  (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
+                                (null-out (make-broadcast-stream))
+                                (syms '())
+                                (vals '()))
+                           ;; Route compiler errors/warnings and notes to STDERR,
+                           ;; but discard compiler trace output (can include
+                           ;; disassembly and other noisy diagnostics).
+                           (when err-sym
+                             (push err-sym syms)
+                             (push stderr vals))
+                           (when note-sym
+                             (push note-sym syms)
+                             (push stderr vals))
+                           (when trace-sym
+                             (push trace-sym syms)
+                             (push null-out vals))
+                           (if syms
+                               (progv (nreverse syms) (nreverse vals)
+                                 (dolist (form forms)
+                                   (setf last-value (eval form))))
+                               (dolist (form forms)
+                                 (setf last-value (eval form)))))
                          #-sbcl
                          (dolist (form forms)
                            (setf last-value (eval form)))))))
                (let ((*print-level* print-level)
                      (*print-length* print-length)
-                       (*print-readably* nil))
-                   (values (truncate-output (prin1-to-string last-value))
-                           last-value
-                           (truncate-output (get-output-stream-string stdout))
-                           (truncate-output (get-output-stream-string stderr))))))))
+                     (*print-readably* nil))
+                 (values (truncate-output (prin1-to-string last-value))
+                         last-value
+                         (truncate-output (get-output-stream-string stdout))
+                         (truncate-output (get-output-stream-string stderr))))))))
     (if (and timeout-seconds (plusp timeout-seconds))
         (let* ((result-box nil)
                (worker (bordeaux-threads:make-thread
