@@ -26,7 +26,8 @@
   "Port number of the currently running background TCP server.")
 
 (defparameter *tcp-read-timeout* 10.0
-  "Seconds to wait for data on a client connection before timing out.")
+  "Seconds to wait for data before checking the stop flag.
+Does not disconnect on timeout to allow idle clients (e.g. AI agents thinking).")
 
 (defparameter *tcp-accept-timeout* 5.0
   "Seconds to wait for an incoming connection before re-checking stop flags.")
@@ -139,12 +140,18 @@ successfully started, or NIL if the start attempt failed."
         (log-context (list "conn" conn-id "remote" remote)))
     (let ((cl-mcp/src/log:*log-context* log-context))
       (loop
+        ;; Use timeout as a heartbeat to check for the stop flag
         for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)
         do (cond
              ((null ready)
-              (log-event :warn "tcp.read.timeout" "conn" conn-id "timeout" *tcp-read-timeout*)
-              (return))
+              ;; Timeout occurred. Do not close the connection immediately.
+              ;; Keep the connection alive to allow for client idle time (e.g. agent thinking).
+              ;; Only exit the loop if a server stop was requested.
+              (when *tcp-stop-flag*
+                (log-event :info "tcp.stop.requested" "conn" conn-id)
+                (return)))
              (t
+              ;; Data available, proceed to read
               (let ((line (handler-case
                               (read-line stream nil :eof)
                             (error (e)

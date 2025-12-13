@@ -52,9 +52,42 @@
             (ignore-errors (usocket:socket-close sock))))
         (join-thread thr))))))
 
+(deftest tcp-idle-connection-does-not-drop
+  (testing "idle tcp connections stay open for later requests"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let ((*tcp-read-timeout* 0.1)
+              (port-var nil))
+          (let ((thr (make-thread
+                      (lambda ()
+                        (serve-tcp :host "127.0.0.1" :port 0
+                                   :accept-once t
+                                   :on-listening (lambda (p) (setf port-var p))))
+                      :name "tcp-idle-server")))
+            (unwind-protect
+                 (progn
+                   (loop repeat 200 until port-var do (sleep 0.01))
+                   (ok port-var)
+                   (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
+                                                        :element-type 'character))
+                          (stream (usocket:socket-stream sock)))
+                     (unwind-protect
+                          (progn
+                            ;; Wait longer than *tcp-read-timeout* without sending.
+                            (sleep 0.3)
+                            (write-string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
+                                          stream)
+                            (finish-output stream)
+                            (ignore-errors (usocket:socket-shutdown sock :output))
+                            (let ((line (read-line stream nil nil)))
+                              (ok (and line (search "\"result\"" line)))))
+                       (ignore-errors (close stream))
+                       (ignore-errors (usocket:socket-close sock)))))
+              (join-thread thr)))))))
+
 (deftest tcp-thread-helper-lifecycle
   (testing "start/ensure/stop manage tcp server thread"
-    (if (socket-available-p)
+    (if (not (socket-available-p))
         (ok t "socket unavailable")
         (unwind-protect
              (progn
