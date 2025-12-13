@@ -111,6 +111,7 @@ Use `repl-eval` for:
 - Loading systems (`(ql:quickload :my-system)`).
 - Inspecting global state.
 - Verifying changes immediately after editing.
+- (Optional) Compiling definitions to surface warnings early.
 
 **WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They are lost if the server restarts. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
 
@@ -119,6 +120,7 @@ Use `repl-eval` for:
 - Use `printLevel` and `printLength` to control output verbosity for complex structures
 - Use `timeoutSeconds` to prevent infinite loops from hanging the session
 - Use `safeRead=true` when evaluating untrusted input
+- When you compile something, always check `stderr` for warnings. Treat compiler warnings as actionable; treat optimization notes/style-warnings as context-dependent (do not get stuck).
 
 ## Common Lisp Specifics
 
@@ -197,7 +199,14 @@ Use `repl-eval` for:
     "operation": "replace", "content": "(defun my-function (x)\n  (* x 2))"}
    ```
 
-6. **Verify:** Re-evaluate or run tests:
+6. **Compile (optional):** Compile to surface warnings early (recommended when behavior stabilizes).
+   ```json
+   {"code": "(compile 'my-function)", "package": "MY-PACKAGE"}
+   ```
+   - **CRITICAL:** Check `stderr`. Fix compiler warnings before proceeding.
+   - If you edited a `defmethod`, note that compiling a single method is not standardized (it typically requires obtaining the method object). Compiling the generic function (e.g., `(compile 'my-generic)`) may not surface warnings from the method body. Prefer **Verify** (exercise the call path) and, in the finish phase, prefer `asdf:compile-system` with `:force t`.
+
+7. **Verify:** Re-evaluate or run tests:
    ```json
    {"code": "(my-function 5)", "package": "MY-PACKAGE"}
    ```
@@ -268,9 +277,28 @@ Use `repl-eval` for:
     "operation": "insert_after", "content": "(defun new-feature (x)\n  ...)"}
    ```
 
-5. **Test:** Write and run tests for the new feature.
+5. **Compile (optional):** Compile new/changed entrypoints to catch warnings early.
+   ```json
+   {"code": "(compile 'new-feature)", "package": "MY-PACKAGE"}
+   ```
 
-6. **Document:** Update docstrings and comments as needed.
+6. **Test:** Write and run tests for the new feature.
+
+7. **Document:** Update docstrings and comments as needed.
+
+### Scenario: Finishing / Pre-PR Check
+
+When you are in a “finish” phase (ready to run the full suite and stop iterating), prefer compiling the whole system from disk rather than compiling individual functions.
+
+1. **Compile whole system:** Force a full recompile and inspect warnings:
+   ```json
+   {"code": "(asdf:compile-system :my-system :force t)", "package": "CL-USER"}
+   ```
+   - **CRITICAL:** Fix compiler warnings. Treat optimization notes/style-warnings as context-dependent unless they indicate a real bug.
+2. **Run tests:** Prefer ASDF `test-op`:
+   ```json
+   {"code": "(asdf:test-system :my-system)", "package": "CL-USER"}
+   ```
 
 ## Tool Fallback Strategy
 

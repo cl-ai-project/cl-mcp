@@ -102,8 +102,40 @@
 (deftest repl-eval-captures-compiler-warnings
   (testing "compiler warnings are routed to stderr"
     (let* ((fn (gensym "WARN-FN-"))
-           (code (format nil "(defun ~A (x) (+ x undefined-var))" fn)))
+           (var (gensym "UNDEFINED-VAR-"))
+           (code (format nil "(defun ~A (x) (+ x ~A))" fn var)))
       (multiple-value-bind (_printed _value stdout stderr)
           (repl-eval code)
         (declare (ignore _printed _value stdout))
-        (ok (search "undefined-var" (string-downcase stderr) :test #'char-equal))))))
+        (ok (search (symbol-name var)
+                    stderr
+                    :test #'char-equal))))))
+
+(deftest repl-eval-captures-compiler-warnings-under-compilation-unit
+  (testing "compiler warnings are captured even under an outer compilation unit"
+    #+sbcl
+    (sb-ext::with-compilation-unit ()
+      (let* ((fn (gensym "WARN-FN-"))
+             (var (gensym "UNDEFINED-VAR-"))
+             (code (format nil "(defun ~A (x) (+ x ~A))" fn var)))
+        (multiple-value-bind (printed value stdout stderr)
+            (repl-eval code)
+          (declare (ignore printed value stdout))
+          (ok (search (symbol-name var) stderr :test #'char-equal)))))
+    #-sbcl
+    (skip "SBCL-only: SB-EXT::WITH-COMPILATION-UNIT")))
+
+(deftest repl-eval-suppresses-compiler-trace-output
+  (testing "compiler trace output is discarded"
+    #+sbcl
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval
+         "(let ((s (find-symbol \"*COMPILER-TRACE-OUTPUT*\" \"SB-C\")))
+  (when s
+    (format (symbol-value s) \"TRACE-OUT\"))
+  :ok)")
+      (declare (ignore printed value))
+      (ok (string= stdout ""))
+      (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
+    #-sbcl
+    (skip "SBCL-only: SB-C::*COMPILER-TRACE-OUTPUT*")))
