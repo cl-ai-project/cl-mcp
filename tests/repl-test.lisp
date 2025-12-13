@@ -128,13 +128,13 @@
 (deftest repl-eval-suppresses-compiler-trace-output
   (testing "compiler trace output is discarded"
     #+sbcl
-    (multiple-value-bind (_printed _value stdout stderr)
+    (multiple-value-bind (printed value stdout stderr)
         (repl-eval
          "(let ((s (find-symbol \"*COMPILER-TRACE-OUTPUT*\" \"SB-C\")))
   (when s
     (format (symbol-value s) \"TRACE-OUT\"))
   :ok)")
-      (declare (ignore _printed _value))
+      (declare (ignore printed value))
       (ok (string= stdout ""))
       (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
     #-sbcl
