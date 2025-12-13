@@ -115,8 +115,6 @@
                     stderr
                     :test #'char-equal))))))
 
-
-
 (deftest repl-eval-captures-compiler-warnings-under-compilation-unit
   (testing "compiler warnings are captured even under an outer compilation unit"
     #+sbcl
