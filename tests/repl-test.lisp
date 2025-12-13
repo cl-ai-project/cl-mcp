@@ -118,9 +118,9 @@
       (let* ((fn (gensym "WARN-FN-"))
              (var (gensym "UNDEFINED-VAR-"))
              (code (format nil "(defun ~A (x) (+ x ~A))" fn var)))
-        (multiple-value-bind (_printed _value stdout stderr)
+        (multiple-value-bind (printed value stdout stderr)
             (repl-eval code)
-          (declare (ignore _printed _value stdout))
+          (declare (ignore printed value stdout))
           (ok (search (symbol-name var) stderr :test #'char-equal)))))
     #-sbcl
     (skip "SBCL-only: SB-EXT::WITH-COMPILATION-UNIT")))
