@@ -57,21 +57,21 @@ Options:
                    (stdout (make-string-output-stream))
                    (stderr (make-string-output-stream)))
                (handler-bind ((warning (lambda (w)
-                                        (format stderr "~&Warning: ~A~%" w)
-                                        (when (find-restart 'muffle-warning)
-                                          (invoke-restart 'muffle-warning))))
+                                         (format stderr "~&Warning: ~A~%" w)
+                                         (when (find-restart 'muffle-warning)
+                                           (invoke-restart 'muffle-warning))))
                               (error (lambda (e)
-                                      (setf last-value
-                                            (with-output-to-string (out)
-                                              (let ((*print-readably* nil))
-                                                (format out "~A~%" e)
-                                                (uiop:print-backtrace :stream out
-                                                                    :condition e))))
-                                      (return-from do-eval
-                                        (values last-value
-                                                last-value
-                                                (get-output-stream-string stdout)
-                                                (get-output-stream-string stderr))))))
+                                       (setf last-value
+                                             (with-output-to-string (out)
+                                               (let ((*print-readably* nil))
+                                                 (format out "~A~%" e)
+                                                 (uiop:print-backtrace :stream out
+                                                                       :condition e))))
+                                       (return-from do-eval
+                                         (values last-value
+                                                 last-value
+                                                 (get-output-stream-string stdout)
+                                                 (get-output-stream-string stderr))))))
                  (let* ((pkg (etypecase package
                                (package package)
                                (symbol (find-package package))
@@ -93,12 +93,12 @@ Options:
                                   (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
                                 (trace-sym
                                   (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
-                                (null-out (make-broadcast-stream))
                                 (syms '())
                                 (vals '()))
-                           ;; Route compiler errors/warnings and notes to STDERR,
-                           ;; but discard compiler trace output (can include
-                           ;; disassembly and other noisy diagnostics).
+                           ;; Route compiler errors/warnings and notes to STDERR.
+                           ;; Disable compiler trace output entirely, since it can
+                           ;; include very noisy diagnostics (including disassembly)
+                           ;; when non-NIL.
                            (when err-sym
                              (push err-sym syms)
                              (push stderr vals))
@@ -107,23 +107,34 @@ Options:
                              (push stderr vals))
                            (when trace-sym
                              (push trace-sym syms)
-                             (push null-out vals))
+                             (push nil vals))
                            (if syms
                                (progv (nreverse syms) (nreverse vals)
+                                 ;; Rove/ASDF often wraps loads in WITH-COMPILATION-UNIT,
+                                 ;; which can delay undefined-variable warnings until the
+                                 ;; outermost unit exits (outside our capture scope).
+                                 ;; OVERRIDE ensures warnings are emitted within this
+                                 ;; dynamic extent and routed to our STDERR capture.
+                                 (sb-ext::with-compilation-unit (:override t
+                                                                 :source-namestring
+                                                                 "repl-eval")
+                                   (dolist (form forms)
+                                     (setf last-value (eval form)))))
+                               (sb-ext::with-compilation-unit (:override t
+                                                               :source-namestring
+                                                               "repl-eval")
                                  (dolist (form forms)
-                                   (setf last-value (eval form))))
-                               (dolist (form forms)
-                                 (setf last-value (eval form)))))
+                                   (setf last-value (eval form))))))
                          #-sbcl
                          (dolist (form forms)
                            (setf last-value (eval form)))))))
-               (let ((*print-level* print-level)
-                     (*print-length* print-length)
-                     (*print-readably* nil))
-                 (values (truncate-output (prin1-to-string last-value))
-                         last-value
-                         (truncate-output (get-output-stream-string stdout))
-                         (truncate-output (get-output-stream-string stderr))))))))
+                 (let ((*print-level* print-level)
+                       (*print-length* print-length)
+                       (*print-readably* nil))
+                   (values (truncate-output (prin1-to-string last-value))
+                           last-value
+                           (truncate-output (get-output-stream-string stdout))
+                           (truncate-output (get-output-stream-string stderr))))))))
     (if (and timeout-seconds (plusp timeout-seconds))
         (let* ((result-box nil)
                (worker (bordeaux-threads:make-thread
@@ -132,7 +143,7 @@ Options:
                         :name "mcp-repl-eval")))
           (loop repeat (ceiling (/ timeout-seconds 0.05))
                 when (not (bordeaux-threads:thread-alive-p worker))
-                  do (return-from repl-eval (values-list result-box))
+                do (return-from repl-eval (values-list result-box))
                 do (sleep 0.05))
           ;; timed out
           ;; Avoid destroying a thread that already exited while we were checking.
