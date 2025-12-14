@@ -50,7 +50,7 @@
            (text4 (and first4 (gethash "text" first4))))
       (ok (string= (gethash "jsonrpc" obj4) "2.0"))
       (ok (stringp text4))
-      (ok (search "0.1.0" text4)))))
+      (ok (search "1.0.0" text4)))))
 
 (deftest fs-write-then-readback
   (testing "write file then read it back via tools/call"
