@@ -90,6 +90,40 @@ You are strictly prohibited from using:
   ```
 - If `"would_change"` is `false`, nothing would be modified; otherwise inspect `"preview"` then rerun with `dry_run` omitted to persist.
 
+**New Files (Best Practice):**
+When creating a new file with `fs-write-file`, follow this safe workflow:
+1. **Minimal Start**: Create the file with minimal valid content first (e.g.,
+   `(in-package ...)` and, only if you are introducing a new package,
+   `defpackage`).
+   - If you plan to grow the file via `lisp-edit-form` operations like `insert_after`, include a small “anchor” top-level definition (e.g., a stub `defun`) that you can later `replace`.
+   - This avoids syntax errors in large generated blocks and ensures `lisp-edit-form` has something reliable to match.
+2. **Verify**: (Optional) Use `lisp-check-parens` on the code string before writing if you are unsure.
+   - Recommended: run `lisp-check-parens` on the written file path immediately after creation to guarantee the file is well-formed before proceeding.
+3. **Expand**: Use `lisp-edit-form` to add the rest of the functions (typically
+   `replace` the stub, then `insert_after` around real `defun`/`defmethod`
+   forms). This ensures safety via parinfer.
+
+**Example:**
+1. Create base (small + valid):
+```json
+{"name": "fs-write-file",
+ "arguments": {"path": "src/new.lisp",
+               "content": "(in-package :my-pkg)\n\n(defun first-stub ()\n  nil)\n"}}
+```
+2. Verify parentheses on the written file:
+```json
+{"name": "lisp-check-parens", "arguments": {"path": "src/new.lisp"}}
+```
+3. Safely replace the stub and/or add more forms:
+```json
+{"name": "lisp-edit-form",
+ "arguments": {"operation": "replace",
+               "file_path": "src/new.lisp",
+               "form_type": "defun",
+               "form_name": "first-stub",
+               "content": "(defun first-stub ()\n  (real-impl))"}}
+```
+
 ### 2. Reading Code
 
 **PREFER `lisp-read-file` over `fs-read-file`.**
