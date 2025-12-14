@@ -14,7 +14,6 @@ clients to drive Common Lisp development via MCP.
 - MCP initialize handshake with capability discovery
 - Tools API
   - `repl-eval` — evaluate forms
-  - `asdf-system-info` / `asdf-list-systems` — inspect registered ASDF systems and dependencies
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
   - `fs-get-project-info` — report project root and cwd info for path normalization
   - `fs-set-project-root` — set the server's project root and working directory
@@ -112,6 +111,10 @@ Response (excerpt):
 {"result":{"content":[{"type":"text","text":"3"}]}}
 ```
 
+### ASDF tools (disabled)
+`asdf-system-info` and `asdf-list-systems` are temporarily disabled.
+
+<!--
 ### `asdf-system-info`
 Return detailed information about an ASDF system, including dependencies and source locations.
 
@@ -138,6 +141,7 @@ List all registered ASDF systems (may be large).
 Input: none
 
 Output: array of lower-case system names.
+-->
 
 ### `fs-read-file`
 Read text from an allow‑listed path.

@@ -2,7 +2,7 @@
   (:use #:cl)
   (:import-from #:rove)
   (:import-from #:cl-mcp/tests/bridge-test)
-  (:import-from #:cl-mcp/tests/asdf-tools-test)
+  #+nil(:import-from #:cl-mcp/tests/asdf-tools-test)
   (:import-from #:cl-mcp/tests/code-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
