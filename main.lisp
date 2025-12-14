@@ -14,9 +14,6 @@
                 #:fs-list-directory
                 #:fs-get-project-info
                 #:*project-root*)
-  (:import-from #:cl-mcp/src/asdf-tools
-                #:asdf-system-info
-                #:asdf-list-systems)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
@@ -54,9 +51,6 @@
            #:*project-root*
            #:lisp-edit-form
            #:lisp-check-parens
-           ;; ASDF tools
-           #:asdf-system-info
-           #:asdf-list-systems
            ;; Code intelligence
            #:code-find-definition
            #:code-describe-symbol

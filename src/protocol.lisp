@@ -12,9 +12,6 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
-  (:import-from #:cl-mcp/src/asdf-tools
-                #:asdf-system-info
-                #:asdf-list-systems)
   (:shadowing-import-from #:cl-mcp/src/code
                           #:code-find-references)
   (:import-from #:cl-mcp/src/code
@@ -166,6 +163,8 @@ there"))
 
 
 
+;; Temporarily disabled: asdf-system-info
+#+nil
 (defun tools-descriptor-asdf-system-info ()
   (%make-ht
    "name" "asdf-system-info"
@@ -186,6 +185,8 @@ there"))
 
 
 
+;; Temporarily disabled: asdf-list-systems
+#+nil
 (defun tools-descriptor-asdf-list-systems ()
   (%make-ht
    "name" "asdf-list-systems"
@@ -444,8 +445,8 @@ ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ens
 (defun handle-tools-list (id)
   (let* ((tools
           (vector (tools-descriptor-repl)
-                  (tools-descriptor-asdf-system-info)
-                  (tools-descriptor-asdf-list-systems)
+                  #+nil(tools-descriptor-asdf-system-info)
+                  #+nil(tools-descriptor-asdf-list-systems)
                   (tools-descriptor-fs-read)
                   (tools-descriptor-fs-write)
                   (tools-descriptor-fs-list)
@@ -468,11 +469,27 @@ Returns a downcased local tool name (string)."
          (idx (max (or dot -1) (or sl -1))))
     (subseq s (1+ idx))))
 
+(defun handle-asdf-tools-call (id params)
+  ;; TODO: Temporarily disabled due to unresolved "Transport closed" errors.
+  ;;
+  ;; Issue:
+  ;; Executing this tool causes the MCP client to disconnect with "Transport closed"
+  ;; or timeout, even though the server logs show immediate and successful JSON response
+  ;; transmission.
+  ;;
+  ;; Investigation Status:
+  ;; 1. ASDF Output: Stdout noise is already suppressed via `with-silenced-output`.
+  ;; 2. TCP Timeout: Keep-alive logic is implemented; server does not close the socket.
+  ;; 3. Server Logs: Show `rpc.result` and `tcp.flushed` occurring immediately.
+  "Handle ASDF-related tool calls.
+Returns a JSON-RPC response hash-table when handled, or NIL to defer."
+  (declare (ignore id params))
+  nil)
 
-
+#+nil
 (defun handle-asdf-tools-call (id params)
   "Handle ASDF-related tool calls.
-Returns a JSON-RPC response hash-table when handled, or NIL to defer." 
+Returns a JSON-RPC response hash-table when handled, or NIL to defer."
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
          (local (and name (%normalize-tool-name name))))

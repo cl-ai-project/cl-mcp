@@ -145,15 +145,7 @@ Use `repl-eval` for:
   ```json
   {"code": "(ql:quickload :my-system)", "package": "CL-USER"}
   ```
-- **Inspect ASDF system metadata/dependencies:** Prefer the dedicated tool:
-  ```json
-  {"name": "asdf-system-info", "arguments": {"system_name": "my-system"}}
-  ```
-  This returns `depends_on`, `defsystem_depends_on`, `source_file`, `source_directory`, and `loaded`.
-- **List registered systems:** Prefer the dedicated tool (output may be large):
-  ```json
-  {"name": "asdf-list-systems", "arguments": {}}
-  ```
+- **Inspect ASDF system metadata/dependencies:** Use `repl-eval` (the dedicated ASDF tools are currently disabled):
 - **Fallback:** If you need raw ASDF state, use `repl-eval`:
   ```json
   {"code": "(asdf:registered-systems)", "package": "CL-USER"}
