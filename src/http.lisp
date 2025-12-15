@@ -227,8 +227,8 @@ Currently returns 405 as SSE is not yet implemented."
           (:delete (handle-mcp-delete))
           (:options (handle-mcp-options))
           (otherwise
-           (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not allowed\"},\"id\":null}"
-                          :status 405))))))))
+           (setf (hunchentoot:return-code*) 405)
+           (json-response "{\"error\":\"Method not allowed\"}")))))))
 
 ;;; ------------------------------------------------------------
 ;;; Server Control
