@@ -12,6 +12,7 @@
                :usocket
                :bordeaux-threads
                :eclector
+               :hunchentoot
                "cl-mcp/main")
   :in-order-to ((test-op (test-op "cl-mcp/tests"))))
 

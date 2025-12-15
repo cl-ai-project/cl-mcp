@@ -38,6 +38,12 @@
                 #:start-tcp-server-thread
                 #:ensure-tcp-server-thread
                 #:stop-tcp-server-thread)
+  (:import-from #:cl-mcp/src/http
+                #:*http-server*
+                #:*http-server-port*
+                #:http-server-running-p
+                #:start-http-server
+                #:stop-http-server)
   (:import-from #:cl-mcp/src/run
                 #:run)
   (:export #:run
@@ -70,6 +76,12 @@
            #:tcp-server-running-p
            #:start-tcp-server-thread
            #:ensure-tcp-server-thread
-           #:stop-tcp-server-thread))
+           #:stop-tcp-server-thread
+           ;; HTTP server (Streamable HTTP transport)
+           #:*http-server*
+           #:*http-server-port*
+           #:http-server-running-p
+           #:start-http-server
+           #:stop-http-server))
 
 (in-package #:cl-mcp/main)

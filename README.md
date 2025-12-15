@@ -21,7 +21,7 @@ clients to drive Common Lisp development via MCP.
   - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
   - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
   - `lisp-check-parens` — detect mismatched delimiters in code slices
-- Transports: `:stdio` and `:tcp`
+- Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
 
@@ -34,7 +34,7 @@ clients to drive Common Lisp development via MCP.
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (for dependencies)
-- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`; tests — `rove`.
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`.
 
 ## Quick Start
 
@@ -63,6 +63,43 @@ ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
 
 **Alternative**: If you don't set `MCP_PROJECT_ROOT`, you must call `fs-set-project-root`
 tool immediately after connecting to initialize the project root.
+
+### HTTP Transport (for Claude Code)
+
+Start the HTTP server and continue using your REPL:
+
+```lisp
+(ql:quickload :cl-mcp)
+
+;; Start HTTP server on port 3000 (default)
+(cl-mcp:start-http-server :port 3000)
+
+;; Server is now running at http://127.0.0.1:3000/mcp
+;; You can continue using your REPL normally
+(+ 1 2)  ; => 3
+
+;; Stop the server when done
+(cl-mcp:stop-http-server)
+```
+
+Configure Claude Code to connect (in `~/.claude/settings.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "type": "url",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+This is the recommended approach for Common Lisp development:
+1. Start your REPL as usual
+2. Load cl-mcp and start the HTTP server
+3. Configure Claude Code to connect
+4. Both you and Claude Code can use the same Lisp runtime simultaneously
 
 ### Try it with the bundled clients
 - Python TCP one‑shot client (initialize):
