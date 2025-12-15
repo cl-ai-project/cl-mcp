@@ -47,7 +47,7 @@
   (last-access (get-universal-time) :type integer))
 
 (defun generate-session-id ()
-  "Generate a cryptographically secure session ID."
+  "Generate a pseudo-random session ID."
   (format nil "~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)"
           (random (expt 2 64))
           (random (expt 2 64))
@@ -130,7 +130,8 @@
                 (search "text/event-stream" accept)
                 (search "*/*" accept))
       (return-from handle-mcp-post
-        (json-response "{\"error\":\"Invalid Accept header\"}" :status 406)))
+        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid Accept header\"},\"id\":null}"
+                       :status 406)))
 
     ;; Handle missing body
     (unless body
@@ -183,9 +184,8 @@
   "Handle GET requests to the MCP endpoint (SSE stream).
 Currently returns 405 as SSE is not yet implemented."
   (log-event :debug "http.get.sse-not-supported")
-  (setf (hunchentoot:return-code*) 405)
-  (setf (hunchentoot:content-type*) "application/json")
-  "{\"error\":\"SSE not yet supported. Use POST for request/response.\"}")
+  (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"SSE not yet supported. Use POST for request/response.\"},\"id\":null}"
+                 :status 405))
 
 (defun handle-mcp-delete ()
   "Handle DELETE requests to terminate a session."
@@ -196,9 +196,8 @@ Currently returns 405 as SSE is not yet implemented."
           (log-event :info "http.session.deleted" "session-id" session-id)
           (setf (hunchentoot:return-code*) 204)
           "")
-        (progn
-          (setf (hunchentoot:return-code*) 400)
-          "{\"error\":\"Missing Mcp-Session-Id header\"}"))))
+        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Missing Mcp-Session-Id header\"},\"id\":null}"
+                       :status 400))))
 
 (defun handle-mcp-options ()
   "Handle OPTIONS requests for CORS preflight."
@@ -228,8 +227,8 @@ Currently returns 405 as SSE is not yet implemented."
           (:delete (handle-mcp-delete))
           (:options (handle-mcp-options))
           (otherwise
-           (setf (hunchentoot:return-code*) 405)
-           (json-response "{\"error\":\"Method not allowed\"}")))))))
+           (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not allowed\"},\"id\":null}"
+                          :status 405))))))))
 
 ;;; ------------------------------------------------------------
 ;;; Server Control
