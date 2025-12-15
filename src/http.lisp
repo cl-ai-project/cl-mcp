@@ -142,7 +142,8 @@
     (when (is-initialize-request-p body)
       (let* ((session (create-session))
              (state (http-session-state session))
-             (line (yason:encode body nil))
+             (line (with-output-to-string (s)
+                     (yason:encode body s)))
              (response (process-json-line line state)))
         (log-event :info "http.initialize"
                    "session-id" (http-session-id session))
