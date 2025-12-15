@@ -17,10 +17,12 @@
             packages = with pkgs; [
               rlwrap
               lisp
+              openssl
             ];
 
             shellHook = ''
               export CL_SOURCE_REGISTRY="$PWD//:$CL_SOURCE_REGISTRY"
+              export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib:$LD_LIBRARY_PATH"
             '';
           };
         };
