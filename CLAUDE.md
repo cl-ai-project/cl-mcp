@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-cl-mcp is a Model Context Protocol (MCP) server for Common Lisp, providing JSON-RPC 2.0 over stdio/TCP. It enables AI agents to interact with Common Lisp environments through structured tools for REPL evaluation, file operations, code introspection, and structure-aware editing.
+cl-mcp is a Model Context Protocol (MCP) server for Common Lisp, providing JSON-RPC 2.0 over stdio/TCP/HTTP. It enables AI agents to interact with Common Lisp environments through structured tools for REPL evaluation, file operations, code introspection, and structure-aware editing.
 
 ## Build & Development Commands
 
@@ -15,6 +15,11 @@ cl-mcp is a Model Context Protocol (MCP) server for Common Lisp, providing JSON-
 
 ### Starting the Server
 ```lisp
+;; HTTP server (recommended for Claude Code integration)
+(cl-mcp:start-http-server :port 3000)
+;; Server runs at http://127.0.0.1:3000/mcp
+;; You can continue using your REPL while the server runs
+
 ;; TCP server (development)
 (cl-mcp:start-tcp-server-thread :port 12345)
 
@@ -60,9 +65,10 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 - Tools API dispatch (tools/list, tools/call)
 - State management for client sessions
 
-**Transport Layer** (`src/tcp.lisp`, `src/run.lisp`)
+**Transport Layer** (`src/tcp.lisp`, `src/http.lisp`, `src/run.lisp`)
 - Stdio transport: single-threaded line-by-line processing
 - TCP transport: multi-threaded server with per-connection handler threads
+- HTTP transport: Streamable HTTP (MCP 2025-03-26) via Hunchentoot for Claude Code
 - Bridge support via `scripts/stdio_tcp_bridge.py` for editor integration
 
 **Tool Categories**
@@ -146,6 +152,28 @@ See `prompts/repl-driven-development.md` for comprehensive tool usage guide incl
 - Common troubleshooting scenarios
 
 ### MCP Client Configuration
+
+**HTTP Transport (Recommended for Claude Code)**
+
+Start the server from your REPL:
+```lisp
+(ql:quickload :cl-mcp)
+(cl-mcp:start-http-server :port 3000)
+```
+
+Configure Claude Code (in `~/.claude/settings.json` or project `.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "type": "url",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+**Stdio Transport (for subprocess-based MCP clients)**
 ```json
 {
   "mcpServers": {
