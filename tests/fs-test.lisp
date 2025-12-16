@@ -254,3 +254,48 @@
           (setf cl-mcp/src/fs:*project-root* original-root)
           (when original-cwd
             (ignore-errors (uiop:chdir original-cwd))))))))
+
+(deftest fs-list-directory-trailing-slash-normalization
+  (testing "fs-list-directory accepts paths with and without trailing slashes"
+    (with-test-project-root
+      (let* ((project-root (namestring cl-mcp/src/fs:*project-root*))
+             ;; Remove trailing slash if present
+             (path-without-slash (string-right-trim "/" project-root))
+             ;; Ensure trailing slash
+             (path-with-slash (if (char= (char project-root (1- (length project-root))) #\/)
+                                  project-root
+                                  (concatenate 'string project-root "/"))))
+        ;; Test without trailing slash
+        (let ((entries-no-slash (fs-list-directory path-without-slash)))
+          (ok (vectorp entries-no-slash))
+          (ok (> (length entries-no-slash) 0)))
+        ;; Test with trailing slash
+        (let ((entries-with-slash (fs-list-directory path-with-slash)))
+          (ok (vectorp entries-with-slash))
+          (ok (> (length entries-with-slash) 0)))
+        ;; Both should return the same entries
+        (let ((entries-no-slash (fs-list-directory path-without-slash))
+              (entries-with-slash (fs-list-directory path-with-slash)))
+          (ok (= (length entries-no-slash) (length entries-with-slash)))
+          ;; Compare entry names
+          (let ((names-no-slash (sort (map 'list (lambda (h) (gethash "name" h)) entries-no-slash) #'string<))
+                (names-with-slash (sort (map 'list (lambda (h) (gethash "name" h)) entries-with-slash) #'string<)))
+            (ok (equal names-no-slash names-with-slash))))))))
+
+(deftest fs-resolve-read-path-trailing-slash-normalization
+  (testing "fs-resolve-read-path normalizes paths with and without trailing slashes"
+    (with-test-project-root
+      (let* ((project-root (namestring cl-mcp/src/fs:*project-root*))
+             (path-without-slash (string-right-trim "/" project-root))
+             (path-with-slash (if (char= (char project-root (1- (length project-root))) #\/)
+                                  project-root
+                                  (concatenate 'string project-root "/"))))
+        ;; Both should resolve successfully
+        (let ((resolved-no-slash (fs-resolve-read-path path-without-slash))
+              (resolved-with-slash (fs-resolve-read-path path-with-slash)))
+          (ok resolved-no-slash)
+          (ok resolved-with-slash)
+          ;; Both should resolve to the same directory pathname
+          (ok (uiop:pathname-equal
+               (uiop:ensure-directory-pathname resolved-no-slash)
+               (uiop:ensure-directory-pathname resolved-with-slash))))))))
