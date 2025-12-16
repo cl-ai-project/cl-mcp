@@ -84,14 +84,18 @@ If RELATIVE-TO is provided and PATH is relative, merge it with RELATIVE-TO."
 Allows project-root subpaths and source dirs of registered ASDF systems."
   (%ensure-project-root)
   (let* ((abs (%canonical-path pn))
-         (project-ok (%path-inside-p abs (uiop:ensure-directory-pathname *project-root*))))
-    (when project-ok (return-from %allowed-read-path-p abs))
+         ;; Normalize as directory if it exists and is a directory
+         (normalized-abs (if (uiop:directory-exists-p abs)
+                             (uiop:ensure-directory-pathname abs)
+                             abs))
+         (project-ok (%path-inside-p normalized-abs (uiop:ensure-directory-pathname *project-root*))))
+    (when project-ok (return-from %allowed-read-path-p normalized-abs))
     ;; absolute path allowed only inside system-source-directory of registered systems
     (let ((systems (asdf:registered-systems)))
       (dolist (name systems)
         (let ((dir (ignore-errors (asdf:system-source-directory name))))
-          (when (and dir (%path-inside-p abs dir))
-            (return-from %allowed-read-path-p abs)))))
+          (when (and dir (%path-inside-p normalized-abs dir))
+            (return-from %allowed-read-path-p normalized-abs)))))
     nil))
 
 (defun %ensure-write-path (path)
