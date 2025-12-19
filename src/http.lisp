@@ -37,8 +37,10 @@
 (defvar *sessions-lock* (bordeaux-threads:make-lock "sessions-lock")
   "Lock for thread-safe session access.")
 
-(defparameter *session-timeout-seconds* 3600
-  "Session expiration time in seconds (default: 1 hour).")
+(defparameter *session-timeout-seconds*
+  nil
+  "Session expiration time in seconds. NIL disables timeout (default).
+Set to a positive number to enable idle session expiration.")
 
 (defstruct http-session
   "HTTP session containing MCP state and metadata."
@@ -56,19 +58,26 @@
           (random (expt 2 64))))
 
 (defun get-session (session-id)
-  "Get session by ID, returning NIL if not found or expired."
+  "Get session by ID, returning NIL if not found or expired.
+When *session-timeout-seconds* is NIL, sessions never expire."
   (bordeaux-threads:with-lock-held (*sessions-lock*)
     (let ((session (gethash session-id *sessions*)))
       (when session
         (let ((now (get-universal-time)))
           (cond
-            ((> (- now (http-session-last-access session))
-                *session-timeout-seconds*)
-             (remhash session-id *sessions*)
-             nil)
-            (t
-             (setf (http-session-last-access session) now)
-             session)))))))
+           ;; Timeout disabled - always return session
+           ((null *session-timeout-seconds*)
+            (setf (http-session-last-access session) now)
+            session)
+           ;; Timeout enabled - check expiration
+           ((> (- now (http-session-last-access session))
+               *session-timeout-seconds*)
+            (remhash session-id *sessions*)
+            nil)
+           ;; Not expired - update last access and return
+           (t
+            (setf (http-session-last-access session) now)
+            session)))))))
 
 (defun create-session ()
   "Create a new session and return it."
