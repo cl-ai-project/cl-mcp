@@ -29,6 +29,123 @@
                                   (:safe-read (member t nil)))
                           (values string t string string &optional))
                 repl-eval))
+
+(defun %truncate-output (string max-output-length)
+  (if (and max-output-length
+           (integerp max-output-length)
+           (> (length string) max-output-length))
+      (concatenate 'string (subseq string 0 max-output-length)
+                   "...(truncated)")
+      string))
+
+(defun %resolve-eval-package (package)
+  (let ((pkg (etypecase package
+               (package package)
+               (symbol (find-package package))
+               (string (find-package package)))))
+    (unless pkg
+      (error "Package ~S does not exist" package))
+    pkg))
+
+(defun %call-with-compiler-streams (stdout stderr thunk)
+  (declare (ignore stdout))
+  #+sbcl
+  (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
+        (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
+        (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
+        (syms '())
+        (vals '()))
+    ;; Route compiler errors/warnings and notes to STDERR.
+    ;; Disable compiler trace output entirely, since it can include noisy diagnostics.
+    (when err-sym
+      (push err-sym syms)
+      (push stderr vals))
+    (when note-sym
+      (push note-sym syms)
+      (push stderr vals))
+    (when trace-sym
+      (push trace-sym syms)
+      (push nil vals))
+    (if syms
+        (progv (nreverse syms) (nreverse vals)
+          ;; Ensure warnings are emitted within this dynamic extent.
+          (sb-ext::with-compilation-unit (:override t
+                                          :source-namestring "repl-eval")
+            (funcall thunk)))
+        (sb-ext::with-compilation-unit (:override t
+                                        :source-namestring "repl-eval")
+          (funcall thunk))))
+  #-sbcl
+  (funcall thunk))
+
+(defun %eval-forms (forms package stdout stderr safe-read)
+  (let ((last-value nil))
+    (let ((*package* package)
+          (*read-eval* (not safe-read))
+          (*print-readably* nil))
+      (let ((*standard-output* stdout)
+            (*error-output* stderr)
+            (*compile-verbose* nil)
+            (*compile-print* nil))
+        (%call-with-compiler-streams
+         stdout
+         stderr
+         (lambda ()
+           (dolist (form forms)
+             (setf last-value (eval form)))))))
+    last-value))
+
+(defun %do-repl-eval (input package safe-read print-level print-length max-output-length)
+  (let ((last-value nil)
+        (stdout (make-string-output-stream))
+        (stderr (make-string-output-stream)))
+    (handler-bind ((warning (lambda (w)
+                              (format stderr "~&Warning: ~A~%" w)
+                              (when (find-restart 'muffle-warning)
+                                (invoke-restart 'muffle-warning))))
+                   (error (lambda (e)
+                            (setf last-value
+                                  (with-output-to-string (out)
+                                    (let ((*print-readably* nil))
+                                      (format out "~A~%" e)
+                                      (uiop:print-backtrace :stream out
+                                                            :condition e))))
+                            (return-from %do-repl-eval
+                              (values last-value
+                                      last-value
+                                      (get-output-stream-string stdout)
+                                      (get-output-stream-string stderr))))))
+      (let ((pkg (%resolve-eval-package package)))
+        (let ((forms (%read-all input (not safe-read))))
+          (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
+    (let ((*print-level* print-level)
+          (*print-length* print-length)
+          (*print-readably* nil))
+      (values (%truncate-output (prin1-to-string last-value) max-output-length)
+              last-value
+              (%truncate-output (get-output-stream-string stdout) max-output-length)
+              (%truncate-output (get-output-stream-string stderr) max-output-length)))))
+
+(defun %repl-eval-with-timeout (thunk timeout-seconds)
+  (if (and timeout-seconds (plusp timeout-seconds))
+      (let* ((result-box nil)
+             (worker (bordeaux-threads:make-thread
+                      (lambda ()
+                        (setf result-box (multiple-value-list (funcall thunk))))
+                      :name "mcp-repl-eval")))
+        (loop repeat (ceiling (/ timeout-seconds 0.05d0))
+              when (not (bordeaux-threads:thread-alive-p worker))
+              do (return-from %repl-eval-with-timeout (values-list result-box))
+              do (sleep 0.05d0))
+        ;; timed out
+        ;; Avoid destroying a thread that already exited while we were checking.
+        (when (bordeaux-threads:thread-alive-p worker)
+          (bordeaux-threads:destroy-thread worker))
+        (values (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
+                :timeout
+                ""
+                ""))
+      (funcall thunk)))
 (defun repl-eval (input &key (package *default-eval-package*)
                              (print-level nil) (print-length nil)
                              (timeout-seconds nil)
@@ -45,112 +162,11 @@ Options:
 - TIMEOUT-SECONDS: abort evaluation after this many seconds, returning a timeout string.
 - MAX-OUTPUT-LENGTH: truncate printed value/stdout/stderr to at most this many chars.
 - SAFE-READ: when T, disables `*read-eval*` to block reader evaluation (#.)."
-  (labels ((truncate-output (s)
-             (if (and max-output-length
-                      (integerp max-output-length)
-                      (> (length s) max-output-length))
-                 (concatenate 'string (subseq s 0 max-output-length)
-                              "...(truncated)")
-                 s))
-           (do-eval ()
-             (let ((last-value nil)
-                   (stdout (make-string-output-stream))
-                   (stderr (make-string-output-stream)))
-               (handler-bind ((warning (lambda (w)
-                                         (format stderr "~&Warning: ~A~%" w)
-                                         (when (find-restart 'muffle-warning)
-                                           (invoke-restart 'muffle-warning))))
-                              (error (lambda (e)
-                                       (setf last-value
-                                             (with-output-to-string (out)
-                                               (let ((*print-readably* nil))
-                                                 (format out "~A~%" e)
-                                                 (uiop:print-backtrace :stream out
-                                                                       :condition e))))
-                                       (return-from do-eval
-                                         (values last-value
-                                                 last-value
-                                                 (get-output-stream-string stdout)
-                                                 (get-output-stream-string stderr))))))
-                 (let* ((pkg (etypecase package
-                               (package package)
-                               (symbol (find-package package))
-                               (string (find-package package)))))
-                   (unless pkg
-                     (error "Package ~S does not exist" package))
-                   (let ((*package* pkg)
-                         (*read-eval* (not safe-read))
-                         (*print-readably* nil))
-                     (let ((forms (%read-all input (not safe-read))))
-                       (let ((*standard-output* stdout)
-                             (*error-output* stderr)
-                             (*compile-verbose* nil)
-                             (*compile-print* nil))
-                         #+sbcl
-                         (let* ((err-sym
-                                  (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
-                                (note-sym
-                                  (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
-                                (trace-sym
-                                  (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
-                                (syms '())
-                                (vals '()))
-                           ;; Route compiler errors/warnings and notes to STDERR.
-                           ;; Disable compiler trace output entirely, since it can
-                           ;; include very noisy diagnostics (including disassembly)
-                           ;; when non-NIL.
-                           (when err-sym
-                             (push err-sym syms)
-                             (push stderr vals))
-                           (when note-sym
-                             (push note-sym syms)
-                             (push stderr vals))
-                           (when trace-sym
-                             (push trace-sym syms)
-                             (push nil vals))
-                           (if syms
-                               (progv (nreverse syms) (nreverse vals)
-                                 ;; Rove/ASDF often wraps loads in WITH-COMPILATION-UNIT,
-                                 ;; which can delay undefined-variable warnings until the
-                                 ;; outermost unit exits (outside our capture scope).
-                                 ;; OVERRIDE ensures warnings are emitted within this
-                                 ;; dynamic extent and routed to our STDERR capture.
-                                 (sb-ext::with-compilation-unit (:override t
-                                                                 :source-namestring
-                                                                 "repl-eval")
-                                   (dolist (form forms)
-                                     (setf last-value (eval form)))))
-                               (sb-ext::with-compilation-unit (:override t
-                                                               :source-namestring
-                                                               "repl-eval")
-                                 (dolist (form forms)
-                                   (setf last-value (eval form))))))
-                         #-sbcl
-                         (dolist (form forms)
-                           (setf last-value (eval form)))))))
-                 (let ((*print-level* print-level)
-                       (*print-length* print-length)
-                       (*print-readably* nil))
-                   (values (truncate-output (prin1-to-string last-value))
-                           last-value
-                           (truncate-output (get-output-stream-string stdout))
-                           (truncate-output (get-output-stream-string stderr))))))))
-    (if (and timeout-seconds (plusp timeout-seconds))
-        (let* ((result-box nil)
-               (worker (bordeaux-threads:make-thread
-                        (lambda ()
-                          (setf result-box (multiple-value-list (do-eval))))
-                        :name "mcp-repl-eval")))
-          (loop repeat (ceiling (/ timeout-seconds 0.05))
-                when (not (bordeaux-threads:thread-alive-p worker))
-                do (return-from repl-eval (values-list result-box))
-                do (sleep 0.05))
-          ;; timed out
-          ;; Avoid destroying a thread that already exited while we were checking.
-          (when (bordeaux-threads:thread-alive-p worker)
-            (bordeaux-threads:destroy-thread worker))
-          (values (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
-                  :timeout
-                  ""
-                  ""))
-        (do-eval))))
+  (let ((thunk (lambda ()
+                 (%do-repl-eval input
+                                package
+                                safe-read
+                                print-level
+                                print-length
+                                max-output-length))))
+    (%repl-eval-with-timeout thunk timeout-seconds)))

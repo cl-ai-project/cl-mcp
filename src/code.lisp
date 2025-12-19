@@ -90,11 +90,11 @@ Returns NIL when the file cannot be read."
   "Return a namestring, relative to *project-root* when possible.
 Falls back to CWD, then cl-mcp system source directory, else absolute."
   (when pathname
-    (let* ((pn (uiop:ensure-pathname pathname))
-           (bases (remove nil
-                          (list *project-root*
-                                (uiop:getcwd)
-                                (ignore-errors (asdf:system-source-directory :cl-mcp))))))
+    (let ((pn (uiop:ensure-pathname pathname))
+          (bases (remove nil
+                         (list *project-root*
+                               (uiop:getcwd)
+                               (ignore-errors (asdf:system-source-directory :cl-mcp))))))
       (dolist (base bases (uiop:native-namestring pn))
         (when (uiop:subpathp pn base)
           (return (uiop:native-namestring (uiop:enough-pathname pn base))))))))
@@ -174,9 +174,12 @@ Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
 (defun %path-inside-project-p (pathname)
   "Return T when PATHNAME is inside *project-root*."
   (and pathname
-       *project-root*
-       (uiop:subpathp (uiop:ensure-pathname pathname :want-relative nil)
-                      (uiop:ensure-directory-pathname *project-root*))))
+       (if *project-root*
+           (if (uiop:absolute-pathname-p pathname)
+               (uiop:subpathp (uiop:ensure-pathname pathname :want-relative nil)
+                              (uiop:ensure-directory-pathname *project-root*))
+               t)
+           t)))
 
 (defun %line-snippet (pathname line)
   "Return LINE text (1-based) from PATHNAME, or NIL when unavailable."
@@ -195,7 +198,7 @@ Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
          (char-offset (and offset-fn (funcall offset-fn source)))
          (line (%offset->line pathname char-offset))
          (path (%normalize-path pathname)))
-    (values pathname path line)))
+    (values pathname path (or line (and pathname char-offset 1)))))
 
 (defun %finder->type (name)
   "Map SB-INTROSPECT XREF function name to output type."
@@ -214,8 +217,8 @@ Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
 (defun code-find-references (symbol-name &key package (project-only t))
   "Return a vector of reference objects and the count for SYMBOL-NAME.
 Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"."
-  (let* ((sym (%parse-symbol symbol-name :package package))
-         (results '()))
+  (let ((sym (%parse-symbol symbol-name :package package))
+        (results '()))
     #+sbcl
     (let* ((pkg (%ensure-sb-introspect))
            (finders '("WHO-CALLS"
@@ -230,7 +233,7 @@ Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"
         (let ((fn (and pkg (find-symbol finder pkg))))
           (when fn
             (dolist (source (ignore-errors (funcall fn sym)))
-              (let* ((definition (if (consp source) (cdr source) source)))
+              (let ((definition (if (consp source) (cdr source) source)))
                 (multiple-value-bind (pathname path line)
                     (%definition->path/line definition path-fn offset-fn)
                   (when (and path line
@@ -249,5 +252,5 @@ Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"
                           (push h results)))))))))))
       #-sbcl
       (error "code-find-references requires SBCL")
-      (let* ((vec (coerce (nreverse results) 'vector)))
+      (let ((vec (coerce (nreverse results) 'vector)))
         (values vec (length vec))))))

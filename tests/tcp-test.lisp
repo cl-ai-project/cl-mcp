@@ -34,14 +34,17 @@
                                :on-listening (lambda (p) (setf port-var p))
                                :accept-once t))
                   :name "tcp-test-server")))
-        (loop repeat 200 until port-var do (sleep 0.01))
+        (loop repeat 200 until port-var do (sleep 0.01d0))
         (ok port-var)
         (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
                                              :element-type 'character))
                (stream (usocket:socket-stream sock)))
           (unwind-protect
-               (progn
-                 (write-string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n" stream)
+               (let ((req (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                           "\"method\":\"initialize\",\"params\":{}}\n")))
+                 (write-string req stream)
                  (finish-output stream)
                  ;; Half-close our write side so the server sees EOF and exits
                  ;; the read loop even if the client crashes before closing.
@@ -56,7 +59,7 @@
   (testing "idle tcp connections stay open for later requests"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
-        (let ((*tcp-read-timeout* 0.1)
+        (let ((*tcp-read-timeout* 0.1d0)
               (port-var nil))
           (let ((thr (make-thread
                       (lambda ()
@@ -66,17 +69,19 @@
                       :name "tcp-idle-server")))
             (unwind-protect
                  (progn
-                   (loop repeat 200 until port-var do (sleep 0.01))
+                   (loop repeat 200 until port-var do (sleep 0.01d0))
                    (ok port-var)
                    (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
                                                         :element-type 'character))
                           (stream (usocket:socket-stream sock)))
                      (unwind-protect
-                          (progn
+                          (let ((req (concatenate
+                                      'string
+                                      "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                      "\"method\":\"initialize\",\"params\":{}}\n")))
                             ;; Wait longer than *tcp-read-timeout* without sending.
-                            (sleep 0.3)
-                            (write-string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
-                                          stream)
+                            (sleep 0.3d0)
+                            (write-string req stream)
                             (finish-output stream)
                             (ignore-errors (usocket:socket-shutdown sock :output))
                             (let ((line (read-line stream nil nil)))
@@ -92,7 +97,8 @@
         (unwind-protect
              (progn
                (multiple-value-bind (thr port)
-                   (start-tcp-server-thread :host "127.0.0.1" :port 0 :accept-once nil)
+                   (start-tcp-server-thread :host "127.0.0.1" :port 0
+                                            :accept-once nil)
                  (ok thr)
                  (ok (tcp-server-running-p))
                  (ok (integerp port))
@@ -100,8 +106,11 @@
                                                       :element-type 'character))
                         (stream (usocket:socket-stream sock)))
                    (unwind-protect
-                        (progn
-                          (write-string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n" stream)
+                        (let ((req (concatenate
+                                    'string
+                                    "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                    "\"method\":\"initialize\",\"params\":{}}\n")))
+                          (write-string req stream)
                           (finish-output stream)
                           ;; Signal EOF to server read loop after sending request.
                           (ignore-errors (usocket:socket-shutdown sock :output))
@@ -120,7 +129,7 @@
   (testing "idle client is closed after read timeout"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
-        (let ((*tcp-read-timeout* 0.1)
+        (let ((*tcp-read-timeout* 0.1d0)
               (port-var nil))
           (let ((thr (make-thread
                       (lambda ()
@@ -130,7 +139,7 @@
                       :name "tcp-timeout-server")))
             (unwind-protect
                  (progn
-                   (loop repeat 200 until port-var do (sleep 0.01))
+                   (loop repeat 200 until port-var do (sleep 0.01d0))
                    (ok port-var)
                    (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
                                                         :element-type 'character))
@@ -138,7 +147,7 @@
                      (unwind-protect
                           (progn
                             ;; Do not send anything; wait for server to time out.
-                            (sleep 0.3)
+                            (sleep 0.3d0)
                             (ok (eq (read-line stream nil :eof) :eof)))
                        (ignore-errors (close stream))
                        (ignore-errors (usocket:socket-close sock)))))
@@ -152,21 +161,29 @@
           (unwind-protect
                (progn
                  (multiple-value-bind (thr p)
-                     (start-tcp-server-thread :host "127.0.0.1" :port 0 :accept-once nil
-                                              :on-listening (lambda (v) (setf port v)))
+                     (start-tcp-server-thread :host "127.0.0.1" :port 0
+                                              :accept-once nil
+                                              :on-listening (lambda (v)
+                                                              (setf port v)))
                    (declare (ignore thr))
                    (setf port p))
-                 (loop repeat 200 until port do (sleep 0.01))
+                 (loop repeat 200 until port do (sleep 0.01d0))
                  (ok port)
                  (flet ((send-init ()
-                          (let* ((sock (usocket:socket-connect "127.0.0.1" port
-                                                               :element-type 'character))
+                          (let* ((sock (usocket:socket-connect
+                                        "127.0.0.1" port
+                                        :element-type 'character))
                                  (stream (usocket:socket-stream sock)))
                             (unwind-protect
-                                 (progn
-                                   (write-string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n" stream)
+                                 (let ((req (concatenate
+                                             'string
+                                             "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                             "\"method\":\"initialize\","
+                                             "\"params\":{}}\n")))
+                                   (write-string req stream)
                                    (finish-output stream)
-                                   (ignore-errors (usocket:socket-shutdown sock :output))
+                                   (ignore-errors
+                                     (usocket:socket-shutdown sock :output))
                                    (read-line stream nil nil))
                               (ignore-errors (close stream))
                               (ignore-errors (usocket:socket-close sock))))))

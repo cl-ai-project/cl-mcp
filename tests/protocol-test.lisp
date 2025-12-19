@@ -8,7 +8,10 @@
 (in-package #:cl-mcp/tests/protocol-test)
 
 (defparameter *init-req*
-  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"test-client\",\"version\":\"0.1\"}}}")
+  (concatenate 'string
+               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+               "\"params\":{\"clientInfo\":{\"name\":\"test-client\","
+               "\"version\":\"0.1\"}}}"))
 
 (deftest initialize-handshake
   (testing "process-json-line responds with serverInfo and capabilities"
@@ -27,12 +30,19 @@
 
 (deftest initialized-notification
   (testing "notifications/initialized returns no response"
-    (let* ((line "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}"))
+    (let ((line (concatenate
+                 'string
+                 "{\"jsonrpc\":\"2.0\","
+                 "\"method\":\"notifications/initialized\","
+                 "\"params\":{\"protocolVersion\":\"2025-06-18\"}}")))
       (ok (null (process-json-line line))))))
 
 (deftest initialize-echo-version
   (testing "initialize echoes client protocolVersion when supported"
-    (let* ((line "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}")
+    (let* ((line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"2024-11-05\"}}"))
            (resp (process-json-line line))
            (obj (parse resp))
            (result (gethash "result" obj)))
@@ -40,7 +50,10 @@
 
 (deftest initialize-unsupported-version
   (testing "initialize returns error for unsupported protocolVersion"
-    (let* ((line "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1999-01-01\"}}")
+    (let* ((line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"1999-01-01\"}}"))
            (resp (process-json-line line))
            (obj (parse resp))
            (err (gethash "error" obj)))

@@ -4,8 +4,7 @@
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition
-                #:code-describe-symbol
-                #:code-find-references))
+                #:code-describe-symbol))
 
 (in-package #:cl-mcp/tests/code-test)
 
@@ -54,7 +53,7 @@
           (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
       (compile 'cl-mcp/tests/code-test::xref-anchor)
       (multiple-value-bind (refs count)
-          (code-find-references "cl-mcp:process-json-line")
+          (cl-mcp/src/code:code-find-references "cl-mcp:process-json-line")
         (ok (>= count 1))
         (ok (vectorp refs))
         (let ((first (aref refs 0)))

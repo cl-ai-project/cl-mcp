@@ -9,7 +9,10 @@
 
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp-read-file\",\"arguments\":{\"path\":\"src/core.lisp\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp-read-file\","
+                 "\"arguments\":{\"path\":\"src/core.lisp\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -26,7 +29,10 @@
 
 (deftest tools-call-fs-read
   (testing "tools/call fs-read-file returns content"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-read-file\",\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":10}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"fs-read-file\","
+                 "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":10}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -39,8 +45,15 @@
 
 (deftest tools-call-fs-write-and-readback
   (testing "tools/call fs-write-file writes then fs-read-file reads"
-    (let* ((req-write "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-write-file\",\"arguments\":{\"path\":\"tmp-tools-write.txt\",\"content\":\"hi\"}}}")
-           (req-read  "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-read-file\",\"arguments\":{\"path\":\"tmp-tools-write.txt\"}}}"))
+    (let ((req-write (concatenate 'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"fs-write-file\","
+                       "\"arguments\":{\"path\":\"tmp-tools-write.txt\","
+                       "\"content\":\"hi\"}}}"))
+          (req-read (concatenate 'string
+                      "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\","
+                      "\"params\":{\"name\":\"fs-read-file\","
+                      "\"arguments\":{\"path\":\"tmp-tools-write.txt\"}}}")))
       (unwind-protect
            (progn
              (let* ((resp (process-json-line req-write))
@@ -59,7 +72,10 @@
 
 (deftest tools-call-fs-list
   (testing "tools/call fs-list-directory lists entries"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-list-directory\",\"arguments\":{\"path\":\".\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"fs-list-directory\","
+                 "\"arguments\":{\"path\":\".\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -72,7 +88,10 @@
 
 (deftest tools-call-code-find
   (testing "tools/call code-find returns path and line"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"code-find\","
+                 "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (or (gethash "result" obj)
@@ -86,7 +105,10 @@
 
 (deftest tools-call-code-describe
   (testing "tools/call code-describe returns symbol metadata"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"code-describe\",\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"code-describe\","
+                 "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (or (gethash "result" obj)
@@ -107,7 +129,10 @@
     #+darwin
     (skip "XREF tests are unstable on macOS")
     #-darwin
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"code-find-references\",\"arguments\":{\"symbol\":\"cl-mcp:process-json-line\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"code-find-references\","
+                 "\"arguments\":{\"symbol\":\"cl-mcp:process-json-line\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -122,7 +147,10 @@
 
 (deftest tools-call-repl-eval
   (testing "tools/call executes repl.eval and returns text content"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(+ 1 2)\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"(+ 1 2)\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -138,7 +166,11 @@
 
 (deftest tools-call-repl-eval-captures-output
   (testing "repl-eval captures stdout and stderr"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":\"(progn (format t \\\"hi\\\") (format *error-output* \\\"oops\\\") 42)\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\",\"arguments\":{\"code\":"
+                 "\"(progn (format t \\\"hi\\\") "
+                 "(format *error-output* \\\"oops\\\") 42)\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj)))
@@ -151,7 +183,10 @@
 
 (deftest tools-call-namespaced-name
   (testing "namespaced tool name like lisp_mcp.repl-eval is accepted"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp_mcp.repl-eval\",\"arguments\":{\"code\":\"(+ 2 3)\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp_mcp.repl-eval\","
+                 "\"arguments\":{\"code\":\"(+ 2 3)\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj))
@@ -165,7 +200,10 @@
 
 (deftest tools-call-lisp-check-parens-ok
   (testing "tools/call lisp-check-parens returns ok true for balanced code"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp-check-parens\",\"arguments\":{\"code\":\"(defun foo () (list 1 2))\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp-check-parens\","
+                 "\"arguments\":{\"code\":\"(defun foo () (list 1 2))\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj)))
@@ -173,7 +211,10 @@
 
 (deftest tools-call-lisp-check-parens-mismatch
   (testing "tools/call lisp-check-parens reports mismatch"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"lisp-check-parens\",\"arguments\":{\"code\":\"(defun foo () [1 2))\"}}}"))
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp-check-parens\","
+                 "\"arguments\":{\"code\":\"(defun foo () [1 2))\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj)))
