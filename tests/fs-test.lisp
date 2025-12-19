@@ -197,7 +197,8 @@
   (testing "fs-set-project-root converts relative paths to absolute paths"
     (let ((original-root cl-mcp/src/fs:*project-root*)
           (original-cwd (getcwd))
-          (expected-absolute (truename (ensure-directory-pathname "."))))
+          ;; Use getcwd to match what fs-set-project-root does internally
+          (expected-absolute (truename (getcwd))))
       (unwind-protect
            (progn
              ;; Set project root using relative path "."
