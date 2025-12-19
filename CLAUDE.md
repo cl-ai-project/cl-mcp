@@ -51,6 +51,16 @@ rove tests/integration-test.lisp
   (rove:run-test 'cl-mcp/tests/integration-test::repl-eval-printlength))
 ```
 
+### Linting
+Always run mallet on changed Lisp files before committing:
+```bash
+# Lint a single file
+mallet src/http.lisp
+
+# Lint all source files
+mallet src/*.lisp
+```
+
 ### Environment Variables
 ```bash
 # Project root (critical for file operations)

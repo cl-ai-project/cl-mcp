@@ -6,8 +6,16 @@
                 #:*http-server-port*
                 #:http-server-running-p
                 #:start-http-server
-                #:stop-http-server)
-  (:import-from #:usocket))
+                #:stop-http-server
+                #:*session-timeout-seconds*
+                #:*sessions*
+                #:*sessions-lock*
+                #:get-session
+                #:create-session
+                #:http-session-id
+                #:http-session-last-access)
+  (:import-from #:usocket)
+  (:import-from #:bordeaux-threads))
 
 (in-package #:cl-mcp/tests/http-test)
 
@@ -148,3 +156,68 @@ Uses Connection: close to avoid keep-alive hanging."
                    (when status
                      (ok (eql status 400))))))
           (stop-http-server)))))
+
+;;; Session timeout tests
+
+(defun clear-all-sessions ()
+  "Clear all sessions for test isolation."
+  (bordeaux-threads:with-lock-held (*sessions-lock*)
+    (clrhash *sessions*)))
+
+(deftest session-timeout-disabled-by-default
+  (testing "*session-timeout-seconds* defaults to NIL"
+    (ok (null *session-timeout-seconds*))))
+
+(deftest session-no-expiry-when-timeout-disabled
+  (testing "Sessions do not expire when *session-timeout-seconds* is NIL"
+    (let ((*session-timeout-seconds* nil))
+      (unwind-protect
+           (let* ((session (create-session))
+                  (session-id (http-session-id session)))
+             ;; Simulate old last-access time (1 hour ago)
+             (setf (http-session-last-access session)
+                   (- (get-universal-time) 3600))
+             ;; Session should still be valid
+             (ok (get-session session-id) "Session should not expire when timeout is NIL"))
+        (clear-all-sessions)))))
+
+(deftest session-expires-when-timeout-enabled
+  (testing "Sessions expire after *session-timeout-seconds*"
+    (let ((*session-timeout-seconds* 1))  ; 1 second timeout
+      (unwind-protect
+           (let* ((session (create-session))
+                  (session-id (http-session-id session)))
+             ;; Simulate old last-access time (2 seconds ago)
+             (setf (http-session-last-access session)
+                   (- (get-universal-time) 2))
+             ;; Session should be expired
+             (ok (null (get-session session-id))
+                 "Session should expire when idle time exceeds timeout"))
+        (clear-all-sessions)))))
+
+(deftest session-valid-within-timeout
+  (testing "Sessions remain valid within timeout period"
+    (let ((*session-timeout-seconds* 60))  ; 60 second timeout
+      (unwind-protect
+           (let* ((session (create-session))
+                  (session-id (http-session-id session)))
+             ;; Session was just created, should be valid
+             (ok (get-session session-id)
+                 "Session should be valid within timeout period"))
+        (clear-all-sessions)))))
+
+(deftest get-session-updates-last-access
+  (testing "get-session updates last-access timestamp"
+    (let ((*session-timeout-seconds* nil))
+      (unwind-protect
+           (let* ((session (create-session))
+                  (session-id (http-session-id session))
+                  (old-time (- (get-universal-time) 100)))
+             ;; Set old last-access time
+             (setf (http-session-last-access session) old-time)
+             ;; Call get-session
+             (get-session session-id)
+             ;; Last-access should be updated
+             (ok (> (http-session-last-access session) old-time)
+                 "get-session should update last-access timestamp"))
+        (clear-all-sessions)))))
