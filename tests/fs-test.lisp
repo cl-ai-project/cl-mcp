@@ -15,10 +15,12 @@
 (in-package #:cl-mcp/tests/fs-test)
 
 (defmacro with-test-project-root (&body body)
-  `(let* ((original-root cl-mcp/src/fs:*project-root*)
-          (original-cwd (ignore-errors (getcwd)))
-          (test-root (or (ignore-errors (ensure-directory-pathname (system-source-directory "cl-mcp")))
-                         (ensure-directory-pathname (getcwd)))))
+  `(let ((original-root cl-mcp/src/fs:*project-root*)
+         (original-cwd (ignore-errors (getcwd)))
+         (test-root (or (ignore-errors
+                          (ensure-directory-pathname
+                           (system-source-directory "cl-mcp")))
+                        (ensure-directory-pathname (getcwd)))))
      (unwind-protect
           (progn
             ;; Set project root explicitly for the test
@@ -39,8 +41,8 @@
 (deftest fs-write-file-project
   (testing "fs-write-file writes under project root"
     (with-test-project-root
-      (let* ((rel "tests/tmp-fs-write.txt")
-             (content "hello world\n"))
+      (let ((rel "tests/tmp-fs-write.txt")
+            (content "hello world\n"))
         (unwind-protect
              (progn
                (ok (fs-write-file rel content))
@@ -193,9 +195,9 @@
 
 (deftest fs-set-project-root-converts-relative-to-absolute
   (testing "fs-set-project-root converts relative paths to absolute paths"
-    (let* ((original-root cl-mcp/src/fs:*project-root*)
-           (original-cwd (getcwd))
-           (expected-absolute (truename (ensure-directory-pathname "."))))
+    (let ((original-root cl-mcp/src/fs:*project-root*)
+          (original-cwd (getcwd))
+          (expected-absolute (truename (ensure-directory-pathname "."))))
       (unwind-protect
            (progn
              ;; Set project root using relative path "."
@@ -262,9 +264,10 @@
              ;; Remove trailing slash if present
              (path-without-slash (string-right-trim "/" project-root))
              ;; Ensure trailing slash
-             (path-with-slash (if (char= (char project-root (1- (length project-root))) #\/)
-                                  project-root
-                                  (concatenate 'string project-root "/"))))
+             (path-with-slash
+               (if (char= (char project-root (1- (length project-root))) #\/)
+                   project-root
+                   (concatenate 'string project-root "/"))))
         ;; Test without trailing slash
         (let ((entries-no-slash (fs-list-directory path-without-slash)))
           (ok (vectorp entries-no-slash))
@@ -278,8 +281,16 @@
               (entries-with-slash (fs-list-directory path-with-slash)))
           (ok (= (length entries-no-slash) (length entries-with-slash)))
           ;; Compare entry names
-          (let ((names-no-slash (sort (map 'list (lambda (h) (gethash "name" h)) entries-no-slash) #'string<))
-                (names-with-slash (sort (map 'list (lambda (h) (gethash "name" h)) entries-with-slash) #'string<)))
+          (let ((names-no-slash
+                  (sort (map 'list
+                             (lambda (h) (gethash "name" h))
+                             entries-no-slash)
+                        #'string<))
+                (names-with-slash
+                  (sort (map 'list
+                             (lambda (h) (gethash "name" h))
+                             entries-with-slash)
+                        #'string<)))
             (ok (equal names-no-slash names-with-slash))))))))
 
 (deftest fs-resolve-read-path-trailing-slash-normalization

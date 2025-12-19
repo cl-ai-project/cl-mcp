@@ -60,14 +60,14 @@
     (let ((session (gethash session-id *sessions*)))
       (when session
         (let ((now (get-universal-time)))
-          (if (> (- now (http-session-last-access session))
-                 *session-timeout-seconds*)
-              (progn
-                (remhash session-id *sessions*)
-                nil)
-              (progn
-                (setf (http-session-last-access session) now)
-                session)))))))
+          (cond
+            ((> (- now (http-session-last-access session))
+                *session-timeout-seconds*)
+             (remhash session-id *sessions*)
+             nil)
+            (t
+             (setf (http-session-last-access session) now)
+             session)))))))
 
 (defun create-session ()
   "Create a new session and return it."
@@ -115,11 +115,44 @@
           (log-event :warn "http.parse-error" "error" (princ-to-string e))
           nil)))))
 
+(defun %http-error-json (code message)
+  (format nil
+          (concatenate 'string
+                       "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":~D,\"message\":\"~A\"},"
+                       "\"id\":null}")
+          code message))
+
+(defun %handle-mcp-post-initialize (body)
+  (when (is-initialize-request-p body)
+    (let* ((session (create-session))
+           (state (http-session-state session))
+           (line (with-output-to-string (s)
+                   (yason:encode body s)))
+           (response (process-json-line line state)))
+      (log-event :info "http.initialize"
+                 "session-id" (http-session-id session))
+      (set-header :mcp-session-id (http-session-id session))
+      response)))
+
+(defun %handle-mcp-post-session (session-id body)
+  (let ((session (get-session session-id)))
+    (unless session
+      (return-from %handle-mcp-post-session (values nil :invalid)))
+    (let* ((state (http-session-state session))
+           (line (with-output-to-string (s)
+                   (yason:encode body s)))
+           (response (process-json-line line state)))
+      (log-event :debug "http.response"
+                 "session-id" session-id
+                 "has-response" (not (null response)))
+      (if response
+          (values response :response)
+          (values nil :notification)))))
 (defun handle-mcp-post ()
   "Handle POST requests to the MCP endpoint."
-  (let* ((accept (get-header :accept))
-         (session-id (get-header :mcp-session-id))
-         (body (parse-json-body)))
+  (let ((accept (get-header :accept))
+        (session-id (get-header :mcp-session-id))
+        (body (parse-json-body)))
     (log-event :debug "http.post"
                "session-id" session-id
                "has-body" (not (null body)))
@@ -130,74 +163,70 @@
                 (search "text/event-stream" accept)
                 (search "*/*" accept))
       (return-from handle-mcp-post
-        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid Accept header\"},\"id\":null}"
+        (json-response (%http-error-json -32600 "Invalid Accept header")
                        :status 406)))
 
     ;; Handle missing body
     (unless body
       (return-from handle-mcp-post
-        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}"
+        (json-response (%http-error-json -32700 "Parse error")
                        :status 400)))
 
     ;; Handle initialization (no session required)
-    (when (is-initialize-request-p body)
-      (let* ((session (create-session))
-             (state (http-session-state session))
-             (line (with-output-to-string (s)
-                     (yason:encode body s)))
-             (response (process-json-line line state)))
-        (log-event :info "http.initialize"
-                   "session-id" (http-session-id session))
-        (set-header :mcp-session-id (http-session-id session))
+    (let ((init-response (%handle-mcp-post-initialize body)))
+      (when init-response
         (return-from handle-mcp-post
-          (json-response response))))
+          (json-response init-response))))
 
     ;; Require session for non-initialize requests
     (unless session-id
       (return-from handle-mcp-post
-        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Missing Mcp-Session-Id header\"},\"id\":null}"
+        (json-response (%http-error-json -32600 "Missing Mcp-Session-Id header")
                        :status 400)))
 
-    ;; Get existing session
-    (let ((session (get-session session-id)))
-      (unless session
-        (return-from handle-mcp-post
-          (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Session expired or invalid\"},\"id\":null}"
-                         :status 404)))
-
-      ;; Process the request
-      (let* ((state (http-session-state session))
-             (line (with-output-to-string (s)
-                     (yason:encode body s)))
-             (response (process-json-line line state)))
-        (log-event :debug "http.response"
-                   "session-id" session-id
-                   "has-response" (not (null response)))
-        (if response
-            (json-response response)
-            ;; Notification - no response body
-            (progn
-              (setf (hunchentoot:return-code*) 202)
-              ""))))))
+    ;; Process the request
+    (multiple-value-bind (response status)
+        (%handle-mcp-post-session session-id body)
+      (cond
+        ((eq status :invalid)
+         (json-response (%http-error-json -32600 "Session expired or invalid")
+                        :status 404))
+        ((eq status :response)
+         (json-response response))
+        (t
+         ;; Notification - no response body
+         (setf (hunchentoot:return-code*) 202)
+         "")))))
 
 (defun handle-mcp-get ()
   "Handle GET requests to the MCP endpoint (SSE stream).
 Currently returns 405 as SSE is not yet implemented."
   (log-event :debug "http.get.sse-not-supported")
-  (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"SSE not yet supported. Use POST for request/response.\"},\"id\":null}"
-                 :status 405))
+  (let ((payload (format nil
+                         (concatenate 'string
+                                      "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,"
+                                      "\"message\":\"~A\"},"
+                                      "\"id\":null}")
+                         "SSE not yet supported. Use POST for request/response.")))
+    (json-response payload :status 405)))
 
 (defun handle-mcp-delete ()
   "Handle DELETE requests to terminate a session."
   (let ((session-id (get-header :mcp-session-id)))
-    (if session-id
-        (progn
-          (delete-session session-id)
-          (log-event :info "http.session.deleted" "session-id" session-id)
-          (setf (hunchentoot:return-code*) 204)
-          "")
-        (json-response "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Missing Mcp-Session-Id header\"},\"id\":null}"
-                       :status 400))))
+    (cond
+      (session-id
+       (delete-session session-id)
+       (log-event :info "http.session.deleted" "session-id" session-id)
+       (setf (hunchentoot:return-code*) 204)
+       "")
+      (t
+       (let ((payload (format nil
+                              (concatenate 'string
+                                           "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
+                                           "\"message\":\"~A\"},"
+                                           "\"id\":null}")
+                              "Missing Mcp-Session-Id header")))
+         (json-response payload :status 400))))))
 
 (defun handle-mcp-options ()
   "Handle OPTIONS requests for CORS preflight."

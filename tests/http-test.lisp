@@ -3,7 +3,6 @@
 (defpackage #:cl-mcp/tests/http-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/http
-                #:*http-server*
                 #:*http-server-port*
                 #:http-server-running-p
                 #:start-http-server
@@ -106,13 +105,17 @@ Uses Connection: close to avoid keep-alive hanging."
                (multiple-value-bind (acceptor port)
                    (start-http-server :host "127.0.0.1" :port 0)
                  (declare (ignore acceptor))
-                 (sleep 0.1)
+                 (sleep 0.1d0)
                  (multiple-value-bind (status headers body)
                      (handler-case
-                         (send-http-request port "POST" "/mcp"
-                                            :body "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"
-                                            :headers '(("Content-Type" . "application/json")
-                                                       ("Accept" . "application/json")))
+                         (send-http-request
+                          port "POST" "/mcp"
+                          :body (concatenate
+                                 'string
+                                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                 "\"method\":\"initialize\",\"params\":{}}")
+                          :headers '(("Content-Type" . "application/json")
+                                     ("Accept" . "application/json")))
                        (error (e)
                          (declare (ignore e))
                          (values nil nil nil)))
@@ -131,12 +134,17 @@ Uses Connection: close to avoid keep-alive hanging."
                (multiple-value-bind (acceptor port)
                    (start-http-server :host "127.0.0.1" :port 0)
                  (declare (ignore acceptor))
-                 (sleep 0.1)
-                 (let ((status (handler-case
-                                   (send-http-request port "POST" "/mcp"
-                                                      :body "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}"
-                                                      :headers '(("Content-Type" . "application/json")))
-                                 (error () nil))))
+                 (sleep 0.1d0)
+                 (let ((status
+                         (handler-case
+                             (send-http-request
+                              port "POST" "/mcp"
+                              :body (concatenate
+                                     'string
+                                     "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                     "\"method\":\"tools/list\",\"params\":{}}")
+                              :headers '(("Content-Type" . "application/json")))
+                           (error () nil))))
                    (when status
                      (ok (eql status 400))))))
           (stop-http-server)))))

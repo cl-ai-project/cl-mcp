@@ -50,7 +50,7 @@ client, so we discard output during ASDF operations."
   (when x
     (typecase x
       (string x)
-      (t (princ-to-string x)))))
+      (otherwise (princ-to-string x)))))
 
 (defun %dep-name (dep)
   (let ((d (if (consp dep) (car dep) dep)))

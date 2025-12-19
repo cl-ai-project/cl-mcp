@@ -25,8 +25,9 @@
    (merge-pathnames* relative (system-source-directory :cl-mcp))))
 
 (defun with-temp-file (relative initial thunk)
-  "Create RELATIVE file with INITIAL content, call THUNK with absolute path, then clean up."
-  (let* ((abs (project-path relative)))
+  "Create RELATIVE file with INITIAL content, call THUNK with absolute path,
+then clean up."
+  (let ((abs (project-path relative)))
     (ensure-directories-exist abs)
     (fs-write-file relative initial)
     (unwind-protect
@@ -52,19 +53,19 @@
     (with-temp-file "tests/tmp/edit-form-dry-run.lisp"
         "(defun target () :old)\n"
       (lambda (path)
-        (let* ((before (fs-read-file path))
-               (result (lisp-edit-form :file-path path
-                                       :form-type "defun"
-                                       :form-name "target"
-                                       :operation "replace"
-                                       :content "(defun target () :new)"
-                                       :dry-run t))
-               (after (fs-read-file path)))
-          (ok (hash-table-p result))
-          (ok (gethash "would_change" result))
-          (ok (string= before after))
-          (ok (string= "(defun target () :old)" (gethash "original" result)))
-          (ok (search ":new" (gethash "preview" result))))))))
+        (let ((before (fs-read-file path))
+              (result (lisp-edit-form :file-path path
+                                      :form-type "defun"
+                                      :form-name "target"
+                                      :operation "replace"
+                                      :content "(defun target () :new)"
+                                      :dry-run t)))
+          (let ((after (fs-read-file path)))
+            (ok (hash-table-p result))
+            (ok (gethash "would_change" result))
+            (ok (string= before after))
+            (ok (string= "(defun target () :old)" (gethash "original" result)))
+            (ok (search ":new" (gethash "preview" result)))))))))
 
 (deftest lisp-edit-form-insert-before
   (testing "insert_before inserts helper before target defun"
@@ -92,7 +93,9 @@
                         :form-type "defmethod"
                         :form-name "describe ((obj widget))"
                         :operation "insert_after"
-                        :content "(defmethod describe :after ((obj widget))\n  (format t \"done\"))")
+                        :content (concatenate 'string
+                                   "(defmethod describe :after ((obj widget))"
+                                   (format nil "~%  (format t \"done\")")))
         (let* ((text (fs-read-file path))
                (primary (search "defmethod describe ((obj widget))" text))
                (after (search "defmethod describe :after ((obj widget))" text)))
@@ -204,10 +207,17 @@
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
-           (content (format nil
-                            "#.(progn (with-open-file (s \"~A\" :direction :output :if-exists :supersede :if-does-not-exist :create) (write-line \"executed\" s)) '(defun target () :ok))~%\
-(defun target () :ok)~%"
-                            flag-path)))
+           (content
+             (format nil
+                     (concatenate
+                      'string
+                      "#.(progn (with-open-file "
+                      "(s \"~A\" :direction :output "
+                      ":if-exists :supersede :if-does-not-exist :create) "
+                      "(write-line \"executed\" s)) "
+                      "'(defun target () :ok))~%"
+                      "(defun target () :ok)~%")
+                     flag-path)))
       (ignore-errors (delete-file flag-path))
       (unwind-protect
            (with-temp-file "tests/tmp/edit-form-read-eval.lisp"
@@ -259,7 +269,9 @@
                         :form-type "defun"
                         :form-name "helper"
                         :operation "insert_after"
-                        :content (format nil "(defun process (data)~%  (when data~%    (print data)~%    (+ 1 2"))
+                        :content (format nil
+                                   "(defun process (data)~%  (when data~%~
+                                    (print data)~%    (+ 1 2"))
         (let ((updated (fs-read-file path)))
           (ok (search "(defun helper () :ok)" updated))
           (ok (search "(defun process (data)" updated))

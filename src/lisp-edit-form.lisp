@@ -24,7 +24,6 @@
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
-                #:merge-pathnames*
                 #:native-namestring
                 #:subpathp)
   (:export #:lisp-edit-form))
@@ -45,14 +44,14 @@
           (setf lambda-list part)
           (return))
         (push part qualifiers))
-      (let* ((name-str (%normalize-string name))
-             (lambda-str (and lambda-list
-                              (%normalize-string
-                               (with-output-to-string (s)
-                                 (prin1 lambda-list s)))))
-             (qual-str (and qualifiers
-                            (%normalize-string
-                             (format nil "~{~A~^ ~}" (nreverse qualifiers))))))
+      (let ((name-str (%normalize-string name))
+            (lambda-str (and lambda-list
+                             (%normalize-string
+                              (with-output-to-string (s)
+                                (prin1 lambda-list s)))))
+            (qual-str (and qualifiers
+                           (%normalize-string
+                            (format nil "~{~A~^ ~}" (nreverse qualifiers))))))
         (remove nil
                 (list name-str
                       (and lambda-str (format nil "~A ~A" name-str lambda-str))
@@ -92,8 +91,8 @@ necessary to leave one blank line between top-level forms."
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools."
-  (let* ((resolved (fs-resolve-read-path file-path))
-         (root (ensure-directory-pathname *project-root*)))
+  (let ((resolved (fs-resolve-read-path file-path))
+        (root (ensure-directory-pathname *project-root*)))
     (unless (subpathp resolved root)
       (error "Write path ~A is outside project root ~A" file-path root))
     (let* ((relative (enough-pathname resolved root))
@@ -111,7 +110,8 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
                      (cl:read-from-string text nil :eof)
                    (when (eq form :eof)
                      (error "content is empty"))
-                   (let ((rest (string-trim '(#\Space #\Tab #\Newline) (subseq text pos))))
+                   (let ((rest (string-trim '(#\Space #\Tab #\Newline)
+                                            (subseq text pos))))
                      (when (> (length rest) 0)
                        (error "content contains extra characters after the first form")))
                    text)
@@ -125,15 +125,16 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
             (let ((repaired (apply-indent-mode content)))
               (multiple-value-bind (repaired-result repaired-err)
                   (try-parse repaired)
-                (if repaired-result
-                    (progn
-                      (log-event :info "lisp-edit-form"
-                                 "auto-repair" "success"
-                                 "original-error" (princ-to-string err))
-                      repaired-result)
-                    ;; Repair failed, signal the original error
-                    (error "content parse error: ~A (repair also failed: ~A)"
-                           err repaired-err)))))))))
+                (cond
+                  (repaired-result
+                   (log-event :info "lisp-edit-form"
+                              "auto-repair" "success"
+                              "original-error" (princ-to-string err))
+                   repaired-result)
+                  (t
+                   ;; Repair failed, signal the original error
+                   (error "content parse error: ~A (repair also failed: ~A)"
+                          err repaired-err))))))))))
 
 (defun %find-target (nodes form-type form-name)
   (let ((target (string-downcase form-name)))
@@ -148,11 +149,11 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
                    (return node))))))
 
 (defun %apply-operation (text node operation content)
-  (let* ((start (cst-node-start node))
-         (end (cst-node-end node))
-         (snippet (ecase operation
-                    ((:replace) content)
-                    ((:insert-before :insert-after) (%ensure-trailing-newline content)))))
+  (let ((start (cst-node-start node))
+        (end (cst-node-end node))
+        (snippet (ecase operation
+                   ((:replace) content)
+                   ((:insert-before :insert-after) (%ensure-trailing-newline content)))))
     (ecase operation
       (:replace
        (concatenate 'string (subseq text 0 start) snippet (subseq text end)))
@@ -213,14 +214,15 @@ written; instead, a preview hash-table is returned."
                      "bytes" (length updated)
                      "dry_run" dry-run
                      "would_change" would-change)
-          (if dry-run
-              (let ((result (make-hash-table :test #'equal)))
-                (setf (gethash "would_change" result) would-change
-                      (gethash "original" result) target-snippet
-                      (gethash "preview" result) updated
-                      (gethash "file_path" result) (namestring abs)
-                      (gethash "operation" result) op-normalized)
-                result)
-              (progn
-                (fs-write-file rel updated)
-                updated)))))))
+          (cond
+            (dry-run
+             (let ((result (make-hash-table :test #'equal)))
+               (setf (gethash "would_change" result) would-change
+                     (gethash "original" result) target-snippet
+                     (gethash "preview" result) updated
+                     (gethash "file_path" result) (namestring abs)
+                     (gethash "operation" result) op-normalized)
+               result))
+            (t
+             (fs-write-file rel updated)
+             updated)))))))

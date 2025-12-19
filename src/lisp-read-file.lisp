@@ -58,7 +58,7 @@
       (string-trim '(#\Space #\Tab) slice))))
 
 (defun %truncate-doc (docstring)
-  (let* ((line (%docstring-first-line docstring)))
+  (let ((line (%docstring-first-line docstring)))
     (when line
       (if (> (length line) 80)
           (concatenate 'string (subseq line 0 77) "...")
@@ -67,8 +67,8 @@
 (defun %definition-names (form)
   "Return a list of stringified definition names for FORM, when applicable."
   (when (consp form)
-    (let* ((head (car form))
-           (name (second form)))
+    (let ((head (car form))
+          (name (second form)))
       (when (member head '(defun defmacro defvar defparameter defconstant defclass
                            defstruct defgeneric defmethod defpackage))
         (list (string-downcase (prin1-to-string name)))))))
@@ -88,7 +88,7 @@
                  ((defmethod)
                   (or (find-if #'listp (cddr form))
                       (third form)))
-                 (t (third form))))
+                 (otherwise (third form))))
          (args-display (if args
                            (with-output-to-string (out)
                              (write args :stream out :pretty nil :case :downcase))
@@ -265,11 +265,11 @@
     (let ((lines (loop for line = (read-line in nil :eof)
                        until (eq line :eof)
                        collect line)))
-      (let* ((len (length lines))
-             (context *text-context-lines*)
-             (selected '())
-             (seen (make-hash-table :test #'eql))
-             (truncated nil))
+      (let ((len (length lines))
+            (context *text-context-lines*)
+            (selected '())
+            (seen (make-hash-table :test #'eql))
+            (truncated nil))
         (loop for idx from 0 below len
               for line in lines do
                 (when (and (not truncated) (scan scanner line))
@@ -283,6 +283,42 @@
                               (return))))))
         (values (format nil "~{~A~%~}" (nreverse selected)) truncated)))))
 
+(defun %lisp-read-file-content (resolved collapsed name-scanner content-scanner offset line-limit
+                                 include-comments comment-context)
+  (cond
+    ((and collapsed (lisp-source-path-p resolved))
+     (let ((text (fs-read-file resolved)))
+       (multiple-value-bind (display meta-table)
+           (%format-lisp-file text
+                              name-scanner
+                              content-scanner
+                              include-comments
+                              comment-context)
+         (values display meta-table "lisp-collapsed"))))
+    ((not collapsed)
+     (multiple-value-bind (text truncated total)
+         (%read-lines-slice resolved (or offset 0) line-limit)
+       (let ((meta (make-hash-table :test #'equal)))
+         (setf (gethash "truncated" meta) truncated
+               (gethash "total_lines" meta) total)
+         (values text meta "raw"))))
+    ((and content-scanner (not (lisp-source-path-p resolved)))
+     (multiple-value-bind (text truncated)
+         (%text-filter-with-context resolved content-scanner line-limit)
+       (let ((meta (make-hash-table :test #'equal)))
+         (setf (gethash "truncated" meta) truncated)
+         (values text meta "text-filtered"))))
+    (t
+     (multiple-value-bind (text truncated total)
+         (%read-lines-slice resolved 0 line-limit)
+       (let ((meta (make-hash-table :test #'equal)))
+         (setf (gethash "truncated" meta) truncated
+               (gethash "total_lines" meta) total)
+         (values text
+                 meta
+                 (if (lisp-source-path-p resolved)
+                     "lisp-snippet"
+                     "text-snippet")))))))
 (defun lisp-read-file (path &key (collapsed t) name-pattern content-pattern offset limit
                              (include-comments nil) (comment-context "preceding"))
   "Read PATH with Lisp-aware collapsed formatting.
@@ -304,44 +340,19 @@ on COMMENT-CONTEXT. Returns a hash-table payload with keys \"content\", \"path\"
     (error "offset must be non-negative"))
   (when (and limit (not (integerp limit)))
     (error "limit must be an integer when provided"))
-  (let* ((resolved (fs-resolve-read-path path))
-         (mode nil)
-         (line-limit (or limit *default-line-limit*))
-         (name-scanner (%compile-scanner name-pattern))
-         (content-scanner (%compile-scanner content-pattern)))
-    (multiple-value-bind (content meta)
-        (cond
-          ((and collapsed (lisp-source-path-p resolved))
-           (let ((text (fs-read-file resolved)))
-             (multiple-value-bind (display meta-table)
-                 (%format-lisp-file text name-scanner content-scanner include-comments comment-context)
-               (setf mode "lisp-collapsed")
-               (values display meta-table))))
-          ((not collapsed)
-           (multiple-value-bind (text truncated total)
-               (%read-lines-slice resolved (or offset 0) line-limit)
-             (let ((meta (make-hash-table :test #'equal)))
-               (setf mode "raw"
-                     (gethash "truncated" meta) truncated
-                     (gethash "total_lines" meta) total)
-               (values text meta))))
-          ((and content-scanner (not (lisp-source-path-p resolved)))
-           (multiple-value-bind (text truncated)
-               (%text-filter-with-context resolved content-scanner line-limit)
-             (let ((meta (make-hash-table :test #'equal)))
-               (setf mode "text-filtered"
-                     (gethash "truncated" meta) truncated)
-               (values text meta))))
-          (t
-           (multiple-value-bind (text truncated total)
-               (%read-lines-slice resolved 0 line-limit)
-             (let ((meta (make-hash-table :test #'equal)))
-               (setf mode (if (lisp-source-path-p resolved)
-                              "lisp-snippet"
-                              "text-snippet")
-                     (gethash "truncated" meta) truncated
-                     (gethash "total_lines" meta) total)
-               (values text meta)))))
+  (let ((resolved (fs-resolve-read-path path))
+        (line-limit (or limit *default-line-limit*))
+        (name-scanner (%compile-scanner name-pattern))
+        (content-scanner (%compile-scanner content-pattern)))
+    (multiple-value-bind (content meta mode)
+        (%lisp-read-file-content resolved
+                                 collapsed
+                                 name-scanner
+                                 content-scanner
+                                 offset
+                                 line-limit
+                                 include-comments
+                                 comment-context)
       (let ((payload (make-hash-table :test #'equal)))
         (setf (gethash "content" payload) content
               (gethash "path" payload) (%normalize-path resolved)

@@ -60,7 +60,7 @@
 (deftest repl-eval-timeout
   (testing "timeouts return a descriptive string without hanging"
     (multiple-value-bind (printed value stdout stderr)
-        (repl-eval "(loop)" :timeout-seconds 0.1)
+        (repl-eval "(loop)" :timeout-seconds 0.1d0)
       (ok (search "timed out" printed))
       (ok (eql value :timeout))
       (ok (string= stdout ""))
@@ -71,13 +71,13 @@
     (setf *timeout-flag* nil)
     (multiple-value-bind (printed value stdout stderr)
         (repl-eval "(progn (sleep 2) (setf cl-mcp/tests/repl-test::*timeout-flag* :done))"
-                   :timeout-seconds 0.1)
+                   :timeout-seconds 0.1d0)
       (ok (search "timed out" printed))
       (ok (eql value :timeout))
       (ok (string= stdout ""))
       (ok (string= stderr ""))
       ;; give any stray worker time to run if it survived; it should not.
-      (sleep 0.2)
+      (sleep 0.2d0)
       (ok (null *timeout-flag*)))))
 
 (deftest repl-eval-safe-read-disables-reader-eval

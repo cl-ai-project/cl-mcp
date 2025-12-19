@@ -11,7 +11,6 @@
                 #:subpathp
                 #:ensure-pathname
                 #:merge-pathnames*
-                #:read-file-string
                 #:directory
                 #:directory-exists-p
                 #:absolute-pathname-p)
@@ -88,7 +87,9 @@ Allows project-root subpaths and source dirs of registered ASDF systems."
          (normalized-abs (if (uiop:directory-exists-p abs)
                              (uiop:ensure-directory-pathname abs)
                              abs))
-         (project-ok (%path-inside-p normalized-abs (uiop:ensure-directory-pathname *project-root*))))
+         (project-ok (%path-inside-p
+                      normalized-abs
+                      (uiop:ensure-directory-pathname *project-root*))))
     (when project-ok (return-from %allowed-read-path-p normalized-abs))
     ;; absolute path allowed only inside system-source-directory of registered systems
     (let ((systems (asdf:registered-systems)))
@@ -142,14 +143,23 @@ Returns the content string."
   (let ((pn (%allowed-read-path-p path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
-    (log-event :debug "fs.read.open" "path" (namestring pn) "offset" offset "limit" limit "fd" (%fd-count))
+    (log-event :debug "fs.read.open"
+               "path" (namestring pn)
+               "offset" offset
+               "limit" limit
+               "fd" (%fd-count))
     (let ((text (%read-file-string pn offset limit)))
-      (log-event :debug "fs.read.close" "path" (namestring pn) "fd" (%fd-count))
+      (log-event :debug "fs.read.close"
+                 "path" (namestring pn)
+                 "fd" (%fd-count))
       text)))
 
 (defun %write-string-to-file (pn content)
   (uiop/filesystem::ensure-directories-exist pn)
-  (with-open-file (out pn :direction :output :if-exists :supersede :if-does-not-exist :create
+  (with-open-file (out pn
+                       :direction :output
+                       :if-exists :supersede
+                       :if-does-not-exist :create
                        :element-type 'character)
     (write-string content out)
     (finish-output out))
@@ -159,10 +169,15 @@ Returns the content string."
   "Write CONTENT to PATH relative to project root.
 Returns T on success."
   (let ((pn (%ensure-write-path path)))
-    (log-event :debug "fs.write.open" "path" (namestring pn) "bytes" (length content) "fd" (%fd-count))
+    (log-event :debug "fs.write.open"
+               "path" (namestring pn)
+               "bytes" (length content)
+               "fd" (%fd-count))
     (unwind-protect
          (%write-string-to-file pn content)
-      (log-event :debug "fs.write.close" "path" (namestring pn) "fd" (%fd-count)))))
+      (log-event :debug "fs.write.close"
+                 "path" (namestring pn)
+                 "fd" (%fd-count)))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
@@ -175,8 +190,8 @@ Returns T on success."
           (and leaf (string leaf))))))
 
 (defun %should-skip-entry-p (path)
-  (let* ((name (%entry-name path))
-         (type (pathname-type path)))
+  (let ((name (%entry-name path))
+        (type (pathname-type path)))
     (or (null name)
         (some (lambda (pref) (uiop:string-prefix-p pref name)) *hidden-prefixes*)
         (and type (member (string-downcase type) *skip-extensions* :test #'string=)))))
@@ -184,13 +199,13 @@ Returns T on success."
 (defun fs-list-directory (path)
   "List directory entries at PATH respecting read allow-list.
 Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)."
-  (let* ((pn (%allowed-read-path-p path)))
+  (let ((pn (%allowed-read-path-p path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     (unless (uiop:directory-exists-p pn)
       (error "Directory ~A (resolved to ~A) does not exist or is not readable"
              path (namestring pn)))
-    (let* ((patterns (list #P"*" #P"*.*"))  ; grab dirs and files (with types)
+    (let* ((patterns (list #P"*" #P"*.*"))
            (entries (loop for pat in patterns
                           append (directory (uiop:merge-pathnames* pat pn))))
            (seen (make-hash-table :test #'equal))
@@ -200,8 +215,8 @@ Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)
           (let ((key (namestring p)))
             (unless (gethash key seen)
               (setf (gethash key seen) t)
-              (let* ((h (make-hash-table :test #'equal))
-                     (name (%entry-name p)))
+              (let ((h (make-hash-table :test #'equal))
+                    (name (%entry-name p)))
                 (setf (gethash "name" h) name
                       (gethash "type" h)
                       (if (uiop:directory-pathname-p p) "directory" "file"))
@@ -216,30 +231,34 @@ Returns a hash-table with keys:
   - project_root_source: how project root was determined (env|cwd|asdf)
   - relative_cwd: cwd relative to project_root (when inside project)"
   (%ensure-project-root)
-  (let* ((cwd (ignore-errors (uiop:getcwd)))
-         (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
-         (root-source (if env-root "env" "explicit"))
-         (h (make-hash-table :test #'equal)))
-    (setf (gethash "project_root" h) (namestring *project-root*)
-          (gethash "cwd" h) (and cwd (namestring cwd))
-          (gethash "project_root_source" h) root-source)
-    (let ((root (uiop:ensure-directory-pathname *project-root*)))
-      (when (and cwd (uiop:subpathp cwd root))
-        (setf (gethash "relative_cwd" h)
-              (uiop:native-namestring (uiop:enough-pathname cwd root)))))
-    h))
+  (let ((cwd (ignore-errors (uiop:getcwd)))
+        (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
+        (h (make-hash-table :test #'equal)))
+    (let ((root-source (if env-root "env" "explicit")))
+      (setf (gethash "project_root" h) (namestring *project-root*)
+            (gethash "cwd" h) (and cwd (namestring cwd))
+            (gethash "project_root_source" h) root-source)
+      (let ((root (uiop:ensure-directory-pathname *project-root*)))
+        (when (and cwd (uiop:subpathp cwd root))
+          (setf (gethash "relative_cwd" h)
+                (uiop:native-namestring (uiop:enough-pathname cwd root)))))
+      h)))
 
 (defun fs-set-project-root (path)
   "Set the project root to PATH and change the current working directory.
 Returns a hash-table with updated path information:
   - project_root: the new absolute project root path
   - cwd: the new current working directory
-  - previous_root: the previous project root path (or \"(not set)\" if was nil)
+  - previous_root: the previous project root path (or (not set) if was nil)
   - status: confirmation message"
   (unless (stringp path)
     (error "path must be a string"))
   (let* ((prev-root *project-root*)
-         (temp-root (uiop:ensure-directory-pathname path)))
+         (requested (uiop:ensure-directory-pathname path))
+         (base (ignore-errors (uiop:getcwd)))
+         (temp-root (if (uiop:absolute-pathname-p requested)
+                        requested
+                        (uiop:merge-pathnames* requested base))))
     (unless (uiop:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
     ;; Convert to absolute path using truename
@@ -248,6 +267,8 @@ Returns a hash-table with updated path information:
       (setf *project-root* new-root)
       ;; Change the current working directory
       (uiop:chdir new-root)
+      (setf *default-pathname-defaults*
+            (uiop:ensure-directory-pathname new-root))
       (log-event :info "fs.set-project-root"
                  "previous" (if prev-root (namestring prev-root) "(not set)")
                  "new" (namestring new-root))
@@ -255,6 +276,8 @@ Returns a hash-table with updated path information:
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "project_root" h) (namestring new-root)
               (gethash "cwd" h) (namestring (uiop:getcwd))
-              (gethash "previous_root" h) (if prev-root (namestring prev-root) "(not set)")
-              (gethash "status" h) (format nil "Project root set to ~A" (namestring new-root)))
+              (gethash "previous_root" h)
+              (if prev-root (namestring prev-root) "(not set)")
+              (gethash "status" h)
+              (format nil "Project root set to ~A" (namestring new-root)))
         h))))

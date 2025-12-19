@@ -16,8 +16,8 @@
   (testing "run returns T for skeleton"
     ;; Provide empty in/out streams so the loop hits EOF immediately and doesn't
     ;; block on *standard-input* during automated runs.
-    (let* ((in (make-string-input-stream ""))
-           (out (make-string-output-stream)))
+    (let ((in (make-string-input-stream ""))
+          (out (make-string-output-stream)))
       (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out))))))
 
 (deftest stdio-one-message
@@ -26,6 +26,6 @@
            (in (make-string-input-stream req))
            (out (make-string-output-stream)))
       (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out)))
-      (let* ((s (get-output-stream-string out)))
+      (let ((s (get-output-stream-string out)))
         (ok (> (length s) 0))
         (ok (search "\"result\"" s))))))
