@@ -265,13 +265,16 @@ then clean up."
         (format nil "(defun helper () :ok)~%")
       (lambda (path)
         ;; Insert a function with multiple missing closing parens
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "helper"
-                        :operation "insert_after"
-                        :content (format nil
-                                   "(defun process (data)~%  (when data~%~
-                                    (print data)~%    (+ 1 2"))
+        (let ((content (concatenate 'string
+                         "(defun process (data)" (string #\Newline)
+                         "  (when data" (string #\Newline)
+                         "    (print data)" (string #\Newline)
+                         "    (+ 1 2")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "helper"
+                          :operation "insert_after"
+                          :content content))
         (let ((updated (fs-read-file path)))
           (ok (search "(defun helper () :ok)" updated))
           (ok (search "(defun process (data)" updated))
