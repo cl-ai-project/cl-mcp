@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Agent Guidelines
+
+@prompts/repl-driven-development.md
+@agents/common-lisp-expert.md
+
 ## Project Overview
 
 cl-mcp is a Model Context Protocol (MCP) server for Common Lisp, providing JSON-RPC 2.0 over stdio/TCP/HTTP. It enables AI agents to interact with Common Lisp environments through structured tools for REPL evaluation, file operations, code introspection, and structure-aware editing.
@@ -145,11 +150,22 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 ## Integration Notes
 
 ### For AI Agents
-See `prompts/repl-driven-development.md` for comprehensive tool usage guide including:
-- Initial setup with `fs-set-project-root`
-- REPL-driven workflow (EXPLORE → DEVELOP → EDIT → VERIFY)
-- Package handling and dependency loading
-- Common troubleshooting scenarios
+
+**Required Reading:**
+- `prompts/repl-driven-development.md` - Comprehensive tool usage guide for REPL-driven development
+- `agents/common-lisp-expert.md` - Production-quality CL architecture, TDD with Rove, and style guidelines
+
+**REPL-Driven Workflow** (from `repl-driven-development.md`):
+1. **EXPLORE**: Use introspection tools (`code-describe`, `code-find`) and `lisp-read-file` to understand context
+2. **DEVELOP**: Evaluate small forms in the REPL (`repl-eval`) to verify correctness
+3. **EDIT**: Use `lisp-edit-form` to persist changes safely. **NEVER** overwrite existing Lisp files with `fs-write-file`
+4. **VERIFY**: Re-evaluate changed forms or run tests to ensure correctness
+
+**Common Lisp Expert Guidelines** (from `common-lisp-expert.md`):
+- Ship production quality from day one with strict style adherence
+- TDD-first with Rove: write failing tests, implement minimally, refactor
+- CLOS protocol-first design; minimize global specials; clear packages/exports
+- No runtime `eval` or dynamic interning; prefer restarts over `signal`
 
 ### MCP Client Configuration
 
@@ -203,6 +219,6 @@ Configure Claude Code (in `~/.claude/settings.json` or project `.mcp.json`):
 src/          Core implementation (protocol, tools, transports)
 tests/        Rove test suites (mirrored naming: *-test.lisp)
 scripts/      Helper clients and stdio↔TCP bridge
-prompts/      Recommended system prompts for AI agents
-agents/       Agent-specific guidelines
+prompts/      System prompts for AI agents (repl-driven-development.md)
+agents/       Agent persona guidelines (common-lisp-expert.md)
 ```
