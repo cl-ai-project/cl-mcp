@@ -199,30 +199,35 @@ successfully started, or NIL if the start attempt failed."
                  "fd" (%fd-count)))))
 
 (defun %tcp-accept-loop (listener accept-once)
-  (loop while (not *tcp-stop-flag*) do
-    (let ((ready (usocket:wait-for-input (list listener)
-                                         :timeout *tcp-accept-timeout*)))
-      (cond
-        ((null ready)
-         (log-event :debug "tcp.accept.timeout"
-                    "timeout" *tcp-accept-timeout*))
-        (accept-once
-         (let ((client (%tcp-accept-client listener)))
-           (when client
-             (%tcp-handle-client client 0))
-           (return)))
-        (t
-         (handler-case
-             (let ((conn-id (incf *tcp-conn-counter*))
-                   (client (%tcp-accept-client listener)))
-               (when client
-                 (bordeaux-threads:make-thread
-                  (lambda ()
-                    (%tcp-handle-client client conn-id))
-                  :name (format nil "mcp-client-~A" conn-id))))
-           (error (e)
-             (log-event :warn "tcp.accept.error"
-                        "error" (princ-to-string e)))))))))
+  (loop while (not *tcp-stop-flag*)
+        do (let ((ready
+                   (handler-case
+                       (usocket:wait-for-input (list listener) :timeout
+                                               *tcp-accept-timeout*)
+                     ;; Socket closed during shutdown - exit gracefully
+                     (usocket:bad-file-descriptor-error ()
+                       (log-event :debug "tcp.accept.shutdown" "reason" "socket-closed")
+                       (return)))))
+             (cond
+               ((null ready)
+                (log-event :debug "tcp.accept.timeout" "timeout"
+                           *tcp-accept-timeout*))
+               (accept-once
+                (let ((client (%tcp-accept-client listener)))
+                  (when client (%tcp-handle-client client 0))
+                  (return)))
+               (t
+                (handler-case
+                    (let ((conn-id (incf *tcp-conn-counter*))
+                          (client (%tcp-accept-client listener)))
+                      (when client
+                        (bordeaux-threads:make-thread
+                         (lambda () (%tcp-handle-client client conn-id)) :name
+                         (format nil "mcp-client-~A" conn-id))))
+                  (error (e)
+                    (log-event :warn "tcp.accept.error" "error"
+                               (princ-to-string e)))))))))
+
 (defun serve-tcp (&key (host "127.0.0.1") (port 0) (accept-once t) on-listening)
   "Serve MCP over TCP. If PORT is 0, an ephemeral port is chosen.
 Calls ON-LISTENING with the actual port when ready. If ACCEPT-ONCE is T,
