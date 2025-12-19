@@ -7,6 +7,7 @@
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
+  (:import-from #:yason)
   (:export
    #:*http-server*
    #:*http-server-port*
@@ -116,11 +117,16 @@
           nil)))))
 
 (defun %http-error-json (code message)
-  (format nil
-          (concatenate 'string
-                       "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":~D,\"message\":\"~A\"},"
-                       "\"id\":null}")
-          code message))
+  "Build a JSON-RPC error response string using yason for proper escaping."
+  (let ((error-obj (make-hash-table :test #'equal))
+        (outer (make-hash-table :test #'equal)))
+    (setf (gethash "code" error-obj) code
+          (gethash "message" error-obj) message)
+    (setf (gethash "jsonrpc" outer) "2.0"
+          (gethash "error" outer) error-obj
+          (gethash "id" outer) :null)
+    (with-output-to-string (s)
+      (yason:encode outer s))))
 
 (defun %handle-mcp-post-initialize (body)
   (when (is-initialize-request-p body)
@@ -202,13 +208,9 @@
   "Handle GET requests to the MCP endpoint (SSE stream).
 Currently returns 405 as SSE is not yet implemented."
   (log-event :debug "http.get.sse-not-supported")
-  (let ((payload (format nil
-                         (concatenate 'string
-                                      "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,"
-                                      "\"message\":\"~A\"},"
-                                      "\"id\":null}")
-                         "SSE not yet supported. Use POST for request/response.")))
-    (json-response payload :status 405)))
+  (json-response (%http-error-json -32601
+                                   "SSE not yet supported. Use POST for request/response.")
+                 :status 405))
 
 (defun handle-mcp-delete ()
   "Handle DELETE requests to terminate a session."
@@ -220,13 +222,8 @@ Currently returns 405 as SSE is not yet implemented."
        (setf (hunchentoot:return-code*) 204)
        "")
       (t
-       (let ((payload (format nil
-                              (concatenate 'string
-                                           "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
-                                           "\"message\":\"~A\"},"
-                                           "\"id\":null}")
-                              "Missing Mcp-Session-Id header")))
-         (json-response payload :status 400))))))
+       (json-response (%http-error-json -32600 "Missing Mcp-Session-Id header")
+                      :status 400)))))
 
 (defun handle-mcp-options ()
   "Handle OPTIONS requests for CORS preflight."
