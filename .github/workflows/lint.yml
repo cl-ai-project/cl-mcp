@@ -26,4 +26,9 @@ jobs:
 
       - name: Run mallet lint
         run: |
-          mallet -a src/*.lisp tests/*.lisp
+          OUTPUT=$(mallet -a src/*.lisp tests/*.lisp 2>&1) || true
+          echo "$OUTPUT"
+          if ! echo "$OUTPUT" | grep -q "No problems found"; then
+            echo "::error::Mallet found problems"
+            exit 1
+          fi
