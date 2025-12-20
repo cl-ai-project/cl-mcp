@@ -2,7 +2,10 @@
 
 (defpackage #:cl-mcp/tests/protocol-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/protocol
+                #:process-json-line
+                #:protocol-version
+                #:make-state)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -86,3 +89,107 @@
            (obj (parse resp))
            (err (gethash "error" obj)))
       (ok (= (gethash "code" err) -32601)))))
+
+;;; Protocol version 2025-11-25 tests
+
+(deftest initialize-supports-2025-11-25
+  (testing "initialize accepts and echoes protocol version 2025-11-25"
+    (let* ((line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"))
+           (resp (process-json-line line))
+           (obj (parse resp))
+           (result (gethash "result" obj)))
+      (ok (string= (gethash "protocolVersion" result) "2025-11-25")))))
+
+(deftest protocol-version-stored-in-state
+  (testing "initialize stores negotiated protocol version in server state"
+    (let* ((state (make-state))
+           (line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"))
+           (_ (process-json-line line state)))
+      (declare (ignore _))
+      (ok (string= (protocol-version state) "2025-11-25")))))
+
+(deftest protocol-version-stored-for-older-version
+  (testing "initialize stores older protocol version in server state"
+    (let* ((state (make-state))
+           (line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"2024-11-05\"}}"))
+           (_ (process-json-line line state)))
+      (declare (ignore _))
+      (ok (string= (protocol-version state) "2024-11-05")))))
+
+(deftest tool-error-old-protocol-returns-json-rpc-error
+  (testing "tool input validation error returns JSON-RPC error for old protocol"
+    (let* ((state (make-state))
+           ;; Initialize with old protocol
+           (init-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"initialize\","
+                       "\"params\":{\"protocolVersion\":\"2024-11-05\"}}"))
+           (_ (process-json-line init-line state))
+           ;; Call tool with invalid input (missing path)
+           (tool-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"fs-read-file\",\"arguments\":{}}}"))
+           (resp (process-json-line tool-line state))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (declare (ignore _))
+      ;; Should return JSON-RPC Protocol Error (-32602)
+      (ok err "Should have error object")
+      (ok (= (gethash "code" err) -32602))
+      (ok (search "path" (gethash "message" err))))))
+
+(deftest tool-error-new-protocol-returns-tool-execution-error
+  (testing "tool input validation error returns Tool Execution Error for 2025-11-25"
+    (let* ((state (make-state))
+           ;; Initialize with new protocol
+           (init-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"initialize\","
+                       "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"))
+           (_ (process-json-line init-line state))
+           ;; Call tool with invalid input (missing path)
+           (tool-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"fs-read-file\",\"arguments\":{}}}"))
+           (resp (process-json-line tool-line state))
+           (obj (parse resp))
+           (result (gethash "result" obj)))
+      (declare (ignore _))
+      ;; Should return Tool Execution Error (result with isError: true)
+      (ok result "Should have result, not error")
+      (ok (gethash "isError" result) "Should have isError flag")
+      (ok (eq (gethash "isError" result) t) "isError should be true")
+      (ok (gethash "content" result) "Should have content"))))
+
+(deftest tool-error-2025-06-18-returns-json-rpc-error
+  (testing "tool input validation error returns JSON-RPC error for 2025-06-18"
+    (let* ((state (make-state))
+           ;; Initialize with 2025-06-18 protocol (before breaking change)
+           (init-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"initialize\","
+                       "\"params\":{\"protocolVersion\":\"2025-06-18\"}}"))
+           (_ (process-json-line init-line state))
+           ;; Call tool with invalid input
+           (tool-line (concatenate
+                       'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"fs-list-directory\",\"arguments\":{}}}"))
+           (resp (process-json-line tool-line state))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (declare (ignore _))
+      ;; 2025-06-18 is before 2025-11-25, should use old format
+      (ok err "Should have error object")
+      (ok (= (gethash "code" err) -32602)))))

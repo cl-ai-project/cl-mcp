@@ -40,14 +40,15 @@
 
 (in-package #:cl-mcp/src/protocol)
 
-(defparameter +protocol-version+ "2025-06-18")
+(defparameter +protocol-version+ "2025-11-25")
 (defparameter +supported-protocol-versions+
-  '("2025-06-18" "2025-03-26" "2024-11-05")
+  '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions, ordered by preference.")
 
 (defclass server-state ()
   ((initialized-p :initform nil :accessor initialized-p)
-   (client-info  :initform nil :accessor client-info)))
+   (client-info :initform nil :accessor client-info)
+   (protocol-version :initform nil :accessor protocol-version)))
 
 (defun make-state () (make-instance 'server-state))
 
@@ -77,48 +78,60 @@
   "Return a one-element content vector with TEXT as a text part."
   (vector (%make-ht "type" "text" "text" text)))
 
+
+(defun %tool-error (state id message)
+  "Return a tool input validation error in the appropriate format.
+For protocol version 2025-11-25 and later, returns as Tool Execution Error.
+For older versions, returns as JSON-RPC Protocol Error (-32602)."
+  (if (and state
+           (protocol-version state)
+           (string>= (protocol-version state) "2025-11-25"))
+      ;; New format: Tool Execution Error with isError flag
+      (%result id (%make-ht "content" (%text-content message) "isError" t))
+      ;; Old format: JSON-RPC Protocol Error
+      (%error id -32602 message)))
 (defun handle-initialize (state id params)
-  (declare (ignore state))
   ;; Sync rootPath from client if provided
   (when params
     (let* ((root-path (gethash "rootPath" params))
            (root-uri (gethash "rootUri" params))
-           (root (or root-path
-                     (and root-uri
-                          (if (uiop:string-prefix-p "file://" root-uri)
-                              (subseq root-uri 7)
-                              root-uri)))))
+           (root
+            (or root-path
+                (and root-uri
+                     (if (uiop/utility:string-prefix-p "file://" root-uri)
+                         (subseq root-uri 7)
+                         root-uri)))))
       (when (and root (stringp root) (plusp (length root)))
         (handler-case
-            (let ((root-dir (uiop:ensure-directory-pathname root)))
-              (when (uiop:directory-exists-p root-dir)
+            (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
+              (when (uiop/filesystem:directory-exists-p root-dir)
                 (setf cl-mcp/src/fs:*project-root* root-dir)
-                (uiop:chdir root-dir)
-                (log-event :info "initialize.sync-root"
-                           "rootPath" (namestring root-dir)
-                           "source" (if root-path "rootPath" "rootUri"))))
+                (uiop/os:chdir root-dir)
+                (log-event :info "initialize.sync-root" "rootPath"
+                           (namestring root-dir) "source"
+                           (if root-path "rootPath" "rootUri"))))
           (error (e)
-            (log-event :warn "initialize.sync-root-failed"
-                       "path" root
+            (log-event :warn "initialize.sync-root-failed" "path" root
                        "error" (princ-to-string e)))))))
   (let* ((client-ver (and params (gethash "protocolVersion" params)))
-         (supported (and client-ver (find client-ver +supported-protocol-versions+
-                                          :test #'string=)))
-         (chosen (cond
-                   (supported supported)
-                   ((null client-ver) (first +supported-protocol-versions+))
-                   (t nil)))
-         (caps (%make-ht
-                "tools" (%make-ht "listChanged" t))))
+         (supported
+          (and client-ver
+               (find client-ver +supported-protocol-versions+ :test #'string=)))
+         (chosen
+          (cond (supported supported)
+                ((null client-ver) (first +supported-protocol-versions+))
+                (t nil)))
+         (caps (%make-ht "tools" (%make-ht "listChanged" t))))
     (if (null chosen)
         (%error id -32602
                 (format nil "Unsupported protocolVersion ~A" client-ver)
                 (%make-ht "supportedVersions" +supported-protocol-versions+))
-        (%result id
-                 (%make-ht
-                  "protocolVersion" chosen
-                  "serverInfo" (%make-ht "name" "cl-mcp" "version" (version))
-                  "capabilities" caps)))))
+        (progn
+          (setf (protocol-version state) chosen)
+          (%result id
+                   (%make-ht "protocolVersion" chosen "serverInfo"
+                             (%make-ht "name" "cl-mcp" "version" (version))
+                             "capabilities" caps))))))
 
 (defun handle-notification (state method params)
   (declare (ignore state params))
@@ -570,7 +583,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
 
       (t nil))))
 
-(defun handle-tool-repl-eval (id args)
+(defun handle-tool-repl-eval (state id args)
+  (declare (ignore state))
   (handler-case
       (let ((code (and args (gethash "code" args)))
             (pkg (and args (gethash "package" args)))
@@ -597,7 +611,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during REPL evaluation: ~A" e)))))
 
-(defun handle-tool-lisp-read-file (id args)
+(defun handle-tool-lisp-read-file (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args)))
             (collapsed-present nil)
@@ -611,10 +625,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
             (limit (and args (gethash "limit" args))))
         (unless (stringp path)
           (return-from handle-tool-lisp-read-file
-            (%error id -32602 "path must be a string")))
+            (%tool-error state id "path must be a string")))
         (when (and collapsed-present (not (member collapsed '(t nil))))
           (return-from handle-tool-lisp-read-file
-            (%error id -32602 "collapsed must be boolean")))
+            (%tool-error state id "collapsed must be boolean")))
         (let ((result (lisp-read-file path
                                       :collapsed collapsed
                                       :name-pattern name-pattern
@@ -631,7 +645,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during lisp-read-file: ~A" e)))))
 
-(defun handle-tool-fs-get-project-info (id)
+(defun handle-tool-fs-get-project-info (state id)
+  (declare (ignore state))
   (handler-case
       (let* ((info (fs-get-project-info))
              (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
@@ -648,12 +663,12 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during fs-get-project-info: ~A" e)))))
 
-(defun handle-tool-fs-set-project-root (id args)
+(defun handle-tool-fs-set-project-root (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args))))
         (unless (stringp path)
           (return-from handle-tool-fs-set-project-root
-            (%error id -32602 "path must be a string")))
+            (%tool-error state id "path must be a string")))
         (let* ((info (fs-set-project-root path))
                (summary (format nil "~A~%New project root: ~A~%New CWD: ~A"
                                 (gethash "status" info)
@@ -669,14 +684,14 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during fs-set-project-root: ~A" e)))))
 
-(defun handle-tool-fs-read-file (id args)
+(defun handle-tool-fs-read-file (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args)))
             (offset (and args (gethash "offset" args)))
             (limit (and args (gethash "limit" args))))
         (unless (stringp path)
           (return-from handle-tool-fs-read-file
-            (%error id -32602 "path must be a string")))
+            (%tool-error state id "path must be a string")))
         (let ((content-string (fs-read-file path :offset offset :limit limit)))
           (%result id (%make-ht
                        "content" (%text-content content-string)
@@ -688,13 +703,13 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during fs-read-file: ~A" e)))))
 
-(defun handle-tool-fs-write-file (id args)
+(defun handle-tool-fs-write-file (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args)))
             (content (and args (gethash "content" args))))
         (unless (and (stringp path) (stringp content))
           (return-from handle-tool-fs-write-file
-            (%error id -32602 "path and content must be strings")))
+            (%tool-error state id "path and content must be strings")))
         (fs-write-file path content)
         (%result id (%make-ht
                      "success" t
@@ -708,12 +723,12 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during fs_write_file: ~A" e)))))
 
-(defun handle-tool-fs-list-directory (id args)
+(defun handle-tool-fs-list-directory (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args))))
         (unless (stringp path)
           (return-from handle-tool-fs-list-directory
-            (%error id -32602 "path must be a string")))
+            (%tool-error state id "path must be a string")))
         (let* ((entries (fs-list-directory path))
                (summary-lines (map 'list
                                    (lambda (h)
@@ -734,13 +749,13 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during fs-list-directory: ~A" e)))))
 
-(defun handle-tool-code-find (id args)
+(defun handle-tool-code-find (state id args)
   (handler-case
       (let ((symbol (and args (gethash "symbol" args)))
             (pkg (and args (gethash "package" args))))
         (unless (stringp symbol)
           (return-from handle-tool-code-find
-            (%error id -32602 "symbol must be a string")))
+            (%tool-error state id "symbol must be a string")))
         (multiple-value-bind (path line)
             (code-find-definition symbol :package pkg)
           (if path
@@ -756,13 +771,13 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during code-find: ~A" e)))))
 
-(defun handle-tool-code-describe (id args)
+(defun handle-tool-code-describe (state id args)
   (handler-case
       (let ((symbol (and args (gethash "symbol" args)))
             (pkg (and args (gethash "package" args))))
         (unless (stringp symbol)
           (return-from handle-tool-code-describe
-            (%error id -32602 "symbol must be a string")))
+            (%tool-error state id "symbol must be a string")))
         (multiple-value-bind (name type arglist doc path line)
             (code-describe-symbol symbol :package pkg)
           (%result id (%make-ht
@@ -779,7 +794,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during code-describe: ~A" e)))))
 
-(defun handle-tool-code-find-references (id args)
+(defun handle-tool-code-find-references (state id args)
   (handler-case
       (let ((symbol (and args (gethash "symbol" args)))
             (pkg (and args (gethash "package" args)))
@@ -790,10 +805,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                           (if presentp val t))))
         (unless (stringp symbol)
           (return-from handle-tool-code-find-references
-            (%error id -32602 "symbol must be a string")))
+            (%tool-error state id "symbol must be a string")))
         (when (and project-only-present (not (member project-only '(t nil))))
           (return-from handle-tool-code-find-references
-            (%error id -32602 "projectOnly must be boolean")))
+            (%tool-error state id "projectOnly must be boolean")))
         (multiple-value-bind (refs count)
             (code-find-references symbol :package pkg :project-only project-only)
           (let* ((summary-lines (map 'list
@@ -817,7 +832,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during code-find-references: ~A" e)))))
 
-(defun handle-tool-lisp-check-parens (id args)
+(defun handle-tool-lisp-check-parens (state id args)
   (handler-case
       (let ((path (and args (gethash "path" args)))
             (code (and args (gethash "code" args)))
@@ -825,10 +840,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
             (limit (and args (gethash "limit" args))))
         (when (and path code)
           (return-from handle-tool-lisp-check-parens
-            (%error id -32602 "Provide only one of path or code")))
+            (%tool-error state id "Provide only one of path or code")))
         (when (and (null path) (null code))
           (return-from handle-tool-lisp-check-parens
-            (%error id -32602 "Either path or code is required")))
+            (%tool-error state id "Either path or code is required")))
         (let* ((result (lisp-check-parens :path path
                                           :code code
                                           :offset offset
@@ -887,7 +902,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                           (format nil
                                   "Applied ~A to ~A ~A (~D chars)"
                                   operation form-type path (length updated))))))
-(defun handle-tool-lisp-edit-form (id args)
+(defun handle-tool-lisp-edit-form (state id args)
   (handler-case
       (let ((path (and args (gethash "file_path" args)))
             (form-type (and args (gethash "form_type" args)))
@@ -902,11 +917,11 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
         (unless (and (stringp path) (stringp form-type) (stringp form-name)
                      (stringp operation) (stringp content))
           (return-from handle-tool-lisp-edit-form
-            (%error id -32602
-                    "file_path, form_type, form_name, operation, and content must be strings")))
+            (%tool-error state id
+                         "file_path, form_type, form_name, operation, and content must be strings")))
         (when (and dry-run-present (not (member dry-run '(t nil))))
           (return-from handle-tool-lisp-edit-form
-            (%error id -32602 "dry_run must be boolean")))
+            (%tool-error state id "dry_run must be boolean")))
         (let ((updated (lisp-edit-form :file-path path
                                        :form-type form-type
                                        :form-name form-name
@@ -938,14 +953,14 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
           (gethash "lisp-edit-form" handlers) #'handle-tool-lisp-edit-form)
     handlers)
   "Map normalized tool names to handler functions.")
-(defun handle-tools-call (id params)
+(defun handle-tools-call (state id params)
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
          (local (and name (%normalize-tool-alias name))))
     (when name (log-event :debug "tools.call" "name" name "local" local))
     (let ((handler (and local (gethash local *tool-handlers*))))
       (if handler
-          (funcall handler id args)
+          (funcall handler state id args)
           (%error id -32601 (format nil "Tool ~A not found" name))))))
 
 (defun handle-request (state id method params)
@@ -954,7 +969,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     ((string= method "tools/list") (handle-tools-list id))
     ((string= method "tools/call")
      (or (handle-asdf-tools-call id params)
-         (handle-tools-call id params)))
+         (handle-tools-call state id params)))
     ((string= method "ping") (%result id (%make-ht)))
     (t (%error id -32601 (format nil "Method ~A not found" method)))))
 
