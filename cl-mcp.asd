@@ -6,12 +6,12 @@
   :author "cxxxr, Satoshi Imai"
   :license "MIT"
   :version "1.0.0"
-  :depends-on (:alexandria
-               :cl-ppcre
-               :yason
-               :usocket
-               :bordeaux-threads
-               :eclector
-               :hunchentoot
+  :depends-on ("alexandria"
+               "cl-ppcre"
+               "yason"
+               "usocket"
+               "bordeaux-threads"
+               "eclector"
+               "hunchentoot"
                "cl-mcp/main")
   :in-order-to ((test-op (test-op "cl-mcp/tests"))))
