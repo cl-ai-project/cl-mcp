@@ -1,12 +1,11 @@
 ;;;; cl-mcp.asd
 
-;;; Register vendor/clgrep in ASDF source registry
+;;; Register vendor/clgrep in ASDF by loading its .asd file
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let* ((here (make-pathname :defaults *load-truename* :name nil :type nil))
-         (clgrep-dir (merge-pathnames "vendor/clgrep/" here)))
-    (when (probe-file clgrep-dir)
-      ;; Add to ASDF central registry for system discovery
-      (pushnew clgrep-dir asdf:*central-registry* :test #'equal))))
+         (clgrep-asd (merge-pathnames "vendor/clgrep/clgrep.asd" here)))
+    (when (probe-file clgrep-asd)
+      (asdf:load-asd clgrep-asd))))
 
 (asdf:defsystem "cl-mcp"
   :class :package-inferred-system
