@@ -645,8 +645,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during lisp-read-file: ~A" e)))))
 
-(defun handle-tool-fs-get-project-info (state id)
-  (declare (ignore state))
+(defun handle-tool-fs-get-project-info (state id args)
+  (declare (ignore state args))
   (handler-case
       (let* ((info (fs-get-project-info))
              (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
