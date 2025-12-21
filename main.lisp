@@ -46,6 +46,9 @@
                 #:stop-http-server)
   (:import-from #:cl-mcp/src/run
                 #:run)
+  (:import-from #:cl-mcp/src/clgrep
+                #:clgrep-search
+                #:clgrep-signatures)
   (:export #:run
            #:version
            ;; File system tools
@@ -61,6 +64,9 @@
            #:code-find-definition
            #:code-describe-symbol
            #:code-find-references
+           ;; Semantic grep (clgrep)
+           #:clgrep-search
+           #:clgrep-signatures
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls
@@ -83,5 +89,6 @@
            #:http-server-running-p
            #:start-http-server
            #:stop-http-server))
+
 
 (in-package #:cl-mcp/main)

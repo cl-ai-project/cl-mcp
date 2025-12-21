@@ -17,7 +17,9 @@
   (:import-from #:cl-mcp/tests/tools-test)
   (:import-from #:cl-mcp/tests/integration-test)
   (:import-from #:cl-mcp/tests/parinfer-test)
-  (:import-from #:cl-mcp/tests/http-test))
+  (:import-from #:cl-mcp/tests/http-test)
+  (:import-from #:cl-mcp/tests/clgrep-test))
+
 (in-package #:cl-mcp/tests)
 
 (defmethod asdf:perform :after ((op asdf:test-op) (system (eql (asdf:find-system :cl-mcp/tests))))
