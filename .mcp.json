@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "type": "stdio",
+      "command": "ros",
+      "args": [
+        "run",
+        "-s",
+        "cl-mcp",
+        "-e",
+        "(cl-mcp:run :transport :stdio)"
+      ],
+      "env": {}
+    }
+  }
+}
