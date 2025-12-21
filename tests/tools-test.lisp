@@ -3,89 +3,129 @@
 (defpackage #:cl-mcp/tests/tools-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
+  (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
+  (:import-from #:asdf #:system-source-directory)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/tools-test)
 
+(defmacro with-test-project-root (&body body)
+  "Set up project root for protocol-level tests."
+  `(let ((original-root cl-mcp/src/fs:*project-root*)
+         (original-cwd (ignore-errors (getcwd)))
+         (test-root (or (ignore-errors
+                          (ensure-directory-pathname
+                           (system-source-directory "cl-mcp")))
+                        (ensure-directory-pathname (getcwd)))))
+     (unwind-protect
+          (progn
+            (setf cl-mcp/src/fs:*project-root* test-root)
+            ,@body)
+       (setf cl-mcp/src/fs:*project-root* original-root)
+       (when original-cwd
+         (ignore-errors (uiop:chdir original-cwd))))))
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
-    (let ((req (concatenate 'string
-                 "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\","
-                 "\"params\":{\"name\":\"lisp-read-file\","
-                 "\"arguments\":{\"path\":\"src/core.lisp\"}}}")))
-      (let* ((resp (process-json-line req))
-             (obj (parse resp))
-             (result (gethash "result" obj))
-             (content (and result (gethash "content" result)))
-             (first (and (arrayp content) (> (length content) 0) (aref content 0))))
-        (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (string= (gethash "mode" result) "lisp-collapsed"))
-        (ok (arrayp content))
-        (ok (stringp (gethash "text" first)))
-        (ok (search "(defun version" (gethash "text" first)))
-        (let ((meta (gethash "meta" result)))
-          (ok (hash-table-p meta))
-          (ok (>= (gethash "total_forms" meta) 3)))))))
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"lisp-read-file\","
+                   "\"arguments\":{\"path\":\"src/core.lisp\"}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (content (and result (gethash "content" result)))
+               (first (and (arrayp content) (> (length content) 0) (aref content 0))))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (string= (gethash "mode" result) "lisp-collapsed"))
+          (ok (arrayp content))
+          (ok (stringp (gethash "text" first)))
+          (ok (search "(defun version" (gethash "text" first)))
+          (let ((meta (gethash "meta" result)))
+            (ok (hash-table-p meta))
+            (ok (>= (gethash "total_forms" meta) 3))))))))
 
 (deftest tools-call-fs-read
   (testing "tools/call fs-read-file returns content"
-    (let ((req (concatenate 'string
-                 "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\","
-                 "\"params\":{\"name\":\"fs-read-file\","
-                 "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":10}}}")))
-      (let* ((resp (process-json-line req))
-             (obj (parse resp))
-             (result (gethash "result" obj))
-             (content (gethash "content" result)))
-        (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (arrayp content))
-        (let ((first (aref content 0)))
-          (ok (string= (gethash "type" first) "text"))
-          (ok (> (length (gethash "text" first)) 0)))))))
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"fs-read-file\","
+                   "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":10}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (content (gethash "content" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp content))
+          (let ((first (aref content 0)))
+            (ok (string= (gethash "type" first) "text"))
+            (ok (> (length (gethash "text" first)) 0))))))))
 
 (deftest tools-call-fs-write-and-readback
   (testing "tools/call fs-write-file writes then fs-read-file reads"
-    (let ((req-write (concatenate 'string
-                       "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
-                       "\"params\":{\"name\":\"fs-write-file\","
-                       "\"arguments\":{\"path\":\"tmp-tools-write.txt\","
-                       "\"content\":\"hi\"}}}"))
-          (req-read (concatenate 'string
-                      "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\","
-                      "\"params\":{\"name\":\"fs-read-file\","
-                      "\"arguments\":{\"path\":\"tmp-tools-write.txt\"}}}")))
-      (unwind-protect
-           (progn
-             (let* ((resp (process-json-line req-write))
-                    (obj (parse resp))
-                    (result (gethash "result" obj)))
-               (ok (gethash "success" result)))
-             (let* ((resp2 (process-json-line req-read))
-                    (obj2 (parse resp2))
-                    (result2 (gethash "result" obj2))
-                    (content (gethash "content" result2)))
-               (ok (arrayp content))
-               (let ((first (aref content 0)))
-                 (ok (string= (gethash "type" first) "text"))
-                 (ok (string= (gethash "text" first) "hi")))))
-        (ignore-errors (delete-file "tmp-tools-write.txt"))))))
+    (with-test-project-root
+      (let ((req-write (concatenate 'string
+                         "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
+                         "\"params\":{\"name\":\"fs-write-file\","
+                         "\"arguments\":{\"path\":\"tmp-tools-write.txt\","
+                         "\"content\":\"hi\"}}}"))
+            (req-read (concatenate 'string
+                        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\","
+                        "\"params\":{\"name\":\"fs-read-file\","
+                        "\"arguments\":{\"path\":\"tmp-tools-write.txt\"}}}")))
+        (unwind-protect
+             (progn
+               (let* ((resp (process-json-line req-write))
+                      (obj (parse resp))
+                      (result (gethash "result" obj)))
+                 (ok (gethash "success" result)))
+               (let* ((resp2 (process-json-line req-read))
+                      (obj2 (parse resp2))
+                      (result2 (gethash "result" obj2))
+                      (content (gethash "content" result2)))
+                 (ok (arrayp content))
+                 (let ((first (aref content 0)))
+                   (ok (string= (gethash "type" first) "text"))
+                   (ok (string= (gethash "text" first) "hi")))))
+          (ignore-errors (delete-file "tmp-tools-write.txt")))))))
 
 (deftest tools-call-fs-list
   (testing "tools/call fs-list-directory lists entries"
-    (let ((req (concatenate 'string
-                 "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
-                 "\"params\":{\"name\":\"fs-list-directory\","
-                 "\"arguments\":{\"path\":\".\"}}}")))
-      (let* ((resp (process-json-line req))
-             (obj (parse resp))
-             (result (gethash "result" obj))
-             (entries (gethash "entries" result))
-             (content (gethash "content" result)))
-        (ok (arrayp entries))
-        (ok (> (length entries) 0))
-        (ok (arrayp content))
-        (ok (string= (gethash "type" (aref content 0)) "text"))))))
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"fs-list-directory\","
+                   "\"arguments\":{\"path\":\".\"}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (entries (gethash "entries" result))
+               (content (gethash "content" result)))
+          (ok (arrayp entries))
+          (ok (> (length entries) 0))
+          (ok (arrayp content))
+          (ok (string= (gethash "type" (aref content 0)) "text")))))))
 
+
+(deftest tools-call-fs-get-project-info
+  (testing "tools/call fs-get-project-info returns project root and cwd"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"fs-get-project-info\","
+                   "\"arguments\":{}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (content (gethash "content" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (null (gethash "error" obj)) "Should not have error")
+          (ok (arrayp content))
+          (ok (stringp (gethash "project_root" result)))
+          (ok (stringp (gethash "cwd" result)))
+          (ok (member (gethash "project_root_source" result)
+                      '("env" "explicit") :test #'string=)))))))
 (deftest tools-call-code-find
   (testing "tools/call code-find returns path and line"
     (let ((req (concatenate 'string
