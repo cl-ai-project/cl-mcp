@@ -23,4 +23,4 @@
 (in-package #:cl-mcp/tests)
 
 (defmethod asdf:perform :after ((op asdf:test-op) (system (eql (asdf:find-system :cl-mcp/tests))))
-  (rove:run system))
+  (rove:run (asdf:system-depends-on system)))
