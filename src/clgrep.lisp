@@ -57,7 +57,7 @@ Accepts a list of strings, a single string, or NIL."
     ((stringp form-types) (list form-types))
     (t nil)))
 
-(defun clgrep-search (pattern &key path recursive case-insensitive form-types limit)
+(defun clgrep-search (pattern &key path recursive case-insensitive form-types limit include-form)
   "Perform semantic grep search for PATTERN in Lisp files.
 
 Arguments:
@@ -67,6 +67,7 @@ Arguments:
   CASE-INSENSITIVE - Case-insensitive matching (default: NIL)
   FORM-TYPES       - Filter by form types, e.g., '(\"defun\" \"defmethod\") (optional)
   LIMIT            - Maximum number of results to return (optional)
+  INCLUDE-FORM     - If true, include full form text in results (default: NIL)
 
 Returns a list of alists, each containing:
   :file            - File path (relative to project root)
@@ -78,7 +79,7 @@ Returns a list of alists, each containing:
   :signature       - Signature of the form
   :form-start-line - Start line of the containing form
   :form-end-line   - End line of the containing form
-  :form            - The full top-level form text"
+  :form            - The full top-level form text (only if INCLUDE-FORM is true)"
   (let* ((search-path (%resolve-search-path path))
          (recursive-p (if (null recursive) t recursive))
          (types (%parse-form-types form-types))
@@ -86,14 +87,16 @@ Returns a list of alists, each containing:
                                  :recursive recursive-p
                                  :case-insensitive case-insensitive
                                  :form-types types
-                                 :include-form t
+                                 :include-form include-form
                                  :limit limit)))
     (log-event :info "clgrep.search"
                "pattern" pattern
                "path" (namestring search-path)
                "limit" limit
+               "include-form" include-form
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
+
 
 
 (defun clgrep-signatures (pattern &key path recursive case-insensitive form-types limit)

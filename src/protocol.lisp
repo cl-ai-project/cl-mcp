@@ -514,8 +514,8 @@ e.g., \"print-object (my-class t)\""))
   (%make-ht "name" "clgrep-search" "description"
    "Perform semantic grep search for a pattern in Lisp files.
 Unlike regular grep, this tool understands Lisp structure and returns
-the complete top-level form (function, class, etc.) containing each match.
-Use this for code exploration when you need full context of matching code."
+the top-level form signature containing each match.
+Use 'includeForm: true' to get the complete form text when needed."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "pattern" p)
@@ -537,7 +537,11 @@ Use this for code exploration when you need full context of matching code."
      (setf (gethash "limit" p)
              (%make-ht "type" "integer" "description"
               "Maximum number of results to return (optional, defaults to unlimited)"))
+     (setf (gethash "includeForm" p)
+             (%make-ht "type" "boolean" "description"
+              "Include full form text in results (default: false, returns signatures only)"))
      (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
+
 
 
 (defun tools-descriptor-clgrep-signatures ()
@@ -1019,7 +1023,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                          (if presentp val t)))
             (case-insensitive (and args (gethash "caseInsensitive" args)))
             (form-types (and args (gethash "formTypes" args)))
-            (limit (and args (gethash "limit" args))))
+            (limit (and args (gethash "limit" args)))
+            (include-form (and args (gethash "includeForm" args))))
         (unless (stringp pattern)
           (return-from handle-tool-clgrep-search
             (%error id -32602 "pattern must be a string")))
@@ -1028,7 +1033,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                                        :recursive recursive
                                        :case-insensitive case-insensitive
                                        :form-types form-types
-                                       :limit limit))
+                                       :limit limit
+                                       :include-form include-form))
                (formatted (%format-clgrep-results results)))
           (%result id
                    (%make-ht "content"
@@ -1041,6 +1047,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     (error (e)
       (%error id -32603
               (format nil "Internal error during clgrep-search: ~A" e)))))
+
 
 
 (defun handle-tool-clgrep-signatures (state id args)
