@@ -57,7 +57,7 @@ Accepts a list of strings, a single string, or NIL."
     ((stringp form-types) (list form-types))
     (t nil)))
 
-(defun clgrep-search (pattern &key path recursive case-insensitive form-types)
+(defun clgrep-search (pattern &key path recursive case-insensitive form-types limit)
   "Perform semantic grep search for PATTERN in Lisp files.
 
 Arguments:
@@ -66,6 +66,7 @@ Arguments:
   RECURSIVE        - Search subdirectories recursively (default: T)
   CASE-INSENSITIVE - Case-insensitive matching (default: NIL)
   FORM-TYPES       - Filter by form types, e.g., '(\"defun\" \"defmethod\") (optional)
+  LIMIT            - Maximum number of results to return (optional)
 
 Returns a list of alists, each containing:
   :file            - File path (relative to project root)
@@ -85,14 +86,17 @@ Returns a list of alists, each containing:
                                  :recursive recursive-p
                                  :case-insensitive case-insensitive
                                  :form-types types
-                                 :include-form t)))
+                                 :include-form t
+                                 :limit limit)))
     (log-event :info "clgrep.search"
                "pattern" pattern
                "path" (namestring search-path)
+               "limit" limit
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
 
-(defun clgrep-signatures (pattern &key path recursive case-insensitive form-types)
+
+(defun clgrep-signatures (pattern &key path recursive case-insensitive form-types limit)
   "Perform semantic grep search for PATTERN, returning signatures only.
 This is a token-efficient version that omits full form text.
 
@@ -115,9 +119,12 @@ Returns a list of alists, each containing:
                                  :recursive recursive-p
                                  :case-insensitive case-insensitive
                                  :form-types types
-                                 :include-form nil)))
+                                 :include-form nil
+                                 :limit limit)))
     (log-event :info "clgrep.signatures"
                "pattern" pattern
                "path" (namestring search-path)
+               "limit" limit
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
+

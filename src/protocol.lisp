@@ -534,7 +534,11 @@ Use this for code exploration when you need full context of matching code."
              (%make-ht "type" "array" "items" (%make-ht "type" "string")
               "description"
               "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)"))
+     (setf (gethash "limit" p)
+             (%make-ht "type" "integer" "description"
+              "Maximum number of results to return (optional, defaults to unlimited)"))
      (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
+
 
 (defun tools-descriptor-clgrep-signatures ()
   (%make-ht "name" "clgrep-signatures" "description"
@@ -560,7 +564,11 @@ Saves ~70% tokens compared to clgrep-search."
              (%make-ht "type" "array" "items" (%make-ht "type" "string")
               "description"
               "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)"))
+     (setf (gethash "limit" p)
+             (%make-ht "type" "integer" "description"
+              "Maximum number of results to return (optional, defaults to unlimited)"))
      (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
+
 (defun handle-tools-list (id)
   (let ((tools
          (vector (tools-descriptor-repl) (tools-descriptor-fs-read)
@@ -1010,7 +1018,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                            (and args (gethash "recursive" args))
                          (if presentp val t)))
             (case-insensitive (and args (gethash "caseInsensitive" args)))
-            (form-types (and args (gethash "formTypes" args))))
+            (form-types (and args (gethash "formTypes" args)))
+            (limit (and args (gethash "limit" args))))
         (unless (stringp pattern)
           (return-from handle-tool-clgrep-search
             (%error id -32602 "pattern must be a string")))
@@ -1018,7 +1027,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                                        :path path
                                        :recursive recursive
                                        :case-insensitive case-insensitive
-                                       :form-types form-types))
+                                       :form-types form-types
+                                       :limit limit))
                (formatted (%format-clgrep-results results)))
           (%result id
                    (%make-ht "content"
@@ -1026,10 +1036,12 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                               (with-output-to-string (s)
                                 (yason:encode formatted s)))
                              "matches" formatted
-                             "count" (length results)))))
+                             "count" (length results)
+                             "limited" (and limit (<= limit (length results)))))))
     (error (e)
       (%error id -32603
               (format nil "Internal error during clgrep-search: ~A" e)))))
+
 
 (defun handle-tool-clgrep-signatures (state id args)
   (declare (ignore state))
@@ -1040,7 +1052,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                            (and args (gethash "recursive" args))
                          (if presentp val t)))
             (case-insensitive (and args (gethash "caseInsensitive" args)))
-            (form-types (and args (gethash "formTypes" args))))
+            (form-types (and args (gethash "formTypes" args)))
+            (limit (and args (gethash "limit" args))))
         (unless (stringp pattern)
           (return-from handle-tool-clgrep-signatures
             (%error id -32602 "pattern must be a string")))
@@ -1048,7 +1061,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                                            :path path
                                            :recursive recursive
                                            :case-insensitive case-insensitive
-                                           :form-types form-types))
+                                           :form-types form-types
+                                           :limit limit))
                (formatted (%format-clgrep-results results)))
           (%result id
                    (%make-ht "content"
@@ -1056,10 +1070,12 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                               (with-output-to-string (s)
                                 (yason:encode formatted s)))
                              "matches" formatted
-                             "count" (length results)))))
+                             "count" (length results)
+                             "limited" (and limit (<= limit (length results)))))))
     (error (e)
       (%error id -32603
               (format nil "Internal error during clgrep-signatures: ~A" e)))))
+
 (defparameter *tool-handlers*
   (let ((handlers (make-hash-table :test #'equal)))
     (setf (gethash "repl-eval" handlers) #'handle-tool-repl-eval

@@ -539,7 +539,7 @@
                 filepath condition)))
     (nreverse results)))
 
-(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t))
+(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t) limit)
   "Search for PATTERN across all Lisp files in ROOT-DIRECTORY.
 
    Keyword arguments:
@@ -549,6 +549,7 @@
                          If NIL, all forms are included.
      :include-form     - If true (default), include full form text in results.
                          Set to NIL to omit :form field (saves tokens).
+     :limit            - Maximum number of results to return. If NIL, return all.
 
    Returns a list of alists, each containing:
      :file            - File path
@@ -568,13 +569,28 @@
      (semantic-grep \"/path/to/project\" \"defun.*foo\")
      (semantic-grep \"/path/to/project\" \"error\" :case-insensitive t)
      (semantic-grep \"/path/to/project\" \"timeout\" :form-types '(\"defun\" \"defmethod\"))
-     (semantic-grep \"/path/to/project\" \"emit\" :include-form nil)  ; signature only"
+     (semantic-grep \"/path/to/project\" \"emit\" :include-form nil)  ; signature only
+     (semantic-grep \"/path/to/project\" \"defun\" :limit 10)  ; first 10 results"
   (let ((files (collect-target-files root-directory :recursive recursive))
-        (all-results nil))
+        (all-results nil)
+        (count 0))
     (dolist (file files)
+      (when (and limit (>= count limit))
+        (return))
       (let ((file-results (search-in-file file pattern
                                           :case-insensitive case-insensitive
                                           :form-types form-types
                                           :include-form include-form)))
-        (setf all-results (append all-results file-results))))
-    all-results))
+        (if limit
+            ;; With limit: add results up to limit
+            (dolist (result file-results)
+              (when (>= count limit)
+                (return))
+              (push result all-results)
+              (incf count))
+            ;; Without limit: add all results
+            (setf all-results (append all-results file-results)))))
+    (if limit
+        (nreverse all-results)
+        all-results)))
+
