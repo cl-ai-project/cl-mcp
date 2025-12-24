@@ -5,8 +5,7 @@
   (:import-from #:cl-mcp/src/fs
                 #:*project-root*)
   (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search
-                #:clgrep-signatures))
+                #:clgrep-search))
 
 (in-package #:cl-mcp/tests/clgrep-test)
 
@@ -34,21 +33,6 @@
           (ok (assoc :file first-result))
           (ok (assoc :signature first-result))
           (ok (assoc :form first-result)))))))
-
-
-(deftest clgrep-signatures-omits-form-body
-  (testing "clgrep-signatures returns results without :form key"
-    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
-      (let ((results (clgrep-signatures "defun" :path "src/" :recursive nil)))
-        (ok (listp results))
-        (ok (> (length results) 0))
-        ;; Check that results have signature but no form body
-        (let ((first-result (first results)))
-          (ok (assoc :file first-result))
-          (ok (assoc :line first-result))
-          (ok (assoc :signature first-result))
-          ;; :form should NOT be present in signatures-only mode
-          (ok (null (assoc :form first-result))))))))
 
 (deftest clgrep-search-filters-by-form-type
   (testing "clgrep-search filters results by form-types"

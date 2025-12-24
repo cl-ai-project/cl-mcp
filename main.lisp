@@ -47,8 +47,7 @@
   (:import-from #:cl-mcp/src/run
                 #:run)
   (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search
-                #:clgrep-signatures)
+                #:clgrep-search)
   (:export #:run
            #:version
            ;; File system tools
@@ -66,7 +65,6 @@
            #:code-find-references
            ;; Semantic grep (clgrep)
            #:clgrep-search
-           #:clgrep-signatures
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls

@@ -27,8 +27,7 @@
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
   (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search
-                #:clgrep-signatures)
+                #:clgrep-search)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -551,39 +550,6 @@ Recommended workflow:
 
 
 
-(defun tools-descriptor-clgrep-signatures ()
-  (%make-ht "name" "clgrep-signatures" "description"
-   "Perform semantic grep search returning only signatures.
-Equivalent to clgrep-search with includeForm=false (the default).
-Use this for maximum token efficiency when exploring code.
-
-Note: clgrep-search now defaults to signatures-only, so this tool
-is provided mainly for explicit clarity. Both tools behave the same
-by default."
-   "inputSchema"
-   (let ((p (make-hash-table :test #'equal)))
-     (setf (gethash "pattern" p)
-             (%make-ht "type" "string" "description"
-              "cl-ppcre regular expression pattern to search for"))
-     (setf (gethash "path" p)
-             (%make-ht "type" "string" "description"
-              "Search root directory, relative to project root (optional, defaults to project root)"))
-     (setf (gethash "recursive" p)
-             (%make-ht "type" "boolean" "description"
-              "Search subdirectories recursively (default: true)"))
-     (setf (gethash "caseInsensitive" p)
-             (%make-ht "type" "boolean" "description"
-              "Case-insensitive matching (default: false)"))
-     (setf (gethash "formTypes" p)
-             (%make-ht "type" "array" "items" (%make-ht "type" "string")
-              "description"
-              "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)"))
-     (setf (gethash "limit" p)
-             (%make-ht "type" "integer" "description"
-              "Maximum number of results to return (optional, defaults to unlimited)"))
-     (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
-
-
 (defun handle-tools-list (id)
   (let ((tools
          (vector (tools-descriptor-repl) (tools-descriptor-fs-read)
@@ -595,8 +561,7 @@ by default."
                  (tools-descriptor-code-references)
                  (tools-descriptor-lisp-check-parens)
                  (tools-descriptor-lisp-edit-form)
-                 (tools-descriptor-clgrep-search)
-                 (tools-descriptor-clgrep-signatures))))
+                 (tools-descriptor-clgrep-search))))
     (%result id (%make-ht "tools" tools))))
 
 
@@ -1059,41 +1024,6 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during clgrep-search: ~A" e)))))
 
-
-
-(defun handle-tool-clgrep-signatures (state id args)
-  (declare (ignore state))
-  (handler-case
-      (let ((pattern (and args (gethash "pattern" args)))
-            (path (and args (gethash "path" args)))
-            (recursive (multiple-value-bind (val presentp)
-                           (and args (gethash "recursive" args))
-                         (if presentp val t)))
-            (case-insensitive (and args (gethash "caseInsensitive" args)))
-            (form-types (and args (gethash "formTypes" args)))
-            (limit (and args (gethash "limit" args))))
-        (unless (stringp pattern)
-          (return-from handle-tool-clgrep-signatures
-            (%error id -32602 "pattern must be a string")))
-        (let* ((results (clgrep-signatures pattern
-                                           :path path
-                                           :recursive recursive
-                                           :case-insensitive case-insensitive
-                                           :form-types form-types
-                                           :limit limit))
-               (formatted (%format-clgrep-results results)))
-          (%result id
-                   (%make-ht "content"
-                             (%text-content
-                              (with-output-to-string (s)
-                                (yason:encode formatted s)))
-                             "matches" formatted
-                             "count" (length results)
-                             "limited" (and limit (<= limit (length results)))))))
-    (error (e)
-      (%error id -32603
-              (format nil "Internal error during clgrep-signatures: ~A" e)))))
-
 (defparameter *tool-handlers*
   (let ((handlers (make-hash-table :test #'equal)))
     (setf (gethash "repl-eval" handlers) #'handle-tool-repl-eval
@@ -1108,8 +1038,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
           (gethash "code-find-references" handlers) #'handle-tool-code-find-references
           (gethash "lisp-check-parens" handlers) #'handle-tool-lisp-check-parens
           (gethash "lisp-edit-form" handlers) #'handle-tool-lisp-edit-form
-          (gethash "clgrep-search" handlers) #'handle-tool-clgrep-search
-          (gethash "clgrep-signatures" handlers) #'handle-tool-clgrep-signatures)
+          (gethash "clgrep-search" handlers) #'handle-tool-clgrep-search)
     handlers)
   "Map normalized tool names to handler functions.")
 

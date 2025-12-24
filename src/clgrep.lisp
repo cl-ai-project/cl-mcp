@@ -8,8 +8,7 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:export
-   #:clgrep-search
-   #:clgrep-signatures))
+   #:clgrep-search))
 (in-package #:cl-mcp/src/clgrep)
 
 (defun %ensure-project-root ()
@@ -95,40 +94,6 @@ Returns a list of alists, each containing:
                "path" (namestring search-path)
                "limit" limit
                "include-form" include-form
-               "matches" (length results))
-    (mapcar (lambda (r) (%normalize-result r search-path)) results)))
-
-
-
-(defun clgrep-signatures (pattern &key path recursive case-insensitive form-types limit)
-  "Perform semantic grep search for PATTERN, returning signatures only.
-This is a token-efficient version that omits full form text.
-
-Arguments are the same as clgrep-search.
-
-Returns a list of alists, each containing:
-  :file            - File path (relative to project root)
-  :line            - Line number of the match
-  :match           - The matching line text
-  :package         - Package name active at that line
-  :form-type       - Type of the form (defun, defmethod, etc.) or NIL
-  :form-name       - Name of the form or NIL
-  :signature       - Signature of the form
-  :form-start-line - Start line of the containing form
-  :form-end-line   - End line of the containing form"
-  (let* ((search-path (%resolve-search-path path))
-         (recursive-p (if (null recursive) t recursive))
-         (types (%parse-form-types form-types))
-         (results (semantic-grep search-path pattern
-                                 :recursive recursive-p
-                                 :case-insensitive case-insensitive
-                                 :form-types types
-                                 :include-form nil
-                                 :limit limit)))
-    (log-event :info "clgrep.signatures"
-               "pattern" pattern
-               "path" (namestring search-path)
-               "limit" limit
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
 
