@@ -11,18 +11,30 @@
 (in-package #:cl-mcp/tests/clgrep-test)
 
 (deftest clgrep-search-returns-results
-  (testing "clgrep-search returns list of alists with expected keys"
+  (testing "clgrep-search returns list of alists with expected keys (default: no form)"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
       (let ((results (clgrep-search "defun" :path "src/" :recursive nil)))
         (ok (listp results))
         (ok (> (length results) 0))
-        ;; Check that results have expected keys
+        ;; Check that results have expected keys (no :form by default)
         (let ((first-result (first results)))
           (ok (assoc :file first-result))
           (ok (assoc :line first-result))
           (ok (assoc :match first-result))
           (ok (assoc :signature first-result))
+          ;; :form should NOT be present by default
+          (ok (null (assoc :form first-result)))))))
+  (testing "clgrep-search with include-form returns :form key"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "defun" :path "src/" :recursive nil :include-form t)))
+        (ok (listp results))
+        (ok (> (length results) 0))
+        ;; Check that results have :form when include-form is true
+        (let ((first-result (first results)))
+          (ok (assoc :file first-result))
+          (ok (assoc :signature first-result))
           (ok (assoc :form first-result)))))))
+
 
 (deftest clgrep-signatures-omits-form-body
   (testing "clgrep-signatures returns results without :form key"
