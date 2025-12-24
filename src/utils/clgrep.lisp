@@ -462,24 +462,28 @@
         (t form-name)))))
 (defun extract-package-for-line (content line-number)
   "Extract the package name that is active at LINE-NUMBER in CONTENT.
-   Returns the package name as a string, or NIL if not found."
+   Returns the package name as a string, or NIL if not found.
+   Ignores in-package forms that appear in comments."
   (let ((current-package nil)
         (current-line 1))
     (with-input-from-string (stream content)
       (loop for line = (read-line stream nil nil)
             while (and line (<= current-line line-number))
             do (let ((trimmed (string-trim '(#\Space #\Tab) line)))
-                 ;; Match (in-package :xxx) or (in-package #:xxx) or (in-package "xxx")
-                 (multiple-value-bind (match groups)
-                     (cl-ppcre:scan-to-strings
-                      "\\(in-package\\s+[:#]?['\"]?([^)\\s'\"]+)"
-                      trimmed)
-                   (when match
-                     ;; Remove leading : or #: from package name
-                     (let ((pkg-name (aref groups 0)))
-                       (setf current-package
-                             (string-upcase
-                              (string-left-trim ":#" pkg-name)))))))
+                 ;; Skip comment lines (lines starting with ;)
+                 (unless (and (> (length trimmed) 0)
+                              (char= (char trimmed 0) #\;))
+                   ;; Match (in-package :xxx) or (in-package #:xxx) or (in-package "xxx")
+                   (multiple-value-bind (match groups)
+                       (cl-ppcre:scan-to-strings
+                        "^\\(in-package\\s+[:#]?['\"]?([^)\\s'\"]+)"
+                        trimmed)
+                     (when match
+                       ;; Remove leading : or #: from package name
+                       (let ((pkg-name (aref groups 0)))
+                         (setf current-package
+                               (string-upcase
+                                (string-left-trim ":#" pkg-name))))))))
                (incf current-line)))
     current-package))
 
