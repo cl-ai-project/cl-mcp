@@ -60,6 +60,12 @@ You are strictly prohibited from using:
 
 **Exception:** If the user explicitly requests shell command execution for non-code tasks (e.g., "run git status"), you may comply if shell tools are available in your environment. However, for all Lisp development tasks, use the Lisp-native tools provided by cl-mcp.
 
+**For Lisp files (.lisp, .asd), prefer cl-mcp tools over AI agent's native search:**
+- Use `clgrep-search` instead of native Grep/Glob tools
+- `clgrep-search` understands Lisp structure: returns form type, name, signature, and package context
+- Enables efficient workflow: clgrep-search (locate) → lisp-read-file (read specific definition)
+- Native search tools lack Lisp awareness and return raw text matches
+
 ### 1. Editing Code
 
 **ALWAYS use `lisp-edit-form` for modifying existing Lisp source code.**
