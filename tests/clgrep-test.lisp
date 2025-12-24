@@ -63,6 +63,41 @@
             (ok (or (null form-type)
                     (string-equal form-type "defparameter")))))))))
 
+(deftest clgrep-search-filters-by-form-type-vector
+  (testing "clgrep-search filters by form-types when passed as vector (JSON array)"
+    ;; This test verifies the fix for the bug where JSON arrays (parsed as vectors
+    ;; by yason) were not handled by %parse-form-types, causing the filter to be
+    ;; silently ignored.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      ;; Pass form-types as a vector (simulating JSON array from MCP client)
+      (let ((results (clgrep-search "." :path "src/"
+                                    :recursive nil
+                                    :form-types #("defparameter"))))
+        (ok (listp results))
+        (ok (> (length results) 0) "Should find at least one defparameter")
+        ;; All results should be defparameter forms only
+        (dolist (r results)
+          (let ((form-type (cdr (assoc :form-type r))))
+            (ok (string-equal form-type "defparameter")
+                (format nil "Expected defparameter but got ~A" form-type)))))))
+  (testing "clgrep-search with vector form-types filters rare form types correctly"
+    ;; Test with defmethod which has only 2 occurrences in the project
+    ;; This would have returned thousands of results before the fix
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "." :path "."
+                                    :recursive t
+                                    :form-types #("defmethod"))))
+        (ok (listp results))
+        ;; Should find defmethod results (there are exactly 2 defmethod forms)
+        ;; Each form may have multiple line matches, but all should be defmethod
+        (ok (> (length results) 0) "Should find at least one defmethod")
+        (ok (< (length results) 20) "Should not return excessive results")
+        ;; All results must be defmethod
+        (dolist (r results)
+          (let ((form-type (cdr (assoc :form-type r))))
+            (ok (string-equal form-type "defmethod")
+                (format nil "Expected defmethod but got ~A" form-type))))))))
+
 (deftest clgrep-search-case-insensitive
   (testing "clgrep-search with case-insensitive flag"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))

@@ -50,10 +50,11 @@ Signals an error if PATH is outside project root."
 
 (defun %parse-form-types (form-types)
   "Parse FORM-TYPES argument into a list of strings.
-Accepts a list of strings, a single string, or NIL."
+Accepts a list of strings, a vector of strings, a single string, or NIL."
   (cond
     ((null form-types) nil)
     ((listp form-types) form-types)
+    ((vectorp form-types) (coerce form-types 'list))
     ((stringp form-types) (list form-types))
     (t nil)))
 
