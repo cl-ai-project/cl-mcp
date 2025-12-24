@@ -1,7 +1,17 @@
 (defpackage #:cl-mcp/tests/clgrep-utils-test
   (:use #:cl
-        #:clgrep
-        #:rove))
+        #:rove)
+  (:import-from #:cl-mcp/src/utils/clgrep
+                #:grep-file
+                #:extract-toplevel-form
+                #:glob-to-regex
+                #:collect-target-files
+                #:target-file-p
+                #:path-ignored-p
+                #:extract-package-for-line
+                #:semantic-grep
+                #:extract-form-type-and-name
+                #:extract-form-signature))
 (in-package #:cl-mcp/tests/clgrep-utils-test)
 
 ;;; Test data content for grep-file tests
@@ -33,7 +43,7 @@ Final line
   (testing "should match simple string patterns"
     (with-test-file (test-file)
       (let ((result (with-output-to-string (*standard-output*)
-                      (clgrep:grep-file "Hello" (namestring test-file)))))
+                      (grep-file "Hello" (namestring test-file)))))
         (ok (search "Hello world" result))
         (ok (search "Hello again" result))
         (ok (search ":2:" result))
@@ -43,7 +53,7 @@ Final line
   (testing "should match regex patterns"
     (with-test-file (test-file)
       (let ((result (with-output-to-string (*standard-output*)
-                      (clgrep:grep-file "test.*file" (namestring test-file)))))
+                      (grep-file "test.*file" (namestring test-file)))))
         (ok (search "This is a test file" result))
         (ok (search ":1:" result))))))
 
@@ -51,25 +61,25 @@ Final line
   (testing "should match digit patterns"
     (with-test-file (test-file)
       (let ((result (with-output-to-string (*standard-output*)
-                      (clgrep:grep-file "\\d+" (namestring test-file)))))
+                      (grep-file "\\d+" (namestring test-file)))))
         (ok (search "Testing 123" result))
         (ok (search ":7:" result))))))
 
 (deftest test-grep-file-match-count
   (testing "should return correct match count"
     (with-test-file (test-file)
-      (ok (= 2 (clgrep:grep-file "Hello" (namestring test-file))))
-      (ok (= 2 (clgrep:grep-file "Testing" (namestring test-file))))
-      (ok (= 1 (clgrep:grep-file "\\d+" (namestring test-file)))))))
+      (ok (= 2 (grep-file "Hello" (namestring test-file))))
+      (ok (= 2 (grep-file "Testing" (namestring test-file))))
+      (ok (= 1 (grep-file "\\d+" (namestring test-file)))))))
 
 (deftest test-grep-file-no-match
   (testing "should return 0 when no matches found"
     (with-test-file (test-file)
-      (ok (= 0 (clgrep:grep-file "NOMATCH" (namestring test-file)))))))
+      (ok (= 0 (grep-file "NOMATCH" (namestring test-file)))))))
 
 (deftest test-grep-file-nonexistent-file
   (testing "should raise file-error for nonexistent file"
-    (ok (signals (clgrep:grep-file "pattern" "/nonexistent/file.txt")
+    (ok (signals (grep-file "pattern" "/nonexistent/file.txt")
                  'file-error))))
 
 (deftest test-extract-toplevel-form-basic
@@ -81,8 +91,8 @@ Final line
 (defun bar (x)
   ;; This is a comment
   (* x 2))"))
-      (let ((result1 (clgrep:extract-toplevel-form content 2))
-            (result2 (clgrep:extract-toplevel-form content 6)))
+      (let ((result1 (extract-toplevel-form content 2))
+            (result2 (extract-toplevel-form content 6)))
         ;; Check text content
         (ok (string= "(defun foo ()
   \"A simple function\"
@@ -105,7 +115,7 @@ Final line
     (let ((content "(defvar *config*
   '(:key \"value with \\\" quote\"
     :another-key 123))"))
-      (let* ((result (clgrep:extract-toplevel-form content 2))
+      (let* ((result (extract-toplevel-form content 2))
              (text (cdr (assoc :text result))))
         (ok (search "value with \\\" quote" text))
         (ok (search "*config*" text))
@@ -118,7 +128,7 @@ Final line
     (let* ((long-lines (loop for i from 1 to 100
                             collect (format nil "  (line-~D \"data-~D\")" i i)))
            (long-form (format nil "(defun huge-function ()~%~{~A~%~})" long-lines))
-           (result (clgrep:extract-toplevel-form long-form 50))
+           (result (extract-toplevel-form long-form 50))
            (text (cdr (assoc :text result))))
       ;; Should be truncated
       (ok (< (length text) (length long-form)))
@@ -138,18 +148,18 @@ Final line
 (defun bar ()
   (* 3 4))"))
       ;; Line 3 is the empty line between the two forms
-      (ok (null (clgrep:extract-toplevel-form content 3))))))
+      (ok (null (extract-toplevel-form content 3))))))
 
 (deftest test-glob-to-regex
   (testing "should convert glob patterns to regex"
-    (ok (string= "[^/]*\\.o" (clgrep::glob-to-regex "*.o")))
-    (ok (string= "(?:.*/|)[^/]*\\.log" (clgrep::glob-to-regex "**/*.log")))
-    (ok (string= "\\.git/.*" (clgrep::glob-to-regex ".git/")))
-    (ok (string= "^root-only\\.txt" (clgrep::glob-to-regex "/root-only.txt")))))
+    (ok (string= "[^/]*\\.o" (glob-to-regex "*.o")))
+    (ok (string= "(?:.*/|)[^/]*\\.log" (glob-to-regex "**/*.log")))
+    (ok (string= "\\.git/.*" (glob-to-regex ".git/")))
+    (ok (string= "^root-only\\.txt" (glob-to-regex "/root-only.txt")))))
 
 (deftest test-collect-target-files
   (testing "should collect .lisp, .asd, and .ros files from project"
-    (let ((files (clgrep:collect-target-files
+    (let ((files (collect-target-files
                   (asdf:system-source-directory :clgrep))))
       ;; Should find at least the main source files
       (ok (>= (length files) 2))
@@ -165,22 +175,22 @@ Final line
 
 (deftest test-target-file-p
   (testing "should identify target file extensions"
-    (ok (clgrep::target-file-p #P"/path/to/file.lisp"))
-    (ok (clgrep::target-file-p #P"/path/to/system.asd"))
-    (ok (clgrep::target-file-p #P"/path/to/script.ros"))
-    (ok (not (clgrep::target-file-p #P"/path/to/file.txt")))
-    (ok (not (clgrep::target-file-p #P"/path/to/file.fasl")))
-    (ok (not (clgrep::target-file-p #P"/path/to/file")))))
+    (ok (target-file-p #P"/path/to/file.lisp"))
+    (ok (target-file-p #P"/path/to/system.asd"))
+    (ok (target-file-p #P"/path/to/script.ros"))
+    (ok (not (target-file-p #P"/path/to/file.txt")))
+    (ok (not (target-file-p #P"/path/to/file.fasl")))
+    (ok (not (target-file-p #P"/path/to/file")))))
 
 (deftest test-path-ignored-p
   (testing "should match paths against ignore patterns"
     (let ((patterns (list "[^/]*\\.o"           ; *.o
                          "\\.git/.*"            ; .git/
                          "(?:.*/|)[^/]*\\.log"))) ; **/*.log
-      (ok (clgrep::path-ignored-p #P"/project/test.o" #P"/project/" patterns))
-      (ok (clgrep::path-ignored-p #P"/project/.git/config" #P"/project/" patterns))
-      (ok (clgrep::path-ignored-p #P"/project/logs/app.log" #P"/project/" patterns))
-      (ok (not (clgrep::path-ignored-p #P"/project/src/main.lisp" #P"/project/" patterns))))))
+      (ok (path-ignored-p #P"/project/test.o" #P"/project/" patterns))
+      (ok (path-ignored-p #P"/project/.git/config" #P"/project/" patterns))
+      (ok (path-ignored-p #P"/project/logs/app.log" #P"/project/" patterns))
+      (ok (not (path-ignored-p #P"/project/src/main.lisp" #P"/project/" patterns))))))
 
 (deftest test-extract-package-for-line
   (testing "should extract package name from in-package forms"
@@ -195,14 +205,14 @@ Final line
 
 (defun bar ()
   (* 3 4))"))
-      (ok (string= "TEST" (clgrep::extract-package-for-line content 5)))
-      (ok (string= "ANOTHER-PACKAGE" (clgrep::extract-package-for-line content 10)))
+      (ok (string= "TEST" (extract-package-for-line content 5)))
+      (ok (string= "ANOTHER-PACKAGE" (extract-package-for-line content 10)))
       ;; Before any in-package declaration
-      (ok (null (clgrep::extract-package-for-line content 1))))))
+      (ok (null (extract-package-for-line content 1))))))
 
 (deftest test-semantic-grep
   (testing "should search across project files and return structured results"
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "defun grep-file")))
       ;; Should find at least the grep-file function
@@ -239,30 +249,30 @@ Final line
 (deftest test-extract-form-type-and-name
   (testing "should extract form type and name from various form types"
     ;; defun
-    (let ((result (clgrep::extract-form-type-and-name "(defun foo (x) (+ x 1))")))
+    (let ((result (extract-form-type-and-name "(defun foo (x) (+ x 1))")))
       (ok (string= "defun" (cdr (assoc :type result))))
       (ok (string= "foo" (cdr (assoc :name result)))))
     ;; defmethod with specializers
-    (let ((result (clgrep::extract-form-type-and-name "(defmethod bar ((x string)) x)")))
+    (let ((result (extract-form-type-and-name "(defmethod bar ((x string)) x)")))
       (ok (string= "defmethod" (cdr (assoc :type result))))
       (ok (string= "bar" (cdr (assoc :name result)))))
     ;; defvar
-    (let ((result (clgrep::extract-form-type-and-name "(defvar *my-var* 42)")))
+    (let ((result (extract-form-type-and-name "(defvar *my-var* 42)")))
       (ok (string= "defvar" (cdr (assoc :type result))))
       (ok (string= "*my-var*" (cdr (assoc :name result)))))
     ;; defclass
-    (let ((result (clgrep::extract-form-type-and-name "(defclass my-class () ())")))
+    (let ((result (extract-form-type-and-name "(defclass my-class () ())")))
       (ok (string= "defclass" (cdr (assoc :type result))))
       (ok (string= "my-class" (cdr (assoc :name result)))))
     ;; Non-recognized form
-    (ok (null (clgrep::extract-form-type-and-name "(my-custom-form foo)")))
+    (ok (null (extract-form-type-and-name "(my-custom-form foo)")))
     ;; Non-form string
-    (ok (null (clgrep::extract-form-type-and-name "just some text")))))
+    (ok (null (extract-form-type-and-name "just some text")))))
 
 (deftest test-semantic-grep-form-type-filter
   (testing "should filter results by form type"
     ;; Search for all forms containing "defun" - should find defun forms
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "grep-file"
                     :form-types '("defun"))))
@@ -271,7 +281,7 @@ Final line
       (ok (every (lambda (r) (string= "defun" (cdr (assoc :form-type r))))
                  results)))
     ;; Search with non-matching form type should return empty
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "grep-file"
                     :form-types '("defclass"))))
@@ -281,31 +291,31 @@ Final line
   (testing "should extract signatures from various form types"
     ;; defun with parameters
     (ok (string= "(foo x y &key z)"
-                 (clgrep:extract-form-signature "(defun foo (x y &key z) (+ x y z))")))
+                 (extract-form-signature "(defun foo (x y &key z) (+ x y z))")))
     ;; defun with no parameters
     (ok (string= "(bar)"
-                 (clgrep:extract-form-signature "(defun bar () nil)")))
+                 (extract-form-signature "(defun bar () nil)")))
     ;; defmethod with specializers
     (ok (string= "(emit (logger json-logger) event &key stream)"
-                 (clgrep:extract-form-signature "(defmethod emit ((logger json-logger) event &key stream) body)")))
+                 (extract-form-signature "(defmethod emit ((logger json-logger) event &key stream) body)")))
     ;; defvar
     (ok (string= "*my-var*"
-                 (clgrep:extract-form-signature "(defvar *my-var* 42)")))
+                 (extract-form-signature "(defvar *my-var* 42)")))
     ;; defclass with superclass
     (ok (string= "(my-class parent-class)"
-                 (clgrep:extract-form-signature "(defclass my-class (parent-class) ())")))
+                 (extract-form-signature "(defclass my-class (parent-class) ())")))
     ;; defclass without superclass
     (ok (string= "empty-class"
-                 (clgrep:extract-form-signature "(defclass empty-class () ())")))
+                 (extract-form-signature "(defclass empty-class () ())")))
     ;; defstruct
     (ok (string= "my-struct"
-                 (clgrep:extract-form-signature "(defstruct my-struct field1 field2)")))
+                 (extract-form-signature "(defstruct my-struct field1 field2)")))
     ;; Non-recognized form
-    (ok (null (clgrep:extract-form-signature "(my-custom-form foo)")))))
+    (ok (null (extract-form-signature "(my-custom-form foo)")))))
 
 (deftest test-semantic-grep-signature-field
   (testing "should include signature in results"
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "defun grep-file"
                     :form-types '("defun"))))
@@ -318,7 +328,7 @@ Final line
 
 (deftest test-semantic-grep-include-form
   (testing "should omit form when :include-form is nil"
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "defun grep-file"
                     :form-types '("defun")
@@ -330,7 +340,7 @@ Final line
         ;; Should still have signature
         (ok (assoc :signature result)))))
   (testing "should include form when :include-form is t (default)"
-    (let ((results (clgrep:semantic-grep
+    (let ((results (semantic-grep
                     (asdf:system-source-directory :clgrep)
                     "defun grep-file"
                     :form-types '("defun")
