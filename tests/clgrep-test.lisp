@@ -91,3 +91,45 @@
                                     :case-insensitive t)))
         (ok (listp results))
         (ok (> (length results) 0))))))
+
+
+(deftest clgrep-search-path-parameter
+  (testing "clgrep-search with single file path returns only results from that file"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "defun" :path "src/http.lisp")))
+        (ok (listp results))
+        (ok (> (length results) 0) "Should find defun in http.lisp")
+        ;; All results must be from http.lisp only
+        (dolist (r results)
+          (let ((file (cdr (assoc :file r))))
+            (ok (search "http.lisp" file)
+                (format nil "Expected http.lisp but got ~A" file)))))))
+  (testing "clgrep-search with directory path returns results from multiple files"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let* ((results (clgrep-search "defun" :path "src/" :recursive nil :limit 50))
+             (files (remove-duplicates
+                     (mapcar (lambda (r) (cdr (assoc :file r))) results)
+                     :test #'string=)))
+        (ok (listp results))
+        (ok (> (length results) 0) "Should find defun in src/")
+        ;; Should have results from multiple files
+        (ok (> (length files) 1)
+            (format nil "Expected multiple files but got ~A" files)))))
+  (testing "clgrep-search single file vs directory returns different result counts"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((single-file-results (clgrep-search "defparameter"
+                                                :path "src/fs.lisp"
+                                                :form-types '("defparameter")))
+            (dir-results (clgrep-search "defparameter"
+                                        :path "src/"
+                                        :recursive nil
+                                        :form-types '("defparameter"))))
+        (ok (listp single-file-results))
+        (ok (listp dir-results))
+        ;; Directory search should find more or equal results
+        (ok (>= (length dir-results) (length single-file-results))
+            (format nil "Directory (~A) should have >= single file (~A) results"
+                    (length dir-results) (length single-file-results)))
+        ;; Single file results should all be from fs.lisp
+        (dolist (r single-file-results)
+          (ok (search "fs.lisp" (cdr (assoc :file r)))))))))

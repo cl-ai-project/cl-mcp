@@ -309,36 +309,41 @@
 
 (defun collect-target-files (root-directory &key (recursive t))
   "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY.
+   If ROOT-DIRECTORY is a single file, return it in a list (if it's a target file).
    If RECURSIVE is true (default), search subdirectories recursively.
    Respects .gitignore patterns and excludes .git directories."
-  (let* ((root-dir (truename root-directory))
-         (gitignore-path (merge-pathnames ".gitignore" root-dir))
-         (ignore-patterns (parse-gitignore gitignore-path))
-         (git-pattern (glob-to-regex ".git/"))
-         (all-patterns (cons git-pattern ignore-patterns))
-         (result nil))
-
-    (if recursive
-        (labels ((collect-from-dir (dir)
-                   "Recursively collect files from DIR."
-                   (dolist (entry (uiop:directory* (merge-pathnames uiop:*wild-file* dir)))
-                     (unless (path-ignored-p entry root-dir all-patterns)
-                       (when (target-file-p entry)
-                         (push entry result))))
-
-                   ;; Recursively process subdirectories
-                   (dolist (subdir (uiop:subdirectories dir))
-                     (unless (path-ignored-p subdir root-dir all-patterns)
-                       (collect-from-dir subdir)))))
-          (collect-from-dir root-dir))
-
-        ;; Non-recursive: only files directly in root-dir
-        (dolist (entry (uiop:directory* (merge-pathnames uiop:*wild-file* root-dir)))
-          (unless (path-ignored-p entry root-dir all-patterns)
-            (when (target-file-p entry)
-              (push entry result)))))
-
-    (nreverse result)))
+  (let ((root-path (truename root-directory)))
+    ;; Handle single file case
+    (when (uiop:file-pathname-p root-path)
+      (return-from collect-target-files
+        (if (target-file-p root-path)
+            (list root-path)
+            nil)))
+    ;; Directory case
+    (let* ((root-dir (uiop:ensure-directory-pathname root-path))
+           (gitignore-path (merge-pathnames ".gitignore" root-dir))
+           (ignore-patterns (parse-gitignore gitignore-path))
+           (git-pattern (glob-to-regex ".git/"))
+           (all-patterns (cons git-pattern ignore-patterns))
+           (result nil))
+      (if recursive
+          (labels ((collect-from-dir (dir)
+                     "Recursively collect files from DIR."
+                     (dolist (entry (uiop:directory*
+                                     (merge-pathnames uiop:*wild-file* dir)))
+                       (unless (path-ignored-p entry root-dir all-patterns)
+                         (when (target-file-p entry)
+                           (push entry result))))
+                     (dolist (subdir (uiop:subdirectories dir))
+                       (unless (path-ignored-p subdir root-dir all-patterns)
+                         (collect-from-dir subdir)))))
+            (collect-from-dir root-dir))
+          (dolist (entry (uiop:directory*
+                          (merge-pathnames uiop:*wild-file* root-dir)))
+            (unless (path-ignored-p entry root-dir all-patterns)
+              (when (target-file-p entry)
+                (push entry result)))))
+      (nreverse result))))
 
 (defparameter *known-form-types*
   '("defun" "defmethod" "defgeneric" "defmacro" "define-compiler-macro"
