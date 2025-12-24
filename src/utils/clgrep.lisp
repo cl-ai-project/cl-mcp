@@ -6,7 +6,12 @@
            #:grep-file
            #:extract-toplevel-form
            #:extract-form-signature
+           #:extract-form-type-and-name
+           #:extract-package-for-line
            #:collect-target-files
+           #:target-file-p
+           #:path-ignored-p
+           #:glob-to-regex
            #:semantic-grep))
 (in-package #:cl-mcp/src/utils/clgrep)
 

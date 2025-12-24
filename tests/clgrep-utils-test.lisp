@@ -160,7 +160,7 @@ Final line
 (deftest test-collect-target-files
   (testing "should collect .lisp, .asd, and .ros files from project"
     (let ((files (collect-target-files
-                  (asdf:system-source-directory :clgrep))))
+                  (asdf:system-source-directory :cl-mcp))))
       ;; Should find at least the main source files
       (ok (>= (length files) 2))
       ;; All files should have target extensions
@@ -213,7 +213,7 @@ Final line
 (deftest test-semantic-grep
   (testing "should search across project files and return structured results"
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "defun grep-file")))
       ;; Should find at least the grep-file function
       (ok (>= (length results) 1))
@@ -229,8 +229,8 @@ Final line
         (ok (assoc :form-end-line result))
         (ok (assoc :form-start-byte result))
         (ok (assoc :form-end-byte result))
-        ;; Package should be CLGREP
-        (ok (string= "CLGREP" (cdr (assoc :package result))))
+        ;; Package should be CL-MCP/SRC/UTILS/CLGREP
+        (ok (string= "CL-MCP/SRC/UTILS/CLGREP" (cdr (assoc :package result))))
         ;; Form should contain the function definition
         (ok (search "defun grep-file" (cdr (assoc :form result))))
         ;; Location sanity checks
@@ -273,7 +273,7 @@ Final line
   (testing "should filter results by form type"
     ;; Search for all forms containing "defun" - should find defun forms
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "grep-file"
                     :form-types '("defun"))))
       (ok (>= (length results) 1))
@@ -282,7 +282,7 @@ Final line
                  results)))
     ;; Search with non-matching form type should return empty
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "grep-file"
                     :form-types '("defclass"))))
       (ok (= 0 (length results))))))
@@ -316,7 +316,7 @@ Final line
 (deftest test-semantic-grep-signature-field
   (testing "should include signature in results"
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "defun grep-file"
                     :form-types '("defun"))))
       (ok (>= (length results) 1))
@@ -329,7 +329,7 @@ Final line
 (deftest test-semantic-grep-include-form
   (testing "should omit form when :include-form is nil"
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "defun grep-file"
                     :form-types '("defun")
                     :include-form nil)))
@@ -341,7 +341,7 @@ Final line
         (ok (assoc :signature result)))))
   (testing "should include form when :include-form is t (default)"
     (let ((results (semantic-grep
-                    (asdf:system-source-directory :clgrep)
+                    (asdf:system-source-directory :cl-mcp)
                     "defun grep-file"
                     :form-types '("defun")
                     :include-form t)))
