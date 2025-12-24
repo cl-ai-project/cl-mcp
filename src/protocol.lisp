@@ -515,7 +515,13 @@ e.g., \"print-object (my-class t)\""))
    "Perform semantic grep search for a pattern in Lisp files.
 Unlike regular grep, this tool understands Lisp structure and returns
 the top-level form signature containing each match.
-Use 'includeForm: true' to get the complete form text when needed."
+
+Default: Returns signatures only (token-efficient).
+Use 'includeForm: true' to get complete form text when needed.
+
+Recommended workflow:
+1. clgrep-search to locate functions/usages across the project
+2. lisp-read-file with name_pattern to read specific definitions in detail"
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "pattern" p)
@@ -544,12 +550,16 @@ Use 'includeForm: true' to get the complete form text when needed."
 
 
 
+
 (defun tools-descriptor-clgrep-signatures ()
   (%make-ht "name" "clgrep-signatures" "description"
-   "Perform semantic grep search returning only signatures (token-efficient).
-Same as clgrep-search but omits full form text, returning only signatures.
-Use this when you need to find matching definitions but don't need full source code.
-Saves ~70% tokens compared to clgrep-search."
+   "Perform semantic grep search returning only signatures.
+Equivalent to clgrep-search with includeForm=false (the default).
+Use this for maximum token efficiency when exploring code.
+
+Note: clgrep-search now defaults to signatures-only, so this tool
+is provided mainly for explicit clarity. Both tools behave the same
+by default."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "pattern" p)
@@ -572,6 +582,7 @@ Saves ~70% tokens compared to clgrep-search."
              (%make-ht "type" "integer" "description"
               "Maximum number of results to return (optional, defaults to unlimited)"))
      (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
+
 
 (defun handle-tools-list (id)
   (let ((tools

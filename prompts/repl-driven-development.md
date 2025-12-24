@@ -52,8 +52,9 @@ You are strictly prohibited from using:
 **Why?** These tools operate outside the Lisp image and cannot maintain consistency with the running system. They also bypass cl-mcp's security policies (allow-lists, project root restrictions).
 
 **Use instead:**
-- `code-find`, `code-describe`, `code-find-references` for symbol lookup
-- `lisp-read-file` with `name_pattern` or `content_pattern` for code search
+- `clgrep-search` for project-wide pattern search with Lisp structure awareness
+- `code-find`, `code-describe`, `code-find-references` for symbol lookup (requires loaded system)
+- `lisp-read-file` with `name_pattern` or `content_pattern` for reading specific definitions
 - `fs-list-directory` for exploring directory structure
 - `lisp-edit-form` for all code modifications
 
@@ -196,6 +197,38 @@ Use `repl-eval` for:
 - When paths are relative, they are resolved relative to the project root.
 
 ## Recommended Workflows
+
+### Scenario: Code Exploration (Token-Efficient)
+
+Use `clgrep-search` to locate code across the project, then `lisp-read-file` to read specific definitions.
+
+1. **Search:** Find functions/usages with `clgrep-search` (returns signatures by default):
+   ```json
+   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 10}
+   ```
+   This returns file paths, line numbers, signatures, and package info without loading the system.
+
+2. **Drill down:** Use `lisp-read-file` with `name_pattern` to read the specific function:
+   ```json
+   {"path": "src/protocol.lisp", "collapsed": true, "name_pattern": "^handle-request$"}
+   ```
+   Other functions remain collapsed; only the target expands.
+
+3. **Find usages:** Search for where a function is called:
+   ```json
+   {"pattern": "handle-request", "limit": 20}
+   ```
+   Results show which functions contain the pattern and their locations.
+
+4. **Get full context (if needed):** Use `includeForm: true` for complete form text:
+   ```json
+   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 3, "includeForm": true}
+   ```
+
+**Why this workflow?**
+- `clgrep-search` works without loading systems (faster, no side effects)
+- Default signature-only output saves tokens (~70% reduction vs full forms)
+- Combined with `lisp-read-file`, enables surgical code reading
 
 ### Scenario: Modifying a Function
 
