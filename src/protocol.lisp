@@ -229,7 +229,10 @@ version, and source location."
    "Read a text file with optional offset and limit.
 Prefer absolute paths inside the project; offset/limit are character counts
 to avoid loading whole files.
-It can only open files in the project or in loaded dependent libraries."
+It can only open files in the project or in loaded dependent libraries.
+
+For .lisp and .asd files, prefer 'lisp-read-file' instead - it provides
+collapsed signatures view that saves ~70% of context window tokens."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "path" p)
@@ -366,11 +369,13 @@ or relative to project root"))
    "name" "code-find"
    "description"
    "Locate the definition of a symbol (path and line) using sb-introspect.
-Quickload/load the library first; prefer package-qualified symbols or supply
-the package argument.
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+Prefer package-qualified symbols or supply the package argument.
+
 NOTE: If the symbol is not found, the system might not be loaded yet.
-Try using 'lisp-read-file' with 'name_pattern' to search the file system
-directly as a fallback."
+For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
+Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -391,11 +396,13 @@ and is loaded"))
    "name" "code-describe"
    "description"
    "Describe a symbol: type, arglist, and documentation.
-Ensure the defining library is loaded; pass a package or a package-qualified
-symbol to avoid resolution errors.
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+Pass a package or a package-qualified symbol to avoid resolution errors.
+
 NOTE: If the symbol is not found, the system might not be loaded yet.
-Try using 'lisp-read-file' with 'name_pattern' to search the file system
-directly as a fallback."
+For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
+Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -417,8 +424,12 @@ and is loaded"))
    "description"
    "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
 references, sets).
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
 Use package-qualified symbols when possible; set projectOnly=false to include
-external libs."
+external libs.
+
+For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' instead."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -515,7 +526,10 @@ e.g., \"print-object (my-class t)\""))
 Unlike regular grep, this tool understands Lisp structure and returns
 the top-level form signature containing each match.
 
-Default: Returns signatures only (token-efficient).
+KEY ADVANTAGE: Works WITHOUT loading systems - faster and no side effects.
+Use this as the FIRST choice for code exploration before code-find/code-describe.
+
+Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
 Use 'includeForm: true' to get complete form text when needed.
 
 Recommended workflow:

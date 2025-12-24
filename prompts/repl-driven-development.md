@@ -66,6 +66,49 @@ You are strictly prohibited from using:
 - Enables efficient workflow: clgrep-search (locate) → lisp-read-file (read specific definition)
 - Native search tools lack Lisp awareness and return raw text matches
 
+### Tool Selection Quick Reference
+
+**Decision Flowchart:**
+```
+Need to explore code?
+├─ Know the symbol name?
+│   ├─ YES → Is system loaded?
+│   │         ├─ YES → code-find / code-describe / code-find-references
+│   │         └─ NO  → clgrep-search (no loading required)
+│   └─ NO  → clgrep-search (pattern search)
+│
+├─ Need to read file contents?
+│   ├─ .lisp / .asd → lisp-read-file (collapsed=true recommended)
+│   └─ Other files → fs-read-file
+│
+├─ Need to edit code?
+│   ├─ Existing Lisp file → lisp-edit-form (REQUIRED)
+│   └─ New file → fs-write-file (minimal content, then expand with lisp-edit-form)
+│
+└─ Need to execute/test code?
+    └─ repl-eval
+```
+
+**Tool Comparison Matrix:**
+
+| Purpose | No Loading Required | Loading Required |
+|---------|---------------------|------------------|
+| Symbol search | `clgrep-search` | `code-find` |
+| Usage search | `clgrep-search` | `code-find-references` |
+| Symbol info | - | `code-describe` |
+| Read file | `lisp-read-file` | - |
+| Edit file | `lisp-edit-form` | - |
+
+**When to Use Each Tool:**
+
+| Tool | Use When | Don't Use When |
+|------|----------|----------------|
+| `clgrep-search` | Project-wide search, system not loaded | Reading a single known definition |
+| `code-find` | Need exact definition location, system loaded | System not loaded, pattern search |
+| `code-find-references` | Need xref info, tracing callers | Simple text search |
+| `lisp-read-file` | Reading Lisp files, need structure overview | Non-Lisp files |
+| `lisp-edit-form` | Editing existing Lisp code | Creating new files, non-Lisp files |
+
 ### 1. Editing Code
 
 **ALWAYS use `lisp-edit-form` for modifying existing Lisp source code.**
