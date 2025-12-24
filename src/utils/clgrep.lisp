@@ -1,17 +1,49 @@
-#!/bin/sh
-#|-*- mode:lisp -*-|#
-#|
-exec ros -Q -- $0 "$@"
-|#
-(progn ;;init forms
-  (ros:ensure-asdf)
-  #+quicklisp(ql:quickload '(:cl-ppcre :uiop :yason) :silent t))
+(uiop:define-package #:cl-mcp/src/utils/clgrep
+  (:use #:cl)
+  (:import-from #:cl-ppcre
+                #:scan)
+  (:export #:main
+           #:grep-file
+           #:extract-toplevel-form
+           #:extract-form-signature
+           #:collect-target-files
+           #:semantic-grep))
+(in-package #:cl-mcp/src/utils/clgrep)
 
-(defpackage :ros.script.clgrep
-  (:use :cl))
-(in-package :ros.script.clgrep)
+(defun grep-file (pattern filepath)
+  "Search for PATTERN in FILEPATH and print matching lines with line numbers.
+   Returns the number of matches found."
+  (let ((match-count 0))
+    (with-open-file (stream filepath :direction :input)
+      (loop for line = (read-line stream nil nil)
+            for line-number from 1
+            while line
+            when (cl-ppcre:scan pattern line)
+            do (format t "~A:~A: ~A~%" filepath line-number line)
+               (incf match-count)))
+    match-count))
 
-;;; Data structures
+(defun main ()
+  "Entry point for the clgrep command-line tool.
+   Usage: clgrep PATTERN FILE"
+  (let ((args (uiop:command-line-arguments)))
+    (cond
+      ((< (length args) 2)
+       (format *error-output* "Usage: clgrep PATTERN FILE~%")
+       (uiop:quit 1))
+      (t
+       (let ((pattern (first args))
+             (filepath (second args)))
+         (handler-case
+             (let ((matches (grep-file pattern filepath)))
+               (when (zerop matches)
+                 (uiop:quit 1)))
+           (file-error (condition)
+             (format *error-output* "Error: ~A~%" condition)
+             (uiop:quit 2))
+           (cl-ppcre:ppcre-syntax-error (condition)
+             (format *error-output* "Invalid regex pattern: ~A~%" condition)
+             (uiop:quit 3))))))))
 
 (defstruct toplevel-form
   "Represents a top-level form with its position and line range."
@@ -19,8 +51,6 @@ exec ros -Q -- $0 "$@"
   end-pos
   start-line
   end-line)
-
-;;; Helper functions for form extraction
 
 (defun scan-toplevel-forms (content)
   "Scan CONTENT and return a list of TOPLEVEL-FORM structs.
@@ -134,7 +164,6 @@ exec ros -Q -- $0 "$@"
           finally (when (< start (length text))
                     (push (subseq text start) lines)))
     (nreverse lines)))
-
 (defun truncate-form (form-text target-line form-start-line context-lines)
   "Truncate FORM-TEXT if longer than 2000 chars, keeping CONTEXT-LINES around TARGET-LINE."
   (if (<= (length form-text) 2000)
@@ -185,120 +214,6 @@ exec ros -Q -- $0 "$@"
                   (cons :start-byte (toplevel-form-start-pos form))
                   (cons :end-byte (toplevel-form-end-pos form)))))))
     nil))
-
-;;; Form type extraction
-
-(defparameter *known-form-types*
-  '("defun" "defmethod" "defgeneric" "defmacro" "define-compiler-macro"
-    "defvar" "defparameter" "defconstant"
-    "defclass" "defstruct" "deftype" "define-condition"
-    "defpackage" "in-package"
-    "defsystem" "deftest")
-  "List of known form type keywords to recognize.")
-
-(defun extract-form-type-and-name (form-text)
-  "Extract the form type and name from FORM-TEXT.
-   Returns an alist with :type and :name, or NIL if not a recognized form."
-  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text)))
-    (when (and (> (length trimmed) 0)
-               (char= (char trimmed 0) #\())
-      ;; Extract the first token (form type) and second token (name)
-      (multiple-value-bind (match groups)
-          (cl-ppcre:scan-to-strings
-           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+-]*)\\s+([^\\s()]+|\\([^)]+\\))"
-           trimmed)
-        (when match
-          (let ((form-type (string-downcase (aref groups 0)))
-                (form-name (aref groups 1)))
-            (when (member form-type *known-form-types* :test #'string=)
-              (list (cons :type form-type)
-                    (cons :name form-name)))))))))
-
-(defun extract-balanced-sexp (text start)
-  "Extract a balanced S-expression starting at position START in TEXT.
-   Returns (values sexp-string end-position) or (values nil nil) if not found."
-  (when (and (< start (length text))
-             (char= (char text start) #\())
-    (let ((depth 1)
-          (pos (1+ start))
-          (len (length text))
-          (state :normal))
-      (loop while (and (< pos len) (plusp depth))
-            for char = (char text pos)
-            do (case state
-                 (:normal
-                  (cond
-                    ((char= char #\() (incf depth))
-                    ((char= char #\)) (decf depth))
-                    ((char= char #\") (setf state :string))
-                    ((char= char #\;) (setf state :comment))
-                    ((char= char #\\) (incf pos))))
-                 (:string
-                  (cond
-                    ((char= char #\\) (incf pos))
-                    ((char= char #\") (setf state :normal))))
-                 (:comment
-                  (when (char= char #\Newline)
-                    (setf state :normal))))
-               (incf pos))
-      (when (zerop depth)
-        (values (subseq text start pos) pos)))))
-
-(defun extract-form-signature (form-text)
-  "Extract the signature from FORM-TEXT.
-   Returns a string representing the signature, or NIL if not a recognized form."
-  (let* ((type-info (extract-form-type-and-name form-text))
-         (form-type (cdr (assoc :type type-info)))
-         (form-name (cdr (assoc :name type-info))))
-    (when (and form-type form-name)
-      (cond
-        ;; Forms with lambda-list: defun, defmacro, defgeneric, defmethod
-        ((member form-type '("defun" "defmacro" "defgeneric" "defmethod"
-                             "define-compiler-macro" "deftest")
-                 :test #'string=)
-         (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*~A\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-type)
-                                      (cl-ppcre:quote-meta-chars form-name)))
-                (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
-           (when name-end
-             (multiple-value-bind (lambda-list end-pos)
-                 (extract-balanced-sexp trimmed name-end)
-               (declare (ignore end-pos))
-               (if lambda-list
-                   (let ((params (string-trim '(#\Space #\Tab #\Newline)
-                                              (subseq lambda-list 1 (1- (length lambda-list))))))
-                     (if (zerop (length params))
-                         (format nil "(~A)" form-name)
-                         (format nil "(~A ~A)" form-name params)))
-                   form-name)))))
-        ;; Variable definitions: just the name
-        ((member form-type '("defvar" "defparameter" "defconstant") :test #'string=)
-         form-name)
-        ;; Class definitions: name + superclasses
-        ((string= form-type "defclass")
-         (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*defclass\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-name)))
-                (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
-           (when name-end
-             (multiple-value-bind (superclasses end-pos)
-                 (extract-balanced-sexp trimmed name-end)
-               (declare (ignore end-pos))
-               (if superclasses
-                   (let ((supers (string-trim '(#\Space #\Tab #\Newline)
-                                              (subseq superclasses 1 (1- (length superclasses))))))
-                     (if (zerop (length supers))
-                         form-name
-                         (format nil "(~A ~A)" form-name supers)))
-                   form-name)))))
-        ;; Struct definitions: just the name
-        ((string= form-type "defstruct")
-         form-name)
-        ;; Other definitions: just the name
-        (t form-name)))))
-
-;;; File collection functions
 
 (defun glob-to-regex (pattern)
   "Convert a gitignore glob PATTERN to a regular expression string.
@@ -387,9 +302,9 @@ exec ros -Q -- $0 "$@"
     (and type
          (member type '("lisp" "asd" "ros") :test #'string-equal))))
 
-(defun collect-target-files (root-directory &optional recursive)
+(defun collect-target-files (root-directory &key (recursive t))
   "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY.
-   If RECURSIVE is true, search recursively; otherwise only the directory itself.
+   If RECURSIVE is true (default), search subdirectories recursively.
    Respects .gitignore patterns and excludes .git directories."
   (let* ((root-dir (truename root-directory))
          (gitignore-path (merge-pathnames ".gitignore" root-dir))
@@ -410,7 +325,6 @@ exec ros -Q -- $0 "$@"
                    (dolist (subdir (uiop:subdirectories dir))
                      (unless (path-ignored-p subdir root-dir all-patterns)
                        (collect-from-dir subdir)))))
-
           (collect-from-dir root-dir))
 
         ;; Non-recursive: only files directly in root-dir
@@ -421,8 +335,126 @@ exec ros -Q -- $0 "$@"
 
     (nreverse result)))
 
-;;; Package extraction
+(defparameter *known-form-types*
+  '("defun" "defmethod" "defgeneric" "defmacro" "define-compiler-macro"
+    "defvar" "defparameter" "defconstant"
+    "defclass" "defstruct" "deftype" "define-condition"
+    "defpackage" "in-package"
+    "defsystem" "deftest")
+  "List of known form type keywords to recognize.")
 
+(defun extract-form-type-and-name (form-text)
+  "Extract the form type and name from FORM-TEXT.
+   Returns an alist with :type and :name, or NIL if not a recognized form.
+
+   Examples:
+     (defun foo ...) => ((:type . \"defun\") (:name . \"foo\"))
+     (defmethod bar ...) => ((:type . \"defmethod\") (:name . \"bar\"))
+     (defvar *x* ...) => ((:type . \"defvar\") (:name . \"*x*\"))"
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text)))
+    (when (and (> (length trimmed) 0)
+               (char= (char trimmed 0) #\())
+      ;; Extract the first token (form type) and second token (name)
+      (multiple-value-bind (match groups)
+          (cl-ppcre:scan-to-strings
+           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+-]*)\\s+([^\\s()]+|\\([^)]+\\))"
+           trimmed)
+        (when match
+          (let ((form-type (string-downcase (aref groups 0)))
+                (form-name (aref groups 1)))
+            (when (member form-type *known-form-types* :test #'string=)
+              (list (cons :type form-type)
+                    (cons :name form-name)))))))))
+
+(defun extract-balanced-sexp (text start)
+  "Extract a balanced S-expression starting at position START in TEXT.
+   Returns (values sexp-string end-position) or (values nil nil) if not found."
+  (when (and (< start (length text))
+             (char= (char text start) #\())
+    (let ((depth 1)
+          (pos (1+ start))
+          (len (length text))
+          (state :normal))
+      (loop while (and (< pos len) (plusp depth))
+            for char = (char text pos)
+            do (case state
+                 (:normal
+                  (cond
+                    ((char= char #\() (incf depth))
+                    ((char= char #\)) (decf depth))
+                    ((char= char #\") (setf state :string))
+                    ((char= char #\;) (setf state :comment))
+                    ((char= char #\\) (incf pos))))
+                 (:string
+                  (cond
+                    ((char= char #\\) (incf pos))
+                    ((char= char #\") (setf state :normal))))
+                 (:comment
+                  (when (char= char #\Newline)
+                    (setf state :normal))))
+               (incf pos))
+      (when (zerop depth)
+        (values (subseq text start pos) pos)))))
+
+(defun extract-form-signature (form-text)
+  "Extract the signature from FORM-TEXT.
+   Returns a string representing the signature, or NIL if not a recognized form.
+
+   Examples:
+     (defun foo (x y &key z) ...) => \"(foo x y &key z)\"
+     (defmethod emit ((logger json-logger) event) ...) => \"(emit (logger json-logger) event)\"
+     (defvar *x* 42) => \"*x*\"
+     (defclass my-class (parent) ...) => \"(my-class parent)\""
+  (let* ((type-info (extract-form-type-and-name form-text))
+         (form-type (cdr (assoc :type type-info)))
+         (form-name (cdr (assoc :name type-info))))
+    (when (and form-type form-name)
+      (cond
+        ;; Forms with lambda-list: defun, defmacro, defgeneric, defmethod
+        ((member form-type '("defun" "defmacro" "defgeneric" "defmethod"
+                             "define-compiler-macro" "deftest")
+                 :test #'string=)
+         (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
+                (name-pattern (format nil "^\\(\\s*~A\\s+~A\\s*"
+                                      (cl-ppcre:quote-meta-chars form-type)
+                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
+           (when name-end
+             (multiple-value-bind (lambda-list end-pos)
+                 (extract-balanced-sexp trimmed name-end)
+               (declare (ignore end-pos))
+               (if lambda-list
+                   (let ((params (string-trim '(#\Space #\Tab #\Newline)
+                                              (subseq lambda-list 1 (1- (length lambda-list))))))
+                     (if (zerop (length params))
+                         (format nil "(~A)" form-name)
+                         (format nil "(~A ~A)" form-name params)))
+                   form-name)))))
+        ;; Variable definitions: just the name
+        ((member form-type '("defvar" "defparameter" "defconstant") :test #'string=)
+         form-name)
+        ;; Class definitions: name + superclasses
+        ((string= form-type "defclass")
+         (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
+                (name-pattern (format nil "^\\(\\s*defclass\\s+~A\\s*"
+                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
+           (when name-end
+             (multiple-value-bind (superclasses end-pos)
+                 (extract-balanced-sexp trimmed name-end)
+               (declare (ignore end-pos))
+               (if superclasses
+                   (let ((supers (string-trim '(#\Space #\Tab #\Newline)
+                                              (subseq superclasses 1 (1- (length superclasses))))))
+                     (if (zerop (length supers))
+                         form-name
+                         (format nil "(~A ~A)" form-name supers)))
+                   form-name)))))
+        ;; Struct definitions: just the name
+        ((string= form-type "defstruct")
+         form-name)
+        ;; Other definitions: just the name
+        (t form-name)))))
 (defun extract-package-for-line (content line-number)
   "Extract the package name that is active at LINE-NUMBER in CONTENT.
    Returns the package name as a string, or NIL if not found."
@@ -446,19 +478,19 @@ exec ros -Q -- $0 "$@"
                (incf current-line)))
     current-package))
 
-;;; Search functions
-
-(defun search-in-file (filepath pattern case-insensitive form-types include-form)
+(defun search-in-file (filepath pattern &key case-insensitive form-types (include-form t))
   "Search for PATTERN in FILEPATH and return a list of match results.
-   If FORM-TYPES is a list of strings, only include matching form types.
-   If INCLUDE-FORM is NIL, omit the :form field from results.
+   If CASE-INSENSITIVE is true, perform case-insensitive matching.
+   If FORM-TYPES is a list of strings (e.g., '(\"defun\" \"defmethod\")),
+   only include results where the form type matches.
+   If INCLUDE-FORM is NIL, omit the :form field from results (saves tokens).
    Each result is an alist with file, line, match, package, signature, and optionally form."
   (let ((results nil))
     (handler-case
-        (let ((content (uiop:read-file-string filepath))
-              (scanner (if case-insensitive
-                          (cl-ppcre:create-scanner pattern :case-insensitive-mode t)
-                          pattern)))
+        (let* ((content (uiop:read-file-string filepath))
+               (scanner (if case-insensitive
+                            (cl-ppcre:create-scanner pattern :case-insensitive-mode t)
+                            pattern)))
           (with-input-from-string (stream content)
             (loop for line = (read-line stream nil nil)
                   for line-number from 1
@@ -488,18 +520,27 @@ exec ros -Q -- $0 "$@"
                                                  (cons :form-end-line (cdr (assoc :end-line form-info)))
                                                  (cons :form-start-byte (cdr (assoc :start-byte form-info)))
                                                  (cons :form-end-byte (cdr (assoc :end-byte form-info))))))
+                               ;; Conditionally add :form
                                (when include-form
                                  (setf result (append result
                                                       (list (cons :form (cdr (assoc :text form-info)))))))
                                (push result results)))))))))
       (error (condition)
-        ;; Silently skip files that can't be read
         (format *error-output* "Warning: Could not read ~A: ~A~%"
                 filepath condition)))
     (nreverse results)))
 
-(defun semantic-grep (root-directory pattern &key recursive case-insensitive form-types (include-form t))
+(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t))
   "Search for PATTERN across all Lisp files in ROOT-DIRECTORY.
+
+   Keyword arguments:
+     :recursive        - If true (default), search subdirectories recursively
+     :case-insensitive - If true, perform case-insensitive matching
+     :form-types       - List of form types to include (e.g., '(\"defun\" \"defmethod\"))
+                         If NIL, all forms are included.
+     :include-form     - If true (default), include full form text in results.
+                         Set to NIL to omit :form field (saves tokens).
+
    Returns a list of alists, each containing:
      :file            - File path
      :line            - Line number of the match
@@ -512,164 +553,19 @@ exec ros -Q -- $0 "$@"
      :form-end-line   - End line of the containing form
      :form-start-byte - Start byte offset of the containing form
      :form-end-byte   - End byte offset of the containing form
-     :form            - The top-level form (only if :include-form is true)"
-  (let ((files (collect-target-files root-directory recursive))
+     :form            - The top-level form (only if :include-form is true)
+
+   Example usage:
+     (semantic-grep \"/path/to/project\" \"defun.*foo\")
+     (semantic-grep \"/path/to/project\" \"error\" :case-insensitive t)
+     (semantic-grep \"/path/to/project\" \"timeout\" :form-types '(\"defun\" \"defmethod\"))
+     (semantic-grep \"/path/to/project\" \"emit\" :include-form nil)  ; signature only"
+  (let ((files (collect-target-files root-directory :recursive recursive))
         (all-results nil))
     (dolist (file files)
-      (let ((file-results (search-in-file file pattern case-insensitive form-types include-form)))
+      (let ((file-results (search-in-file file pattern
+                                          :case-insensitive case-insensitive
+                                          :form-types form-types
+                                          :include-form include-form)))
         (setf all-results (append all-results file-results))))
     all-results))
-
-;;; Output formatting
-
-(defun print-text-results (results)
-  "Print results in human-readable format."
-  (if (null results)
-      (format t "No matches found.~%")
-      (dolist (result results)
-        (format t "~A:~A: ~A~%"
-                (cdr (assoc :file result))
-                (cdr (assoc :line result))
-                (string-trim '(#\Space #\Tab #\Newline) (cdr (assoc :match result)))))))
-
-(defun print-json-results (results)
-  "Print results in JSON format."
-  (yason:encode
-   (mapcar (lambda (result)
-             (let ((ht (make-hash-table :test 'equal)))
-               (setf (gethash "file" ht) (cdr (assoc :file result)))
-               (setf (gethash "line" ht) (cdr (assoc :line result)))
-               (setf (gethash "match" ht) (cdr (assoc :match result)))
-               (setf (gethash "package" ht) (cdr (assoc :package result)))
-               (setf (gethash "formType" ht) (cdr (assoc :form-type result)))
-               (setf (gethash "formName" ht) (cdr (assoc :form-name result)))
-               (setf (gethash "signature" ht) (cdr (assoc :signature result)))
-               (setf (gethash "formStartLine" ht) (cdr (assoc :form-start-line result)))
-               (setf (gethash "formEndLine" ht) (cdr (assoc :form-end-line result)))
-               (setf (gethash "formStartByte" ht) (cdr (assoc :form-start-byte result)))
-               (setf (gethash "formEndByte" ht) (cdr (assoc :form-end-byte result)))
-               ;; Only include form if present in result
-               (when (assoc :form result)
-                 (setf (gethash "form" ht) (cdr (assoc :form result))))
-               ht))
-           results)
-   *standard-output*)
-  (terpri))
-
-;;; Argument parsing
-
-(defun parse-form-types (form-types-str)
-  "Parse comma-separated form types string into a list."
-  (when form-types-str
-    (mapcar (lambda (s) (string-trim '(#\Space #\Tab) s))
-            (uiop:split-string form-types-str :separator ","))))
-
-(defun parse-args (argv)
-  "Parse command line arguments. Returns a plist with :pattern, :path, :recursive, :ignore-case, :json, :form-types, :only-signature."
-  (let ((pattern nil)
-        (path ".")
-        (recursive nil)
-        (ignore-case nil)
-        (json nil)
-        (form-types nil)
-        (only-signature nil)
-        (positional-args nil)
-        (skip-next nil))
-
-    (loop for (arg next-arg) on argv
-          do (cond
-               (skip-next
-                (setf skip-next nil))
-               ((or (string= arg "-r") (string= arg "--recursive"))
-                (setf recursive t))
-               ((or (string= arg "-i") (string= arg "--ignore-case"))
-                (setf ignore-case t))
-               ((string= arg "--json")
-                (setf json t))
-               ((or (string= arg "-s") (string= arg "--only-signature"))
-                (setf only-signature t))
-               ((or (string= arg "-t") (string= arg "--form-type"))
-                (if next-arg
-                    (progn
-                      (setf form-types (parse-form-types next-arg))
-                      (setf skip-next t))
-                    (progn
-                      (format *error-output* "Error: --form-type requires an argument~%")
-                      (uiop:quit 1))))
-               ((or (string= arg "-h") (string= arg "--help"))
-                (format t "Usage: clgrep [OPTIONS] PATTERN [PATH]~%")
-                (format t "~%Options:~%")
-                (format t "  -r, --recursive        Search recursively~%")
-                (format t "  -i, --ignore-case      Case-insensitive search~%")
-                (format t "  -t, --form-type TYPES  Filter by form types (comma-separated)~%")
-                (format t "                         e.g., defun,defmethod,defmacro~%")
-                (format t "  -s, --only-signature   Output signature only, omit full form~%")
-                (format t "  --json                 Output in JSON format~%")
-                (format t "  -h, --help             Show this help~%")
-                (format t "~%PATH defaults to current directory if not specified.~%")
-                (format t "~%Available form types:~%")
-                (format t "  defun, defmethod, defgeneric, defmacro, define-compiler-macro~%")
-                (format t "  defvar, defparameter, defconstant~%")
-                (format t "  defclass, defstruct, deftype, define-condition~%")
-                (format t "  defpackage, in-package, defsystem, deftest~%")
-                (uiop:quit 0))
-               (t
-                (push arg positional-args))))
-
-    (setf positional-args (nreverse positional-args))
-
-    (when (null positional-args)
-      (format *error-output* "Error: PATTERN is required~%")
-      (format *error-output* "Try 'clgrep --help' for more information.~%")
-      (uiop:quit 1))
-
-    (setf pattern (first positional-args))
-    (when (second positional-args)
-      (setf path (second positional-args)))
-
-    (list :pattern pattern
-          :path path
-          :recursive recursive
-          :ignore-case ignore-case
-          :json json
-          :form-types form-types
-          :only-signature only-signature)))
-
-;;; Main entry point
-
-(defun main (&rest argv)
-  (declare (ignorable argv))
-  (handler-case
-      (let* ((args (parse-args argv))
-             (pattern (getf args :pattern))
-             (path (getf args :path))
-             (recursive (getf args :recursive))
-             (ignore-case (getf args :ignore-case))
-             (json (getf args :json))
-             (form-types (getf args :form-types))
-             (only-signature (getf args :only-signature)))
-
-        (unless (probe-file path)
-          (format *error-output* "Error: Path '~A' does not exist~%" path)
-          (uiop:quit 1))
-
-        (let ((results (semantic-grep path pattern
-                                     :recursive recursive
-                                     :case-insensitive ignore-case
-                                     :form-types form-types
-                                     :include-form (not only-signature))))
-          (if json
-              (print-json-results results)
-              (print-text-results results))
-
-          ;; Exit with status 1 if no matches found (like grep)
-          (when (null results)
-            (uiop:quit 1))))
-
-    (cl-ppcre:ppcre-syntax-error (condition)
-      (format *error-output* "Error: Invalid regex pattern: ~A~%" condition)
-      (uiop:quit 2))
-
-    (error (condition)
-      (format *error-output* "Error: ~A~%" condition)
-      (uiop:quit 3))))

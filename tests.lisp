@@ -18,6 +18,7 @@
   (:import-from #:cl-mcp/tests/integration-test)
   (:import-from #:cl-mcp/tests/parinfer-test)
   (:import-from #:cl-mcp/tests/http-test)
+  (:import-from #:cl-mcp/tests/clgrep-utils-test)
   (:import-from #:cl-mcp/tests/clgrep-test))
 
 (in-package #:cl-mcp/tests)

@@ -5,20 +5,17 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/fs #:*project-root*)
-  (:import-from #:clgrep
+  (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:export
    #:clgrep-search
    #:clgrep-signatures))
-
-
 (in-package #:cl-mcp/src/clgrep)
 
 (defun %ensure-project-root ()
   "Ensure *project-root* is set. Signal an error with instructions if not."
   (unless *project-root*
     (error "Project root is not set. Call fs-set-project-root first.")))
-
 
 (defun %resolve-search-path (path)
   "Resolve PATH to an absolute pathname within project root.

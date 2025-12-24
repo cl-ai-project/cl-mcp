@@ -1,10 +1,8 @@
-(defpackage clgrep/tests/main
-  (:use :cl
-        :clgrep
-        :rove))
-(in-package :clgrep/tests/main)
-
-;; NOTE: To run this test file, execute `(asdf:test-system :clgrep)' in your Lisp.
+(defpackage #:cl-mcp/tests/clgrep-utils-test
+  (:use #:cl
+        #:clgrep
+        #:rove))
+(in-package #:cl-mcp/tests/clgrep-utils-test)
 
 ;;; Test data content for grep-file tests
 (defparameter *test-data-content*
