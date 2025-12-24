@@ -13,6 +13,5 @@
                "bordeaux-threads"
                "eclector"
                "hunchentoot"
-               "clgrep"
                "cl-mcp/main")
   :in-order-to ((test-op (test-op "cl-mcp/tests"))))
