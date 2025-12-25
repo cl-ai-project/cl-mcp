@@ -15,8 +15,9 @@
            #:semantic-grep))
 (in-package #:cl-mcp/src/utils/clgrep)
 
-(defun grep-file (pattern filepath)
-  "Search for PATTERN in FILEPATH and print matching lines with line numbers.
+(defun grep-file (pattern filepath &key (output *standard-output*))
+  "Search for PATTERN in FILEPATH and print matching lines to OUTPUT.
+   OUTPUT defaults to *standard-output* for CLI use.
    Returns the number of matches found."
   (let ((match-count 0))
     (with-open-file (stream filepath :direction :input)
@@ -24,7 +25,7 @@
             for line-number from 1
             while line
             when (cl-ppcre:scan pattern line)
-            do (format t "~A:~A: ~A~%" filepath line-number line)
+            do (format output "~A:~A: ~A~%" filepath line-number line)
                (incf match-count)))
     match-count))
 
