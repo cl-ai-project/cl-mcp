@@ -17,8 +17,16 @@
   (:import-from #:cl-mcp/tests/tools-test)
   (:import-from #:cl-mcp/tests/integration-test)
   (:import-from #:cl-mcp/tests/parinfer-test)
-  (:import-from #:cl-mcp/tests/http-test))
+  (:import-from #:cl-mcp/tests/http-test)
+  (:import-from #:cl-mcp/tests/clgrep-utils-test)
+  (:import-from #:cl-mcp/tests/clgrep-test))
+
 (in-package #:cl-mcp/tests)
 
 (defmethod asdf:perform :after ((op asdf:test-op) (system (eql (asdf:find-system :cl-mcp/tests))))
-  (rove:run system))
+  (let ((test-packages (remove-if-not
+                        (lambda (dep)
+                          (and (stringp dep)
+                               (uiop:string-prefix-p "cl-mcp/tests/" dep)))
+                        (asdf:system-depends-on system))))
+    (rove:run test-packages)))

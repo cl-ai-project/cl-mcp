@@ -21,6 +21,7 @@ clients to drive Common Lisp development via MCP.
   - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
   - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
   - `lisp-check-parens` — detect mismatched delimiters in code slices
+  - `clgrep-search` — semantic grep for Lisp files with structure awareness
 - Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`

@@ -26,6 +26,8 @@
                 #:code-describe-symbol)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
+  (:import-from #:cl-mcp/src/clgrep
+                #:clgrep-search)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -37,6 +39,7 @@
    #:client-info
    #:make-state
    #:process-json-line))
+
 
 (in-package #:cl-mcp/src/protocol)
 
@@ -226,7 +229,10 @@ version, and source location."
    "Read a text file with optional offset and limit.
 Prefer absolute paths inside the project; offset/limit are character counts
 to avoid loading whole files.
-It can only open files in the project or in loaded dependent libraries."
+It can only open files in the project or in loaded dependent libraries.
+
+For .lisp and .asd files, prefer 'lisp-read-file' instead - it provides
+collapsed signatures view that saves ~70% of context window tokens."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "path" p)
@@ -363,11 +369,13 @@ or relative to project root"))
    "name" "code-find"
    "description"
    "Locate the definition of a symbol (path and line) using sb-introspect.
-Quickload/load the library first; prefer package-qualified symbols or supply
-the package argument.
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+Prefer package-qualified symbols or supply the package argument.
+
 NOTE: If the symbol is not found, the system might not be loaded yet.
-Try using 'lisp-read-file' with 'name_pattern' to search the file system
-directly as a fallback."
+For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
+Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -388,11 +396,13 @@ and is loaded"))
    "name" "code-describe"
    "description"
    "Describe a symbol: type, arglist, and documentation.
-Ensure the defining library is loaded; pass a package or a package-qualified
-symbol to avoid resolution errors.
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+Pass a package or a package-qualified symbol to avoid resolution errors.
+
 NOTE: If the symbol is not found, the system might not be loaded yet.
-Try using 'lisp-read-file' with 'name_pattern' to search the file system
-directly as a fallback."
+For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
+Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -414,8 +424,12 @@ and is loaded"))
    "description"
    "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
 references, sets).
+
+PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
 Use package-qualified symbols when possible; set projectOnly=false to include
-external libs."
+external libs.
+
+For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' instead."
    "inputSchema"
    (let ((p (make-hash-table :test #'equal)))
      (setf (gethash "symbol" p)
@@ -506,23 +520,64 @@ e.g., \"print-object (my-class t)\""))
                "required" (vector "file_path" "form_type" "form_name"
                                   "operation" "content")))))
 
+(defun tools-descriptor-clgrep-search ()
+  (%make-ht "name" "clgrep-search" "description"
+   "Perform semantic grep search for a pattern in Lisp files.
+Unlike regular grep, this tool understands Lisp structure and returns
+the top-level form signature containing each match.
+
+KEY ADVANTAGE: Works WITHOUT loading systems - faster and no side effects.
+Use this as the FIRST choice for code exploration before code-find/code-describe.
+
+Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
+Use 'includeForm: true' to get complete form text when needed.
+
+Recommended workflow:
+1. clgrep-search to locate functions/usages across the project
+2. lisp-read-file with name_pattern to read specific definitions in detail"
+   "inputSchema"
+   (let ((p (make-hash-table :test #'equal)))
+     (setf (gethash "pattern" p)
+             (%make-ht "type" "string" "description"
+              "cl-ppcre regular expression pattern to search for"))
+     (setf (gethash "path" p)
+             (%make-ht "type" "string" "description"
+              "Search root directory, relative to project root (optional, defaults to project root)"))
+     (setf (gethash "recursive" p)
+             (%make-ht "type" "boolean" "description"
+              "Search subdirectories recursively (default: true)"))
+     (setf (gethash "caseInsensitive" p)
+             (%make-ht "type" "boolean" "description"
+              "Case-insensitive matching (default: false)"))
+     (setf (gethash "formTypes" p)
+             (%make-ht "type" "array" "items" (%make-ht "type" "string")
+              "description"
+              "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)"))
+     (setf (gethash "limit" p)
+             (%make-ht "type" "integer" "description"
+              "Maximum number of results to return (optional, defaults to unlimited)"))
+     (setf (gethash "includeForm" p)
+             (%make-ht "type" "boolean" "description"
+              "Include full form text in results (default: false, returns signatures only)"))
+     (%make-ht "type" "object" "properties" p "required" (vector "pattern")))))
+
+
+
+
 (defun handle-tools-list (id)
   (let ((tools
-          (vector (tools-descriptor-repl)
-                  #+nil(tools-descriptor-asdf-system-info)
-                  #+nil(tools-descriptor-asdf-list-systems)
-                  (tools-descriptor-fs-read)
-                  (tools-descriptor-fs-write)
-                  (tools-descriptor-fs-list)
-                  (tools-descriptor-fs-project-info)
-                  (tools-descriptor-fs-set-project-root)
-                  (tools-descriptor-lisp-read-file)
-                  (tools-descriptor-code-find)
-                  (tools-descriptor-code-describe)
-                  (tools-descriptor-code-references)
-                  (tools-descriptor-lisp-check-parens)
-                  (tools-descriptor-lisp-edit-form))))
+         (vector (tools-descriptor-repl) (tools-descriptor-fs-read)
+                 (tools-descriptor-fs-write) (tools-descriptor-fs-list)
+                 (tools-descriptor-fs-project-info)
+                 (tools-descriptor-fs-set-project-root)
+                 (tools-descriptor-lisp-read-file) (tools-descriptor-code-find)
+                 (tools-descriptor-code-describe)
+                 (tools-descriptor-code-references)
+                 (tools-descriptor-lisp-check-parens)
+                 (tools-descriptor-lisp-edit-form)
+                 (tools-descriptor-clgrep-search))))
     (%result id (%make-ht "tools" tools))))
+
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -937,6 +992,52 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
       (%error id -32603
               (format nil "Internal error during lisp-edit-form: ~A" e)))))
 
+(defun %alist-to-hash-table (alist)
+  "Convert an alist to a hash table for JSON encoding."
+  (let ((ht (make-hash-table :test #'equal)))
+    (dolist (pair alist ht)
+      (setf (gethash (string-downcase (symbol-name (car pair))) ht)
+            (cdr pair)))))
+
+(defun %format-clgrep-results (results)
+  "Convert clgrep results (list of alists) to a vector of hash tables."
+  (map 'vector #'%alist-to-hash-table results))
+
+(defun handle-tool-clgrep-search (state id args)
+  (declare (ignore state))
+  (handler-case
+      (let ((pattern (and args (gethash "pattern" args)))
+            (path (and args (gethash "path" args)))
+            (recursive (multiple-value-bind (val presentp)
+                           (and args (gethash "recursive" args))
+                         (if presentp val t)))
+            (case-insensitive (and args (gethash "caseInsensitive" args)))
+            (form-types (and args (gethash "formTypes" args)))
+            (limit (and args (gethash "limit" args)))
+            (include-form (and args (gethash "includeForm" args))))
+        (unless (stringp pattern)
+          (return-from handle-tool-clgrep-search
+            (%error id -32602 "pattern must be a string")))
+        (let* ((results (clgrep-search pattern
+                                       :path path
+                                       :recursive recursive
+                                       :case-insensitive case-insensitive
+                                       :form-types form-types
+                                       :limit limit
+                                       :include-form include-form))
+               (formatted (%format-clgrep-results results)))
+          (%result id
+                   (%make-ht "content"
+                             (%text-content
+                              (with-output-to-string (s)
+                                (yason:encode formatted s)))
+                             "matches" formatted
+                             "count" (length results)
+                             "limited" (and limit (<= limit (length results)))))))
+    (error (e)
+      (%error id -32603
+              (format nil "Internal error during clgrep-search: ~A" e)))))
+
 (defparameter *tool-handlers*
   (let ((handlers (make-hash-table :test #'equal)))
     (setf (gethash "repl-eval" handlers) #'handle-tool-repl-eval
@@ -950,9 +1051,11 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
           (gethash "code-describe" handlers) #'handle-tool-code-describe
           (gethash "code-find-references" handlers) #'handle-tool-code-find-references
           (gethash "lisp-check-parens" handlers) #'handle-tool-lisp-check-parens
-          (gethash "lisp-edit-form" handlers) #'handle-tool-lisp-edit-form)
+          (gethash "lisp-edit-form" handlers) #'handle-tool-lisp-edit-form
+          (gethash "clgrep-search" handlers) #'handle-tool-clgrep-search)
     handlers)
   "Map normalized tool names to handler functions.")
+
 (defun handle-tools-call (state id params)
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))

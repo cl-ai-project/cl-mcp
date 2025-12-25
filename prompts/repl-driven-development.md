@@ -52,12 +52,62 @@ You are strictly prohibited from using:
 **Why?** These tools operate outside the Lisp image and cannot maintain consistency with the running system. They also bypass cl-mcp's security policies (allow-lists, project root restrictions).
 
 **Use instead:**
-- `code-find`, `code-describe`, `code-find-references` for symbol lookup
-- `lisp-read-file` with `name_pattern` or `content_pattern` for code search
+- `clgrep-search` for project-wide pattern search with Lisp structure awareness
+- `code-find`, `code-describe`, `code-find-references` for symbol lookup (requires loaded system)
+- `lisp-read-file` with `name_pattern` or `content_pattern` for reading specific definitions
 - `fs-list-directory` for exploring directory structure
 - `lisp-edit-form` for all code modifications
 
 **Exception:** If the user explicitly requests shell command execution for non-code tasks (e.g., "run git status"), you may comply if shell tools are available in your environment. However, for all Lisp development tasks, use the Lisp-native tools provided by cl-mcp.
+
+**For Lisp files (.lisp, .asd), prefer cl-mcp tools over AI agent's native search:**
+- Use `clgrep-search` instead of native Grep/Glob tools
+- `clgrep-search` understands Lisp structure: returns form type, name, signature, and package context
+- Enables efficient workflow: clgrep-search (locate) → lisp-read-file (read specific definition)
+- Native search tools lack Lisp awareness and return raw text matches
+
+### Tool Selection Quick Reference
+
+**Decision Flowchart:**
+```
+Need to explore code?
+├─ Know the symbol name?
+│   ├─ YES → Is system loaded?
+│   │         ├─ YES → code-find / code-describe / code-find-references
+│   │         └─ NO  → clgrep-search (no loading required)
+│   └─ NO  → clgrep-search (pattern search)
+│
+├─ Need to read file contents?
+│   ├─ .lisp / .asd → lisp-read-file (collapsed=true recommended)
+│   └─ Other files → fs-read-file
+│
+├─ Need to edit code?
+│   ├─ Existing Lisp file → lisp-edit-form (REQUIRED)
+│   └─ New file → fs-write-file (minimal content, then expand with lisp-edit-form)
+│
+└─ Need to execute/test code?
+    └─ repl-eval
+```
+
+**Tool Comparison Matrix:**
+
+| Purpose | No Loading Required | Loading Required |
+|---------|---------------------|------------------|
+| Symbol search | `clgrep-search` | `code-find` |
+| Usage search | `clgrep-search` | `code-find-references` |
+| Symbol info | - | `code-describe` |
+| Read file | `lisp-read-file` | - |
+| Edit file | `lisp-edit-form` | - |
+
+**When to Use Each Tool:**
+
+| Tool | Use When | Don't Use When |
+|------|----------|----------------|
+| `clgrep-search` | Project-wide search, system not loaded | Reading a single known definition |
+| `code-find` | Need exact definition location, system loaded | System not loaded, pattern search |
+| `code-find-references` | Need xref info, tracing callers | Simple text search |
+| `lisp-read-file` | Reading Lisp files, need structure overview | Non-Lisp files |
+| `lisp-edit-form` | Editing existing Lisp code | Creating new files, non-Lisp files |
 
 ### 1. Editing Code
 
@@ -196,6 +246,38 @@ Use `repl-eval` for:
 - When paths are relative, they are resolved relative to the project root.
 
 ## Recommended Workflows
+
+### Scenario: Code Exploration (Token-Efficient)
+
+Use `clgrep-search` to locate code across the project, then `lisp-read-file` to read specific definitions.
+
+1. **Search:** Find functions/usages with `clgrep-search` (returns signatures by default):
+   ```json
+   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 10}
+   ```
+   This returns file paths, line numbers, signatures, and package info without loading the system.
+
+2. **Drill down:** Use `lisp-read-file` with `name_pattern` to read the specific function:
+   ```json
+   {"path": "src/protocol.lisp", "collapsed": true, "name_pattern": "^handle-request$"}
+   ```
+   Other functions remain collapsed; only the target expands.
+
+3. **Find usages:** Search for where a function is called:
+   ```json
+   {"pattern": "handle-request", "limit": 20}
+   ```
+   Results show which functions contain the pattern and their locations.
+
+4. **Get full context (if needed):** Use `includeForm: true` for complete form text:
+   ```json
+   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 3, "includeForm": true}
+   ```
+
+**Why this workflow?**
+- `clgrep-search` works without loading systems (faster, no side effects)
+- Default signature-only output saves tokens (~70% reduction vs full forms)
+- Combined with `lisp-read-file`, enables surgical code reading
 
 ### Scenario: Modifying a Function
 
