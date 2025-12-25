@@ -201,9 +201,9 @@ Use `repl-eval` for:
 
 **Best practices:**
 - Specify the `package` argument to ensure correct package context
-- Use `printLevel` and `printLength` to control output verbosity for complex structures
-- Use `timeoutSeconds` to prevent infinite loops from hanging the session
-- Use `safeRead=true` when evaluating untrusted input
+- Use `print_level` and `print_length` to control output verbosity for complex structures
+- Use `timeout_seconds` to prevent infinite loops from hanging the session
+- Use `safe_read=true` when evaluating untrusted input
 - When you compile something, always check `stderr` for warnings. Treat compiler warnings as actionable; treat optimization notes/style-warnings as context-dependent (do not get stuck).
 
 ## Common Lisp Specifics
@@ -253,7 +253,7 @@ Use `clgrep-search` to locate code across the project, then `lisp-read-file` to 
 
 1. **Search:** Find functions/usages with `clgrep-search` (returns signatures by default):
    ```json
-   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 10}
+   {"pattern": "handle-request", "form_types": ["defun"], "limit": 10}
    ```
    This returns file paths, line numbers, signatures, and package info without loading the system.
 
@@ -269,9 +269,9 @@ Use `clgrep-search` to locate code across the project, then `lisp-read-file` to 
    ```
    Results show which functions contain the pattern and their locations.
 
-4. **Get full context (if needed):** Use `includeForm: true` for complete form text:
+4. **Get full context (if needed):** Use `include_form: true` for complete form text:
    ```json
-   {"pattern": "handle-request", "formTypes": ["defun"], "limit": 3, "includeForm": true}
+   {"pattern": "handle-request", "form_types": ["defun"], "limit": 3, "include_form": true}
    ```
 
 **Why this workflow?**
@@ -328,7 +328,7 @@ Use `clgrep-search` to locate code across the project, then `lisp-read-file` to 
 
 2. **Analyze:** Use `code-find-references` to see where the problematic symbol is used:
    ```json
-   {"symbol": "my-package:problematic-var", "projectOnly": true}
+   {"symbol": "my-package:problematic-var", "project_only": true}
    ```
 
 3. **Check Syntax:** If you suspect malformed code, use `lisp-check-parens`:

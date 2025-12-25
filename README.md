@@ -126,11 +126,11 @@ Evaluate one or more forms and return the last value as a text item.
 Input schema (JSON):
 - `code` (string, required): one or more s‑expressions
 - `package` (string, optional): package to evaluate in (default `CL-USER`)
-- `printLevel` (integer|null): binds `*print-level*`
-- `printLength` (integer|null): binds `*print-length*`
-- `timeoutSeconds` (number|null): abort evaluation after this many seconds
-- `maxOutputLength` (integer|null): truncate `content`/`stdout`/`stderr` to this many characters
-- `safeRead` (boolean|null): when `true`, disables `*read-eval*` while reading forms
+- `print_level` (integer|null): binds `*print-level*`
+- `print_length` (integer|null): binds `*print-length*`
+- `timeout_seconds` (number|null): abort evaluation after this many seconds
+- `max_output_length` (integer|null): truncate `content`/`stdout`/`stderr` to this many characters
+- `safe_read` (boolean|null): when `true`, disables `*read-eval*` while reading forms
 Output fields:
 - `content`: last value as text (existing)
 - `stdout`: concatenated standard output from evaluation
@@ -246,9 +246,9 @@ Inputs:
   (`.lisp`, `.asd`, `.ros`, `.cl`, `.lsp`), return only top-level signatures
   (e.g., `(defun name (args) ...)`) while keeping `in-package` forms fully
   shown.
-- `namePattern` (string, optional): CL-PPCRE regex; matching definition names are
+- `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
-- `contentPattern` (string, optional): CL-PPCRE regex applied to form bodies; if
+- `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
   it matches, the full form is expanded. For non-Lisp files, this triggers a
   grep-like text filter with ±5 lines of context.
 - `offset` / `limit` (integer, optional): slice window used when `collapsed` is
@@ -323,13 +323,13 @@ Return cross-reference locations for a symbol using SBCL `sb-introspect`.
 Input:
 - `symbol` (string, required)
 - `package` (string, optional): package used when `symbol` is unqualified
-- `projectOnly` (boolean, default `true`): limit results to files under the project root
+- `project_only` (boolean, default `true`): limit results to files under the project root
 
 Output:
 - `refs` (array): each element includes `path`, `line`, `type` (`call`, `macro`, `bind`, `reference`, `set`), and `context`
 - `count` (integer): number of references returned
 - `symbol`: echoed symbol name
-- `projectOnly`: whether results were filtered to the project
+- `project_only`: whether results were filtered to the project
 - `content`: newline-separated human-readable summary of references
 
 ## Logging
