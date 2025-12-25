@@ -186,15 +186,15 @@ to save changes to files."
                :description "Code string of one or more forms evaluated sequentially")
          (package :type :string
                   :description "Existing package name (e.g., CL-USER); forms are read/evaluated there")
-         (print-level :type :integer
+         (print-level :type :integer :json-name "print_level"
                       :description "Integer to limit printed nesting depth (omit to print fully)")
-         (print-length :type :integer
+         (print-length :type :integer :json-name "print_length"
                        :description "Integer to limit printed list length (omit to print fully)")
-         (timeout-seconds :type :number
+         (timeout-seconds :type :number :json-name "timeout_seconds"
                           :description "Seconds to wait before timing out evaluation")
-         (max-output-length :type :integer
+         (max-output-length :type :integer :json-name "max_output_length"
                             :description "Maximum characters for printed result/stdout/stderr")
-         (safe-read :type :boolean
+         (safe-read :type :boolean :json-name "safe_read"
                     :description "When true, disables #. reader evaluation for safety"))
   :body
   (multiple-value-bind (printed _ stdout stderr)

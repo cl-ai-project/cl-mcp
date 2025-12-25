@@ -320,7 +320,7 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
                  :description "Symbol name like \"cl-mcp:run\" (package-qualified preferred)")
          (package :type :string
                   :description "Optional package used when SYMBOL is unqualified")
-         (project-only :type :boolean :default t
+         (project-only :type :boolean :json-name "project_only" :default t
                        :description "When true (default), only include references under the project root"))
   :body
   (multiple-value-bind (refs count)
@@ -341,5 +341,5 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
               (make-ht "refs" refs
                        "count" count
                        "symbol" symbol
-                       "projectOnly" project-only
+                       "project_only" project-only
                        "content" (text-content summary))))))

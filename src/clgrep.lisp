@@ -109,13 +109,13 @@ Recommended workflow:
                :description "Search root directory, relative to project root (optional, defaults to project root)")
          (recursive :type :boolean :default t
                     :description "Search subdirectories recursively (default: true)")
-         (case-insensitive :type :boolean
+         (case-insensitive :type :boolean :json-name "case_insensitive"
                            :description "Case-insensitive matching (default: false)")
-         (form-types :type :array
+         (form-types :type :array :json-name "form_types"
                      :description "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)")
          (limit :type :integer
                 :description "Maximum number of results to return (optional, defaults to unlimited)")
-         (include-form :type :boolean
+         (include-form :type :boolean :json-name "include_form"
                        :description "Include full form text in results (default: false, returns signatures only)"))
   :body
   (let* ((results
