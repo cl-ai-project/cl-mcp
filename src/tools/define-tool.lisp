@@ -52,15 +52,17 @@
            :type :string
            :required nil
            :default nil
+           :enum nil
            :description nil))
     (list
-     (destructuring-bind (name &key json-name type required default description)
+     (destructuring-bind (name &key json-name type required default enum description)
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
              :type (or type :string)
              :required required
              :default default
+             :enum enum
              :description description)))))
 
 (defun %type-to-json-type (type)
@@ -90,9 +92,12 @@
   "Generate schema property setter form for a parsed argument spec."
   (let ((json-name (getf parsed-spec :json-name))
         (type (getf parsed-spec :type))
+        (enum (getf parsed-spec :enum))
         (description (getf parsed-spec :description)))
     `(setf (gethash ,json-name properties)
            (make-ht "type" ,(%type-to-json-type type)
+                    ,@(when enum
+                        `("enum" (vector ,@enum)))
                     ,@(when description
                         `("description" ,description))))))
 
@@ -113,12 +118,13 @@ DESCRIPTION is the tool description string for the schema.
 
 ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
-  - A list: (name &key json-name type required default description)
+  - A list: (name &key json-name type required default enum description)
     - name: Symbol used in BODY
     - json-name: JSON key (default: camelCase of name)
     - type: :string :integer :number :boolean :array :object
     - required: T if required
     - default: Default value (for :boolean only)
+    - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
     - description: Schema description
 
 BODY is the handler body. It has access to:

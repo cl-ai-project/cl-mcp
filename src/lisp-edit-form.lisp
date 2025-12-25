@@ -247,6 +247,7 @@ safety and structure preservation."
                     :description "Form name to match; for defmethod include specializers,
 e.g., \"print-object (my-class t)\"")
          (operation :type :string :required t
+                    :enum ("replace" "insert_before" "insert_after")
                     :description "Operation to perform")
          (content :type :string :required t
                   :description "Full Lisp form to insert or replace with")

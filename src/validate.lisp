@@ -209,7 +209,12 @@ success if balanced."
          (limit :type :integer
                 :description "Maximum characters to read from path"))
   :body
-  (let* ((check-result (lisp-check-parens :path path
+  (progn
+    (when (and path code)
+      (error "Provide either path or code, not both"))
+    (when (and (null path) (null code))
+      (error "Either path or code is required"))
+    (let* ((check-result (lisp-check-parens :path path
                                           :code code
                                           :offset offset
                                           :limit limit))
@@ -225,10 +230,10 @@ success if balanced."
                       (col (and pos (gethash "column" pos))))
                  (format nil "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D"
                          kind expected found line col)))))
-    (result id
-            (make-ht "content" (text-content summary)
-                     "ok" ok
-                     "kind" (gethash "kind" check-result)
-                     "expected" (gethash "expected" check-result)
-                     "found" (gethash "found" check-result)
-                     "position" (gethash "position" check-result)))))
+      (result id
+              (make-ht "content" (text-content summary)
+                       "ok" ok
+                       "kind" (gethash "kind" check-result)
+                       "expected" (gethash "expected" check-result)
+                       "found" (gethash "found" check-result)
+                       "position" (gethash "position" check-result))))))

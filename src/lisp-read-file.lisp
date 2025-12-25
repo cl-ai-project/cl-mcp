@@ -377,9 +377,9 @@ for full source."
 or relative to project root")
          (collapsed :type :boolean :default t
                     :description "When true (default) collapse Lisp definitions to signatures")
-         (name-pattern :type :string
+         (name_pattern :type :string
                        :description "Regex to match definition names to expand (CL-PPCRE syntax)")
-         (content-pattern :type :string
+         (content_pattern :type :string
                           :description "Regex to match form bodies or text lines to expand")
          (offset :type :integer
                  :description "0-based line offset when collapsed=false (raw mode only)")
@@ -389,8 +389,8 @@ or relative to project root")
   (let ((file-result
          (lisp-read-file path
                          :collapsed collapsed
-                         :name-pattern name-pattern
-                         :content-pattern content-pattern
+                         :name-pattern name_pattern
+                         :content-pattern content_pattern
                          :offset offset
                          :limit limit)))
     (result id
