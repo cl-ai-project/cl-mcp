@@ -4,12 +4,14 @@
 (defpackage #:cl-mcp/src/clgrep
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/state
+                #:protocol-version)
   (:import-from #:cl-mcp/src/utils/paths
                 #:resolve-path-in-project)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content)
+                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
   (:import-from #:cl-mcp/src/tools/registry
                 #:register-tool)
   (:import-from #:yason
@@ -145,7 +147,6 @@ Recommended workflow:
 
 (defun clgrep-search-handler (state id args)
   "Handle the clgrep-search MCP tool call."
-  (declare (ignore state))
   (handler-case
       (let ((pattern (and args (gethash "pattern" args)))
             (path (and args (gethash "path" args)))
@@ -158,7 +159,8 @@ Recommended workflow:
             (include-form (and args (gethash "includeForm" args))))
         (unless (stringp pattern)
           (return-from clgrep-search-handler
-            (rpc-error id -32602 "pattern must be a string")))
+            (tool-error id "pattern must be a string"
+                        :protocol-version (protocol-version state))))
         (let* ((results (clgrep-search pattern
                                        :path path
                                        :recursive recursive

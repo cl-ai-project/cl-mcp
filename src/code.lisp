@@ -393,13 +393,13 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
 (defun code-find-references-handler (state id args)
   "Handle the code-find-references MCP tool call."
   (handler-case
-      (let ((symbol (and args (gethash "symbol" args)))
-            (pkg (and args (gethash "package" args)))
-            (project-only-present nil)
-            (project-only (multiple-value-bind (val presentp)
-                            (and args (gethash "projectOnly" args))
-                          (setf project-only-present presentp)
-                          (if presentp val t))))
+      (let* ((symbol (and args (gethash "symbol" args)))
+             (pkg (and args (gethash "package" args)))
+             (project-only-present nil)
+             (project-only (multiple-value-bind (val presentp)
+                             (and args (gethash "projectOnly" args))
+                           (setf project-only-present presentp)
+                           (if presentp val t))))
         (unless (stringp symbol)
           (return-from code-find-references-handler
             (tool-error id "symbol must be a string"
