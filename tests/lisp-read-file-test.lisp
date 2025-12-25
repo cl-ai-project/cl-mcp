@@ -14,7 +14,7 @@
 
 (in-package #:cl-mcp/tests/lisp-read-file-test)
 
-(setf cl-mcp/src/fs:*project-root*
+(setf cl-mcp/src/project-root:*project-root*
       (uiop:ensure-directory-pathname (system-source-directory :cl-mcp)))
 
 (defun with-temp-lisp-file (relative content thunk)

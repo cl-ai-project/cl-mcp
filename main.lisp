@@ -8,12 +8,13 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:set-log-level-from-env)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
                 #:fs-list-directory
-                #:fs-get-project-info
-                #:*project-root*)
+                #:fs-get-project-info)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-read-file

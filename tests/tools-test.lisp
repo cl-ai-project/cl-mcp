@@ -11,7 +11,7 @@
 
 (defmacro with-test-project-root (&body body)
   "Set up project root for protocol-level tests."
-  `(let ((original-root cl-mcp/src/fs:*project-root*)
+  `(let ((original-root cl-mcp/src/project-root:*project-root*)
          (original-cwd (ignore-errors (getcwd)))
          (test-root (or (ignore-errors
                           (ensure-directory-pathname
@@ -19,9 +19,9 @@
                         (ensure-directory-pathname (getcwd)))))
      (unwind-protect
           (progn
-            (setf cl-mcp/src/fs:*project-root* test-root)
+            (setf cl-mcp/src/project-root:*project-root* test-root)
             ,@body)
-       (setf cl-mcp/src/fs:*project-root* original-root)
+       (setf cl-mcp/src/project-root:*project-root* original-root)
        (when original-cwd
          (ignore-errors (uiop:chdir original-cwd))))))
 (deftest tools-call-lisp-read-file
@@ -172,7 +172,7 @@
     (let ((req (concatenate 'string
                  "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\","
                  "\"params\":{\"name\":\"code-find-references\","
-                 "\"arguments\":{\"symbol\":\"cl-mcp:process-json-line\"}}}")))
+                 "\"arguments\":{\"symbol\":\"cl-mcp/src/log:log-event\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))

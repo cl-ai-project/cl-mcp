@@ -4,6 +4,12 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
+  (:import-from #:cl-mcp/src/state
+                #:protocol-version)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:register-tool)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -189,3 +195,81 @@ Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
                   (gethash "column" pos) column)
             (setf (gethash "position" h) pos)))
         h))))
+
+(defun lisp-check-parens-descriptor ()
+  "Return the MCP tool descriptor for lisp-check-parens."
+  (make-ht
+   "name" "lisp-check-parens"
+   "description"
+   "Check balanced parentheses/brackets in a file slice or provided code.
+Use this to DIAGNOSE syntax errors in existing files or validate code snippets
+before/after editing. Returns the first mismatch position if unbalanced, or
+success if balanced."
+   "inputSchema"
+   (let ((p (make-hash-table :test #'equal)))
+     (setf (gethash "path" p)
+           (make-ht "type" "string"
+                    "description"
+                    "Absolute path inside project or registered ASDF system
+(mutually exclusive with code)"))
+     (setf (gethash "code" p)
+           (make-ht "type" "string"
+                    "description"
+                    "Raw code string to check (mutually exclusive with path)"))
+     (setf (gethash "offset" p)
+           (make-ht "type" "integer"
+                    "description"
+                    "0-based character offset when reading from path"))
+     (setf (gethash "limit" p)
+           (make-ht "type" "integer"
+                    "description"
+                    "Maximum characters to read from path"))
+     (make-ht "type" "object" "properties" p))))
+
+(defun lisp-check-parens-handler (state id args)
+  "Handle the lisp-check-parens MCP tool call."
+  (handler-case
+      (let ((path (and args (gethash "path" args)))
+            (code (and args (gethash "code" args)))
+            (offset (and args (gethash "offset" args)))
+            (limit (and args (gethash "limit" args))))
+        (when (and path code)
+          (return-from lisp-check-parens-handler
+            (tool-error id "Provide only one of path or code"
+                        :protocol-version (protocol-version state))))
+        (when (and (null path) (null code))
+          (return-from lisp-check-parens-handler
+            (tool-error id "Either path or code is required"
+                        :protocol-version (protocol-version state))))
+        (let* ((check-result (lisp-check-parens :path path
+                                                :code code
+                                                :offset offset
+                                                :limit limit))
+               (ok (gethash "ok" check-result))
+               (summary
+                 (if ok
+                     "Parentheses are balanced"
+                     (let* ((kind (gethash "kind" check-result))
+                            (expected (gethash "expected" check-result))
+                            (found (gethash "found" check-result))
+                            (pos (gethash "position" check-result))
+                            (line (and pos (gethash "line" pos)))
+                            (col (and pos (gethash "column" pos))))
+                       (format nil "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D"
+                               kind expected found line col)))))
+          (result id
+                  (make-ht "content" (text-content summary)
+                           "ok" ok
+                           "kind" (gethash "kind" check-result)
+                           "expected" (gethash "expected" check-result)
+                           "found" (gethash "found" check-result)
+                           "position" (gethash "position" check-result)))))
+    (error (e)
+      (rpc-error id -32603
+                 (format nil "Internal error during lisp-check-parens: ~A" e)))))
+
+;;; Tool Registration
+
+(register-tool "lisp-check-parens"
+               (lisp-check-parens-descriptor)
+               #'lisp-check-parens-handler)

@@ -16,7 +16,7 @@
 
 (in-package #:cl-mcp/tests/lisp-edit-form-test)
 
-(setf cl-mcp/src/fs:*project-root*
+(setf cl-mcp/src/project-root:*project-root*
       (uiop:ensure-directory-pathname (system-source-directory :cl-mcp)))
 
 (defun project-path (relative)

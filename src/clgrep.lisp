@@ -9,6 +9,12 @@
                 #:resolve-path-in-project)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:register-tool)
+  (:import-from #:yason
+                #:encode)
   (:export
    #:clgrep-search))
 (in-package #:cl-mcp/src/clgrep)
@@ -74,3 +80,107 @@ Returns a list of alists, each containing:
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
 
+(defun clgrep-search-descriptor ()
+  "Return the MCP tool descriptor for clgrep-search."
+  (make-ht
+   "name" "clgrep-search"
+   "description"
+   "Perform semantic grep search for a pattern in Lisp files.
+Unlike regular grep, this tool understands Lisp structure and returns
+the top-level form signature containing each match.
+
+KEY ADVANTAGE: Works WITHOUT loading systems - faster and no side effects.
+Use this as the FIRST choice for code exploration before code-find/code-describe.
+
+Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
+Use 'includeForm: true' to get complete form text when needed.
+
+Recommended workflow:
+1. clgrep-search to locate functions/usages across the project
+2. lisp-read-file with name_pattern to read specific definitions in detail"
+   "inputSchema"
+   (let ((p (make-hash-table :test #'equal)))
+     (setf (gethash "pattern" p)
+           (make-ht "type" "string"
+                    "description"
+                    "cl-ppcre regular expression pattern to search for"))
+     (setf (gethash "path" p)
+           (make-ht "type" "string"
+                    "description"
+                    "Search root directory, relative to project root (optional, defaults to project root)"))
+     (setf (gethash "recursive" p)
+           (make-ht "type" "boolean"
+                    "description"
+                    "Search subdirectories recursively (default: true)"))
+     (setf (gethash "caseInsensitive" p)
+           (make-ht "type" "boolean"
+                    "description"
+                    "Case-insensitive matching (default: false)"))
+     (setf (gethash "formTypes" p)
+           (make-ht "type" "array"
+                    "items" (make-ht "type" "string")
+                    "description"
+                    "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)"))
+     (setf (gethash "limit" p)
+           (make-ht "type" "integer"
+                    "description"
+                    "Maximum number of results to return (optional, defaults to unlimited)"))
+     (setf (gethash "includeForm" p)
+           (make-ht "type" "boolean"
+                    "description"
+                    "Include full form text in results (default: false, returns signatures only)"))
+     (make-ht "type" "object"
+              "properties" p
+              "required" (vector "pattern")))))
+
+(defun %alist-to-hash-table (alist)
+  "Convert an alist to a hash table for JSON encoding."
+  (let ((ht (make-hash-table :test #'equal)))
+    (dolist (pair alist ht)
+      (setf (gethash (string-downcase (symbol-name (car pair))) ht)
+            (cdr pair)))))
+
+(defun %format-clgrep-results (results)
+  "Convert clgrep results (list of alists) to a vector of hash tables."
+  (map 'vector #'%alist-to-hash-table results))
+
+(defun clgrep-search-handler (state id args)
+  "Handle the clgrep-search MCP tool call."
+  (declare (ignore state))
+  (handler-case
+      (let ((pattern (and args (gethash "pattern" args)))
+            (path (and args (gethash "path" args)))
+            (recursive (multiple-value-bind (val presentp)
+                          (and args (gethash "recursive" args))
+                        (if presentp val t)))
+            (case-insensitive (and args (gethash "caseInsensitive" args)))
+            (form-types (and args (gethash "formTypes" args)))
+            (limit (and args (gethash "limit" args)))
+            (include-form (and args (gethash "includeForm" args))))
+        (unless (stringp pattern)
+          (return-from clgrep-search-handler
+            (rpc-error id -32602 "pattern must be a string")))
+        (let* ((results (clgrep-search pattern
+                                       :path path
+                                       :recursive recursive
+                                       :case-insensitive case-insensitive
+                                       :form-types form-types
+                                       :limit limit
+                                       :include-form include-form))
+               (formatted (%format-clgrep-results results)))
+          (result id
+                  (make-ht "content" (text-content
+                                      (with-output-to-string (s)
+                                        (encode formatted s)))
+                           "matches" formatted
+                           "count" (length results)
+                           "limited" (and limit (<= limit (length results)))))))
+    (error (e)
+      (rpc-error id -32603
+                 (format nil "Internal error during clgrep-search: ~A" e)))))
+
+;;; Tool Registration
+
+(register-tool "clgrep-search"
+               (clgrep-search-descriptor)
+               #'clgrep-search-handler)
