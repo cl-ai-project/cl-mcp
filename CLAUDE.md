@@ -103,7 +103,7 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 
 **Evaluation Safety**:
 - Reader and runtime eval are ENABLED (trusted local development tool)
-- Optional `safeRead` parameter to disable `#.` reader macro
+- Optional `safe_read` parameter to disable `#.` reader macro
 - Timeout support to prevent infinite loops
 
 ### Key Design Patterns
