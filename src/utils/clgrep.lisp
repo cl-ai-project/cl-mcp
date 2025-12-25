@@ -1,4 +1,6 @@
-(uiop:define-package #:cl-mcp/src/utils/clgrep
+;;;; src/utils/clgrep.lisp
+
+(defpackage #:cl-mcp/src/utils/clgrep
   (:use #:cl)
   (:import-from #:cl-ppcre
                 #:scan)
