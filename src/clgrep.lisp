@@ -98,7 +98,7 @@ KEY ADVANTAGE: Works WITHOUT loading systems - faster and no side effects.
 Use this as the FIRST choice for code exploration before code-find/code-describe.
 
 Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
-Use 'includeForm: true' to get complete form text when needed.
+Use 'include_form: true' to get complete form text when needed.
 
 Recommended workflow:
 1. clgrep-search to locate functions/usages across the project

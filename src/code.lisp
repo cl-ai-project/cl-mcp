@@ -312,7 +312,7 @@ and is loaded"))
 references, sets).
 
 PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
-Use package-qualified symbols when possible; set projectOnly=false to include
+Use package-qualified symbols when possible; set project_only=false to include
 external libs.
 
 For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' instead."

@@ -136,7 +136,7 @@ Signals ARG-VALIDATION-ERROR if provided but not a boolean.
 
 Example:
   (extract-boolean-arg args \"recursive\" :default t)
-  (extract-boolean-arg args \"dryRun\")"
+  (extract-boolean-arg args \"dry_run\")"
   (multiple-value-bind (value presentp)
       (and args (gethash name args))
     (cond
