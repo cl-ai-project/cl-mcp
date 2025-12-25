@@ -13,13 +13,9 @@
                 #:make-ht #:result #:rpc-error #:text-content #:tool-error)
   (:import-from #:cl-mcp/src/tools/registry
                 #:register-tool)
-  (:import-from #:asdf
-                #:system-source-directory)
   (:import-from #:uiop
                 #:read-file-string
-                #:getcwd
                 #:ensure-pathname
-                #:subpathp
                 #:ensure-directory-pathname
                 #:absolute-pathname-p)
   (:export

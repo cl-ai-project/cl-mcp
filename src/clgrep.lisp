@@ -4,13 +4,12 @@
 (defpackage #:cl-mcp/src/clgrep
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:resolve-path-in-project)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
+                #:make-ht #:result #:rpc-error #:text-content)
   (:import-from #:cl-mcp/src/tools/registry
                 #:register-tool)
   (:import-from #:yason

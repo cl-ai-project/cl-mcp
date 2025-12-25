@@ -15,30 +15,11 @@
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
-  ;; Import from tool modules to trigger registration side-effects
-  (:import-from #:cl-mcp/src/repl
-                #:repl-eval)
+  ;; Import tools/all to trigger loading of all tool modules.
+  ;; Tool modules register themselves with the registry at load time.
+  (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
-  (:import-from #:cl-mcp/src/fs
-                #:fs-read-file
-                #:fs-write-file
-                #:fs-list-directory
-                #:fs-get-project-info
-                #:fs-set-project-root)
-  (:import-from #:cl-mcp/src/lisp-edit-form
-                #:lisp-edit-form)
-  (:import-from #:cl-mcp/src/lisp-read-file
-                #:lisp-read-file)
-  (:shadowing-import-from #:cl-mcp/src/code
-                          #:code-find-references)
-  (:import-from #:cl-mcp/src/code
-                #:code-find-definition
-                #:code-describe-symbol)
-  (:import-from #:cl-mcp/src/validate
-                #:lisp-check-parens)
-  (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search)
   (:import-from #:yason
                 #:encode
                 #:parse)

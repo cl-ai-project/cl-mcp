@@ -5,7 +5,7 @@
   (:import-from #:uiop #:print-backtrace)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
+                #:make-ht #:result #:rpc-error #:text-content)
   (:import-from #:cl-mcp/src/tools/registry
                 #:register-tool)
   (:export #:repl-eval #:*default-eval-package*))
