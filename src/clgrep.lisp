@@ -4,39 +4,16 @@
 (defpackage #:cl-mcp/src/clgrep
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/fs #:*project-root*)
+  (:import-from #:cl-mcp/src/project-root #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:resolve-path-in-project)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:export
    #:clgrep-search))
 (in-package #:cl-mcp/src/clgrep)
 
-(defun %ensure-project-root ()
-  "Ensure *project-root* is set. Signal an error with instructions if not."
-  (unless *project-root*
-    (error "Project root is not set. Call fs-set-project-root first.")))
-
-(defun %resolve-search-path (path)
-  "Resolve PATH to an absolute pathname within project root.
-If PATH is NIL or empty, returns *project-root*.
-Signals an error if PATH is outside project root."
-  (%ensure-project-root)
-  (let* ((base *project-root*)
-         (target (if (or (null path) (string= path ""))
-                     base
-                     (let ((pn (uiop:ensure-pathname path
-                                                     :want-pathname t
-                                                     :defaults base)))
-                       (if (uiop:absolute-pathname-p pn)
-                           pn
-                           (uiop:merge-pathnames* pn base))))))
-    ;; Security: ensure target is under project root
-    (let ((canonical (ignore-errors (truename target))))
-      (unless canonical
-        (error "Path does not exist: ~A" target))
-      (unless (uiop:subpathp canonical base)
-        (error "Path ~A is outside project root ~A" target base))
-      canonical)))
+;; Path resolution is now handled by cl-mcp/src/utils/paths:resolve-path-in-project
 
 (defun %normalize-result (result base-path)
   "Normalize a single search result, making file paths relative to BASE-PATH."
@@ -80,7 +57,7 @@ Returns a list of alists, each containing:
   :form-start-line - Start line of the containing form
   :form-end-line   - End line of the containing form
   :form            - The full top-level form text (only if INCLUDE-FORM is true)"
-  (let* ((search-path (%resolve-search-path path))
+  (let* ((search-path (resolve-path-in-project path :must-exist t))
          (recursive-p (if (null recursive) t recursive))
          (types (%parse-form-types form-types))
          (results (semantic-grep search-path pattern

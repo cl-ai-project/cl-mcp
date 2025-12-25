@@ -3,7 +3,10 @@
 (defpackage #:cl-mcp/src/code
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/fs #:*project-root*)
+  (:import-from #:cl-mcp/src/project-root #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:normalize-path-for-display
+                #:path-inside-p)
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
@@ -11,7 +14,8 @@
                 #:getcwd
                 #:ensure-pathname
                 #:subpathp
-                #:ensure-directory-pathname)
+                #:ensure-directory-pathname
+                #:absolute-pathname-p)
   (:export
    #:code-find-definition
    #:code-describe-symbol
@@ -88,16 +92,8 @@ Returns NIL when the file cannot be read."
 
 (defun %normalize-path (pathname)
   "Return a namestring, relative to *project-root* when possible.
-Falls back to CWD, then cl-mcp system source directory, else absolute."
-  (when pathname
-    (let ((pn (uiop:ensure-pathname pathname))
-          (bases (remove nil
-                         (list *project-root*
-                               (uiop:getcwd)
-                               (ignore-errors (asdf:system-source-directory :cl-mcp))))))
-      (dolist (base bases (uiop:native-namestring pn))
-        (when (uiop:subpathp pn base)
-          (return (uiop:native-namestring (uiop:enough-pathname pn base))))))))
+Delegates to normalize-path-for-display from paths module."
+  (normalize-path-for-display pathname))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) &optional))
@@ -172,11 +168,12 @@ Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
         (values name type arglist doc path line)))))
 
 (defun %path-inside-project-p (pathname)
-  "Return T when PATHNAME is inside *project-root*."
+  "Return T when PATHNAME is inside *project-root*.
+Returns T for NIL or relative paths when *project-root* is not set."
   (and pathname
        (if *project-root*
            (if (uiop:absolute-pathname-p pathname)
-               (uiop:subpathp (uiop:ensure-pathname pathname :want-relative nil)
+               (path-inside-p (uiop:ensure-pathname pathname :want-relative nil)
                               (uiop:ensure-directory-pathname *project-root*))
                t)
            t)))

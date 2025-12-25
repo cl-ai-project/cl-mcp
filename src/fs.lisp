@@ -3,6 +3,8 @@
 (defpackage #:cl-mcp/src/fs
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:getenv
@@ -27,13 +29,7 @@
 
 (in-package #:cl-mcp/src/fs)
 
-(defparameter *project-root*
-  (let ((env-root (uiop:getenv "MCP_PROJECT_ROOT")))
-    (when env-root
-      (uiop:ensure-directory-pathname env-root)))
-  "Absolute pathname of the project root.
-Must be set via MCP_PROJECT_ROOT environment variable or by calling fs-set-project-root.
-If NIL, all file operations will fail with an error instructing to set the project root.")
+;; *project-root* is imported from cl-mcp/src/project-root and re-exported
 
 (defparameter *hidden-prefixes* '("." ".git" ".hg" ".svn" ".cache" ".fasl"))
 (defparameter *skip-extensions* '("fasl" "ufasl" "x86f" "cfasl"))
