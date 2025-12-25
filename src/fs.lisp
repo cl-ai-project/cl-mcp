@@ -11,19 +11,21 @@
                 #:make-ht #:result #:rpc-error #:text-content #:tool-error)
   (:import-from #:cl-mcp/src/tools/registry
                 #:register-tool)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:ensure-project-root
+                #:allowed-read-path-p
+                #:ensure-write-path)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:getenv
                 #:getcwd
                 #:chdir
                 #:subpathp
-                #:ensure-pathname
                 #:merge-pathnames*
                 #:directory
                 #:directory-exists-p
                 #:absolute-pathname-p)
   (:import-from #:uiop/utility #:string-prefix-p)
-  (:import-from #:asdf #:registered-systems #:system-source-directory)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
   (:export #:fs-resolve-read-path
            #:fs-read-file
@@ -44,72 +46,7 @@
 (defun %fd-count ()
   (ignore-errors (length (directory #P"/proc/self/fd/*"))))
 
-(defun %ensure-project-root ()
-  "Ensure *project-root* is set. Signal an error with instructions if not.
-This guard function should be called at the beginning of all file operations."
-  (unless *project-root*
-    (error "Project root is not set.
 
-SOLUTION:
-call fs-set-project-root tool with your current working directory:
-   Method: tools/call
-   Tool: fs-set-project-root
-   Arguments: {\"path\": \"/absolute/path/to/your/project\"}
-
-CURRENT SERVER STATE:
-- Current working directory: ~A
-- Registered ASDF systems: ~D
-
-For AI agents: Call fs-set-project-root at the start of your session with your
-current working directory to synchronize the server's project root."
-           (or (ignore-errors (namestring (uiop:getcwd))) "(unknown)")
-           (length (asdf:registered-systems)))))
-(defun %path-inside-p (child parent)
-  "Return T when CHILD pathname is a subpath of directory PARENT."
-  (uiop:subpathp child parent))
-
-(defun %canonical-path (path &key relative-to)
-  "Turn PATH designator into a physical absolute pathname.
-If RELATIVE-TO is provided and PATH is relative, merge it with RELATIVE-TO."
-  (%ensure-project-root)
-  (let* ((pn (uiop:ensure-pathname path :want-relative nil
-                                   :ensure-directory nil :ensure-absolute nil))
-         (abs (if (uiop:absolute-pathname-p pn)
-                  pn
-                  (uiop:merge-pathnames* pn (or relative-to *project-root*)))))
-    (uiop:ensure-pathname abs :want-relative nil)))
-
-(defun %allowed-read-path-p (pn)
-  "Return PN if readable per policy, else NIL.
-Allows project-root subpaths and source dirs of registered ASDF systems."
-  (%ensure-project-root)
-  (let* ((abs (%canonical-path pn))
-         ;; Normalize as directory if it exists and is a directory
-         (normalized-abs (if (uiop:directory-exists-p abs)
-                             (uiop:ensure-directory-pathname abs)
-                             abs))
-         (project-ok (%path-inside-p
-                      normalized-abs
-                      (uiop:ensure-directory-pathname *project-root*))))
-    (when project-ok (return-from %allowed-read-path-p normalized-abs))
-    ;; absolute path allowed only inside system-source-directory of registered systems
-    (let ((systems (asdf:registered-systems)))
-      (dolist (name systems)
-        (let ((dir (ignore-errors (asdf:system-source-directory name))))
-          (when (and dir (%path-inside-p normalized-abs dir))
-            (return-from %allowed-read-path-p normalized-abs)))))
-    nil))
-
-(defun %ensure-write-path (path)
-  "Ensure PATH is relative to project root and return absolute pathname.
-Signals an error if outside project root or absolute."
-  (%ensure-project-root)
-  (let* ((pn (uiop:ensure-pathname path :want-relative t))
-         (abs (%canonical-path pn :relative-to *project-root*))
-         (real (or (ignore-errors (truename abs)) abs)))
-    (unless (%path-inside-p real (uiop:ensure-directory-pathname *project-root*))
-      (error "Write path ~A is outside project root" path))
-    real))
 
 (defun %read-file-string (pn offset limit)
   "Read file PN honoring OFFSET and LIMIT (both may be NIL)."
@@ -129,7 +66,7 @@ Signals an error if outside project root or absolute."
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
 Signals an error when PATH is outside the allow-list."
-  (let ((pn (%allowed-read-path-p path)))
+  (let ((pn (allowed-read-path-p path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     pn))
@@ -141,7 +78,7 @@ Returns the content string."
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
     (error "limit must be an integer"))
-  (let ((pn (%allowed-read-path-p path)))
+  (let ((pn (allowed-read-path-p path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     (log-event :debug "fs.read.open"
@@ -169,7 +106,7 @@ Returns the content string."
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
 Returns T on success."
-  (let ((pn (%ensure-write-path path)))
+  (let ((pn (ensure-write-path path)))
     (log-event :debug "fs.write.open"
                "path" (namestring pn)
                "bytes" (length content)
@@ -200,7 +137,7 @@ Returns T on success."
 (defun fs-list-directory (path)
   "List directory entries at PATH respecting read allow-list.
 Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)."
-  (let ((pn (%allowed-read-path-p path)))
+  (let ((pn (allowed-read-path-p path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     (unless (uiop:directory-exists-p pn)
@@ -231,7 +168,7 @@ Returns a hash-table with keys:
   - cwd: current working directory
   - project_root_source: how project root was determined (env|cwd|asdf)
   - relative_cwd: cwd relative to project_root (when inside project)"
-  (%ensure-project-root)
+  (ensure-project-root)
   (let ((cwd (ignore-errors (uiop:getcwd)))
         (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
         (h (make-hash-table :test #'equal)))

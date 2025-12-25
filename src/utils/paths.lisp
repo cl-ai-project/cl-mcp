@@ -11,6 +11,7 @@
            #:path-inside-p
            #:canonical-path
            #:allowed-read-path-p
+           #:ensure-write-path
            #:resolve-path-in-project
            #:normalize-path-for-display))
 
@@ -78,6 +79,16 @@ Allows project-root subpaths and source dirs of registered ASDF systems."
             (return-from allowed-read-path-p normalized-abs)))))
     nil))
 
+(defun ensure-write-path (path)
+  "Ensure PATH is relative to project root and return absolute pathname.
+Signals an error if outside project root or absolute."
+  (ensure-project-root)
+  (let* ((pn (uiop/pathname:ensure-pathname path :want-relative t))
+         (abs (canonical-path pn :relative-to *project-root*))
+         (real (or (ignore-errors (truename abs)) abs)))
+    (unless (path-inside-p real (uiop/pathname:ensure-directory-pathname *project-root*))
+      (error "Write path ~A is outside project root" path))
+    real))
 (defun resolve-path-in-project (path &key (must-exist nil))
   "Resolve PATH to an absolute pathname within project root.
 If PATH is NIL or empty, returns *project-root*.
