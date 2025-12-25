@@ -261,3 +261,70 @@
         (ok (string= (gethash "kind" result) "mismatch"))
         (ok (equal (gethash "expected" result) "]"))
         (ok (equal (gethash "found" result) ")"))))))
+
+;;; Boolean option tests - verify explicit false is handled correctly
+;;; These tests catch the let vs let* bug where *-present variables weren't set
+
+(deftest tools-call-lisp-read-file-collapsed-false
+  (testing "tools/call lisp-read-file with collapsed=false returns raw content"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"lisp-read-file\","
+                   "\"arguments\":{\"path\":\"src/core.lisp\",\"collapsed\":false}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (mode (gethash "mode" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (string= mode "raw") "collapsed=false should return raw mode"))))))
+
+(deftest tools-call-lisp-edit-form-dry-run-true
+  (testing "tools/call lisp-edit-form with dry_run=true returns preview"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"lisp-edit-form\","
+                   "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                   "\"form_type\":\"defun\",\"form_name\":\"version\","
+                   "\"operation\":\"replace\","
+                   "\"content\":\"(defun version () \\\"test\\\")\","
+                   "\"dry_run\":true}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (gethash "would_change" result) "dry_run=true should return would_change")
+          (ok (gethash "preview" result) "dry_run=true should return preview"))))))
+
+(deftest tools-call-lisp-edit-form-dry-run-false
+  (testing "tools/call lisp-edit-form with dry_run=false applies changes"
+    (with-test-project-root
+      ;; Create a temporary file
+      (let* ((tmp-path "tests/tmp-dry-run-test.lisp")
+             (initial-content "(defun test-fn () 1)")
+             (new-content "(defun test-fn () 2)"))
+        (with-open-file (out (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)
+                             :direction :output :if-exists :supersede)
+          (write-string initial-content out))
+        (unwind-protect
+             (let ((req (concatenate 'string
+                          "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\","
+                          "\"params\":{\"name\":\"lisp-edit-form\","
+                          "\"arguments\":{\"file_path\":\"" tmp-path "\","
+                          "\"form_type\":\"defun\",\"form_name\":\"test-fn\","
+                          "\"operation\":\"replace\","
+                          "\"content\":\"" new-content "\","
+                          "\"dry_run\":false}}}")))
+               (let* ((resp (process-json-line req))
+                      (obj (parse resp))
+                      (result (gethash "result" obj)))
+                 (ok (string= (gethash "jsonrpc" obj) "2.0"))
+                 (ok (null (gethash "would_change" result)) "dry_run=false should not return would_change")
+                 (ok (null (gethash "preview" result)) "dry_run=false should not return preview")
+                 ;; Verify file was actually changed
+                 (let ((file-content (uiop:read-file-string
+                                      (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))
+                   (ok (search "2)" file-content) "File should contain new content"))))
+          (ignore-errors
+            (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
