@@ -9,7 +9,12 @@
            #:result
            #:rpc-error
            #:text-content
-           #:tool-error))
+           #:tool-error
+           ;; Argument extraction helpers
+           #:arg-validation-error
+           #:validation-message
+           #:extract-arg
+           #:extract-boolean-arg))
 
 (in-package #:cl-mcp/src/tools/helpers)
 
@@ -45,3 +50,102 @@ PROTOCOL-VERSION should be a string like \"2025-11-25\" or NIL."
   (if (and protocol-version (string>= protocol-version "2025-11-25"))
       (result id (make-ht "content" (text-content message) "isError" t))
       (rpc-error id -32602 message)))
+
+;;;; Argument Extraction Helpers
+;;;;
+;;;; These helpers simplify the common pattern of extracting and validating
+;;;; arguments from the MCP tool call args hash-table.
+
+(define-condition arg-validation-error (error)
+  ((arg-name :initarg :arg-name :reader arg-name)
+   (message :initarg :message :reader validation-message))
+  (:report (lambda (c s)
+             (format s "~A" (validation-message c))))
+  (:documentation "Signaled when tool argument validation fails.
+Use VALIDATION-MESSAGE to get the user-facing error message."))
+
+(defun %check-type-match (value type arg-name)
+  "Check if VALUE matches TYPE. Signal ARG-VALIDATION-ERROR if not.
+TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any)."
+  (when type
+    (let ((valid (ecase type
+                   (:string (stringp value))
+                   (:integer (integerp value))
+                   (:number (numberp value))
+                   (:boolean (member value '(t nil)))
+                   (:array (or (vectorp value) (listp value)))
+                   (:object (hash-table-p value)))))
+      (unless valid
+        (error 'arg-validation-error
+               :arg-name arg-name
+               :message (format nil "~A must be ~A"
+                                arg-name
+                                (ecase type
+                                  (:string "a string")
+                                  (:integer "an integer")
+                                  (:number "a number")
+                                  (:boolean "boolean")
+                                  (:array "an array")
+                                  (:object "an object"))))))))
+
+(defun extract-arg (args name &key type required)
+  "Extract argument NAME from ARGS hash-table with optional validation.
+
+Arguments:
+  ARGS     - Hash-table of tool arguments (may be NIL)
+  NAME     - String key to extract
+  TYPE     - Expected type (:string :integer :number :boolean :array :object)
+             If NIL, no type checking is performed.
+  REQUIRED - If T, signal error when argument is missing
+
+Returns the argument value, or NIL if optional and not provided.
+Signals ARG-VALIDATION-ERROR on validation failure.
+
+Example:
+  (extract-arg args \"path\" :type :string :required t)
+  (extract-arg args \"limit\" :type :integer)"
+  (let ((value (and args (gethash name args))))
+    (cond
+      ;; Required but missing
+      ((and required (null value))
+       (error 'arg-validation-error
+              :arg-name name
+              :message (format nil "~A is required" name)))
+      ;; Present - check type
+      (value
+       (%check-type-match value type name)
+       value)
+      ;; Optional and missing
+      (t nil))))
+
+(defun extract-boolean-arg (args name &key (default nil))
+  "Extract boolean argument NAME from ARGS with proper nil/false handling.
+
+The challenge with boolean args is distinguishing between:
+  - Not provided (should use DEFAULT)
+  - Explicitly set to false/nil (should use NIL)
+  - Explicitly set to true (should use T)
+
+Arguments:
+  ARGS    - Hash-table of tool arguments (may be NIL)
+  NAME    - String key to extract
+  DEFAULT - Value to use when argument is not provided (default: NIL)
+
+Returns the boolean value.
+Signals ARG-VALIDATION-ERROR if provided but not a boolean.
+
+Example:
+  (extract-boolean-arg args \"recursive\" :default t)
+  (extract-boolean-arg args \"dryRun\")"
+  (multiple-value-bind (value presentp)
+      (and args (gethash name args))
+    (cond
+      ;; Not provided - use default
+      ((not presentp) default)
+      ;; Provided - validate it's boolean
+      (t
+       (unless (member value '(t nil))
+         (error 'arg-validation-error
+                :arg-name name
+                :message (format nil "~A must be boolean" name)))
+       value))))

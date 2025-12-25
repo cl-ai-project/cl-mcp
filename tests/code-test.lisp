@@ -2,9 +2,12 @@
 
 (defpackage #:cl-mcp/tests/code-test
   (:use #:cl #:rove)
+  (:import-from #:cl-mcp/main
+                #:process-json-line)
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition
-                #:code-describe-symbol))
+                #:code-describe-symbol
+                #:code-find-references))
 
 (in-package #:cl-mcp/tests/code-test)
 
@@ -50,10 +53,10 @@
       ;; flakiness when the symbol has not been compiled elsewhere in the session.
       (unless (fboundp 'cl-mcp/tests/code-test::xref-anchor)
         (defun cl-mcp/tests/code-test::xref-anchor ()
-          (cl-mcp:process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
+          (process-json-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}")))
       (compile 'cl-mcp/tests/code-test::xref-anchor)
       (multiple-value-bind (refs count)
-          (cl-mcp/src/code:code-find-references "cl-mcp:process-json-line")
+          (code-find-references "cl-mcp:process-json-line")
         (ok (>= count 1))
         (ok (vectorp refs))
         (let ((first (aref refs 0)))

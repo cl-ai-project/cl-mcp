@@ -4,15 +4,13 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
-  (:import-from #:cl-mcp/src/state
-                #:protocol-version)
   (:import-from #:cl-mcp/src/utils/paths
                 #:normalize-path-for-display
                 #:path-inside-p)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
-  (:import-from #:cl-mcp/src/tools/registry
-                #:register-tool)
+                #:make-ht #:result #:rpc-error #:text-content)
+  (:import-from #:cl-mcp/src/tools/define-tool
+                #:define-tool)
   (:import-from #:uiop
                 #:read-file-string
                 #:ensure-pathname
@@ -254,12 +252,8 @@ Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"
       (let ((vec (coerce (nreverse results) 'vector)))
         (values vec (length vec))))))
 
-(defun code-find-descriptor ()
-  "Return the MCP tool descriptor for code-find."
-  (make-ht
-   "name" "code-find"
-   "description"
-   "Locate the definition of a symbol (path and line) using sb-introspect.
+(define-tool "code-find"
+  :description "Locate the definition of a symbol (path and line) using sb-introspect.
 
 PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
 Prefer package-qualified symbols or supply the package argument.
@@ -267,51 +261,26 @@ Prefer package-qualified symbols or supply the package argument.
 NOTE: If the symbol is not found, the system might not be loaded yet.
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
-   "inputSchema"
-   (let ((p (make-hash-table :test #'equal)))
-     (setf (gethash "symbol" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Symbol name like \"cl:mapcar\" (package-qualified preferred)"))
-     (setf (gethash "package" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Optional package used when SYMBOL is unqualified; ensure the package exists
+  :args ((symbol :type :string :required t
+                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred)")
+         (package :type :string
+                  :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
-     (make-ht "type" "object"
-              "properties" p
-              "required" (vector "symbol")))))
+  :body
+  (multiple-value-bind (path line)
+      (code-find-definition symbol :package package)
+    (if path
+        (result id
+                (make-ht "path" path
+                         "line" line
+                         "content" (text-content
+                                    (format nil "~A defined in ~A at line ~D"
+                                            symbol path line))))
+        (rpc-error id -32004
+                   (format nil "Definition not found for ~A" symbol)))))
 
-(defun code-find-handler (state id args)
-  "Handle the code-find MCP tool call."
-  (handler-case
-      (let ((symbol (and args (gethash "symbol" args)))
-            (pkg (and args (gethash "package" args))))
-        (unless (stringp symbol)
-          (return-from code-find-handler
-            (tool-error id "symbol must be a string"
-                        :protocol-version (protocol-version state))))
-        (multiple-value-bind (path line)
-            (code-find-definition symbol :package pkg)
-          (if path
-              (result id (make-ht
-                          "path" path
-                          "line" line
-                          "content" (text-content
-                                     (format nil "~A defined in ~A at line ~D"
-                                             symbol path line))))
-              (rpc-error id -32004
-                         (format nil "Definition not found for ~A" symbol)))))
-    (error (e)
-      (rpc-error id -32603
-                 (format nil "Internal error during code-find: ~A" e)))))
-
-(defun code-describe-descriptor ()
-  "Return the MCP tool descriptor for code-describe."
-  (make-ht
-   "name" "code-describe"
-   "description"
-   "Describe a symbol: type, arglist, and documentation.
+(define-tool "code-describe"
+  :description "Describe a symbol: type, arglist, and documentation.
 
 PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
 Pass a package or a package-qualified symbol to avoid resolution errors.
@@ -319,52 +288,27 @@ Pass a package or a package-qualified symbol to avoid resolution errors.
 NOTE: If the symbol is not found, the system might not be loaded yet.
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
-   "inputSchema"
-   (let ((p (make-hash-table :test #'equal)))
-     (setf (gethash "symbol" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Symbol name like \"cl:mapcar\" (package-qualified preferred)"))
-     (setf (gethash "package" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Optional package used when SYMBOL is unqualified; ensure the package exists
+  :args ((symbol :type :string :required t
+                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred)")
+         (package :type :string
+                  :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
-     (make-ht "type" "object"
-              "properties" p
-              "required" (vector "symbol")))))
+  :body
+  (multiple-value-bind (name type arglist doc path line)
+      (code-describe-symbol symbol :package package)
+    (result id
+            (make-ht "name" name
+                     "type" type
+                     "arglist" arglist
+                     "documentation" doc
+                     "path" path
+                     "line" line
+                     "content" (text-content
+                                (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                                        name type arglist doc path line))))))
 
-(defun code-describe-handler (state id args)
-  "Handle the code-describe MCP tool call."
-  (handler-case
-      (let ((symbol (and args (gethash "symbol" args)))
-            (pkg (and args (gethash "package" args))))
-        (unless (stringp symbol)
-          (return-from code-describe-handler
-            (tool-error id "symbol must be a string"
-                        :protocol-version (protocol-version state))))
-        (multiple-value-bind (name type arglist doc path line)
-            (code-describe-symbol symbol :package pkg)
-          (result id (make-ht
-                      "name" name
-                      "type" type
-                      "arglist" arglist
-                      "documentation" doc
-                      "path" path
-                      "line" line
-                      "content" (text-content
-                                 (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
-                                         name type arglist doc path line))))))
-    (error (e)
-      (rpc-error id -32603
-                 (format nil "Internal error during code-describe: ~A" e)))))
-
-(defun code-find-references-descriptor ()
-  "Return the MCP tool descriptor for code-find-references."
-  (make-ht
-   "name" "code-find-references"
-   "description"
-   "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
+(define-tool "code-find-references"
+  :description "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
 references, sets).
 
 PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
@@ -372,75 +316,30 @@ Use package-qualified symbols when possible; set projectOnly=false to include
 external libs.
 
 For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' instead."
-   "inputSchema"
-   (let ((p (make-hash-table :test #'equal)))
-     (setf (gethash "symbol" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Symbol name like \"cl-mcp:run\" (package-qualified preferred)"))
-     (setf (gethash "package" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Optional package used when SYMBOL is unqualified"))
-     (setf (gethash "projectOnly" p)
-           (make-ht "type" "boolean"
-                    "description"
-                    "When true (default), only include references under the project root"))
-     (make-ht "type" "object"
-              "properties" p
-              "required" (vector "symbol")))))
-
-(defun code-find-references-handler (state id args)
-  "Handle the code-find-references MCP tool call."
-  (handler-case
-      (let* ((symbol (and args (gethash "symbol" args)))
-             (pkg (and args (gethash "package" args)))
-             (project-only-present nil)
-             (project-only (multiple-value-bind (val presentp)
-                             (and args (gethash "projectOnly" args))
-                           (setf project-only-present presentp)
-                           (if presentp val t))))
-        (unless (stringp symbol)
-          (return-from code-find-references-handler
-            (tool-error id "symbol must be a string"
-                        :protocol-version (protocol-version state))))
-        (when (and project-only-present (not (member project-only '(t nil))))
-          (return-from code-find-references-handler
-            (tool-error id "projectOnly must be boolean"
-                        :protocol-version (protocol-version state))))
-        (multiple-value-bind (refs count)
-            (code-find-references symbol :package pkg :project-only project-only)
-          (let* ((summary-lines (map 'list
-                                     (lambda (h)
-                                       (format nil "~A:~D ~A ~A"
-                                               (gethash "path" h)
-                                               (gethash "line" h)
-                                               (gethash "type" h)
-                                               (gethash "context" h)))
-                                     refs))
-                 (summary (if summary-lines
-                              (format nil "~{~A~%~}" summary-lines)
-                              "")))
-            (result id (make-ht
-                        "refs" refs
-                        "count" count
-                        "symbol" symbol
-                        "projectOnly" project-only
-                        "content" (text-content summary))))))
-    (error (e)
-      (rpc-error id -32603
-                 (format nil "Internal error during code-find-references: ~A" e)))))
-
-;;; Tool Registration
-
-(register-tool "code-find"
-               (code-find-descriptor)
-               #'code-find-handler)
-
-(register-tool "code-describe"
-               (code-describe-descriptor)
-               #'code-describe-handler)
-
-(register-tool "code-find-references"
-               (code-find-references-descriptor)
-               #'code-find-references-handler)
+  :args ((symbol :type :string :required t
+                 :description "Symbol name like \"cl-mcp:run\" (package-qualified preferred)")
+         (package :type :string
+                  :description "Optional package used when SYMBOL is unqualified")
+         (project-only :type :boolean :default t
+                       :description "When true (default), only include references under the project root"))
+  :body
+  (multiple-value-bind (refs count)
+      (code-find-references symbol :package package :project-only project-only)
+    (let* ((summary-lines
+            (map 'list
+                 (lambda (h)
+                   (format nil "~A:~D ~A ~A"
+                           (gethash "path" h)
+                           (gethash "line" h)
+                           (gethash "type" h)
+                           (gethash "context" h)))
+                 refs))
+           (summary (if summary-lines
+                        (format nil "~{~A~%~}" summary-lines)
+                        "")))
+      (result id
+              (make-ht "refs" refs
+                       "count" count
+                       "symbol" symbol
+                       "projectOnly" project-only
+                       "content" (text-content summary))))))
