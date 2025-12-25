@@ -65,10 +65,9 @@ Returns a list of alists, each containing:
   :form-end-line   - End line of the containing form
   :form            - The full top-level form text (only if INCLUDE-FORM is true)"
   (let* ((search-path (resolve-path-in-project path :must-exist t))
-         (recursive-p (if (null recursive) t recursive))
          (types (%parse-form-types form-types))
          (results (semantic-grep search-path pattern
-                                 :recursive recursive-p
+                                 :recursive recursive
                                  :case-insensitive case-insensitive
                                  :form-types types
                                  :include-form include-form

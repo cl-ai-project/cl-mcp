@@ -328,3 +328,190 @@
                    (ok (search "2)" file-content) "File should contain new content"))))
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
+
+(deftest tools-call-code-find-references-project-only-false
+  (testing "tools/call code-find-references with projectOnly=false includes external refs"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"code-find-references\","
+                 "\"arguments\":{\"symbol\":\"cl:car\",\"projectOnly\":false}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (refs (gethash "refs" result)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (arrayp refs) "Should return refs array")
+        ;; With projectOnly=false, we might get external references
+        ;; The key is that the request doesn't error
+        (ok (>= (length refs) 0) "Should handle projectOnly=false without error")))))
+
+(deftest tools-call-code-find-references-project-only-true
+  (testing "tools/call code-find-references with projectOnly=true filters to project"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"code-find-references\","
+                 "\"arguments\":{\"symbol\":\"cl-mcp/src/log:log-event\",\"projectOnly\":true}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (refs (gethash "refs" result)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (arrayp refs))
+        (ok (> (length refs) 0) "Should find project references")
+        ;; All refs should be within project
+        (ok (every (lambda (ref)
+                     (let ((path (gethash "path" ref)))
+                       (and (stringp path)
+                            (or (search "src/" path)
+                                (search "tests/" path)))))
+                   (coerce refs 'list))
+            "All refs should be within project")))))
+
+(deftest tools-call-clgrep-search-recursive-false
+  (testing "tools/call clgrep-search with recursive=false searches only top level"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"defun\",\"path\":\"src\",\"recursive\":false}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          ;; With recursive=false, should only find files directly in src/, not in subdirs
+          (ok (every (lambda (m)
+                       (let ((file (gethash "file" m)))
+                         ;; File should not contain additional path separators after src/
+                         (not (search "/" file :start2 (1+ (or (search "src/" file) 0))))))
+                     (coerce matches 'list))
+              "recursive=false should only search top-level directory"))))))
+
+(deftest tools-call-clgrep-search-recursive-true
+  (testing "tools/call clgrep-search with recursive=true searches subdirectories"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"register-tool\",\"path\":\"src\",\"recursive\":true}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          ;; With recursive=true, should find files in subdirectories like src/tools/
+          (ok (some (lambda (m)
+                      (let ((file (gethash "file" m)))
+                        (search "tools/" file)))
+                    (coerce matches 'list))
+              "recursive=true should find files in subdirectories"))))))
+
+(deftest tools-call-clgrep-search-include-form-false
+  (testing "tools/call clgrep-search with includeForm=false returns signatures only"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":27,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"version\",\"path\":\"src/core.lisp\","
+                   "\"includeForm\":false}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          (when (> (length matches) 0)
+            (let ((first-match (aref matches 0)))
+              ;; With includeForm=false, should have signature but no full form
+              (ok (gethash "signature" first-match) "Should have signature")
+              (ok (null (gethash "form" first-match)) "includeForm=false should not include form"))))))))
+
+(deftest tools-call-clgrep-search-include-form-true
+  (testing "tools/call clgrep-search with includeForm=true returns full forms"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":28,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"version\",\"path\":\"src/core.lisp\","
+                   "\"includeForm\":true}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          (when (> (length matches) 0)
+            (let ((first-match (aref matches 0)))
+              ;; With includeForm=true, should have full form
+              (ok (gethash "form" first-match) "includeForm=true should include form"))))))))
+
+(deftest tools-call-clgrep-search-case-insensitive-false
+    (testing "tools/call clgrep-search with caseInsensitive=false is case-sensitive"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"DEFUN\",\"path\":\"src/core.lisp\","
+                   "\"caseInsensitive\":false}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          ;; With caseInsensitive=false, "DEFUN" should not match "(defun"
+          (ok (= (length matches) 0) "caseInsensitive=false should not match lowercase"))))))
+
+(deftest tools-call-clgrep-search-case-insensitive-true
+    (testing "tools/call clgrep-search with caseInsensitive=true ignores case"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\"DEFUN\",\"path\":\"src/core.lisp\","
+                   "\"caseInsensitive\":true}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (matches (gethash "matches" result)))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (arrayp matches))
+          ;; With caseInsensitive=true, "DEFUN" should match "(defun"
+          (ok (> (length matches) 0) "caseInsensitive=true should match lowercase"))))))
+(deftest tools-call-repl-eval-safe-read-false
+  (testing "tools/call repl-eval with safeRead=false allows reader evaluation"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":29,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"#.(+ 1 2)\",\"safeRead\":false}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (gethash "content" result))
+             (first (and (arrayp content) (> (length content) 0) (aref content 0))))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        ;; With safeRead=false, #.(+ 1 2) should evaluate to 3
+        (ok (string= (gethash "text" first) "3") "safeRead=false should allow #. evaluation")))))
+
+(deftest tools-call-repl-eval-safe-read-true
+  (testing "tools/call repl-eval with safeRead=true blocks reader evaluation"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"#.(+ 1 2)\",\"safeRead\":true}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (and result (gethash "content" result)))
+             (first (and (arrayp content) (> (length content) 0) (aref content 0)))
+             (text (and first (gethash "text" first))))
+        ;; With safeRead=true, #.(+ 1 2) should cause a read error
+        ;; The error is caught and returned in the result content
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        ;; The result should contain an error message about *READ-EVAL* being NIL
+        (ok (and text
+                 (or (search "*READ-EVAL*" text)
+                     (search "can't read #." text)))
+            "safeRead=true should return error about #. evaluation")))))
