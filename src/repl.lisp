@@ -4,6 +4,10 @@
   (:use #:cl)
   (:import-from #:uiop #:print-backtrace)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht #:result #:rpc-error #:text-content)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:register-tool)
   (:export #:repl-eval #:*default-eval-package*))
 
 (in-package #:cl-mcp/src/repl)
@@ -170,3 +174,72 @@ Options:
                                 print-length
                                 max-output-length))))
     (%repl-eval-with-timeout thunk timeout-seconds)))
+
+(defun repl-eval-descriptor ()
+  "Return the MCP tool descriptor for repl-eval."
+  (make-ht
+   "name" "repl-eval"
+   "description"
+   "Evaluate Common Lisp forms and return the last value as printed text.
+Use this for testing, inspection, debugging, or loading systems (ql:quickload).
+Provide an existing package (e.g., CL-USER) and set printLevel/printLength when needed.
+WARNING: Definitions created here are TRANSIENT and lost on server restart.
+To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
+to save changes to files."
+   "inputSchema"
+   (make-ht
+    "type" "object"
+    "properties"
+    (let ((p (make-hash-table :test #'equal)))
+      (setf (gethash "code" p)
+            (make-ht "type" "string"
+                     "description" "Code string of one or more forms evaluated sequentially"))
+      (setf (gethash "package" p)
+            (make-ht "type" "string"
+                     "description" "Existing package name (e.g., CL-USER); forms are read/evaluated there"))
+      (setf (gethash "printLevel" p)
+            (make-ht "type" "integer"
+                     "description" "Integer to limit printed nesting depth (omit to print fully)"))
+      (setf (gethash "printLength" p)
+            (make-ht "type" "integer"
+                     "description" "Integer to limit printed list length (omit to print fully)"))
+      (setf (gethash "timeoutSeconds" p)
+            (make-ht "type" "number"
+                     "description" "Seconds to wait before timing out evaluation"))
+      (setf (gethash "maxOutputLength" p)
+            (make-ht "type" "integer"
+                     "description" "Maximum characters for printed result/stdout/stderr"))
+      (setf (gethash "safeRead" p)
+            (make-ht "type" "boolean"
+                     "description" "When true, disables #. reader evaluation for safety"))
+      p))))
+
+(defun repl-eval-handler (state id args)
+  "Handle the repl-eval MCP tool call."
+  (declare (ignore state))
+  (handler-case
+      (let ((code (and args (gethash "code" args)))
+            (pkg (and args (gethash "package" args)))
+            (pl (and args (gethash "printLevel" args)))
+            (plen (and args (gethash "printLength" args)))
+            (timeout (and args (gethash "timeoutSeconds" args)))
+            (max-out (and args (gethash "maxOutputLength" args)))
+            (safe-read (and args (gethash "safeRead" args))))
+        (multiple-value-bind (printed _ stdout stderr)
+            (repl-eval (or code "")
+                       :package (or pkg *package*)
+                       :print-level pl
+                       :print-length plen
+                       :timeout-seconds timeout
+                       :max-output-length max-out
+                       :safe-read safe-read)
+          (declare (ignore _))
+          (result id
+                  (make-ht "content" (text-content printed)
+                           "stdout" stdout
+                           "stderr" stderr))))
+    (error (e)
+      (rpc-error id -32603
+                 (format nil "Internal error during REPL evaluation: ~A" e)))))
+
+(register-tool "repl-eval" (repl-eval-descriptor) #'repl-eval-handler)

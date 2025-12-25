@@ -15,7 +15,7 @@
 (in-package #:cl-mcp/tests/fs-test)
 
 (defmacro with-test-project-root (&body body)
-  `(let ((original-root cl-mcp/src/fs:*project-root*)
+  `(let ((original-root cl-mcp/src/project-root:*project-root*)
          (original-cwd (ignore-errors (getcwd)))
          (test-root (or (ignore-errors
                           (ensure-directory-pathname
@@ -24,10 +24,10 @@
      (unwind-protect
           (progn
             ;; Set project root explicitly for the test
-            (setf cl-mcp/src/fs:*project-root* test-root)
+            (setf cl-mcp/src/project-root:*project-root* test-root)
             ,@body)
        ;; Restore original state
-       (setf cl-mcp/src/fs:*project-root* original-root)
+       (setf cl-mcp/src/project-root:*project-root* original-root)
        (when original-cwd
          (ignore-errors (uiop:chdir original-cwd))))))
 
@@ -115,7 +115,7 @@
 (deftest fs-set-project-root-changes-root
   (testing "fs-set-project-root updates project root and cwd"
     (with-test-project-root
-      (let* ((original-root cl-mcp/src/fs:*project-root*)
+      (let* ((original-root cl-mcp/src/project-root:*project-root*)
              (original-cwd (getcwd))
              (test-dir (namestring original-root)))
         (unwind-protect
@@ -128,7 +128,7 @@
                (ok (string= (gethash "project_root" result) test-dir))
                (ok (string= (gethash "cwd" result) test-dir)))
           ;; Restore original state
-          (setf cl-mcp/src/fs:*project-root* original-root)
+          (setf cl-mcp/src/project-root:*project-root* original-root)
           (ignore-errors (uiop:chdir original-cwd)))))))
 
 (deftest fs-set-project-root-validates-directory
@@ -148,7 +148,7 @@
 (deftest fs-set-project-root-syncs-with-get-info
   (testing "fs-set-project-root result matches fs-get-project-info"
     (with-test-project-root
-      (let* ((original-root cl-mcp/src/fs:*project-root*)
+      (let* ((original-root cl-mcp/src/project-root:*project-root*)
              (original-cwd (getcwd))
              (test-dir (namestring original-root)))
         (unwind-protect
@@ -158,12 +158,12 @@
                  (ok (string= (gethash "project_root" info) test-dir))
                  (ok (string= (gethash "cwd" info) test-dir))))
           ;; Restore original state
-          (setf cl-mcp/src/fs:*project-root* original-root)
+          (setf cl-mcp/src/project-root:*project-root* original-root)
           (ignore-errors (uiop:chdir original-cwd)))))))
 
 (deftest fs-operations-require-project-root
   (testing "file operations fail with helpful error when project root is not set"
-    (let ((cl-mcp/src/fs:*project-root* nil))
+    (let ((cl-mcp/src/project-root:*project-root* nil))
       ;; Test that fs-read-file fails
       (ok (handler-case
                (progn (fs-read-file "src/core.lisp") nil)
@@ -195,7 +195,7 @@
 
 (deftest fs-set-project-root-converts-relative-to-absolute
   (testing "fs-set-project-root converts relative paths to absolute paths"
-    (let ((original-root cl-mcp/src/fs:*project-root*)
+    (let ((original-root cl-mcp/src/project-root:*project-root*)
           (original-cwd (getcwd))
           ;; Use getcwd to match what fs-set-project-root does internally
           (expected-absolute (truename (getcwd))))
@@ -216,7 +216,7 @@
                            (namestring expected-absolute)))
 
                ;; Verify *project-root* is also absolute
-               (ok (uiop:absolute-pathname-p cl-mcp/src/fs:*project-root*))
+               (ok (uiop:absolute-pathname-p cl-mcp/src/project-root:*project-root*))
 
                ;; Verify file operations work with the absolute path
                (let ((info (fs-get-project-info)))
@@ -224,14 +224,14 @@
                  (ok (uiop:absolute-pathname-p
                       (uiop:ensure-pathname (gethash "project_root" info)))))))
         ;; Restore original state
-        (setf cl-mcp/src/fs:*project-root* original-root)
+        (setf cl-mcp/src/project-root:*project-root* original-root)
         (when original-cwd
           (ignore-errors (uiop:chdir original-cwd)))))))
 
 (deftest fs-set-project-root-relative-path-subdirectory
   (testing "fs-set-project-root handles relative subdirectory paths"
     (with-test-project-root
-      (let* ((original-root cl-mcp/src/fs:*project-root*)
+      (let* ((original-root cl-mcp/src/project-root:*project-root*)
              (original-cwd (getcwd))
              ;; Assume "src" directory exists in the project
              (relative-path "src")
@@ -252,16 +252,16 @@
                              (namestring expected-absolute)))
 
                  ;; Verify *project-root* is also absolute
-                 (ok (uiop:absolute-pathname-p cl-mcp/src/fs:*project-root*))))
+                 (ok (uiop:absolute-pathname-p cl-mcp/src/project-root:*project-root*))))
           ;; Restore original state
-          (setf cl-mcp/src/fs:*project-root* original-root)
+          (setf cl-mcp/src/project-root:*project-root* original-root)
           (when original-cwd
             (ignore-errors (uiop:chdir original-cwd))))))))
 
 (deftest fs-list-directory-trailing-slash-normalization
   (testing "fs-list-directory accepts paths with and without trailing slashes"
     (with-test-project-root
-      (let* ((project-root (namestring cl-mcp/src/fs:*project-root*))
+      (let* ((project-root (namestring cl-mcp/src/project-root:*project-root*))
              ;; Remove trailing slash if present
              (path-without-slash (string-right-trim "/" project-root))
              ;; Ensure trailing slash
@@ -297,7 +297,7 @@
 (deftest fs-resolve-read-path-trailing-slash-normalization
   (testing "fs-resolve-read-path normalizes paths with and without trailing slashes"
     (with-test-project-root
-      (let* ((project-root (namestring cl-mcp/src/fs:*project-root*))
+      (let* ((project-root (namestring cl-mcp/src/project-root:*project-root*))
              (path-without-slash (string-right-trim "/" project-root))
              (path-with-slash (if (char= (char project-root (1- (length project-root))) #\/)
                                   project-root
