@@ -5,7 +5,8 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content
+                #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:lisp-check-parens
@@ -211,9 +212,13 @@ success if balanced."
   :body
   (progn
     (when (and path code)
-      (error "Provide either path or code, not both"))
+      (error 'arg-validation-error
+             :arg-name "path/code"
+             :message "Provide either path or code, not both"))
     (when (and (null path) (null code))
-      (error "Either path or code is required"))
+      (error 'arg-validation-error
+             :arg-name "path/code"
+             :message "Either path or code is required"))
     (let* ((check-result (lisp-check-parens :path path
                                           :code code
                                           :offset offset
