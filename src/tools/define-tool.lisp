@@ -25,23 +25,13 @@
 ;;;;
 ;;;; Types: :string :integer :number :boolean :array :object
 
-(defun %kebab-to-camel (string)
-  "Convert kebab-case STRING to camelCase."
-  (with-output-to-string (out)
-    (let ((capitalize-next nil))
-      (loop for char across string
-            do (cond
-                 ((char= char #\-)
-                  (setf capitalize-next t))
-                 (capitalize-next
-                  (write-char (char-upcase char) out)
-                  (setf capitalize-next nil))
-                 (t
-                  (write-char char out)))))))
+(defun %kebab-to-snake (string)
+  "Convert kebab-case STRING to snake_case."
+  (substitute #\_ #\- string))
 
 (defun %symbol-to-json-name (sym)
-  "Convert symbol SYM to a camelCase JSON key string."
-  (%kebab-to-camel (string-downcase (symbol-name sym))))
+  "Convert symbol SYM to a snake_case JSON key string."
+  (%kebab-to-snake (string-downcase (symbol-name sym))))
 
 (defun %parse-arg-spec (spec)
   "Parse an argument specification into a normalized plist."
@@ -120,7 +110,7 @@ ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
   - A list: (name &key json-name type required default enum description)
     - name: Symbol used in BODY
-    - json-name: JSON key (default: camelCase of name)
+    - json-name: JSON key (default: snake_case of name)
     - type: :string :integer :number :boolean :array :object
     - required: T if required
     - default: Default value (for :boolean only)
