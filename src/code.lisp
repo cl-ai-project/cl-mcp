@@ -169,13 +169,15 @@ Signals an error when the symbol is unbound. PATH/LINE may be NIL when unknown."
 
 (defun %path-inside-project-p (pathname)
   "Return T when PATHNAME is inside *project-root*.
-Returns T for NIL or relative paths when *project-root* is not set."
+For relative paths, verifies the file exists under project root.
+Returns T for any path when *project-root* is not set."
   (and pathname
        (if *project-root*
            (if (uiop:absolute-pathname-p pathname)
                (path-inside-p (uiop:ensure-pathname pathname :want-relative nil)
                               (uiop:ensure-directory-pathname *project-root*))
-               t)
+               ;; Relative path: must exist under project root
+               (and (probe-file (merge-pathnames pathname *project-root*)) t))
            t)))
 
 (defun %line-snippet (pathname line)
