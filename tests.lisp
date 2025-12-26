@@ -15,6 +15,7 @@
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)
+  (:import-from #:cl-mcp/tests/define-tool-test)
   (:import-from #:cl-mcp/tests/integration-test)
   (:import-from #:cl-mcp/tests/parinfer-test)
   (:import-from #:cl-mcp/tests/http-test)

@@ -13,12 +13,10 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
-  (:import-from #:cl-mcp/src/state
-                #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content #:tool-error)
-  (:import-from #:cl-mcp/src/tools/registry
-                #:register-tool)
+                #:make-ht #:result #:text-content)
+  (:import-from #:cl-mcp/src/tools/define-tool
+                #:define-tool)
   (:import-from #:cl-ppcre
                 #:scan
                 #:create-scanner)
@@ -366,88 +364,38 @@ on COMMENT-CONTEXT. Returns a hash-table payload with keys \"content\", \"path\"
               (gethash "meta" payload) meta)
         payload))))
 
-(defun lisp-read-file-descriptor ()
-  "Return the MCP tool descriptor for lisp-read-file."
-  (make-ht
-   "name" "lisp-read-file"
-   "description"
-   "Read a file with Lisp-aware collapsed view to save context window tokens.
+(define-tool "lisp-read-file"
+  :description "Read a file with Lisp-aware collapsed view to save context window tokens.
 ALWAYS prefer this tool over 'fs-read-file' when reading .lisp or .asd files,
 unless you need exact raw bytes.
 Use 'name_pattern' to locate specific definitions (e.g., functions, classes)
 without reading the entire file.
 Use 'collapsed=true' (default) to see only signatures, or 'collapsed=false'
 for full source."
-   "inputSchema"
-   (let ((p (make-hash-table :test #'equal)))
-     (setf (gethash "path" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Path to read; absolute inside project or registered ASDF system,
-or relative to project root"))
-     (setf (gethash "collapsed" p)
-           (make-ht "type" "boolean"
-                    "description"
-                    "When true (default) collapse Lisp definitions to signatures"))
-     (setf (gethash "name_pattern" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Regex to match definition names to expand (CL-PPCRE syntax)"))
-     (setf (gethash "content_pattern" p)
-           (make-ht "type" "string"
-                    "description"
-                    "Regex to match form bodies or text lines to expand"))
-     (setf (gethash "offset" p)
-           (make-ht "type" "integer"
-                    "description"
-                    "0-based line offset when collapsed=false (raw mode only)"))
-     (setf (gethash "limit" p)
-           (make-ht "type" "integer"
-                    "description"
-                    "Maximum lines to return; defaults to 2000"))
-     (make-ht "type" "object"
-              "properties" p
-              "required" (vector "path")))))
-
-(defun lisp-read-file-handler (state id args)
-  "Handle the lisp-read-file MCP tool call."
-  (handler-case
-      (let* ((path (and args (gethash "path" args)))
-             (collapsed-present nil)
-             (collapsed (multiple-value-bind (val presentp)
-                           (and args (gethash "collapsed" args))
-                         (setf collapsed-present presentp)
-                         (if presentp val t)))
-             (name-pattern (and args (gethash "name_pattern" args)))
-             (content-pattern (and args (gethash "content_pattern" args)))
-             (offset (and args (gethash "offset" args)))
-             (limit (and args (gethash "limit" args))))
-        (unless (stringp path)
-          (return-from lisp-read-file-handler
-            (tool-error id "path must be a string"
-                        :protocol-version (protocol-version state))))
-        (when (and collapsed-present (not (member collapsed '(t nil))))
-          (return-from lisp-read-file-handler
-            (tool-error id "collapsed must be boolean"
-                        :protocol-version (protocol-version state))))
-        (let ((file-result (lisp-read-file path
-                                           :collapsed collapsed
-                                           :name-pattern name-pattern
-                                           :content-pattern content-pattern
-                                           :offset offset
-                                           :limit limit)))
-          (result id (make-ht
-                      "content" (text-content (gethash "content" file-result))
-                      "text" (gethash "content" file-result)
-                      "path" (gethash "path" file-result)
-                      "mode" (gethash "mode" file-result)
-                      "meta" (gethash "meta" file-result)))))
-    (error (e)
-      (rpc-error id -32603
-                 (format nil "Internal error during lisp-read-file: ~A" e)))))
-
-;;; Tool Registration
-
-(register-tool "lisp-read-file"
-               (lisp-read-file-descriptor)
-               #'lisp-read-file-handler)
+  :args ((path :type :string :required t
+               :description "Path to read; absolute inside project or registered ASDF system,
+or relative to project root")
+         (collapsed :type :boolean :default t
+                    :description "When true (default) collapse Lisp definitions to signatures")
+         (name_pattern :type :string
+                       :description "Regex to match definition names to expand (CL-PPCRE syntax)")
+         (content_pattern :type :string
+                          :description "Regex to match form bodies or text lines to expand")
+         (offset :type :integer
+                 :description "0-based line offset when collapsed=false (raw mode only)")
+         (limit :type :integer
+                :description "Maximum lines to return; defaults to 2000"))
+  :body
+  (let ((file-result
+         (lisp-read-file path
+                         :collapsed collapsed
+                         :name-pattern name_pattern
+                         :content-pattern content_pattern
+                         :offset offset
+                         :limit limit)))
+    (result id
+            (make-ht "content" (text-content (gethash "content" file-result))
+                     "text" (gethash "content" file-result)
+                     "path" (gethash "path" file-result)
+                     "mode" (gethash "mode" file-result)
+                     "meta" (gethash "meta" file-result)))))

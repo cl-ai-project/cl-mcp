@@ -49,8 +49,12 @@
                 #:run)
   (:import-from #:cl-mcp/src/clgrep
                 #:clgrep-search)
+  (:import-from #:cl-mcp/src/tools/define-tool
+                #:define-tool)
   (:export #:run
            #:version
+           ;; Tool definition macro
+           #:define-tool
            ;; File system tools
            #:fs-read-file
            #:fs-write-file

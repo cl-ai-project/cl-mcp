@@ -151,12 +151,12 @@
         (ok (search "(" (gethash "arglist" res)))))))
 
 (deftest repl-eval-printlength
-  (testing "repl-eval honors printLength for long lists"
+  (testing "repl-eval honors print_length for long lists"
     (let ((req (concatenate
                 'string
                 "{\"jsonrpc\":\"2.0\",\"id\":140,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"repl-eval\","
-                "\"arguments\":{\"code\":\"(list 1 2 3 4)\",\"printLength\":2}}}")))
+                "\"arguments\":{\"code\":\"(list 1 2 3 4)\",\"print_length\":2}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (res (gethash "result" obj))
