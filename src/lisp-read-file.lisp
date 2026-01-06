@@ -323,6 +323,7 @@
                  (if (lisp-source-path-p resolved)
                      "lisp-snippet"
                      "text-snippet")))))))
+
 (defun lisp-read-file (path &key (collapsed t) name-pattern content-pattern offset limit
                              (include-comments nil) (comment-context "preceding"))
   "Read PATH with Lisp-aware collapsed formatting.

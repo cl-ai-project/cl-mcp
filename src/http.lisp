@@ -163,6 +163,7 @@ When *session-timeout-seconds* is NIL, sessions never expire."
       (if response
           (values response :response)
           (values nil :notification)))))
+
 (defun handle-mcp-post ()
   "Handle POST requests to the MCP endpoint."
   (let ((accept (get-header :accept))

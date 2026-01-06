@@ -70,7 +70,6 @@
   "Return a one-element content vector with TEXT as a text part."
   (vector (%make-ht "type" "text" "text" text)))
 
-
 (defun %tool-error (state id message)
   "Return a tool input validation error in the appropriate format.
 For protocol version 2025-11-25 and later, returns as Tool Execution Error.
@@ -135,7 +134,6 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
   (%result id (%make-ht "tools" (get-all-tool-descriptors))))
-
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.

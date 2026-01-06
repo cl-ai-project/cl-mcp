@@ -89,6 +89,7 @@ Signals an error if outside project root or absolute."
     (unless (path-inside-p real (uiop/pathname:ensure-directory-pathname *project-root*))
       (error "Write path ~A is outside project root" path))
     real))
+
 (defun resolve-path-in-project (path &key (must-exist nil))
   "Resolve PATH to an absolute pathname within project root.
 If PATH is NIL or empty, returns *project-root*.

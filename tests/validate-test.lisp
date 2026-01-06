@@ -9,7 +9,9 @@
 (in-package #:cl-mcp/tests/validate-test)
 
 (defun %ok? (ht) (gethash "ok" ht))
+
 (defun %kind (ht) (gethash "kind" ht))
+
 (defun %pos (ht key)
   (let ((p (gethash "position" ht)))
     (and p (gethash key p))))

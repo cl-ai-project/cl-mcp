@@ -44,8 +44,6 @@
 (defun %fd-count ()
   (ignore-errors (length (directory #P"/proc/self/fd/*"))))
 
-
-
 (defun %read-file-string (pn offset limit)
   "Read file PN honoring OFFSET and LIMIT (both may be NIL)."
   (when (and offset (< offset 0))
