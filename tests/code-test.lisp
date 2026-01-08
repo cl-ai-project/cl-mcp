@@ -2,6 +2,7 @@
 
 (defpackage #:cl-mcp/tests/code-test
   (:use #:cl #:rove)
+  (:import-from #:cl-mcp/main)  ; Ensure CL-MCP package nickname exists
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition
                 #:code-describe-symbol
