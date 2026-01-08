@@ -89,7 +89,7 @@ Configure Claude Code to connect (in `~/.claude/settings.json` or project `.mcp.
 {
   "mcpServers": {
     "cl-mcp": {
-      "type": "url",
+      "type": "http",
       "url": "http://127.0.0.1:3000/mcp"
     }
   }
