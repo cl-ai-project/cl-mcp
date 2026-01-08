@@ -74,7 +74,7 @@
 (defun parse-top-level-forms (text)
   "Parse TEXT into a list of CST-NODE values with offset and line information.
 Reader evaluation is disabled for safety."
-  (let ((*readtable* (copy-readtable nil))
+  (let ((*readtable* (copy-readtable))
         (*read-eval* nil)
         (*line-table* (%build-line-table text))
         (nodes '())
