@@ -23,6 +23,7 @@ clients to drive Common Lisp development via MCP.
   - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
   - `lisp-check-parens` — detect mismatched delimiters in code slices
   - `clgrep-search` — semantic grep for Lisp files with structure awareness
+  - `clhs-lookup` — Common Lisp HyperSpec reference (symbols and sections)
 - Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -36,7 +37,7 @@ clients to drive Common Lisp development via MCP.
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (for dependencies)
-- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`.
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `clhs` (loaded on-demand by `clhs-lookup` tool).
 
 ## Quick Start
 
@@ -370,6 +371,31 @@ Output:
 - `symbol`: echoed symbol name
 - `project_only`: whether results were filtered to the project
 - `content`: newline-separated human-readable summary of references
+
+### `clhs-lookup`
+Look up a symbol or section in the Common Lisp HyperSpec (ANSI standard documentation).
+
+Input:
+- `query` (string, required): either a symbol name (e.g., `"loop"`, `"handler-case"`) or a section number (e.g., `"22.3"`, `"3.1.2"`)
+- `include_content` (boolean, default `true`): include extracted text content from local HyperSpec
+
+Output:
+- `symbol` or `section`: the query identifier (depends on query type)
+- `url`: HyperSpec URL (`file://` for local, `http://` for remote fallback)
+- `source`: `"local"` or `"remote"`
+- `content`: extracted text content (when `include_content` is true and source is local)
+
+The tool auto-detects whether the query is a section number (digits and dots only, starting with a digit) or a symbol name.
+
+Example requests:
+```json
+{"method":"tools/call","params":{"name":"clhs-lookup","arguments":{"query":"loop"}}}
+{"method":"tools/call","params":{"name":"clhs-lookup","arguments":{"query":"22.3"}}}
+```
+
+Notes:
+- If the HyperSpec is not installed locally, the tool attempts auto-installation via `(clhs:install-clhs-use-local)`
+- Section numbers map to filenames: `22.3` → `22_c.htm`, `22.3.1` → `22_ca.htm` (a=1, b=2, c=3, etc.)
 
 ## Logging
 - Structured JSON line logs to `*error-output*`.
