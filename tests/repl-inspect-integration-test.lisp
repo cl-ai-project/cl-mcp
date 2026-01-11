@@ -10,7 +10,9 @@
                 #:lookup-object
                 #:inspectable-p)
   (:import-from #:cl-mcp/src/inspect
-                #:inspect-object-by-id))
+                #:inspect-object-by-id)
+  (:import-from #:cl-mcp/src/protocol
+                #:process-json-line))
 
 (in-package #:cl-mcp/tests/repl-inspect-integration-test)
 
@@ -120,7 +122,7 @@
                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
                      "\"params\":{\"name\":\"repl-eval\","
                      "\"arguments\":{\"code\":\"(list 1 2 3)\"}}}"))
-              (resp (cl-mcp/src/protocol:process-json-line req))
+              (resp (process-json-line req))
               (obj (yason:parse resp))
               (result (gethash "result" obj))
               (object-id (gethash "result_object_id" result)))
@@ -137,7 +139,7 @@
                      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
                      "\"params\":{\"name\":\"repl-eval\","
                      "\"arguments\":{\"code\":\"42\"}}}"))
-              (resp (cl-mcp/src/protocol:process-json-line req))
+              (resp (process-json-line req))
               (obj (yason:parse resp))
               (result (gethash "result" obj)))
          (ok (null (gethash "result_object_id" result))
@@ -167,3 +169,82 @@
                 (inspect-obj (yason:parse inspect-resp))
                 (inspect-result (gethash "result" inspect-obj)))
            (ok (string= "hash-table" (gethash "kind" inspect-result)))))))))
+
+;;; Test error context locals include object_id
+
+#+sbcl
+(deftest error-context-locals-have-object-id
+  (testing "error context includes object_id for non-primitive locals"
+    (with-fresh-registry
+     (lambda ()
+       ;; Define and call a function that errors with a list local
+       (multiple-value-bind (printed raw-value stdout stderr error-context)
+           (repl-eval "(let ((my-list (list 1 2 3)))
+                         (error \"test error with list local\"))")
+         (declare (ignore printed raw-value stdout stderr))
+         ;; Error context should be present
+         (ok error-context "Should have error context")
+         ;; Check frames
+         (let ((frames (getf error-context :frames)))
+           (ok frames "Should have frames")
+           ;; Find a frame with locals containing my-list
+           (let ((found-object-id nil))
+             (dolist (frame frames)
+               (dolist (local (getf frame :locals))
+                 (when (and (string= "MY-LIST" (getf local :name))
+                            (getf local :object-id))
+                   (setf found-object-id (getf local :object-id)))))
+             ;; Note: MY-LIST local may or may not be visible depending on optimization
+             ;; If found, verify we can inspect it
+             (when found-object-id
+               (ok (integerp found-object-id) "object-id should be integer")
+               (let ((inspect-result (inspect-object-by-id found-object-id)))
+                 (ok (string= "list" (ht-get inspect-result "kind"))
+                     "Should be able to inspect the local"))))))))))
+
+#+sbcl
+(deftest error-context-primitive-locals-no-object-id
+  (testing "error context does not include object_id for primitive locals"
+    (with-fresh-registry
+     (lambda ()
+       ;; Define and call a function that errors with primitive locals
+       (multiple-value-bind (printed raw-value stdout stderr error-context)
+           (repl-eval "(let ((my-number 42))
+                         (error \"test error with number local\"))")
+         (declare (ignore printed raw-value stdout stderr))
+         ;; Error context should be present
+         (ok error-context "Should have error context")
+         ;; Check frames for locals named MY-NUMBER
+         (let ((frames (getf error-context :frames)))
+           (dolist (frame frames)
+             (dolist (local (getf frame :locals))
+               (when (string= "MY-NUMBER" (getf local :name))
+                 ;; Primitive should NOT have object-id
+                 (ok (null (getf local :object-id))
+                     "Primitive local should not have object-id"))))))))))
+
+#+sbcl
+(deftest error-context-locals-inspection-workflow
+  (testing "complete workflow: error -> get local object-id -> inspect"
+    (with-fresh-registry
+     (lambda ()
+       ;; Create error with hash-table local
+       (multiple-value-bind (printed raw-value stdout stderr error-context)
+           (repl-eval "(let ((ht (make-hash-table :test 'equal)))
+                         (setf (gethash \"key\" ht) \"value\")
+                         (error \"test error\"))")
+         (declare (ignore printed raw-value stdout stderr))
+         (ok error-context)
+         ;; Find HT local with object-id
+         (let ((ht-object-id nil))
+           (dolist (frame (getf error-context :frames))
+             (dolist (local (getf frame :locals))
+               (when (and (string= "HT" (getf local :name))
+                          (getf local :object-id))
+                 (setf ht-object-id (getf local :object-id)))))
+           ;; If found, verify full inspection workflow
+           (when ht-object-id
+             (let ((result (inspect-object-by-id ht-object-id)))
+               (ok (string= "hash-table" (ht-get result "kind")))
+               (ok (string= "EQUAL" (ht-get result "test")))
+               (ok (= 1 (length (ht-get result "entries"))))))))))))

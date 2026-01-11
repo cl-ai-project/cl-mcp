@@ -4,6 +4,9 @@
 
 (defpackage #:cl-mcp/src/frame-inspector
   (:use #:cl)
+  (:import-from #:cl-mcp/src/object-registry
+                #:inspectable-p
+                #:register-object)
   (:export #:capture-error-context))
 
 (in-package #:cl-mcp/src/frame-inspector)
@@ -29,7 +32,8 @@
 
 #+sbcl
 (defun %frame-locals (frame print-level print-length)
-  "Extract local variable names and values from FRAME."
+  "Extract local variable names and values from FRAME.
+Non-primitive values are registered in the object registry for drill-down inspection."
   (let ((debug-fun (sb-di:frame-debug-fun frame))
         (locals '()))
     (handler-case
@@ -38,9 +42,15 @@
                     :valid)
             (handler-case
                 (let* ((sym (sb-di:debug-var-symbol var))
-                       (val (sb-di:debug-var-value var frame)))
-                  (push (list :name (symbol-name sym)
-                              :value (%safe-format-value val print-level print-length))
+                       (val (sb-di:debug-var-value var frame))
+                       (object-id (when (inspectable-p val)
+                                    (register-object val))))
+                  (push (if object-id
+                            (list :name (symbol-name sym)
+                                  :value (%safe-format-value val print-level print-length)
+                                  :object-id object-id)
+                            (list :name (symbol-name sym)
+                                  :value (%safe-format-value val print-level print-length)))
                         locals))
               (error () nil))))
       (error () nil))
