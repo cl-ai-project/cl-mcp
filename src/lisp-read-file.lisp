@@ -85,24 +85,36 @@
       (write form :stream out :pretty t :right-margin 80))))
 
 (defun %collapse-def-form (form)
+  "Collapse a definition form to a signature line.
+For defmethod, includes qualifiers like :before, :after, :around."
   (let* ((*print-case* :downcase)
          (head (car form))
          (name (second form))
-         (args (case head
-                 ((defmethod)
-                  (or (find-if #'listp (cddr form))
-                      (third form)))
-                 (otherwise (third form))))
-         (args-display (if args
-                           (with-output-to-string (out)
-                             (write args :stream out :pretty nil :case :downcase))
-                           "()"))
-         (doc (%truncate-doc (find-if #'stringp (cddr form)))))
-    (format nil "(~(~A~) ~(~A~) ~A ...~@[ ;; ~A~])"
-            head
-            (if name name "")
-            args-display
-            doc)))
+         (qualifiers
+          (when (eq head 'defmethod)
+            (loop for part in (cddr form)
+                  while (and part (symbolp part))
+                  collect part)))
+         (args
+          (case head
+            ((defmethod) (or (find-if #'listp (cddr form)) (third form)))
+            (otherwise (third form))))
+         (args-display
+          (if args
+              (with-output-to-string (out)
+                (write args :stream out :pretty nil :case :downcase))
+              "()"))
+         (doc (%truncate-doc (find-if #'stringp (cddr form))))
+         ;; Use ~S to preserve colon for keyword qualifiers
+         (qual-str (when qualifiers (format nil "~{~(~S~)~^ ~}" qualifiers))))
+    (if qual-str
+        (format nil "(~(~A~) ~(~A~) ~A ~A ...~@[ ;; ~A~])" head name qual-str
+                args-display doc)
+        (format nil "(~(~A~) ~(~A~) ~A ...~@[ ;; ~A~])" head
+                (if name
+                    name
+                    "")
+                args-display doc))))
 
 (defun %collapse-generic (form)
   (cond

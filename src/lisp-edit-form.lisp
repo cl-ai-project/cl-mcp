@@ -10,6 +10,8 @@
                           #:cst-node-end)
   (:import-from #:alexandria
                 #:string-trim)
+  (:import-from #:cl-ppcre
+                #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms)
   (:import-from #:cl-mcp/src/project-root
@@ -39,7 +41,12 @@
   (string-downcase (princ-to-string thing)))
 
 (defun %defmethod-candidates (form)
-  "Return candidate signature strings for a DEFMETHOD FORM."
+  "Return candidate signature strings for a DEFMETHOD FORM.
+Candidates are generated in order of specificity:
+1. name only: \"resize\"
+2. name + qualifier: \"resize :after\"
+3. name + lambda-list: \"resize ((s shape) factor)\"
+4. name + qualifier + lambda-list: \"resize :after ((s shape) factor)\""
   (destructuring-bind (_ name &rest rest) form
     (declare (ignore _))
     (let ((qualifiers '())
@@ -54,11 +61,14 @@
                              (%normalize-string
                               (with-output-to-string (s)
                                 (prin1 lambda-list s)))))
+            ;; Use ~S to preserve colon prefix for keywords like :after
             (qual-str (and qualifiers
                            (%normalize-string
-                            (format nil "~{~A~^ ~}" (nreverse qualifiers))))))
+                            (format nil "~{~S~^ ~}" (nreverse qualifiers))))))
         (remove nil
                 (list name-str
+                      ;; name + qualifier (without lambda-list)
+                      (and qual-str (format nil "~A ~A" name-str qual-str))
                       (and lambda-str (format nil "~A ~A" name-str lambda-str))
                       (and (and qual-str lambda-str)
                            (format nil "~A ~A ~A" name-str qual-str lambda-str))))))))
@@ -153,16 +163,47 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
                           err repaired-err))))))))))
 
 (defun %find-target (nodes form-type form-name)
-  (let ((target (string-downcase form-name)))
-    (loop for node in nodes
-          when (and (typep node 'cst-node)
-                    (eq (cst-node-kind node) :expr))
-            do (let ((value (cst-node-value node)))
-                 (when (and (consp value)
-                            (string= (string-downcase (symbol-name (car value))) form-type)
-                            (some (lambda (cand) (string= cand target))
-                                  (%definition-candidates value form-type)))
-                   (return node))))))
+  "Find a target node matching FORM-TYPE and FORM-NAME.
+If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
+If multiple matches exist without an index, signals an error with candidate info."
+  (multiple-value-bind (base-name index)
+      (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
+        (if match
+            (values (aref match 0) (parse-integer (aref match 1)))
+            (values form-name nil)))
+    (let ((target (string-downcase base-name))
+          (matches nil))
+      (loop for node in nodes
+            when (and (typep node 'cst-node)
+                      (eq (cst-node-kind node) :expr))
+              do (let ((value (cst-node-value node)))
+                   (when (and (consp value)
+                              (string= (string-downcase (symbol-name (car value))) form-type)
+                              (some (lambda (cand) (string= cand target))
+                                    (%definition-candidates value form-type)))
+                     (push (cons node value) matches))))
+      (setf matches (nreverse matches))
+      (cond
+        ((null matches)
+         nil)
+        ((and index (< index (length matches)))
+         (car (nth index matches)))
+        (index
+         (error "Index [~D] out of range, only ~D match~:P found for ~A"
+                index (length matches) form-name))
+        ((= (length matches) 1)
+         (car (first matches)))
+        (t
+         ;; Multiple matches without index - provide helpful error
+         (let ((descriptions
+                 (loop for (node . form) in matches
+                       for i from 0
+                       collect (format nil "[~D] ~A"
+                                       i
+                                       (let ((candidates (%definition-candidates form form-type)))
+                                         (or (car (last candidates)) (first candidates)))))))
+           (error "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
+                  form-type form-name descriptions)))))))
 
 (defun %apply-operation (text node operation content)
   (let ((start (cst-node-start node))

@@ -137,3 +137,17 @@
                 (ok (search "(defun greet" content))))))
       (error ()
         (skip "cl-interpol not available")))))
+
+(deftest lisp-read-file-collapsed-shows-method-qualifiers
+  (testing "collapsed view includes method qualifiers like :before, :after, :around"
+    (with-temp-lisp-file "tests/tmp/lisp-read-qualifiers.lisp"
+        (format nil "(defmethod resize ((s shape) factor)~%  (* (size s) factor))~%~%(defmethod resize :before ((s shape) factor)~%  (validate s))~%~%(defmethod resize :after ((s shape) factor)~%  (notify s))~%~%(defmethod resize :around ((s shape) factor)~%  (call-next-method))~%")
+      (lambda (path)
+        (let* ((result (lisp-read-file path :collapsed t))
+               (content (gethash "content" result)))
+          ;; Primary method should show without qualifier
+          (ok (search "(defmethod resize ((s shape) factor) ...)" content))
+          ;; Qualified methods should show their qualifiers
+          (ok (search "(defmethod resize :before ((s shape) factor) ...)" content))
+          (ok (search "(defmethod resize :after ((s shape) factor) ...)" content))
+          (ok (search "(defmethod resize :around ((s shape) factor) ...)" content)))))))

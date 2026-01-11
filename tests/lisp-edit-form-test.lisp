@@ -329,3 +329,63 @@ then clean up."
                 (ok (null (search "#?\"Hello, ${name}!\"" updated)))))))
       (error ()
         (skip "cl-interpol not available")))))
+
+(deftest lisp-edit-form-defmethod-qualifier-only
+  (testing "defmethod matches by name + qualifier without lambda-list"
+    (with-temp-file "tests/tmp/edit-form-qualifier.lisp"
+        (format nil "(defmethod resize ((s shape) factor)~%  (* (slot-value s 'size) factor))~%~%(defmethod resize :after ((s shape) factor)~%  (format t \"resized\"))~%")
+      (lambda (path)
+        ;; Match by "name :qualifier" pattern (Fix #1)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "resize :after"
+                        :operation "replace"
+                        :content (format nil "(defmethod resize :after ((s shape) factor)~%  (format t \"resize complete\"))"))
+        (let ((updated (fs-read-file path)))
+          ;; Verify the :after method was updated
+          (ok (search "resize complete" updated))
+          (ok (null (search "resized" updated)))
+          ;; Verify the primary method is untouched
+          (ok (search "(slot-value s 'size)" updated)))))))
+
+(deftest lisp-edit-form-multiple-matches-error
+  (testing "multiple matches without index signals descriptive error"
+    (with-temp-file "tests/tmp/edit-form-multi-match.lisp"
+        (format nil "(defmethod process ((x string))~%  (string-upcase x))~%~%(defmethod process ((x integer))~%  (* x 2))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path)))
+          ;; Matching just "process" should error since there are 2 methods
+          (ok (handler-case
+                  (progn
+                    (lisp-edit-form :file-path path
+                                    :form-type "defmethod"
+                                    :form-name "process"
+                                    :operation "replace"
+                                    :content "(defmethod process ((x string)) :replaced)")
+                    nil)
+                (error (e)
+                  ;; Error message should mention multiple matches and indices
+                  (let ((msg (princ-to-string e)))
+                    (and (search "Multiple matches" msg)
+                         (search "[0]" msg)
+                         (search "[1]" msg))))))
+          ;; File should be unchanged
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-edit-form-index-syntax-selects-match
+  (testing "index syntax [N] selects specific match from multiple"
+    (with-temp-file "tests/tmp/edit-form-index-select.lisp"
+        (format nil "(defmethod process ((x string))~%  (string-upcase x))~%~%(defmethod process ((x integer))~%  (* x 2))~%")
+      (lambda (path)
+        ;; Use [1] to select the second match (integer specializer)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "process[1]"
+                        :operation "replace"
+                        :content "(defmethod process ((x integer))~%  (* x 10))")
+        (let ((updated (fs-read-file path)))
+          ;; Second method (integer) should be updated
+          (ok (search "(* x 10)" updated))
+          (ok (null (search "(* x 2)" updated)))
+          ;; First method (string) should be untouched
+          (ok (search "(string-upcase x)" updated)))))))
