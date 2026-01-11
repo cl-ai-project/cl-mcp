@@ -100,8 +100,9 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
           else
             append (%rove-extract-assertions child))))
 
-(defun %rove-extract-test-failures (stats)
-  "Extract all failure details from Rove stats."
+(defun %rove-extract-test-failures (stats &key single-test-p)
+  "Extract all failure details from Rove stats.
+When SINGLE-TEST-P is true, stats contain test results directly (no suite wrapper)."
   (let* ((pkg (find-package :rove/core/result))
          (stats-pkg (find-package :rove/core/stats))
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" pkg)))
@@ -109,19 +110,86 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
          (stats-failed-fn (fdefinition (find-symbol "STATS-FAILED-TESTS" stats-pkg)))
          (failed-tests (funcall stats-failed-fn stats))
          (results nil))
-    ;; Navigate the hierarchy: suite -> deftest -> testing -> assertion
-    (loop for suite-fail across failed-tests do
-      (loop for test-fail in (funcall test-failed-fn suite-fail) do
-        (loop for testing-fail in (funcall test-failed-fn test-fail) do
-          (let* ((test-name (funcall test-name-fn test-fail))
-                 (testing-desc (funcall test-name-fn testing-fail))
-                 (assertions (%rove-extract-assertions testing-fail)))
-            (dolist (assertion assertions)
-              (setf (gethash "test_name" assertion)
-                    (format nil "~A / ~A" test-name testing-desc))
-              (push assertion results))))))
+    (if single-test-p
+        ;; Single test mode: failed-tests contains FAILED-TEST directly (deftest level)
+        (loop for test-fail across failed-tests
+              do (let ((test-name (funcall test-name-fn test-fail)))
+                   (loop for testing-fail in (funcall test-failed-fn test-fail)
+                         do (let* ((testing-desc (funcall test-name-fn testing-fail))
+                                   (assertions (%rove-extract-assertions testing-fail)))
+                              (dolist (assertion assertions)
+                                (setf (gethash "test_name" assertion)
+                                      (format nil "~A / ~A" test-name testing-desc))
+                                (push assertion results))))))
+        ;; Suite mode: failed-tests contains FAILED-SUITE → FAILED-TEST → assertions
+        (loop for suite-fail across failed-tests
+              do (loop for test-fail in (funcall test-failed-fn suite-fail)
+                       do (loop for testing-fail in (funcall test-failed-fn test-fail)
+                                do (let* ((test-name (funcall test-name-fn test-fail))
+                                          (testing-desc (funcall test-name-fn testing-fail))
+                                          (assertions (%rove-extract-assertions testing-fail)))
+                                     (dolist (assertion assertions)
+                                       (setf (gethash "test_name" assertion)
+                                             (format nil "~A / ~A" test-name testing-desc))
+                                       (push assertion results)))))))
     (nreverse results)))
 
+(defun run-rove-single-test (test-name)
+  "Run a single Rove test by name and return structured results.
+TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
+  (log-event :info "test-runner" "framework" "rove" "test" (princ-to-string test-name))
+  (let* ((suite-pkg (find-package :rove/core/suite))
+         (stats-pkg (find-package :rove/core/stats))
+         (reporter-pkg (find-package :rove/reporter))
+         (get-test-fn (fdefinition (find-symbol "GET-TEST" suite-pkg)))
+         (run-test-fns-fn (fdefinition (find-symbol "RUN-TEST-FUNCTIONS" suite-pkg)))
+         (stats-passed-fn (fdefinition (find-symbol "STATS-PASSED-TESTS" stats-pkg)))
+         (stats-failed-fn (fdefinition (find-symbol "STATS-FAILED-TESTS" stats-pkg)))
+         (stats-pending-fn (fdefinition (find-symbol "STATS-PENDING-TESTS" stats-pkg)))
+         ;; Dynamic symbol lookup to avoid compile-time package references
+         (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
+         (stats-sym (find-symbol "*STATS*" stats-pkg))
+         (with-reporter-sym (find-symbol "WITH-REPORTER" reporter-pkg))
+         ;; Parse test name string to symbol
+         (test-sym (if (symbolp test-name)
+                       test-name
+                       (let* ((name (string-upcase (string test-name)))
+                              (colon-pos (search "::" name)))
+                         (if colon-pos
+                             (let ((pkg-name (subseq name 0 colon-pos))
+                                   (sym-name (subseq name (+ colon-pos 2))))
+                               (intern sym-name (find-package pkg-name)))
+                             (error "Test name must be fully qualified (pkg::name): ~A" test-name)))))
+         (test-fn (funcall get-test-fn test-sym))
+         result-stats
+         (start-time (get-internal-real-time)))
+    (unless test-fn
+      (error "No test found for ~A" test-sym))
+    ;; Run test with structured result capture
+    (setf result-stats
+          (funcall
+           (compile nil
+                    `(lambda (run-fns-fn test-fn)
+                       (let ((,report-stream-sym (make-broadcast-stream)))
+                         (,with-reporter-sym :spec
+                           (funcall run-fns-fn (list test-fn))
+                           ,stats-sym))))
+           run-test-fns-fn test-fn))
+    (let* ((end-time (get-internal-real-time))
+           (duration-ms (round (* 1000 (/ (- end-time start-time)
+                                          internal-time-units-per-second))))
+           (passed (length (funcall stats-passed-fn result-stats)))
+           (failed (length (funcall stats-failed-fn result-stats)))
+           (pending (length (funcall stats-pending-fn result-stats)))
+           (failure-details (when (plusp failed)
+                              (%rove-extract-test-failures result-stats
+                                                           :single-test-p t))))
+      (make-test-result :passed passed
+                        :failed failed
+                        :pending pending
+                        :failed-tests failure-details
+                        :framework :rove
+                        :duration duration-ms))))
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results."
   (log-event :info "test-runner" "framework" "rove" "system" system-name)
@@ -206,29 +274,34 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
 ;;; Main Entry Point
 ;;; ---------------------------------------------------------------------------
 
-(defun run-tests (system-name &key framework)
+(defun run-tests (system-name &key framework test)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
+If TEST is provided, run only that specific test (fully qualified symbol name).
 Returns a hash table with structured results."
-  (let ((fw (or (and framework
-                     (intern (string-upcase framework) :keyword))
+  (let ((fw (or (and framework (intern (string-upcase framework) :keyword))
                 (detect-test-framework system-name))))
-    (log-event :info "test-runner" "action" "run-tests"
-               "system" system-name "framework" (string-downcase fw))
+    (log-event :info "test-runner" "action" "run-tests" "system" system-name
+               "framework" (string-downcase fw)
+               "test" (or test "all"))
     (case fw
       (:rove
        (if (find-package :rove)
-           (run-rove-tests system-name)
+           (if test
+               (run-rove-single-test test)
+               (run-rove-tests system-name))
            (progn
-             (log-event :warn "test-runner" "message" "Rove not loaded, using ASDF fallback")
+             (log-event :warn "test-runner" "message"
+                        "Rove not loaded, using ASDF fallback")
              (run-asdf-fallback system-name))))
       (:fiveam
-       (log-event :warn "test-runner" "message" "FiveAM support not yet implemented")
+       (log-event :warn "test-runner" "message"
+                  "FiveAM support not yet implemented")
        (run-asdf-fallback system-name))
       (:prove
-       (log-event :warn "test-runner" "message" "Prove support not yet implemented")
+       (log-event :warn "test-runner" "message"
+                  "Prove support not yet implemented")
        (run-asdf-fallback system-name))
-      (t
-       (run-asdf-fallback system-name)))))
+      (t (run-asdf-fallback system-name)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tool Definition
@@ -247,13 +320,18 @@ Returns:
 - failure details (test name, form, values, reason)
 - execution duration
 
-Example: Run tests for cl-mcp
-  system='cl-mcp/tests/clhs-test'"
+Examples:
+  Run all tests: system='cl-mcp/tests/clhs-test'
+  Run single test: system='cl-mcp/tests/clhs-test' test='cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table'"
   :args ((system :type :string :required t
                  :description "System name to test (e.g., 'my-project/tests')")
          (framework :type :string :required nil
-                    :description "Force framework: 'rove', 'fiveam', or 'auto' (default: auto-detect)"))
+                    :description "Force framework: 'rove', 'fiveam', or 'auto' (default: auto-detect)")
+         (test :type :string :required nil
+               :description "Run only this specific test (fully qualified: 'package::test-name')"))
   :body
   (let ((fw (when (and (boundp 'framework) framework)
-              framework)))
-    (result id (run-tests system :framework fw))))
+              framework))
+        (tst (when (and (boundp 'test) test)
+               test)))
+    (result id (run-tests system :framework fw :test tst))))
