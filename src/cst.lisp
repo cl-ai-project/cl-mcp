@@ -46,6 +46,55 @@
 (defun %pos->line (pos)
   (aref *line-table* (min pos (1- (length *line-table*)))))
 
+(defun %in-readtable-form-p (form)
+  "Return the readtable designator if FORM is an IN-READTABLE form, NIL otherwise."
+  (and (consp form)
+       (let ((head (car form)))
+         (and (symbolp head)
+              (string= (symbol-name head) "IN-READTABLE")
+              (consp (cdr form))
+              (second form)))))
+
+(defun %try-switch-readtable (designator)
+  "Try to get the named readtable for DESIGNATOR.
+Returns the readtable if found, NIL if named-readtables is not loaded
+or the readtable is not found."
+  (let ((pkg (or (find-package :named-readtables)
+                 (find-package :editor-hints.named-readtables))))
+    (when pkg
+      (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
+        (when (and find-fn (fboundp find-fn))
+          (funcall find-fn designator))))))
+
+(defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
+  "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
+Returns the complete list of nodes (including previously collected NODES)."
+  (let ((*readtable* custom-readtable)
+        (*read-eval* nil))
+    (loop
+      (let ((start-pos (file-position stream)))
+        ;; Skip whitespace
+        (loop for ch = (peek-char nil stream nil :eof)
+              while (and (characterp ch)
+                         (member ch '(#\Space #\Tab #\Newline #\Return)))
+              do (read-char stream))
+        (setf start-pos (file-position stream))
+        (let ((form (handler-case (read stream nil :eof)
+                      (error (e)
+                        ;; On read error, return what we have so far
+                        (declare (ignore e))
+                        (return (nreverse nodes))))))
+          (when (eq form :eof)
+            (return (nreverse nodes)))
+          (let* ((end-pos (file-position stream))
+                 (node (make-cst-node :kind :expr
+                                      :value form
+                                      :children nil
+                                      :start start-pos
+                                      :end end-pos
+                                      :start-line (%pos->line start-pos)
+                                      :end-line (%pos->line end-pos))))
+            (push node nodes)))))))
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defmethod make-expression-result ((client parse-result-client)
                                      result children source)
@@ -71,20 +120,39 @@
                      :start-line (%pos->line start)
                      :end-line (%pos->line end)))))
 
-(defun parse-top-level-forms (text)
-  "Parse TEXT into a list of CST-NODE values with offset and line information.
-Reader evaluation is disabled for safety."
-  (let ((*readtable* (copy-readtable))
-        (*read-eval* nil)
-        (*line-table* (%build-line-table text))
-        (nodes '())
-        (client (make-instance 'parse-result-client)))
-    (with-input-from-string (stream text)
-      (loop
-        (multiple-value-bind (result orphan-results)
-            (eclector.parse-result:read client stream nil :eof)
-          (dolist (orphan orphan-results)
-            (push orphan nodes))
-          (when (eq result :eof)
-            (return (nreverse nodes)))
-          (push result nodes))))))
+(defun parse-top-level-forms (text &key readtable)
+  "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable."
+  (let ((*line-table* (%build-line-table text)))
+    (if readtable
+        (let ((custom-rt (%try-switch-readtable readtable)))
+          (if custom-rt
+              (with-input-from-string (stream text)
+                (%read-remaining-with-cl-reader stream nil custom-rt))
+              (error "Readtable ~S not found." readtable)))
+        (let ((*readtable* (copy-readtable))
+              (*read-eval* nil)
+              (nodes '())
+              (client (make-instance 'parse-result-client)))
+          (with-input-from-string (stream text)
+            (handler-case
+                (loop
+                  (multiple-value-bind (result orphan-results)
+                      (eclector.parse-result:read client stream nil :eof)
+                    (dolist (orphan orphan-results)
+                      (push orphan nodes))
+                    (when (eq result :eof)
+                      (return (nreverse nodes)))
+                    (push result nodes)
+                    (when (and (typep result 'cst-node)
+                               (eq (cst-node-kind result) :expr))
+                      (let ((designator (%in-readtable-form-p (cst-node-value result))))
+                        (when designator
+                          (let ((custom-rt (%try-switch-readtable designator)))
+                            (when custom-rt
+                              (return (%read-remaining-with-cl-reader
+                                       stream nodes custom-rt)))))))))
+              (reader-error (e)
+                (error "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
+                        specify the 'readtable' parameter with the named-readtable designator ~
+                        (e.g., readtable: \"interpol-syntax\")."
+                       e))))))))

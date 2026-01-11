@@ -23,3 +23,16 @@
       (ok (= 3 (cst-node-start-line expr)))
       (ok (<= (cst-node-end-line expr) 4))
       (ok (string= "sample" (string-downcase (second (cst-node-value expr))))))))
+
+(deftest parse-top-level-forms-error-suggests-readtable
+  (testing "reader error message suggests using readtable parameter"
+    (let ((error-message
+            (handler-case
+                (progn
+                  (parse-top-level-forms "(defun foo () #?\"test\")")
+                  nil)
+              (error (e)
+                (format nil "~A" e)))))
+      (ok error-message)
+      (ok (search "readtable" error-message))
+      (ok (search "interpol-syntax" error-message)))))

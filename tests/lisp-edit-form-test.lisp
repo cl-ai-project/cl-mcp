@@ -288,3 +288,44 @@ then clean up."
                             do (incf forms)))
                     (= forms 2))
                 (error () nil))))))))
+
+(deftest lisp-edit-form-with-custom-readtable
+  (testing "readtable parameter enables editing files with custom reader macros"
+    (handler-case
+        (progn
+          (ql:quickload :cl-interpol :silent t)
+          (with-temp-file "tests/tmp/edit-form-interpol.lisp"
+              (format nil "(in-package :cl-user)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
+            (lambda (path)
+              ;; Edit a file containing cl-interpol #? reader macro
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "greet"
+                              :operation "replace"
+                              :content (format nil "(defun greet (name)~%  #?\"Hi, ${name}!\")")
+                              :readtable :interpol-syntax)
+              (let ((updated (fs-read-file path)))
+                (ok (search "#?\"Hi, ${name}!\"" updated))
+                (ok (null (search "#?\"Hello, ${name}!\"" updated)))))))
+      (error ()
+        (skip "cl-interpol not available")))))
+
+(deftest lisp-edit-form-auto-detects-in-readtable
+  (testing "in-readtable form triggers automatic readtable switching"
+    (handler-case
+        (progn
+          (ql:quickload :cl-interpol :silent t)
+          (with-temp-file "tests/tmp/edit-form-in-readtable.lisp"
+              (format nil "(in-package :cl-user)~%(named-readtables:in-readtable :interpol-syntax)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
+            (lambda (path)
+              ;; Without explicit readtable parameter, in-readtable should be auto-detected
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "greet"
+                              :operation "replace"
+                              :content (format nil "(defun greet (name)~%  #?\"Hi, ${name}!\")"))
+              (let ((updated (fs-read-file path)))
+                (ok (search "#?\"Hi, ${name}!\"" updated))
+                (ok (null (search "#?\"Hello, ${name}!\"" updated)))))))
+      (error ()
+        (skip "cl-interpol not available")))))

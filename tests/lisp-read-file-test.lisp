@@ -105,3 +105,35 @@
           (ok colon)
           (ok (every #'digit-char-p (subseq line 0 colon)))
           (ok (search "(defun target" line)))))))
+
+(deftest lisp-read-file-with-custom-readtable
+  (testing "readtable parameter enables reading files with custom reader macros"
+    (handler-case
+        (progn
+          (ql:quickload :cl-interpol :silent t)
+          (with-temp-lisp-file "tests/tmp/lisp-read-interpol.lisp"
+              (format nil "(in-package :cl-user)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
+            (lambda (path)
+              ;; Without readtable parameter, this would fail
+              (let* ((result (lisp-read-file path :readtable :interpol-syntax))
+                     (content (gethash "content" result)))
+                (ok (stringp content))
+                (ok (search "(defun greet" content))))))
+      (error ()
+        (skip "cl-interpol not available")))))
+
+(deftest lisp-read-file-auto-detects-in-readtable
+  (testing "in-readtable form triggers automatic readtable switching"
+    (handler-case
+        (progn
+          (ql:quickload :cl-interpol :silent t)
+          (with-temp-lisp-file "tests/tmp/lisp-read-in-readtable.lisp"
+              (format nil "(in-package :cl-user)~%(named-readtables:in-readtable :interpol-syntax)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
+            (lambda (path)
+              ;; Without explicit readtable parameter, in-readtable should be auto-detected
+              (let* ((result (lisp-read-file path))
+                     (content (gethash "content" result)))
+                (ok (stringp content))
+                (ok (search "(defun greet" content))))))
+      (error ()
+        (skip "cl-interpol not available")))))

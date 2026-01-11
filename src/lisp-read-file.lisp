@@ -188,10 +188,11 @@
                    (incf comment))))))
     (values source comment blank)))
 
-(defun %format-lisp-file (text name-scanner content-scanner include-comments comment-context)
+(defun %format-lisp-file (text name-scanner content-scanner include-comments comment-context
+                          &key readtable)
   (multiple-value-bind (source-lines-count comment-lines blank-lines)
       (%line-stats text)
-    (let* ((nodes (parse-top-level-forms text))
+    (let* ((nodes (parse-top-level-forms text :readtable readtable))
            (line-width (%line-number-width source-lines-count))
            (expanded 0)
            (total-forms 0)
@@ -288,16 +289,13 @@
         (values (format nil "~{~A~%~}" (nreverse selected)) truncated)))))
 
 (defun %lisp-read-file-content (resolved collapsed name-scanner content-scanner offset line-limit
-                                 include-comments comment-context)
+                                 include-comments comment-context &key readtable)
   (cond
     ((and collapsed (lisp-source-path-p resolved))
      (let ((text (fs-read-file resolved)))
        (multiple-value-bind (display meta-table)
-           (%format-lisp-file text
-                              name-scanner
-                              content-scanner
-                              include-comments
-                              comment-context)
+           (%format-lisp-file text name-scanner content-scanner include-comments comment-context
+                              :readtable readtable)
          (values display meta-table "lisp-collapsed"))))
     ((not collapsed)
      (multiple-value-bind (text truncated total)
@@ -318,19 +316,23 @@
        (let ((meta (make-hash-table :test #'equal)))
          (setf (gethash "truncated" meta) truncated
                (gethash "total_lines" meta) total)
-         (values text
-                 meta
+         (values text meta
                  (if (lisp-source-path-p resolved)
                      "lisp-snippet"
                      "text-snippet")))))))
 
 (defun lisp-read-file (path &key (collapsed t) name-pattern content-pattern offset limit
-                             (include-comments nil) (comment-context "preceding"))
+                            (include-comments nil) (comment-context "preceding") readtable)
   "Read PATH with Lisp-aware collapsed formatting.
 When COLLAPSED is true, NAME-PATTERN or CONTENT-PATTERN expand matching forms,
 and INCLUDE-COMMENTS controls whether preceding or all comments are kept based
-on COMMENT-CONTEXT. Returns a hash-table payload with keys \"content\", \"path\",
-\"mode\", and \"meta\"."
+on COMMENT-CONTEXT.
+
+READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
+to use for parsing the file. This is useful for files that use custom reader macros
+without an explicit IN-READTABLE form.
+
+Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"meta\"."
   (unless (stringp path)
     (error "path must be a string"))
   (unless (member collapsed '(t nil))
@@ -350,14 +352,9 @@ on COMMENT-CONTEXT. Returns a hash-table payload with keys \"content\", \"path\"
         (name-scanner (%compile-scanner name-pattern))
         (content-scanner (%compile-scanner content-pattern)))
     (multiple-value-bind (content meta mode)
-        (%lisp-read-file-content resolved
-                                 collapsed
-                                 name-scanner
-                                 content-scanner
-                                 offset
-                                 line-limit
-                                 include-comments
-                                 comment-context)
+        (%lisp-read-file-content resolved collapsed name-scanner content-scanner
+                                 offset line-limit include-comments comment-context
+                                 :readtable readtable)
       (let ((payload (make-hash-table :test #'equal)))
         (setf (gethash "content" payload) content
               (gethash "path" payload) (%normalize-path resolved)
@@ -385,7 +382,9 @@ or relative to project root")
          (offset :type :integer
                  :description "0-based line offset when collapsed=false (raw mode only)")
          (limit :type :integer
-                :description "Maximum lines to return; defaults to 2000"))
+                :description "Maximum lines to return; defaults to 2000")
+         (readtable :type :string
+                    :description "Named-readtable designator (e.g., 'interpol-syntax') for files using custom reader macros without in-readtable. NOTE: When specified, the standard CL reader is used instead of Eclector, which means comments are NOT preserved in the parsed output."))
   :body
   (let ((file-result
          (lisp-read-file path
@@ -393,7 +392,8 @@ or relative to project root")
                          :name-pattern name_pattern
                          :content-pattern content_pattern
                          :offset offset
-                         :limit limit)))
+                         :limit limit
+                         :readtable (when readtable (intern (string-upcase readtable) :keyword)))))
     (result id
             (make-ht "content" (text-content (gethash "content" file-result))
                      "text" (gethash "content" file-result)

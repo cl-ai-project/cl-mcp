@@ -104,11 +104,16 @@ necessary to leave one blank line between top-level forms."
            (rel-namestring (native-namestring relative)))
       (values resolved rel-namestring))))
 
-(defun %validate-and-repair-content (content)
+(defun %validate-and-repair-content (content &optional readtable-designator)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content."
-  (let ((*read-eval* nil)
-        (*readtable* (copy-readtable nil)))
+using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
+When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
+  (let* ((*read-eval* nil)
+         (custom-rt (when readtable-designator
+                      (named-readtables:find-readtable readtable-designator)))
+         (*readtable* (if custom-rt
+                          custom-rt
+                          (copy-readtable nil))))
     (flet ((try-parse (text)
              (handler-case
                  (multiple-value-bind (form pos)
@@ -181,29 +186,32 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
 
-(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run)
+(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run readtable)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
 CONTENT are required. If CONTENT has missing closing parentheses, they will
 be automatically added using parinfer. When DRY-RUN is true, no changes are
-written; instead, a preview hash-table is returned."
+written; instead, a preview hash-table is returned.
+
+READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
+to use for parsing both the file and the new content."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name)
                (stringp operation) (stringp content))
     (error "All parameters (file_path, form_type, form_name, operation, content) must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
   (let* ((op-normalized (string-downcase operation))
-         (op-key (cond
-                   ((string= op-normalized "replace") :replace)
-                   ((string= op-normalized "insert_before") :insert-before)
-                   ((string= op-normalized "insert_after") :insert-after)
-                   (t (error "Unsupported operation: ~A" operation))))
+         (op-key (cond ((string= op-normalized "replace") :replace)
+                       ((string= op-normalized "insert_before") :insert-before)
+                       ((string= op-normalized "insert_after") :insert-after)
+                       (t (error "Unsupported operation: ~A" operation))))
          (form-type-str (string-downcase form-type))
-         (validated-content (%validate-and-repair-content content)))
-    (multiple-value-bind (abs rel) (%normalize-paths file-path)
+         (validated-content (%validate-and-repair-content content readtable)))
+    (multiple-value-bind (abs rel)
+        (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
-             (nodes (parse-top-level-forms original))
+             (nodes (parse-top-level-forms original :readtable readtable))
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name abs))
@@ -212,7 +220,8 @@ written; instead, a preview hash-table is returned."
                (target-snippet (subseq original start end))
                (updated (%apply-operation original target op-key validated-content))
                (would-change (not (string= original updated))))
-          (log-event :debug "lisp-edit-form" "path" (namestring abs)
+          (log-event :debug "lisp-edit-form"
+                     "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
                      "form_name" form-name
@@ -252,14 +261,17 @@ e.g., \"print-object (my-class t)\"")
          (content :type :string :required t
                   :description "Full Lisp form to insert or replace with")
          (dry_run :type :boolean
-                  :description "When true, return a preview without writing to disk"))
+                  :description "When true, return a preview without writing to disk")
+         (readtable :type :string
+                    :description "Named-readtable designator (e.g., 'interpol-syntax') for files using custom reader macros. NOTE: When specified, the standard CL reader is used instead of Eclector, which means comments are NOT preserved in the parsed output."))
   :body
   (let ((updated (lisp-edit-form :file-path file_path
                                  :form-type form_type
                                  :form-name form_name
                                  :operation operation
                                  :content content
-                                 :dry-run dry_run)))
+                                 :dry-run dry_run
+                                 :readtable (when readtable (intern (string-upcase readtable) :keyword)))))
     (if dry_run
         (let* ((preview (gethash "preview" updated))
                (would-change (gethash "would_change" updated))
