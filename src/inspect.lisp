@@ -354,10 +354,10 @@ Use this to drill down into complex data structures like CLOS instances, structu
                                                   :max-depth (or max-depth 1)
                                                   :max-elements (or max-elements 50))))
     (if (gethash "error" inspection-result)
-        ;; Return error as isError response
-        (values (make-ht "content" (text-content (gethash "message" inspection-result))
-                         "isError" t)
-                id)
+        ;; Return error using result function with isError flag
+        (let ((error-ht (make-ht "content" (text-content (gethash "message" inspection-result))
+                                 "isError" t)))
+          (result id error-ht))
         ;; Return successful inspection with content field for display
         (let ((summary (format nil "[~A] ~A"
                                (gethash "kind" inspection-result)
