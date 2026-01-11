@@ -358,5 +358,9 @@ Use this to drill down into complex data structures like CLOS instances, structu
         (values (make-ht "content" (text-content (gethash "message" inspection-result))
                          "isError" t)
                 id)
-        ;; Return successful inspection
-        (result id inspection-result))))
+        ;; Return successful inspection with content field for display
+        (let ((summary (format nil "[~A] ~A"
+                               (gethash "kind" inspection-result)
+                               (gethash "summary" inspection-result))))
+          (setf (gethash "content" inspection-result) (text-content summary))
+          (result id inspection-result)))))
