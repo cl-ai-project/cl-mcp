@@ -34,7 +34,11 @@
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
   (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search))
+                #:clgrep-search)
+  (:import-from #:cl-mcp/src/inspect
+                #:inspect-object-by-id)
+  (:import-from #:cl-mcp/src/clhs
+                #:clhs-lookup))
 
 (in-package #:cl-mcp/src/tools/all)
 
