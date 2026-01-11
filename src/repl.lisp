@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:uiop #:print-backtrace)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread)
+  (:import-from #:cl-mcp/src/frame-inspector
+                #:capture-error-context)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -31,7 +33,7 @@
                                   (:timeout-seconds (or null (real 0)))
                                   (:max-output-length (or null (integer 0)))
                                   (:safe-read (member t nil)))
-                          (values string t string string &optional))
+                          (values string t string string list &optional))
                 repl-eval))
 
 (defun %truncate-output (string max-output-length)
@@ -100,7 +102,10 @@
     last-value))
 
 (defun %do-repl-eval (input package safe-read print-level print-length max-output-length)
+  "Evaluate INPUT and return (values printed raw-value stdout stderr error-context).
+ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
+        (error-context nil)
         (stdout (make-string-output-stream))
         (stderr (make-string-output-stream)))
     (handler-bind ((warning (lambda (w)
@@ -108,6 +113,13 @@
                               (when (find-restart 'muffle-warning)
                                 (invoke-restart 'muffle-warning))))
                    (error (lambda (e)
+                            ;; Capture structured error context
+                            (setf error-context
+                                  (capture-error-context e
+                                                         :max-frames 20
+                                                         :print-level (or print-level 3)
+                                                         :print-length (or print-length 10)))
+                            ;; Also keep text representation for backward compatibility
                             (setf last-value
                                   (with-output-to-string (out)
                                     (let ((*print-readably* nil))
@@ -118,7 +130,8 @@
                               (values last-value
                                       last-value
                                       (get-output-stream-string stdout)
-                                      (get-output-stream-string stderr))))))
+                                      (get-output-stream-string stderr)
+                                      error-context)))))
       (let ((pkg (%resolve-eval-package package)))
         (let ((forms (%read-all input (not safe-read))))
           (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
@@ -128,7 +141,8 @@
       (values (%truncate-output (prin1-to-string last-value) max-output-length)
               last-value
               (%truncate-output (get-output-stream-string stdout) max-output-length)
-              (%truncate-output (get-output-stream-string stderr) max-output-length)))))
+              (%truncate-output (get-output-stream-string stderr) max-output-length)
+              nil))))
 
 (defun %repl-eval-with-timeout (thunk timeout-seconds)
   (if (and timeout-seconds (plusp timeout-seconds))
@@ -148,7 +162,8 @@
         (values (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
                 :timeout
                 ""
-                ""))
+                ""
+                nil))
       (funcall thunk)))
 
 (defun repl-eval (input &key (package *default-eval-package*)
@@ -161,7 +176,8 @@
 Forms are read as provided and evaluated sequentially; the last value is
 returned as a printed string per `prin1-to-string`. The second return value is
 the raw last value for callers that want it. The third and fourth values capture
-stdout and stderr produced during evaluation.
+stdout and stderr produced during evaluation. The fifth value is a structured
+error context plist when an error occurred, NIL otherwise.
 
 Options:
 - TIMEOUT-SECONDS: abort evaluation after this many seconds, returning a timeout string.
@@ -198,7 +214,7 @@ to save changes to files."
          (safe-read :type :boolean :json-name "safe_read"
                     :description "When true, disables #. reader evaluation for safety"))
   :body
-  (multiple-value-bind (printed _ stdout stderr)
+  (multiple-value-bind (printed _ stdout stderr error-context)
       (repl-eval code
                  :package (or package *package*)
                  :print-level print-level
@@ -207,7 +223,25 @@ to save changes to files."
                  :max-output-length max-output-length
                  :safe-read safe-read)
     (declare (ignore _))
-    (result id
-            (make-ht "content" (text-content printed)
-                     "stdout" stdout
-                     "stderr" stderr))))
+    (let ((ht (make-ht "content" (text-content printed)
+                       "stdout" stdout
+                       "stderr" stderr)))
+      (when error-context
+        (setf (gethash "error_context" ht)
+              (make-ht "condition_type" (getf error-context :condition-type)
+                       "message" (getf error-context :message)
+                       "restarts" (mapcar (lambda (r)
+                                            (make-ht "name" (getf r :name)
+                                                     "description" (getf r :description)))
+                                          (getf error-context :restarts))
+                       "frames" (mapcar (lambda (f)
+                                          (make-ht "index" (getf f :index)
+                                                   "function" (getf f :function)
+                                                   "source_file" (getf f :source-file)
+                                                   "source_line" (getf f :source-line)
+                                                   "locals" (mapcar (lambda (l)
+                                                                      (make-ht "name" (getf l :name)
+                                                                               "value" (getf l :value)))
+                                                                    (getf f :locals))))
+                                        (getf error-context :frames)))))
+      (result id ht))))

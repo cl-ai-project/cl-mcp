@@ -110,7 +110,13 @@ using parinfer:apply-indent-mode. Returns the validated (possibly repaired) cont
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
   (let* ((*read-eval* nil)
          (custom-rt (when readtable-designator
-                      (named-readtables:find-readtable readtable-designator)))
+                      ;; Dynamic lookup of named-readtables package
+                      (let ((pkg (or (find-package :named-readtables)
+                                     (find-package :editor-hints.named-readtables))))
+                        (when pkg
+                          (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
+                            (when (and find-fn (fboundp find-fn))
+                              (funcall find-fn readtable-designator)))))))
          (*readtable* (if custom-rt
                           custom-rt
                           (copy-readtable nil))))
