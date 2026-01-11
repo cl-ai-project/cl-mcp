@@ -21,6 +21,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Inspect object | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
+| Run tests | `run-tests` | `system`, `test` (optional) |
 
 **Minimal Workflow (experienced users):**
 1. `repl-eval` — prototype in REPL
@@ -395,25 +396,39 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 
 ### Scenario: Running Tests
 
-1. **Load test system:** Use `repl-eval` to load your test suite:
+**Preferred: Use `run-tests` tool** for structured results with pass/fail counts and failure details.
+
+1. **Run all tests in a system:**
    ```json
-   {"code": "(ql:quickload :my-system/tests)", "package": "CL-USER"}
+   {"name": "run-tests", "arguments": {"system": "my-system/tests"}}
+   ```
+   Returns: `{"passed": 10, "failed": 0, "framework": "rove", "duration_ms": 150}`
+
+2. **Run a single test:** (requires test package to be loaded first)
+   ```json
+   {"name": "run-tests", "arguments": {
+     "system": "my-system/tests",
+     "test": "my-system/tests::my-specific-test"
+   }}
    ```
 
-2. **Run tests via REPL:** Use `repl-eval` to execute tests:
-   ```json
-   {"code": "(rove:run :my-system/tests)", "package": "CL-USER"}
-   ```
-   Or use ASDF test-op:
-   ```json
-   {"code": "(asdf:test-system :my-system)", "package": "CL-USER"}
-   ```
+3. **Analyze failures:** When tests fail, `failed_tests` array contains detailed info:
+   - `test_name`: Which test failed
+   - `form`: The failing assertion (e.g., `"(= 1 2)"`)
+   - `reason`: Error message
+   - `source`: File and line number
 
-3. **Analyze failures:** Read test files with `lisp-read-file`, locate failing test definitions.
+4. **Iterate:** Fix code using `lisp-edit-form` → re-run with `run-tests` → verify pass.
 
-4. **Iterate:** Fix code using `lisp-edit-form` → re-run tests → verify pass.
+**Alternative: Use `repl-eval`** when you need more control or custom test invocation:
+```json
+{"code": "(ql:quickload :my-system/tests)", "package": "CL-USER"}
+{"code": "(rove:run :my-system/tests)", "package": "CL-USER"}
+```
 
-5. **Integration with development:** Always run tests after making changes to ensure no regressions.
+**Note:** Single test execution with `run-tests` requires the test package to be loaded. Either:
+- Run system-level tests first (which loads the package), or
+- Load explicitly: `(ql:quickload :my-system/tests)` via `repl-eval`
 
 ### Scenario: Adding New Feature
 

@@ -24,6 +24,7 @@ clients to drive Common Lisp development via MCP.
   - `lisp-check-parens` — detect mismatched delimiters in code slices
   - `clgrep-search` — semantic grep for Lisp files with structure awareness
   - `clhs-lookup` — Common Lisp HyperSpec reference (symbols and sections)
+  - `run-tests` — unified test runner with structured results (Rove, ASDF fallback)
 - Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -396,6 +397,42 @@ Example requests:
 Notes:
 - If the HyperSpec is not installed locally, the tool attempts auto-installation via `(clhs:install-clhs-use-local)`
 - Section numbers map to filenames: `22.3` → `22_c.htm`, `22.3.1` → `22_ca.htm` (a=1, b=2, c=3, etc.)
+
+### `run-tests`
+Run tests for a system and return structured results with pass/fail counts and failure details.
+
+Input:
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`)
+- `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, or `"auto"` for auto-detect)
+- `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
+
+Output:
+- `passed` (integer): Number of passed tests
+- `failed` (integer): Number of failed tests
+- `pending` (integer): Number of pending/skipped tests (Rove only)
+- `framework` (string): Framework used (`"rove"` or `"asdf"`)
+- `duration_ms` (integer): Execution time in milliseconds
+- `failed_tests` (array, when failures exist): Detailed failure information including:
+  - `test_name`: Name of the failing test
+  - `description`: Test description
+  - `form`: The failing assertion form
+  - `values`: Evaluated values
+  - `reason`: Error message (string)
+  - `source`: Source location (file and line)
+
+Example requests:
+```json
+// Run all tests in a system
+{"method":"tools/call","params":{"name":"run-tests","arguments":{"system":"cl-mcp/tests/clhs-test"}}}
+
+// Run a single test
+{"method":"tools/call","params":{"name":"run-tests","arguments":{"system":"cl-mcp/tests/clhs-test","test":"cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table"}}}
+```
+
+Notes:
+- Auto-detects Rove framework when loaded; falls back to ASDF `test-system` for text capture
+- Single test execution requires the test package to be loaded first
+- Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
 
 ## Logging
 - Structured JSON line logs to `*error-output*`.
