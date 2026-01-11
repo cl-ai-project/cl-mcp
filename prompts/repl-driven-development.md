@@ -20,6 +20,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Edit code | `lisp-edit-form` | `form_type`, `form_name` |
 | Inspect object | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
+| Language spec | `clhs-lookup` | `query` (symbol or section) |
 
 **Minimal Workflow (experienced users):**
 1. `repl-eval` — prototype in REPL
@@ -107,9 +108,12 @@ What do you need to do?
 │   ├─ Test expression ────→ repl-eval
 │   └─ Inspect result ─────→ inspect-object (use result_object_id)
 │
-└─ EDIT
-    ├─ Existing .lisp ─────→ lisp-edit-form (ALWAYS)
-    └─ New file ───────────→ fs-write-file (minimal), then lisp-edit-form
+├─ EDIT
+│   ├─ Existing .lisp ─────→ lisp-edit-form (ALWAYS)
+│   └─ New file ───────────→ fs-write-file (minimal), then lisp-edit-form
+│
+└─ REFERENCE
+    └─ CL language spec ───→ clhs-lookup (symbol or section number)
 ```
 
 **Key Principle:** `clgrep-search` works without loading systems; `code-*` tools require `(ql:quickload ...)` first.
@@ -262,6 +266,35 @@ This returns the object's kind, entries, slots, or elements depending on type. N
 - **Prefer absolute paths** for clarity and reliability.
 - Use `fs-get-project-info` to retrieve the project root and construct absolute paths.
 - When paths are relative, they are resolved relative to the project root.
+
+### Language Reference (CLHS)
+When unsure about Common Lisp standard behavior, **always consult the HyperSpec** using `clhs-lookup`:
+
+- **Uncertain about syntax?** Look up the symbol:
+  ```json
+  {"query": "loop"}
+  ```
+- **Need FORMAT directives?** Look up the section:
+  ```json
+  {"query": "22.3"}
+  ```
+- **Following a cross-reference?** If documentation mentions "See Section X.Y", look it up directly:
+  ```json
+  {"query": "22.3.1"}
+  ```
+
+**When to use CLHS:**
+- Complex macro syntax (`loop`, `format`, `setf`, `defstruct`)
+- Edge cases in standard functions (return values, exceptional situations)
+- Confirming implementation-specific vs standard behavior
+- Understanding condition types and restarts
+
+**Example workflow:**
+1. Look up `format`: `{"query": "format"}` → See "Section 22.3 (Formatted Output)"
+2. Follow reference: `{"query": "22.3"}` → Get FORMAT directive overview
+3. Drill down: `{"query": "22.3.3"}` → Floating-Point Printers (~F, ~E, ~G)
+
+**Do NOT guess** at Common Lisp semantics. The HyperSpec is authoritative.
 
 ## Recommended Workflows
 
@@ -582,3 +615,4 @@ When exploring, batch independent operations:
 - Symbol not found → `(ql:quickload ...)` or use `clgrep-search`
 - Form not matched → check `form_type` and `form_name` with `lisp-read-file`
 - Package issues → use package-qualified symbols: `pkg:symbol`
+- Unsure about CL semantics → `clhs-lookup` with symbol or section number

@@ -58,6 +58,8 @@
                 #:run)
   (:import-from #:cl-mcp/src/clgrep
                 #:clgrep-search)
+  (:import-from #:cl-mcp/src/clhs
+                #:clhs-lookup)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -79,6 +81,8 @@
            #:code-find-references
            ;; Semantic grep (clgrep)
            #:clgrep-search
+           ;; HyperSpec lookup
+           #:clhs-lookup
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls
