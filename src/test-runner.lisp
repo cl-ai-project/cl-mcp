@@ -62,7 +62,10 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
       (setf (gethash "values" ht)
             (coerce (mapcar #'princ-to-string values) 'vector)))
     (when reason
-      (setf (gethash "reason" ht) reason))
+      (setf (gethash "reason" ht)
+            (if (stringp reason)
+                reason
+                (princ-to-string reason))))
     (when source
       (setf (gethash "source" ht)
             (if (listp source)
