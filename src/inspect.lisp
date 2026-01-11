@@ -343,14 +343,14 @@ Returns a hash-table with inspection results or error info."
   :description "Inspect an object's internal structure by ID.
 Objects are registered when repl-eval returns non-primitive values (result_object_id field).
 Use this to drill down into complex data structures like CLOS instances, structures, lists, arrays, and hash-tables."
-  :args ((id :type :integer :required t
-             :description "Object ID from repl-eval result_object_id or previous inspection")
+  :args ((object-id :type :integer :json-name "id" :required t
+                    :description "Object ID from repl-eval result_object_id or previous inspection")
          (max-depth :type :integer :json-name "max_depth"
                     :description "Nesting depth for expansion (0=summary only, default=1)")
          (max-elements :type :integer :json-name "max_elements"
                        :description "Maximum elements for lists/arrays/hash-tables (default=50)"))
   :body
-  (let ((inspection-result (inspect-object-by-id id
+  (let ((inspection-result (inspect-object-by-id object-id
                                                   :max-depth (or max-depth 1)
                                                   :max-elements (or max-elements 50))))
     (if (gethash "error" inspection-result)
