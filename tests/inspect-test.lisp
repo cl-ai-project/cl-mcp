@@ -4,7 +4,6 @@
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object
-                #:clear-registry
                 #:*object-registry*
                 #:make-object-registry)
   (:import-from #:cl-mcp/src/inspect
