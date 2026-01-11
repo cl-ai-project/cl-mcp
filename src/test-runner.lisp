@@ -124,22 +124,33 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
   (log-event :info "test-runner" "framework" "rove" "system" system-name)
   (let* ((suite-pkg (find-package :rove/core/suite))
          (stats-pkg (find-package :rove/core/stats))
+         (reporter-pkg (find-package :rove/reporter))
          (find-suite-fn (fdefinition (find-symbol "FIND-SUITE" suite-pkg)))
          (run-suite-fn (fdefinition (find-symbol "RUN-SUITE" suite-pkg)))
          (stats-passed-fn (fdefinition (find-symbol "STATS-PASSED-TESTS" stats-pkg)))
          (stats-failed-fn (fdefinition (find-symbol "STATS-FAILED-TESTS" stats-pkg)))
          (stats-pending-fn (fdefinition (find-symbol "STATS-PENDING-TESTS" stats-pkg)))
+         ;; Dynamic symbol lookup to avoid compile-time package references
+         (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
+         (stats-sym (find-symbol "*STATS*" stats-pkg))
+         (with-reporter-sym (find-symbol "WITH-REPORTER" reporter-pkg))
          (suite (funcall find-suite-fn (intern (string-upcase system-name) :keyword)))
          result-stats
          (start-time (get-internal-real-time)))
     (unless suite
       (error "No test suite found for ~A" system-name))
     ;; Run with reporter and capture stats INSIDE the block
-    (let ((rove/reporter:*report-stream* (make-broadcast-stream)))
-      (rove/reporter:with-reporter :spec
-        (funcall run-suite-fn suite)
-        ;; Capture stats before with-reporter exits and resets them
-        (setf result-stats rove/core/stats:*stats*)))
+    ;; Use eval with dynamically looked-up symbols to avoid compile-time
+    ;; package references (Rove may not be loaded when this file is compiled)
+    (setf result-stats
+          (funcall
+           (compile nil
+                    `(lambda (run-fn suite-obj)
+                       (let ((,report-stream-sym (make-broadcast-stream)))
+                         (,with-reporter-sym :spec
+                           (funcall run-fn suite-obj)
+                           ,stats-sym))))
+           run-suite-fn suite))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))

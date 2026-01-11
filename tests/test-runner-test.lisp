@@ -6,7 +6,9 @@
                 #:deftest #:testing #:ok #:signals)
   (:import-from #:cl-mcp/src/test-runner
                 #:run-tests
-                #:detect-test-framework))
+                #:detect-test-framework)
+  ;; Load clhs-test system so we can use it as a test subject
+  (:import-from #:cl-mcp/tests/clhs-test))
 
 (in-package #:cl-mcp/tests/test-runner-test)
 
