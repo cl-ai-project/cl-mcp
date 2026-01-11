@@ -6,6 +6,9 @@
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread)
   (:import-from #:cl-mcp/src/frame-inspector
                 #:capture-error-context)
+  (:import-from #:cl-mcp/src/object-registry
+                #:inspectable-p
+                #:register-object)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -198,7 +201,11 @@ Use this for testing, inspection, debugging, or loading systems (ql:quickload).
 Provide an existing package (e.g., CL-USER) and set print_level/print_length when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
 To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
-to save changes to files."
+to save changes to files.
+
+When the result is a non-primitive object (not a number, string, symbol, or character),
+the response includes a 'result_object_id' field. Use this ID with the 'inspect-object'
+tool to drill down into the object's internal structure."
   :args ((code :type :string :required t
                :description "Code string of one or more forms evaluated sequentially")
          (package :type :string
@@ -214,7 +221,7 @@ to save changes to files."
          (safe-read :type :boolean :json-name "safe_read"
                     :description "When true, disables #. reader evaluation for safety"))
   :body
-  (multiple-value-bind (printed _ stdout stderr error-context)
+  (multiple-value-bind (printed raw-value stdout stderr error-context)
       (repl-eval code
                  :package (or package *package*)
                  :print-level print-level
@@ -222,10 +229,16 @@ to save changes to files."
                  :timeout-seconds timeout-seconds
                  :max-output-length max-output-length
                  :safe-read safe-read)
-    (declare (ignore _))
     (let ((ht (make-ht "content" (text-content printed)
                        "stdout" stdout
                        "stderr" stderr)))
+      ;; Register non-primitive results for inspection
+      (when (and (null error-context)
+                 (inspectable-p raw-value))
+        (let ((object-id (register-object raw-value)))
+          (when object-id
+            (setf (gethash "result_object_id" ht) object-id))))
+      ;; Add error context if present
       (when error-context
         (setf (gethash "error_context" ht)
               (make-ht "condition_type" (getf error-context :condition-type)

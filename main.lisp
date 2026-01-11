@@ -29,6 +29,15 @@
                 #:repl-eval)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
+  (:import-from #:cl-mcp/src/object-registry
+                #:*object-registry*
+                #:inspectable-p
+                #:register-object
+                #:lookup-object
+                #:clear-registry
+                #:registry-count)
+  (:import-from #:cl-mcp/src/inspect
+                #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/protocol
                 #:process-json-line)
   (:import-from #:cl-mcp/src/tcp
@@ -76,6 +85,14 @@
            #:set-log-level-from-env
            ;; REPL interfaces
            #:repl-eval
+           ;; Object inspection
+           #:*object-registry*
+           #:inspectable-p
+           #:register-object
+           #:lookup-object
+           #:clear-registry
+           #:registry-count
+           #:inspect-object-by-id
            ;; Protocol helpers (for tests and custom transports)
            #:process-json-line
            ;; TCP server
