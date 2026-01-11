@@ -38,7 +38,9 @@
   (:import-from #:cl-mcp/src/inspect
                 #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/clhs
-                #:clhs-lookup))
+                #:clhs-lookup)
+  (:import-from #:cl-mcp/src/test-runner
+                #:run-tests))
 
 (in-package #:cl-mcp/src/tools/all)
 

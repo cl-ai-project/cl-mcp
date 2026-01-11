@@ -60,6 +60,9 @@
                 #:clgrep-search)
   (:import-from #:cl-mcp/src/clhs
                 #:clhs-lookup)
+  (:import-from #:cl-mcp/src/test-runner
+                #:run-tests
+                #:detect-test-framework)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -83,6 +86,9 @@
            #:clgrep-search
            ;; HyperSpec lookup
            #:clhs-lookup
+           ;; Test runner
+           #:run-tests
+           #:detect-test-framework
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls
