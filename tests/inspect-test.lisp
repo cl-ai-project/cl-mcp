@@ -214,3 +214,113 @@
            ;; At depth 2, inner objects get expanded
            (ok (or (string= "list" (ht-get first-elem "kind"))
                    (string= "object-ref" (ht-get first-elem "kind"))))))))))
+
+(deftest inspect-multi-dimensional-array
+  (testing "inspect 2D array"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (make-array '(2 3) :initial-contents '((1 2 3) (4 5 6))))
+              (id (register-object obj))
+              (result (inspect-object-by-id id)))
+         (ok (string= "array" (ht-get result "kind")))
+         (ok (equal '(2 3) (ht-get result "dimensions")))
+         (ok (= 6 (length (ht-get result "elements"))))
+         (let ((meta (ht-get result "meta")))
+           (ok (= 6 (ht-get meta "total_elements")))))))))
+
+(deftest inspect-3d-array
+  (testing "inspect 3D array"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (make-array '(2 2 2) :initial-element 0))
+              (id (register-object obj))
+              (result (inspect-object-by-id id)))
+         (ok (string= "array" (ht-get result "kind")))
+         (ok (equal '(2 2 2) (ht-get result "dimensions")))
+         (ok (= 8 (length (ht-get result "elements")))))))))
+
+(deftest inspect-dotted-list
+  (testing "inspect dotted pair"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (cons 1 2))
+              (id (register-object obj))
+              (result (inspect-object-by-id id)))
+         (ok (string= "list" (ht-get result "kind")))
+         (let ((elements (ht-get result "elements")))
+           (ok (>= (length elements) 1))
+           (let ((last-elem (car (last elements))))
+             (ok (string= "dotted-tail" (ht-get last-elem "kind"))))))))))
+
+(deftest inspect-improper-list
+  (testing "inspect improper list (a b . c)"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (cons 'a (cons 'b 'c)))
+              (id (register-object obj))
+              (result (inspect-object-by-id id)))
+         (ok (string= "list" (ht-get result "kind")))
+         (let ((elements (ht-get result "elements")))
+           (ok (= 3 (length elements)))
+           (let ((last-elem (car (last elements))))
+             (ok (string= "dotted-tail" (ht-get last-elem "kind"))))))))))
+
+(defclass self-ref-node ()
+  ((name :initarg :name :accessor node-name)
+   (self :initarg :self :accessor node-self)))
+
+#+sbcl
+(deftest inspect-self-referential-instance
+  (testing "inspect CLOS instance that references itself"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (make-instance 'self-ref-node :name "root")))
+         (setf (node-self obj) obj)
+         (let* ((id (register-object obj))
+                (result (inspect-object-by-id id :max-depth 2)))
+           (ok (string= "instance" (ht-get result "kind")))
+           (let ((self-slot (find-if (lambda (s)
+                                       (string= "SELF" (ht-get s "name")))
+                                     (ht-get result "slots"))))
+             (ok self-slot)
+             (let ((self-value (ht-get self-slot "value")))
+               (ok (string= "circular-ref" (ht-get self-value "kind")))
+               (ok (= id (ht-get self-value "ref_id")))))))))))
+
+
+(deftest inspect-hash-table-complex-keys
+  (testing "inspect hash-table with list keys"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (make-hash-table :test 'equal)))
+         (setf (gethash '(a b) obj) "first")
+         (setf (gethash '(c d) obj) "second")
+         (let* ((id (register-object obj))
+                (result (inspect-object-by-id id)))
+           (ok (string= "hash-table" (ht-get result "kind")))
+           (ok (= 2 (length (ht-get result "entries"))))
+           ;; Keys should be object-refs (lists are inspectable)
+           (let ((entry (first (ht-get result "entries"))))
+             (ok (ht-get entry "key"))
+             (ok (ht-get entry "value")))))))))
+
+
+(deftest inspect-hash-table-nested-values
+  (testing "inspect hash-table with nested hash-table value"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((inner (make-hash-table))
+              (outer (make-hash-table)))
+         (setf (gethash :x inner) 10)
+         (setf (gethash :nested outer) inner)
+         (let* ((id (register-object outer))
+                (result (inspect-object-by-id id :max-depth 1)))
+           (ok (string= "hash-table" (ht-get result "kind")))
+           ;; The nested entry value should be object-ref
+           (let* ((entry (first (ht-get result "entries")))
+                  (value (ht-get entry "value")))
+             (ok (string= "object-ref" (ht-get value "kind")))
+             ;; Can drill down into nested hash-table
+             (let* ((inner-id (ht-get value "id"))
+                    (inner-result (inspect-object-by-id inner-id)))
+               (ok (string= "hash-table" (ht-get inner-result "kind")))))))))))
