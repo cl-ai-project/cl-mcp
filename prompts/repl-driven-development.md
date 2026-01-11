@@ -85,8 +85,11 @@ Need to explore code?
 │   ├─ Existing Lisp file → lisp-edit-form (REQUIRED)
 │   └─ New file → fs-write-file (minimal content, then expand with lisp-edit-form)
 │
-└─ Need to execute/test code?
-    └─ repl-eval
+├─ Need to execute/test code?
+│   └─ repl-eval (returns result_object_id for complex objects)
+│
+└─ Need to inspect complex objects?
+    └─ inspect-object (drill down using result_object_id from repl-eval)
 ```
 
 **Tool Comparison Matrix:**
@@ -98,6 +101,7 @@ Need to explore code?
 | Symbol info | - | `code-describe` |
 | Read file | `lisp-read-file` | - |
 | Edit file | `lisp-edit-form` | - |
+| Object inspection | `inspect-object` | - |
 
 **When to Use Each Tool:**
 
@@ -108,6 +112,7 @@ Need to explore code?
 | `code-find-references` | Need xref info, tracing callers | Simple text search |
 | `lisp-read-file` | Reading Lisp files, need structure overview | Non-Lisp files |
 | `lisp-edit-form` | Editing existing Lisp code | Creating new files, non-Lisp files |
+| `inspect-object` | Drill into complex objects from `repl-eval` | Primitive values (numbers, strings, symbols) |
 
 ### 1. Editing Code
 
@@ -198,6 +203,19 @@ Use `repl-eval` for:
 - (Optional) Compiling definitions to surface warnings early.
 
 **WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They are lost if the server restarts. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
+
+**Object Inspection:**
+When `repl-eval` returns a non-primitive result (list, hash-table, CLOS instance, etc.), the response includes a `result_object_id` field. Use this ID with `inspect-object` to drill down into the object's structure:
+```json
+{"code": "(make-hash-table)", "package": "CL-USER"}
+```
+Response includes: `"result_object_id": 42`
+
+Then inspect the object:
+```json
+{"id": 42, "max_depth": 1}
+```
+This returns the object's kind, entries, slots, or elements depending on type. Nested non-primitive values also include IDs for further drill-down.
 
 **Best practices:**
 - Specify the `package` argument to ensure correct package context
@@ -325,23 +343,35 @@ Use `clgrep-search` to locate code across the project, then `lisp-read-file` to 
    ```json
    {"code": "(my-buggy-function)", "package": "MY-PACKAGE"}
    ```
+   - If an error occurs, the response includes `error_context` with structured error info:
+     - `condition_type`: The error type (e.g., "TYPE-ERROR")
+     - `message`: The error message
+     - `restarts`: Available restarts
+     - `frames`: Stack frames with function names, source locations, and local variables
+   - Locals in stack frames include `object_id` for non-primitive values, enabling inspection.
 
-2. **Analyze:** Use `code-find-references` to see where the problematic symbol is used:
+2. **Inspect Runtime State:** If `repl-eval` returns a complex object, use its `result_object_id` to inspect:
+   ```json
+   {"id": 42}
+   ```
+   For debugging errors, you can inspect local variables from the error context using their `object_id`.
+
+3. **Analyze:** Use `code-find-references` to see where the problematic symbol is used:
    ```json
    {"symbol": "my-package:problematic-var", "project_only": true}
    ```
 
-3. **Check Syntax:** If you suspect malformed code, use `lisp-check-parens`:
+4. **Check Syntax:** If you suspect malformed code, use `lisp-check-parens`:
    ```json
    {"path": "src/buggy.lisp"}
    ```
 
-4. **Inspect:** Use `code-describe` to verify function signatures:
+5. **Inspect Symbols:** Use `code-describe` to verify function signatures:
    ```json
    {"symbol": "my-package:my-function"}
    ```
 
-5. **Fix:** Apply the fix using `lisp-edit-form`, then verify with `repl-eval`.
+6. **Fix:** Apply the fix using `lisp-edit-form`, then verify with `repl-eval`.
 
 ### Scenario: Running Tests
 

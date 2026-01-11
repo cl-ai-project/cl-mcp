@@ -13,7 +13,8 @@ clients to drive Common Lisp development via MCP.
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
 - Tools API
-  - `repl-eval` — evaluate forms
+  - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
+  - `inspect-object` — drill down into complex objects (CLOS instances, hash-tables, lists, arrays) by ID
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
   - `fs-get-project-info` — report project root and cwd info for path normalization
   - `fs-set-project-root` — set the server's project root and working directory
@@ -132,9 +133,11 @@ Input schema (JSON):
 - `max_output_length` (integer|null): truncate `content`/`stdout`/`stderr` to this many characters
 - `safe_read` (boolean|null): when `true`, disables `*read-eval*` while reading forms
 Output fields:
-- `content`: last value as text (existing)
+- `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
+- `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+- `error_context` (object|null): when an error occurs, contains structured error info including `condition_type`, `message`, `restarts`, and `frames` with local variable inspection
 
 Example JSON‑RPC request:
 
@@ -147,6 +150,42 @@ Response (excerpt):
 
 ```json
 {"result":{"content":[{"type":"text","text":"3"}]}}
+```
+
+### `inspect-object`
+Drill down into non-primitive objects by ID. Objects are registered when `repl-eval`
+returns non-primitive results (the `result_object_id` field).
+
+Input:
+- `id` (integer, required): Object ID from `repl-eval`'s `result_object_id` or from a previous `inspect-object` call
+- `max_depth` (integer, optional): Nesting depth for expansion (0=summary only, default=1)
+- `max_elements` (integer, optional): Maximum elements for lists/arrays/hash-tables (default=50)
+
+Output fields:
+- `kind`: Object type (`list`, `hash-table`, `array`, `instance`, `structure`, `function`, `other`)
+- `summary`: String representation of the object
+- `id`: The object's registry ID
+- Type-specific fields:
+  - Lists: `elements` array with nested value representations
+  - Hash-tables: `entries` array with `key`/`value` pairs, `test` function name
+  - Arrays: `elements` array, `dimensions`, `element_type`
+  - CLOS instances: `class` name, `slots` array with `name`/`value` pairs
+  - Structures: `class` name, `slots` array
+  - Functions: `name`, `lambda_list` (SBCL only)
+- `meta`: Contains `truncated` flag, element counts, etc.
+
+Nested objects are returned as `object-ref` with their own `id` for further inspection.
+Circular references are detected and marked as `circular-ref`.
+
+Example workflow:
+```json
+// 1. Evaluate code that returns a complex object
+{"method":"tools/call","params":{"name":"repl-eval","arguments":{"code":"(make-hash-table)"}}}
+// Response includes: "result_object_id": 42
+
+// 2. Inspect the object
+{"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":42}}}
+// Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":42}
 ```
 
 ### ASDF tools (disabled)
