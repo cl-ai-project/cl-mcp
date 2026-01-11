@@ -265,7 +265,7 @@ e.g., \"print-object (my-class t)\"")
                     :enum ("replace" "insert_before" "insert_after")
                     :description "Operation to perform")
          (content :type :string :required t
-                  :description "Full Lisp form to insert or replace with")
+                  :description "Full Lisp form to insert or replace with. Must contain exactly ONE top-level form; multiple forms in a single call are not supported. Use separate insert_after calls to add multiple forms.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (readtable :type :string
