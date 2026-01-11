@@ -152,7 +152,15 @@ Returns the complete list of nodes (including previously collected NODES)."
                               (return (%read-remaining-with-cl-reader
                                        stream nodes custom-rt)))))))))
               (reader-error (e)
-                (error "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
-                        specify the 'readtable' parameter with the named-readtable designator ~
-                        (e.g., readtable: \"interpol-syntax\")."
-                       e))))))))
+                (let ((msg (format nil "~A" e)))
+                  (if (search "READ-EVAL" msg)
+                      ;; #. read-time evaluation error
+                      (error "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
+                              If you need to parse files containing #., consider removing or replacing ~
+                              the #. forms, or use a separate evaluation step."
+                             e)
+                      ;; Other reader errors (unknown reader macros, etc.)
+                      (error "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
+                              specify the 'readtable' parameter with the named-readtable designator ~
+                              (e.g., readtable: \"interpol-syntax\")."
+                             e))))))))))

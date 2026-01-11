@@ -36,3 +36,17 @@
       (ok error-message)
       (ok (search "readtable" error-message))
       (ok (search "interpol-syntax" error-message)))))
+
+(deftest parse-top-level-forms-read-eval-error-message
+  (testing "read-time evaluation error shows security message, not readtable suggestion"
+    (let ((error-message
+            (handler-case
+                (progn
+                  (parse-top-level-forms "#.(+ 1 2)")
+                  nil)
+              (error (e)
+                (format nil "~A" e)))))
+      (ok error-message)
+      (ok (search "security" error-message))
+      (ok (search "#." error-message))
+      (ok (null (search "readtable" error-message))))))
