@@ -348,6 +348,51 @@ then clean up."
           ;; Verify the primary method is untouched
           (ok (search "(slot-value s 'size)" updated)))))))
 
+
+(deftest lisp-edit-form-with-package-qualified-readtable
+  (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
+    (handler-case
+        (progn
+          (ql:quickload :named-readtables :silent t)
+          (ql:quickload :cl-interpol :silent t)
+          ;; Create a test package with a named readtable at runtime
+          (let ((test-pkg-name "CL-MCP-EDIT-TEST-PKG-QUALIFIED-RT"))
+            (when (find-package test-pkg-name)
+              (delete-package test-pkg-name))
+            (unwind-protect
+                 (progn
+                   ;; Create package and register readtable dynamically
+                   (eval `(defpackage ,test-pkg-name
+                            (:use :cl)))
+                   (eval `(in-package ,test-pkg-name))
+                   ;; Copy interpol-syntax to our test package's readtable
+                   (eval `(named-readtables:defreadtable
+                              ,(intern "TEST-INTERPOL" test-pkg-name)
+                            (:merge :interpol-syntax)))
+                   (in-package :cl-mcp/tests/lisp-edit-form-test)
+                   ;; Now test editing with package-qualified readtable string
+                   (with-temp-file "tests/tmp/edit-form-pkg-qualified-rt.lisp"
+                       (format nil "(in-package :cl-user)~%~%(defun greet-pkg (name)~%  #?\"Hello, ${name}!\")~%")
+                     (lambda (path)
+                       ;; Use the package-qualified format: "pkg:sym"
+                       (let ((rt-string (format nil "~A:~A" test-pkg-name "TEST-INTERPOL")))
+                         (lisp-edit-form :file-path path
+                                         :form-type "defun"
+                                         :form-name "greet-pkg"
+                                         :operation "replace"
+                                         :content (format nil "(defun greet-pkg (name)~%  #?\"Hi, ${name}!\")")
+                                         :readtable rt-string)
+                         (let ((updated (fs-read-file path)))
+                           (ok (search "#?\"Hi, ${name}!\"" updated))
+                           (ok (null (search "#?\"Hello, ${name}!\"" updated))))))))
+              ;; Cleanup: unregister readtable and delete package
+              (ignore-errors
+               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name)))
+                 (when rt-sym
+                   (named-readtables:unregister-readtable rt-sym))))
+              (ignore-errors (delete-package test-pkg-name)))))
+      (error (e)
+        (skip (format nil "Test dependencies not available: ~A" e))))))
 (deftest lisp-edit-form-multiple-matches-error
   (testing "multiple matches without index signals descriptive error"
     (with-temp-file "tests/tmp/edit-form-multi-match.lisp"

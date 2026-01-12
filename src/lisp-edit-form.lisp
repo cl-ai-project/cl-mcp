@@ -310,7 +310,10 @@ e.g., \"print-object (my-class t)\"")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (readtable :type :string
-                    :description "Named-readtable designator (e.g., 'interpol-syntax') for files using custom reader macros. NOTE: When specified, the standard CL reader is used instead of Eclector, which means comments are NOT preserved in the parsed output."))
+                    :description "Named-readtable designator for files using custom reader macros.
+Supports both keyword style ('interpol-syntax') and package-qualified style
+('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
+is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (let ((updated (lisp-edit-form :file-path file_path
                                  :form-type form_type
@@ -318,7 +321,23 @@ e.g., \"print-object (my-class t)\"")
                                  :operation operation
                                  :content content
                                  :dry-run dry_run
-                                 :readtable (when readtable (intern (string-upcase readtable) :keyword)))))
+                                 :readtable (when readtable
+                                             (let ((colon-pos (position #\: readtable)))
+                                               (if colon-pos
+                                                   ;; Package-qualified: "pkg:sym" or "pkg::sym"
+                                                   (let* ((pkg-name (subseq readtable 0 colon-pos))
+                                                          (sym-start (if (and (< (1+ colon-pos) (length readtable))
+                                                                              (char= (char readtable (1+ colon-pos)) #\:))
+                                                                         (+ colon-pos 2)
+                                                                         (1+ colon-pos)))
+                                                          (sym-name (subseq readtable sym-start))
+                                                          (pkg (find-package (string-upcase pkg-name))))
+                                                     (if pkg
+                                                         (intern (string-upcase sym-name) pkg)
+                                                         (error "Package ~A not found for readtable ~A"
+                                                                pkg-name readtable)))
+                                                   ;; Keyword symbol (no colon prefix)
+                                                   (intern (string-upcase readtable) :keyword)))))))
     (if dry_run
         (let* ((preview (gethash "preview" updated))
                (would-change (gethash "would_change" updated))
