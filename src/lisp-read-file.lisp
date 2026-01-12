@@ -396,7 +396,10 @@ or relative to project root")
          (limit :type :integer
                 :description "Maximum lines to return; defaults to 2000")
          (readtable :type :string
-                    :description "Named-readtable designator (e.g., 'interpol-syntax') for files using custom reader macros without in-readtable. NOTE: When specified, the standard CL reader is used instead of Eclector, which means comments are NOT preserved in the parsed output."))
+                    :description "Named-readtable designator for files using custom reader macros.
+Supports both keyword style ('interpol-syntax') and package-qualified style
+('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
+is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (let ((file-result
          (lisp-read-file path
@@ -405,10 +408,27 @@ or relative to project root")
                          :content-pattern content_pattern
                          :offset offset
                          :limit limit
-                         :readtable (when readtable (intern (string-upcase readtable) :keyword)))))
+                         :readtable (when readtable
+                                      (let ((colon-pos (position #\: readtable)))
+                                        (if colon-pos
+                                            ;; Package-qualified: "pkg:sym" or "pkg::sym"
+                                            (let* ((pkg-name (subseq readtable 0 colon-pos))
+                                                   (sym-start (if (and (< (1+ colon-pos) (length readtable))
+                                                                       (char= (char readtable (1+ colon-pos)) #\:))
+                                                                  (+ colon-pos 2)
+                                                                  (1+ colon-pos)))
+                                                   (sym-name (subseq readtable sym-start))
+                                                   (pkg (find-package (string-upcase pkg-name))))
+                                              (if pkg
+                                                  (intern (string-upcase sym-name) pkg)
+                                                  (error "Package ~A not found for readtable ~A"
+                                                         pkg-name readtable)))
+                                            ;; Keyword symbol (no colon prefix)
+                                            (intern (string-upcase readtable) :keyword)))))))
     (result id
             (make-ht "content" (text-content (gethash "content" file-result))
                      "text" (gethash "content" file-result)
                      "path" (gethash "path" file-result)
                      "mode" (gethash "mode" file-result)
                      "meta" (gethash "meta" file-result)))))
+
