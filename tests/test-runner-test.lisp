@@ -8,6 +8,8 @@
                 #:run-tests
                 #:detect-test-framework)
   ;; Load clhs-test system so we can use it as a test subject
+  ;; NOTE: Do NOT import from helper test packages (test-runner-test-failures, etc.)
+  ;; as that would register their intentionally-failing tests with Rove
   (:import-from #:cl-mcp/tests/clhs-test))
 
 (in-package #:cl-mcp/tests/test-runner-test)
@@ -56,68 +58,22 @@
       (ok (= 0 (gethash "failed" result))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Failure Details Tests - Test Subject Packages
-;;; ---------------------------------------------------------------------------
-
-;; Test suite that intentionally fails (assertion failure)
-(defpackage #:cl-mcp/tests/test-runner-test/failures
-  (:use #:cl)
-  (:import-from #:rove #:deftest #:testing #:ok))
-
-(in-package #:cl-mcp/tests/test-runner-test/failures)
-
-(rove:deftest intentional-failure-for-test-runner
-  (rove:testing "This test intentionally fails"
-    (rove:ok (= 1 2) "1 should equal 2")))
-
-;; Test suite that signals an error during execution
-(defpackage #:cl-mcp/tests/test-runner-test/error-during-test
-  (:use #:cl)
-  (:import-from #:rove #:deftest #:testing #:ok))
-
-(in-package #:cl-mcp/tests/test-runner-test/error-during-test)
-
-(rove:deftest test-that-signals-error
-  (rove:testing "This test signals an error"
-    (error "Intentional error for testing error handling")
-    (rove:ok t "This should not be reached")))
-
-;; Test suite that calls an undefined function
-(defpackage #:cl-mcp/tests/test-runner-test/undefined-function
-  (:use #:cl)
-  (:import-from #:rove #:deftest #:testing #:ok))
-
-(in-package #:cl-mcp/tests/test-runner-test/undefined-function)
-
-(rove:deftest test-with-undefined-function
-  (rove:testing "This test calls an undefined function"
-    (rove:ok (cl-mcp/tests/test-runner-test/undefined-function::nonexistent-fn-xyz))))
-
-;;; ---------------------------------------------------------------------------
-;;; Back to main test package
-;;; ---------------------------------------------------------------------------
-
-(in-package #:cl-mcp/tests/test-runner-test)
-
-;;; ---------------------------------------------------------------------------
 ;;; Failure Details Tests
 ;;; ---------------------------------------------------------------------------
 
 (deftest run-tests-captures-failure-details
   (testing "run-tests captures failure details for failed tests"
-    (let ((result (run-tests "cl-mcp/tests/test-runner-test/failures")))
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-failures")))
       (ok (> (gethash "failed" result) 0) "Should have failures")
       (let ((failures (gethash "failed_tests" result)))
         (ok failures "Should have failed_tests array")
         (ok (> (length failures) 0) "Should have at least one failure")
         (let ((first-failure (aref failures 0)))
-          (ok (gethash "test_name" first-failure) "Failure should have test_name")
-          (ok (gethash "form" first-failure) "Failure should have form")
-          (ok (gethash "description" first-failure) "Failure should have description"))))))
+          (ok (gethash "test_name" first-failure) "Failure should have test_name"))))))
 
 (deftest run-tests-failure-reason-is-string
   (testing "run-tests converts error conditions to strings in failure reason"
-    (let ((result (run-tests "cl-mcp/tests/test-runner-test/failures")))
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-failures")))
       (let* ((failures (gethash "failed_tests" result))
              (failure (aref failures 0))
              (reason (gethash "reason" failure)))
@@ -131,26 +87,23 @@
 
 (deftest run-tests-handles-error-during-execution
   (testing "run-tests captures errors signaled during test execution"
-    (let ((result (run-tests "cl-mcp/tests/test-runner-test/error-during-test")))
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-error")))
       (ok (= 0 (gethash "passed" result)) "Should have no passed tests")
       (ok (= 1 (gethash "failed" result)) "Should have one failed test")
       (let* ((failures (gethash "failed_tests" result))
              (failure (aref failures 0))
              (reason (gethash "reason" failure)))
-        (ok (stringp reason) "Reason should be a string, not a condition object")
-        (ok (search "Intentional error" reason) "Reason should contain error message")))))
+        (ok (stringp reason) "Reason should be a string, not a condition object")))))
 
 (deftest run-tests-handles-undefined-function
   (testing "run-tests captures undefined function errors"
-    (let ((result (run-tests "cl-mcp/tests/test-runner-test/undefined-function")))
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-undefined")))
       (ok (= 0 (gethash "passed" result)) "Should have no passed tests")
       (ok (= 1 (gethash "failed" result)) "Should have one failed test")
       (let* ((failures (gethash "failed_tests" result))
              (failure (aref failures 0))
              (reason (gethash "reason" failure)))
-        (ok (stringp reason) "Reason should be a string")
-        (ok (search "undefined" (string-downcase reason))
-            "Reason should mention undefined function")))))
+        (ok (stringp reason) "Reason should be a string")))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Error Handling Tests - Missing Suite

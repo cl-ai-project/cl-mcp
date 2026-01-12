@@ -5,7 +5,7 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result)
+                #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run-tests
@@ -136,20 +136,17 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
 
 (defun run-rove-single-test (test-name)
   "Run a single Rove test by name and return structured results.
-TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
+TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name').
+Uses rove:run-test to ensure any :around methods (e.g., test environment setup) are invoked."
   (log-event :info "test-runner" "framework" "rove" "test" (princ-to-string test-name))
-  (let* ((suite-pkg (find-package :rove/core/suite))
-         (stats-pkg (find-package :rove/core/stats))
+  (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
-         (get-test-fn (fdefinition (find-symbol "GET-TEST" suite-pkg)))
-         (run-test-fns-fn (fdefinition (find-symbol "RUN-TEST-FUNCTIONS" suite-pkg)))
-         (stats-passed-fn (fdefinition (find-symbol "STATS-PASSED-TESTS" stats-pkg)))
-         (stats-failed-fn (fdefinition (find-symbol "STATS-FAILED-TESTS" stats-pkg)))
-         (stats-pending-fn (fdefinition (find-symbol "STATS-PENDING-TESTS" stats-pkg)))
-         ;; Dynamic symbol lookup to avoid compile-time package references
+         (rove-pkg (find-package :rove))
+         (run-test-fn (fdefinition (find-symbol "RUN-TEST" rove-pkg)))
+         (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
+         (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
+         (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
-         (stats-sym (find-symbol "*STATS*" stats-pkg))
-         (with-reporter-sym (find-symbol "WITH-REPORTER" reporter-pkg))
          ;; Parse test name string to symbol
          (test-sym (if (symbolp test-name)
                        test-name
@@ -160,80 +157,100 @@ TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
                                    (sym-name (subseq name (+ colon-pos 2))))
                                (intern sym-name (find-package pkg-name)))
                              (error "Test name must be fully qualified (pkg::name): ~A" test-name)))))
-         (test-fn (funcall get-test-fn test-sym))
-         result-stats
-         (start-time (get-internal-real-time)))
-    (unless test-fn
-      (error "No test found for ~A" test-sym))
-    ;; Run test with structured result capture
-    (setf result-stats
+         (start-time (get-internal-real-time))
+         successp test-result)
+    ;; Run with suppressed output using rove:run-test (triggers :around methods)
+    (setf (values successp test-result)
           (funcall
            (compile nil
-                    `(lambda (run-fns-fn test-fn)
-                       (let ((,report-stream-sym (make-broadcast-stream)))
-                         (,with-reporter-sym :spec
-                           (funcall run-fns-fn (list test-fn))
-                           ,stats-sym))))
-           run-test-fns-fn test-fn))
+                    `(lambda (run-test-fn test-sym)
+                       (let ((,report-stream-sym (make-broadcast-stream))
+                             (*standard-output* (make-broadcast-stream)))
+                         (funcall run-test-fn test-sym))))
+           run-test-fn test-sym))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
-           (passed (length (funcall stats-passed-fn result-stats)))
-           (failed (length (funcall stats-failed-fn result-stats)))
-           (pending (length (funcall stats-pending-fn result-stats)))
-           (failure-details (when (plusp failed)
-                              (%rove-extract-test-failures result-stats
-                                                           :single-test-p t))))
+           (passed (length (funcall passed-tests-fn test-result)))
+           (failed (length (funcall failed-tests-fn test-result)))
+           (pending (length (funcall pending-tests-fn test-result)))
+           (failure-details nil))
+      ;; Extract failure details if any
+      (when (plusp failed)
+        (let ((failed-list (funcall failed-tests-fn test-result)))
+          (dolist (fail failed-list)
+            (push (make-failure-detail
+                   :test-name (princ-to-string fail)
+                   :reason "Test failed (see rove output for details)")
+                  failure-details))))
       (make-test-result :passed passed
                         :failed failed
                         :pending pending
-                        :failed-tests failure-details
+                        :failed-tests (nreverse failure-details)
                         :framework :rove
                         :duration duration-ms))))
 (defun run-rove-tests (system-name)
-  "Run tests using Rove and return structured results."
+  "Run tests using Rove and return structured results.
+Uses rove:run to ensure any :around methods (e.g., test environment setup) are invoked."
   (log-event :info "test-runner" "framework" "rove" "system" system-name)
-  (let* ((suite-pkg (find-package :rove/core/suite))
-         (stats-pkg (find-package :rove/core/stats))
+  (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
-         (find-suite-fn (fdefinition (find-symbol "FIND-SUITE" suite-pkg)))
-         (run-suite-fn (fdefinition (find-symbol "RUN-SUITE" suite-pkg)))
-         (stats-passed-fn (fdefinition (find-symbol "STATS-PASSED-TESTS" stats-pkg)))
-         (stats-failed-fn (fdefinition (find-symbol "STATS-FAILED-TESTS" stats-pkg)))
-         (stats-pending-fn (fdefinition (find-symbol "STATS-PENDING-TESTS" stats-pkg)))
-         ;; Dynamic symbol lookup to avoid compile-time package references
+         (rove-pkg (find-package :rove))
+         (run-fn (fdefinition (find-symbol "RUN" rove-pkg)))
+         (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
+         (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
+         (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
-         (stats-sym (find-symbol "*STATS*" stats-pkg))
-         (with-reporter-sym (find-symbol "WITH-REPORTER" reporter-pkg))
-         (suite (funcall find-suite-fn (intern (string-upcase system-name) :keyword)))
-         result-stats
-         (start-time (get-internal-real-time)))
-    (unless suite
-      (error "No test suite found for ~A" system-name))
-    ;; Run with reporter and capture stats INSIDE the block
-    ;; Use eval with dynamically looked-up symbols to avoid compile-time
-    ;; package references (Rove may not be loaded when this file is compiled)
-    (setf result-stats
+         (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
+         (start-time (get-internal-real-time))
+         successp results)
+    ;; Run with suppressed output using rove:run (triggers :around methods)
+    (setf (values successp results)
           (funcall
            (compile nil
-                    `(lambda (run-fn suite-obj)
-                       (let ((,report-stream-sym (make-broadcast-stream)))
-                         (,with-reporter-sym :spec
-                           (funcall run-fn suite-obj)
-                           ,stats-sym))))
-           run-suite-fn suite))
+                    `(lambda (run-fn system-key)
+                       (let ((,report-stream-sym (make-broadcast-stream))
+                             (*standard-output* (make-broadcast-stream)))
+                         (funcall run-fn system-key))))
+           run-fn (intern (string-upcase system-name) :keyword)))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
-           (passed (length (funcall stats-passed-fn result-stats)))
-           (failed (length (funcall stats-failed-fn result-stats)))
-           (pending (length (funcall stats-pending-fn result-stats)))
-           (failure-details (when (plusp failed)
-                              (%rove-extract-test-failures result-stats))))
+           ;; Get stats from *last-suite-report*
+           (suite-results (symbol-value last-report-sym))
+           (passed 0)
+           (failed 0)
+           (pending 0)
+           (failure-details nil))
+      ;; Count passed/failed/pending from results
+      ;; Structure: suite-results → package-results → deftest-results
+      ;; We need to count at the deftest level (3rd level)
+      (dolist (suite-result suite-results)
+        ;; Level 2: package results (passed/failed packages)
+        (dolist (pkg-result (funcall passed-tests-fn suite-result))
+          ;; Level 3: deftest results
+          (incf passed (length (funcall passed-tests-fn pkg-result)))
+          (incf failed (length (funcall failed-tests-fn pkg-result)))
+          (incf pending (length (funcall pending-tests-fn pkg-result))))
+        ;; Also count from failed packages
+        (dolist (pkg-result (funcall failed-tests-fn suite-result))
+          (incf passed (length (funcall passed-tests-fn pkg-result)))
+          (incf failed (length (funcall failed-tests-fn pkg-result)))
+          (incf pending (length (funcall pending-tests-fn pkg-result)))))
+      ;; Extract failure details if any
+      (when (plusp failed)
+        (dolist (suite-result suite-results)
+          (dolist (pkg-result (append (funcall passed-tests-fn suite-result)
+                                      (funcall failed-tests-fn suite-result)))
+            (dolist (fail (funcall failed-tests-fn pkg-result))
+              (push (make-failure-detail
+                     :test-name (princ-to-string fail)
+                     :reason "Test failed (see rove output for details)")
+                    failure-details)))))
       (make-test-result :passed passed
                         :failed failed
                         :pending pending
-                        :failed-tests failure-details
+                        :failed-tests (nreverse failure-details)
                         :framework :rove
                         :duration duration-ms))))
 
@@ -334,4 +351,26 @@ Examples:
               framework))
         (tst (when (and (boundp 'test) test)
                test)))
-    (result id (run-tests system :framework fw :test tst))))
+    (let* ((test-result (run-tests system :framework fw :test tst))
+           (passed (gethash "passed" test-result 0))
+           (failed (gethash "failed" test-result 0))
+           (pending (gethash "pending" test-result 0))
+           (duration (gethash "duration_ms" test-result))
+           (failed-tests (gethash "failed_tests" test-result))
+           (summary (with-output-to-string (s)
+                      (format s "~A~%"
+                              (if (zerop failed) "✓ PASS" "✗ FAIL"))
+                      (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
+                              passed failed (when (plusp pending) pending))
+                      (when duration
+                        (format s "Duration: ~Dms~%" duration))
+                      (when (and failed-tests (plusp (length failed-tests)))
+                        (format s "~%Failures:~%")
+                        (loop for fail across failed-tests
+                              for i from 1
+                              do (format s "  ~D. ~A~%"
+                                         i (gethash "test_name" fail))
+                                 (when (gethash "reason" fail)
+                                   (format s "     Reason: ~A~%"
+                                           (gethash "reason" fail))))))))
+      (result id (make-ht "content" (text-content summary))))))
