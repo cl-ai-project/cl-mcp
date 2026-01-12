@@ -151,3 +151,45 @@
           (ok (search "(defmethod resize :before ((s shape) factor) ...)" content))
           (ok (search "(defmethod resize :after ((s shape) factor) ...)" content))
           (ok (search "(defmethod resize :around ((s shape) factor) ...)" content)))))))
+
+
+(deftest lisp-read-file-with-package-qualified-readtable
+  (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
+    (handler-case
+        (progn
+          (ql:quickload :named-readtables :silent t)
+          (ql:quickload :cl-interpol :silent t)
+          ;; Create a test package with a named readtable at runtime
+          ;; to avoid parse-time errors with non-existent package-qualified symbols
+          (let ((test-pkg-name "CL-MCP-TEST-PKG-QUALIFIED-RT"))
+            (when (find-package test-pkg-name)
+              (delete-package test-pkg-name))
+            (unwind-protect
+                 (progn
+                   ;; Create package and register readtable dynamically
+                   (eval `(defpackage ,test-pkg-name
+                            (:use :cl)))
+                   (eval `(in-package ,test-pkg-name))
+                   ;; Copy interpol-syntax to our test package's readtable
+                   (eval `(named-readtables:defreadtable
+                              ,(intern "TEST-INTERPOL" test-pkg-name)
+                            (:merge :interpol-syntax)))
+                   (in-package :cl-mcp/tests/lisp-read-file-test)
+                   ;; Now test reading with package-qualified readtable string
+                   (with-temp-lisp-file "tests/tmp/lisp-read-pkg-qualified-rt.lisp"
+                       (format nil "(in-package :cl-user)~%~%(defun greet-pkg (name)~%  #?\"Hello, ${name}!\")~%")
+                     (lambda (path)
+                       ;; Use the package-qualified format: "pkg:sym"
+                       (let* ((rt-string (format nil "~A:~A" test-pkg-name "TEST-INTERPOL"))
+                              (result (lisp-read-file path :readtable rt-string))
+                              (content (gethash "content" result)))
+                         (ok (stringp content))
+                         (ok (search "(defun greet-pkg" content))))))
+              ;; Cleanup: unregister readtable and delete package
+              (ignore-errors
+               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name)))
+                 (when rt-sym
+                   (named-readtables:unregister-readtable rt-sym))))
+              (ignore-errors (delete-package test-pkg-name)))))
+      (error (e)
+        (skip (format nil "Test dependencies not available: ~A" e))))))
