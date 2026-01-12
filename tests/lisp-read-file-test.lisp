@@ -171,9 +171,11 @@
                             (:use :cl)))
                    (eval `(in-package ,test-pkg-name))
                    ;; Copy interpol-syntax to our test package's readtable
-                   (eval `(named-readtables:defreadtable
-                              ,(intern "TEST-INTERPOL" test-pkg-name)
-                            (:merge :interpol-syntax)))
+                   ;; Use funcall to avoid read-time package resolution
+                   (let ((defreadtable-fn (find-symbol "DEFREADTABLE" :named-readtables)))
+                     (eval `(,defreadtable-fn
+                                ,(intern "TEST-INTERPOL" test-pkg-name)
+                              (:merge :interpol-syntax))))
                    (in-package :cl-mcp/tests/lisp-read-file-test)
                    ;; Now test reading with package-qualified readtable string
                    (with-temp-lisp-file "tests/tmp/lisp-read-pkg-qualified-rt.lisp"
@@ -187,9 +189,10 @@
                          (ok (search "(defun greet-pkg" content))))))
               ;; Cleanup: unregister readtable and delete package
               (ignore-errors
-               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name)))
-                 (when rt-sym
-                   (named-readtables:unregister-readtable rt-sym))))
+               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name))
+                     (unregister-fn (find-symbol "UNREGISTER-READTABLE" :named-readtables)))
+                 (when (and rt-sym unregister-fn)
+                   (funcall unregister-fn rt-sym))))
               (ignore-errors (delete-package test-pkg-name)))))
       (error (e)
         (skip (format nil "Test dependencies not available: ~A" e))))))
