@@ -39,13 +39,52 @@
                           (values string t string string list &optional))
                 repl-eval))
 
+(defun %sanitize-control-chars (string)
+  "Remove control characters that are invalid in JSON strings.
+Removes ANSI escape sequences and other control chars except tab, newline, carriage return."
+  (when (null string)
+    (return-from %sanitize-control-chars string))
+  (let ((result (make-array (length string)
+                            :element-type 'character
+                            :fill-pointer 0
+                            :adjustable t))
+        (i 0)
+        (len (length string)))
+    (loop while (< i len)
+          do (let ((char (char string i)))
+               (cond
+                 ;; ANSI escape sequence: ESC [ ... (ending with letter)
+                 ((and (char= char (code-char 27)) ; ESC
+                       (< (1+ i) len)
+                       (char= (char string (1+ i)) #\[))
+                  ;; Skip until we find a letter (end of ANSI sequence)
+                  (incf i 2)
+                  (loop while (and (< i len)
+                                   (let ((c (char string i)))
+                                     (not (alpha-char-p c))))
+                        do (incf i))
+                  (when (< i len) (incf i))) ; skip the final letter
+                 ;; Keep tab, newline, carriage return
+                 ((member char '(#\Tab #\Newline #\Return))
+                  (vector-push-extend char result)
+                  (incf i))
+                 ;; Remove other control characters (ASCII 0-31)
+                 ((< (char-code char) 32)
+                  (incf i))
+                 ;; Keep normal characters
+                 (t
+                  (vector-push-extend char result)
+                  (incf i)))))
+    (coerce result 'string)))
+
 (defun %truncate-output (string max-output-length)
-  (if (and max-output-length
-           (integerp max-output-length)
-           (> (length string) max-output-length))
-      (concatenate 'string (subseq string 0 max-output-length)
-                   "...(truncated)")
-      string))
+  (let ((sanitized (%sanitize-control-chars string)))
+    (if (and max-output-length
+             (integerp max-output-length)
+             (> (length sanitized) max-output-length))
+        (concatenate 'string (subseq sanitized 0 max-output-length)
+                     "...(truncated)")
+        sanitized)))
 
 (defun %resolve-eval-package (package)
   (let ((pkg (etypecase package
@@ -130,10 +169,10 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                       (uiop:print-backtrace :stream out
                                                             :condition e))))
                             (return-from %do-repl-eval
-                              (values last-value
+                              (values (%truncate-output last-value max-output-length)
                                       last-value
-                                      (get-output-stream-string stdout)
-                                      (get-output-stream-string stderr)
+                                      (%truncate-output (get-output-stream-string stdout) max-output-length)
+                                      (%truncate-output (get-output-stream-string stderr) max-output-length)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
         (let ((forms (%read-all input (not safe-read))))

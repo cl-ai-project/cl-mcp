@@ -139,3 +139,91 @@
       (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
     #-sbcl
     (skip "SBCL-only: SB-C::*COMPILER-TRACE-OUTPUT*")))
+
+(deftest repl-eval-sanitizes-ansi-escape-codes
+  (testing "ANSI escape codes are stripped from stdout"
+    (multiple-value-bind (printed value stdout stderr)
+        ;; Output text with ANSI color codes (ESC[32m = green, ESC[0m = reset)
+        (repl-eval "(progn (format t \"~C[32mgreen~C[0m\" (code-char 27) (code-char 27)) :ok)")
+      (declare (ignore value stderr))
+      (ok (string= printed ":OK"))
+      ;; ANSI codes should be stripped, leaving just "green"
+      (ok (string= stdout "green"))
+      ;; Verify no ESC character remains
+      (ok (not (find (code-char 27) stdout)))))) ; ESC
+
+(deftest repl-eval-sanitizes-control-chars
+  (testing "control characters are stripped from output"
+    (multiple-value-bind (printed value stdout stderr)
+        ;; Output with control characters (bell, backspace)
+        (repl-eval "(progn (format t \"hello~Cworld~Ctest\" (code-char 7) (code-char 8)) :ok)")
+      (declare (ignore value stderr))
+      (ok (string= printed ":OK"))
+      ;; Control chars should be removed
+      (ok (string= stdout "helloworldtest"))
+      ;; Verify no control chars remain (except allowed ones)
+      (ok (not (find-if (lambda (c)
+                          (and (< (char-code c) 32)
+                               (not (member c '(#\Tab #\Newline #\Return)))))
+                        stdout))))))
+
+(defun %has-control-chars-p (string)
+  "Check if STRING contains any disallowed control characters."
+  (and string
+       (find-if (lambda (c)
+                  (and (< (char-code c) 32)
+                       (not (member c '(#\Tab #\Newline #\Return)))))
+                string)))
+
+(deftest repl-eval-no-control-chars-in-printed
+  (testing "printed result never contains control characters"
+    ;; Test with a value that contains control chars when printed
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(format nil \"result~C~Cend\" (code-char 7) (code-char 27))")
+      (declare (ignore value stdout stderr))
+      (ok (not (%has-control-chars-p printed))
+          "printed should not contain control characters"))))
+
+(deftest repl-eval-no-control-chars-in-stderr
+  (testing "stderr never contains control characters"
+    (multiple-value-bind (printed value stdout stderr)
+        ;; Output ANSI codes and control chars to stderr
+        (repl-eval "(progn (format *error-output* \"~C[31merror~C[0m~Cbeep\" (code-char 27) (code-char 27) (code-char 7)) :done)")
+      (declare (ignore printed value stdout))
+      (ok (not (%has-control-chars-p stderr))
+          "stderr should not contain control characters")
+      (ok (not (find (code-char 27) stderr)) ; ESC
+          "stderr should not contain ESC character")
+      (ok (string= stderr "errorbeep")
+          "ANSI codes and control chars should be stripped from stderr"))))
+
+(deftest repl-eval-no-control-chars-in-error-output
+  (testing "error messages never contain control characters"
+    (multiple-value-bind (printed value stdout stderr)
+        ;; Trigger an error - the error message should be sanitized
+        (repl-eval "(error \"fail~Cbeep\" (code-char 7))")
+      (declare (ignore value stdout stderr))
+      (ok (not (%has-control-chars-p printed))
+          "error output should not contain control characters"))))
+
+(deftest repl-eval-all-outputs-sanitized
+  (testing "all output streams are sanitized comprehensively"
+    (multiple-value-bind (printed value stdout stderr)
+        ;; Comprehensive test: control chars in stdout, stderr, and result
+        (repl-eval
+         "(progn
+            (format t \"out~C\" (code-char 8))
+            (format *error-output* \"err~C\" (code-char 7))
+            (format nil \"res~C\" (code-char 27)))")
+      (declare (ignore value))
+      ;; All outputs should be free of control characters
+      (ok (not (%has-control-chars-p printed))
+          "printed should be sanitized")
+      (ok (not (%has-control-chars-p stdout))
+          "stdout should be sanitized")
+      (ok (not (%has-control-chars-p stderr))
+          "stderr should be sanitized")
+      ;; Verify content is preserved (minus control chars)
+      (ok (search "out" stdout) "stdout content preserved")
+      (ok (search "err" stderr) "stderr content preserved")
+      (ok (search "res" printed) "printed content preserved"))))
