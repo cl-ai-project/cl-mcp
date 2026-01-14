@@ -95,6 +95,7 @@ Returns the complete list of nodes (including previously collected NODES)."
                                       :start-line (%pos->line start-pos)
                                       :end-line (%pos->line end-pos))))
             (push node nodes)))))))
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defmethod make-expression-result ((client parse-result-client)
                                      result children source)

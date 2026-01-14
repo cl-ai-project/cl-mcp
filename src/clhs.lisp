@@ -103,6 +103,7 @@ Each subsection letter corresponds to a=1, b=2, c=3, etc."
   (and (> (length string) 0)
        (every (lambda (c) (or (digit-char-p c) (char= c #\.))) string)
        (digit-char-p (char string 0))))
+
 (defun clhs-lookup-section (section-string &key (include-content t))
   "Look up a section number (e.g., '22.3') in the Common Lisp HyperSpec.
 Returns a hash table with:

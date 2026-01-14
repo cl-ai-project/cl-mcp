@@ -189,6 +189,7 @@ Uses rove:run-test to ensure any :around methods (e.g., test environment setup) 
                         :failed-tests (nreverse failure-details)
                         :framework :rove
                         :duration duration-ms))))
+
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
 Uses rove:run to ensure any :around methods (e.g., test environment setup) are invoked."

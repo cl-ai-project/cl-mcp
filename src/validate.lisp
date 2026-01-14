@@ -116,6 +116,7 @@
      (setf (scan-state-col state) 1))
     (t
      (incf (scan-state-col state)))))
+
 (defun %scan-parens (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column."
