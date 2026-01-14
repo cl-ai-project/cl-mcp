@@ -396,6 +396,7 @@ then clean up."
               (ignore-errors (delete-package test-pkg-name)))))
       (error (e)
         (skip (format nil "Test dependencies not available: ~A" e))))))
+
 (deftest lisp-edit-form-multiple-matches-error
   (testing "multiple matches without index signals descriptive error"
     (with-temp-file "tests/tmp/edit-form-multi-match.lisp"
