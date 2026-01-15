@@ -84,6 +84,7 @@
                     (first processed-lines)
                     (make-string remaining :initial-element #\))))))
   processed-lines)
+
 (defun apply-indent-mode (text)
   "Apply a minimal Parinfer-like indent mode to TEXT.
 Closes open forms when indentation decreases, drops excessive closing parens,

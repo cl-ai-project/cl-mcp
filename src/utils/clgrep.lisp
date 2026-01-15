@@ -172,6 +172,7 @@
           finally (when (< start (length text))
                     (push (subseq text start) lines)))
     (nreverse lines)))
+
 (defun truncate-form (form-text target-line form-start-line context-lines)
   "Truncate FORM-TEXT if longer than 2000 chars, keeping CONTEXT-LINES around TARGET-LINE."
   (if (<= (length form-text) 2000)
@@ -468,6 +469,7 @@
          form-name)
         ;; Other definitions: just the name
         (t form-name)))))
+
 (defun extract-package-for-line (content line-number)
   "Extract the package name that is active at LINE-NUMBER in CONTENT.
    Returns the package name as a string, or NIL if not found.

@@ -24,6 +24,7 @@
        (setf cl-mcp/src/project-root:*project-root* original-root)
        (when original-cwd
          (ignore-errors (uiop:chdir original-cwd))))))
+
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
     (with-test-project-root
@@ -126,6 +127,7 @@
           (ok (stringp (gethash "cwd" result)))
           (ok (member (gethash "project_root_source" result)
                       '("env" "explicit") :test #'string=)))))))
+
 (deftest tools-call-code-find
   (testing "tools/call code-find returns path and line"
     (let ((req (concatenate 'string
@@ -489,6 +491,7 @@
           (ok (arrayp matches))
           ;; With case_insensitive=true, "DEFUN" should match "(defun"
           (ok (> (length matches) 0) "case_insensitive=true should match lowercase"))))))
+
 (deftest tools-call-repl-eval-safe-read-false
   (testing "tools/call repl-eval with safe_read=false allows reader evaluation"
     (let ((req (concatenate 'string
