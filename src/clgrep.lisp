@@ -6,6 +6,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
                 #:resolve-path-in-project)
+  (:import-from #:cl-mcp/src/utils/hash
+                #:alist-to-hash-table)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -16,6 +18,7 @@
                 #:encode)
   (:export
    #:clgrep-search))
+
 (in-package #:cl-mcp/src/clgrep)
 
 ;; Path resolution is now handled by cl-mcp/src/utils/paths:resolve-path-in-project
@@ -78,16 +81,10 @@ Returns a list of alists, each containing:
                "matches" (length results))
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
 
-(defun %alist-to-hash-table (alist)
-  "Convert an alist to a hash table for JSON encoding."
-  (let ((ht (make-hash-table :test #'equal)))
-    (dolist (pair alist ht)
-      (setf (gethash (string-downcase (symbol-name (car pair))) ht)
-            (cdr pair)))))
-
 (defun %format-clgrep-results (results)
   "Convert clgrep results (list of alists) to a vector of hash tables."
-  (map 'vector #'%alist-to-hash-table results))
+  (map 'vector #'alist-to-hash-table results))
+
 
 (define-tool "clgrep-search"
   :description "Perform semantic grep search for a pattern in Lisp files.

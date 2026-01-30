@@ -1,7 +1,9 @@
 (defpackage #:cl-mcp/tests/utils-hash-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/utils/hash
-                #:make-string-hash-table))
+                #:make-string-hash-table
+                #:alist-to-hash-table))
+
 
 (in-package #:cl-mcp/tests/utils-hash-test)
 
@@ -47,3 +49,24 @@
       (ok (hash-table-p (gethash "nested" outer)))
       (ok (string= (gethash "inner-key" (gethash "nested" outer))
                    "inner-value")))))
+
+(deftest alist-to-hash-table-empty
+  (testing "creates empty hash table from empty alist"
+    (let ((h (alist-to-hash-table '())))
+      (ok (hash-table-p h))
+      (ok (zerop (hash-table-count h)))
+      (ok (eq (hash-table-test h) 'equal)))))
+
+(deftest alist-to-hash-table-symbol-keys
+  (testing "converts symbol keys to lowercase strings"
+    (let ((h (alist-to-hash-table '((:name . "foo") (:count . 42)))))
+      (ok (= (hash-table-count h) 2))
+      (ok (string= (gethash "name" h) "foo"))
+      (ok (= (gethash "count" h) 42)))))
+
+(deftest alist-to-hash-table-string-keys
+  (testing "preserves string keys as-is"
+    (let ((h (alist-to-hash-table '(("Name" . "foo") ("COUNT" . 42)))))
+      (ok (= (hash-table-count h) 2))
+      (ok (string= (gethash "Name" h) "foo"))
+      (ok (= (gethash "COUNT" h) 42)))))

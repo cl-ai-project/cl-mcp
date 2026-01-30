@@ -7,20 +7,12 @@
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p
                 #:register-object)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:safe-prin1)
   (:export #:capture-error-context))
 
-(in-package #:cl-mcp/src/frame-inspector)
 
-(defun %safe-format-value (value print-level print-length)
-  "Safely format VALUE to string, handling errors during printing."
-  (handler-case
-      (let ((*print-level* print-level)
-            (*print-length* print-length)
-            (*print-readably* nil)
-            (*print-circle* t))
-        (prin1-to-string value))
-    (error (e)
-      (format nil "#<error printing: ~A>" (type-of e)))))
+(in-package #:cl-mcp/src/frame-inspector)
 
 (defun %collect-restarts ()
   "Return list of available restarts with names and descriptions."
@@ -47,10 +39,10 @@ Non-primitive values are registered in the object registry for drill-down inspec
                                     (register-object val))))
                   (push (if object-id
                             (list :name (symbol-name sym)
-                                  :value (%safe-format-value val print-level print-length)
+                                  :value (safe-prin1 val :level print-level :length print-length)
                                   :object-id object-id)
                             (list :name (symbol-name sym)
-                                  :value (%safe-format-value val print-level print-length)))
+                                  :value (safe-prin1 val :level print-level :length print-length)))
                         locals))
               (error () nil))))
       (error () nil))

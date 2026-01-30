@@ -6,23 +6,16 @@
                 #:inspectable-p
                 #:register-object
                 #:lookup-object)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:safe-prin1)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:inspect-object-by-id))
 
-(in-package #:cl-mcp/src/inspect)
 
-(defun %safe-prin1 (object)
-  "Safely convert OBJECT to string, handling errors."
-  (handler-case
-      (let ((*print-readably* nil)
-            (*print-level* 3)
-            (*print-length* 10))
-        (prin1-to-string object))
-    (error (e)
-      (format nil "#<error printing: ~A>" e))))
+(in-package #:cl-mcp/src/inspect)
 
 (defun %type-name (object)
   "Return the type name of OBJECT as a string."
@@ -55,7 +48,7 @@
          (setf (gethash "package" ht) (package-name (symbol-package object))))
        ht))
     (t
-     (make-ht "value" (%safe-prin1 object)
+     (make-ht "value" (safe-prin1 object)
               "type" (%type-name object)))))
 
 (defun %make-object-ref (object visited-table)
@@ -72,7 +65,7 @@ VISITED-TABLE is used for circular reference detection."
           (setf (gethash object visited-table) id)
           (make-ht "kind" "object-ref"
                    "id" id
-                   "summary" (%safe-prin1 object)
+                   "summary" (safe-prin1 object)
                    "type" (%type-name object))))))
 
 (defun %value-repr (object visited-table depth max-depth max-elements)
@@ -110,7 +103,7 @@ Returns either a primitive value representation or an object-ref."
                      "value" (%value-repr current visited-table depth max-depth max-elements))
             elements))
     (let ((ht (make-ht "kind" "list"
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "elements" (nreverse elements))))
       (setf (gethash "meta" ht)
             (make-ht "length" (if truncated (format nil ">~A" max-elements) count)
@@ -126,7 +119,7 @@ Returns either a primitive value representation or an object-ref."
                          collect (%value-repr (aref object i) visited-table depth max-depth max-elements)))
          (truncated (> len max-elements)))
     (let ((ht (make-ht "kind" "array"
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "element_type" (let ((et (array-element-type object)))
                                         (if (eq et t) "T" (prin1-to-string et)))
                        "dimensions" (list len)
@@ -146,7 +139,7 @@ Returns either a primitive value representation or an object-ref."
                          collect (%value-repr (row-major-aref object i) visited-table depth max-depth max-elements)))
          (truncated (> total max-elements)))
     (let ((ht (make-ht "kind" "array"
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "element_type" (let ((et (array-element-type object)))
                                         (if (eq et t) "T" (prin1-to-string et)))
                        "dimensions" dims
@@ -174,7 +167,7 @@ Returns either a primitive value representation or an object-ref."
                  (incf count))
                object))
     (let ((ht (make-ht "kind" "hash-table"
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "test" (symbol-name (hash-table-test object))
                        "entries" (nreverse entries))))
       (setf (gethash "meta" ht)
@@ -199,11 +192,11 @@ Returns either a primitive value representation or an object-ref."
                 (setf lambda-list (funcall lambda-list-fn object))))))
       (error () nil))
     (let ((ht (make-ht "kind" "function"
-                       "summary" (%safe-prin1 object))))
+                       "summary" (safe-prin1 object))))
       (when name
-        (setf (gethash "name" ht) (%safe-prin1 name)))
+        (setf (gethash "name" ht) (safe-prin1 name)))
       (when lambda-list
-        (setf (gethash "lambda_list" ht) (%safe-prin1 lambda-list)))
+        (setf (gethash "lambda_list" ht) (safe-prin1 lambda-list)))
       ht)))
 
 #+sbcl
@@ -248,7 +241,7 @@ Returns either a primitive value representation or an object-ref."
       (error () nil))  ; Silently ignore if internal API not available
     (let ((ht (make-ht "kind" "structure"
                        "class" class-name
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "slots" (nreverse slots))))
       (setf (gethash "meta" ht)
             (make-ht "slot_count" (length slots)))
@@ -284,7 +277,7 @@ Returns either a primitive value representation or an object-ref."
     nil  ; Non-SBCL fallback: no slot introspection
     (let ((ht (make-ht "kind" "instance"
                        "class" class-name
-                       "summary" (%safe-prin1 object)
+                       "summary" (safe-prin1 object)
                        "slots" (nreverse slots))))
       (setf (gethash "meta" ht)
             (make-ht "slot_count" (length slots)))
@@ -318,7 +311,7 @@ Returns either a primitive value representation or an object-ref."
     ;; Fallback: other types
     (t
      (make-ht "kind" "other"
-              "summary" (%safe-prin1 object)
+              "summary" (safe-prin1 object)
               "type" (%type-name object)))))
 
 (defun inspect-object-by-id (id &key (max-depth 1) (max-elements 50))

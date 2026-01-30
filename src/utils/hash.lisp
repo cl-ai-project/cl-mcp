@@ -1,6 +1,8 @@
 (defpackage #:cl-mcp/src/utils/hash
   (:use #:cl)
-  (:export #:make-string-hash-table))
+  (:export #:make-string-hash-table
+           #:alist-to-hash-table))
+
 
 (in-package #:cl-mcp/src/utils/hash)
 
@@ -29,3 +31,28 @@ Examples:
           do (setf (gethash k h) v))
     h))
 
+(declaim (ftype (function (list) hash-table) alist-to-hash-table))
+
+(defun alist-to-hash-table (alist)
+  "Convert an association list to a hash table with EQUAL test.
+Keys that are symbols are converted to lowercase strings.
+
+Arguments:
+  ALIST -- An association list where each element is (key . value).
+           Symbol keys are converted via (string-downcase (symbol-name key)).
+
+Returns:
+  A hash table with :TEST #'EQUAL containing the converted pairs.
+
+Examples:
+  (alist-to-hash-table '((:name . \"foo\") (:count . 42)))
+  => #<HASH-TABLE :TEST EQUAL :COUNT 2>
+  ;; with keys \"name\" and \"count\""
+  (declare (type list alist))
+  (let ((ht (make-hash-table :test #'equal)))
+    (dolist (pair alist ht)
+      (setf (gethash (if (symbolp (car pair))
+                         (string-downcase (symbol-name (car pair)))
+                         (car pair))
+                     ht)
+            (cdr pair)))))
