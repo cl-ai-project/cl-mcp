@@ -17,15 +17,21 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:normalize-path-for-display)
+  (:import-from #:cl-mcp/src/utils/strings
+                #:ensure-trailing-newline)
   (:import-from #:cl-ppcre
                 #:scan
                 #:create-scanner)
   (:import-from #:uiop
                 #:ensure-pathname
-                #:pathname-type
-                #:native-namestring)
+                #:pathname-type)
   (:export #:lisp-read-file
            #:lisp-source-path-p))
+
+
+
 
 (in-package #:cl-mcp/src/lisp-read-file)
 
@@ -53,7 +59,9 @@
     (create-scanner pattern)))
 
 (defun %normalize-path (pathname)
-  (uiop:native-namestring pathname))
+  "Return a display-friendly path, relative to project root when possible."
+  (normalize-path-for-display pathname))
+
 
 (defun %docstring-first-line (string)
   (when (stringp string)
@@ -133,12 +141,6 @@ For defmethod, includes qualifiers like :before, :after, :around."
 (defun %comment-text (node text)
   (subseq text (cst-node-start node) (cst-node-end node)))
 
-(defun %ensure-trailing-newline (string)
-  (if (and (> (length string) 0)
-           (char= (char string (1- (length string))) #\Newline))
-      string
-      (concatenate 'string string (string #\Newline))))
-
 (defun %line-number-width (line-count)
   (max 1 (length (write-to-string line-count))))
 
@@ -200,44 +202,47 @@ For defmethod, includes qualifiers like :before, :after, :around."
                    (incf comment))))))
     (values source comment blank)))
 
-(defun %format-lisp-file (text name-scanner content-scanner include-comments comment-context
-                          &key readtable)
+(defun %format-lisp-file
+       (text name-scanner content-scanner include-comments comment-context
+        &key readtable)
   (multiple-value-bind (source-lines-count comment-lines blank-lines)
       (%line-stats text)
     (let* ((nodes (parse-top-level-forms text :readtable readtable))
            (line-width (%line-number-width source-lines-count))
            (expanded 0)
            (total-forms 0)
-           (display (with-output-to-string (out)
-                      (let ((pending-comments '()))
-                        (dolist (node nodes)
-                          (cond
-                            ((and include-comments (%comment-node-p node))
-                             (let ((comment (%ensure-trailing-newline
-                                             (%comment-text node text))))
-                               (cond
-                                 ((string= comment-context "all")
-                                  (write-string comment out))
-                                 ((string= comment-context "preceding")
-                                  (push comment pending-comments)))))
-                            ((and (typep node 'cst-node)
-                                  (eq (cst-node-kind node) :expr))
-                             (incf total-forms)
-                             (when (and include-comments pending-comments)
-                               (dolist (comment (nreverse pending-comments))
-                                 (write-string comment out))
-                               (setf pending-comments '()))
-                             (multiple-value-bind (line expanded?)
-                                 (%format-lisp-form node name-scanner content-scanner line-width)
-                               (when expanded? (incf expanded))
-                               (write-string (%ensure-trailing-newline line) out)))
-                            (t
-                             (setf pending-comments '()))))
-                        (when (and include-comments
-                                   (string/= comment-context "none")
-                                   pending-comments)
-                          (dolist (comment (nreverse pending-comments))
-                            (write-string comment out)))))))
+           (display
+            (with-output-to-string (out)
+              (let ((pending-comments 'nil))
+                (dolist (node nodes)
+                  (cond
+                   ((and include-comments (%comment-node-p node))
+                    (let ((comment
+                           (ensure-trailing-newline
+                            (%comment-text node text))))
+                      (cond
+                       ((string= comment-context "all")
+                        (write-string comment out))
+                       ((string= comment-context "preceding")
+                        (push comment pending-comments)))))
+                   ((and (typep node 'cst-node)
+                         (eq (cst-node-kind node) :expr))
+                    (incf total-forms)
+                    (when (and include-comments pending-comments)
+                      (dolist (comment (nreverse pending-comments))
+                        (write-string comment out))
+                      (setf pending-comments 'nil))
+                    (multiple-value-bind (line expanded?)
+                        (%format-lisp-form node name-scanner content-scanner
+                         line-width)
+                      (when expanded? (incf expanded))
+                      (write-string (ensure-trailing-newline line) out)))
+                   (t (setf pending-comments 'nil))))
+                (when
+                    (and include-comments (string/= comment-context "none")
+                         pending-comments)
+                  (dolist (comment (nreverse pending-comments))
+                    (write-string comment out)))))))
       (values display
               (let ((meta (make-hash-table :test #'equal)))
                 (setf (gethash "total_forms" meta) total-forms
@@ -247,6 +252,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
                       (gethash "blank_lines" meta) blank-lines
                       (gethash "source_lines" meta) source-lines-count)
                 meta)))))
+
 
 (defun %read-lines-slice (pathname offset limit)
   "Return three values: sliced text, truncated?, and total line count."
