@@ -20,7 +20,10 @@
   (:import-from #:cl-mcp/tests/parinfer-test)
   (:import-from #:cl-mcp/tests/http-test)
   (:import-from #:cl-mcp/tests/clgrep-utils-test)
-  (:import-from #:cl-mcp/tests/clgrep-test))
+  (:import-from #:cl-mcp/tests/clgrep-test)
+  (:import-from #:cl-mcp/tests/utils-strings-test)
+  (:import-from #:cl-mcp/tests/utils-hash-test))
+
 
 (in-package #:cl-mcp/tests)
 

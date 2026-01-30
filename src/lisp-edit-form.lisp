@@ -28,12 +28,15 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/strings
+                #:ensure-trailing-newline)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
                 #:native-namestring
                 #:subpathp)
   (:export #:lisp-edit-form))
+
 
 (in-package #:cl-mcp/src/lisp-edit-form)
 
@@ -82,12 +85,6 @@ Candidates are generated in order of specificity:
       ((symbolp name)
        (list (%normalize-string name)))
       (t (list (%normalize-string name))))))
-
-(defun %ensure-trailing-newline (string)
-  (if (and (> (length string) 0)
-           (char= (char string (1- (length string))) #\Newline))
-      string
-      (concatenate 'string string (string #\Newline))))
 
 (defun %ensure-blank-separation (prefix between)
   "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
@@ -210,7 +207,7 @@ If multiple matches exist without an index, signals an error with candidate info
         (end (cst-node-end node))
         (snippet (ecase operation
                    ((:replace) content)
-                   ((:insert-before :insert-after) (%ensure-trailing-newline content)))))
+                   ((:insert-before :insert-after) (ensure-trailing-newline content)))))
     (ecase operation
       (:replace
        (concatenate 'string (subseq text 0 start) snippet (subseq text end)))
@@ -232,6 +229,7 @@ If multiple matches exist without an index, signals an error with candidate info
               (rest (subseq suffix ws-end))
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
+
 
 (defun lisp-edit-form (&key file-path form-type form-name operation content dry-run readtable)
   "Structured edit of a top-level Lisp form.

@@ -15,6 +15,8 @@
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
@@ -34,6 +36,7 @@
    #:process-json-line))
 
 
+
 (in-package #:cl-mcp/src/protocol)
 
 (defparameter +protocol-version+ "2025-11-25")
@@ -51,24 +54,18 @@
   (with-output-to-string (stream)
     (yason:encode obj stream)))
 
-(defun %make-ht (&rest kvs)
-  (let ((h (make-hash-table :test #'equal)))
-    (loop for (k v) on kvs by #'cddr
-          do (setf (gethash k h) v))
-    h))
-
 (defun %result (id payload)
-  (%make-ht "jsonrpc" "2.0" "id" id "result" payload))
+  (make-ht "jsonrpc" "2.0" "id" id "result" payload))
 
 (defun %error (id code message &optional data)
-  (let* ((err (%make-ht "code" code "message" message))
-         (obj (%make-ht "jsonrpc" "2.0" "id" id "error" err)))
+  (let* ((err (make-ht "code" code "message" message))
+         (obj (make-ht "jsonrpc" "2.0" "id" id "error" err)))
     (when data (setf (gethash "data" err) data))
     obj))
 
 (defun %text-content (text)
   "Return a one-element content vector with TEXT as a text part."
-  (vector (%make-ht "type" "text" "text" text)))
+  (vector (make-ht "type" "text" "text" text)))
 
 (defun %tool-error (state id message)
   "Return a tool input validation error in the appropriate format.
@@ -78,7 +75,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
            (protocol-version state)
            (string>= (protocol-version state) "2025-11-25"))
       ;; New format: Tool Execution Error with isError flag
-      (%result id (%make-ht "content" (%text-content message) "isError" t))
+      (%result id (make-ht "content" (%text-content message) "isError" t))
       ;; Old format: JSON-RPC Protocol Error
       (%error id -32602 message)))
 
@@ -113,16 +110,16 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
           (cond (supported supported)
                 ((null client-ver) (first +supported-protocol-versions+))
                 (t nil)))
-         (caps (%make-ht "tools" (%make-ht "listChanged" t))))
+         (caps (make-ht "tools" (make-ht "listChanged" t))))
     (if (null chosen)
         (%error id -32602
                 (format nil "Unsupported protocolVersion ~A" client-ver)
-                (%make-ht "supportedVersions" +supported-protocol-versions+))
+                (make-ht "supportedVersions" +supported-protocol-versions+))
         (progn
           (setf (protocol-version state) chosen)
           (%result id
-                   (%make-ht "protocolVersion" chosen "serverInfo"
-                             (%make-ht "name" "cl-mcp" "version" (version))
+                   (make-ht "protocolVersion" chosen "serverInfo"
+                             (make-ht "name" "cl-mcp" "version" (version))
                              "capabilities" caps))))))
 
 (defun handle-notification (state method params)
@@ -133,7 +130,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
-  (%result id (%make-ht "tools" (get-all-tool-descriptors))))
+  (%result id (make-ht "tools" (get-all-tool-descriptors))))
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -183,7 +180,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     ((string= method "tools/call")
      (or (handle-asdf-tools-call id params)
          (handle-tools-call state id params)))
-    ((string= method "ping") (%result id (%make-ht)))
+    ((string= method "ping") (%result id (make-ht)))
     (t (%error id -32601 (format nil "Method ~A not found" method)))))
 
 (defun process-json-line (line &optional (state (make-state)))
