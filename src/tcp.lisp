@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
+  (:import-from #:cl-mcp/src/utils/system
+                #:fd-count)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:usocket)
   (:export
@@ -40,9 +42,6 @@ Does not disconnect on timeout to allow idle clients (e.g. AI agents thinking)."
 
 (defparameter *tcp-conn-counter* 0
   "Monotonic counter used to tag connections in logs.")
-
-(defun %fd-count ()
-  (ignore-errors (length (directory #P"/proc/self/fd/*"))))
 
 (defun tcp-server-running-p ()
   "Return T when a background TCP server thread is alive."
@@ -196,7 +195,7 @@ successfully started, or NIL if the start attempt failed."
       (when client (ignore-errors (usocket:socket-close client)))
       (log-event :info "tcp.conn.closed"
                  "conn" conn-id
-                 "fd" (%fd-count)))))
+                 "fd" (fd-count)))))
 
 (defun %tcp-accept-loop (listener accept-once)
   (loop while (not *tcp-stop-flag*)

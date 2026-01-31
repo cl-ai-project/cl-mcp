@@ -58,11 +58,6 @@
       (error "Pattern must be a string or NIL"))
     (create-scanner pattern)))
 
-(defun %normalize-path (pathname)
-  "Return a display-friendly path, relative to project root when possible."
-  (normalize-path-for-display pathname))
-
-
 (defun %docstring-first-line (string)
   (when (stringp string)
     (let* ((pos (or (position #\Newline string) (length string)))
@@ -375,7 +370,7 @@ Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"me
                                  :readtable readtable)
       (let ((payload (make-hash-table :test #'equal)))
         (setf (gethash "content" payload) content
-              (gethash "path" payload) (%normalize-path resolved)
+              (gethash "path" payload) (normalize-path-for-display resolved)
               (gethash "mode" payload) mode
               (gethash "meta" payload) meta)
         payload))))

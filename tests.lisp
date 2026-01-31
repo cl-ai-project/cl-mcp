@@ -23,7 +23,8 @@
   (:import-from #:cl-mcp/tests/clgrep-test)
   (:import-from #:cl-mcp/tests/utils-strings-test)
   (:import-from #:cl-mcp/tests/utils-hash-test)
-  (:import-from #:cl-mcp/tests/utils-printing-test))
+  (:import-from #:cl-mcp/tests/utils-printing-test)
+  (:import-from #:cl-mcp/tests/utils-system-test))
 
 
 
