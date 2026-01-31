@@ -88,10 +88,28 @@ validation:
               (ok (stringp (version)))))
           ```
 
+          📦 Package-Inferred System Registration:
+          This project uses ASDF's `package-inferred-system`. To register new test files:
+
+          1. Add `:import-from` to `tests.lisp`:
+             ```lisp
+             (defpackage #:cl-mcp/tests
+               ...
+               (:import-from #:cl-mcp/tests/new-module-test))
+             ```
+          2. That's it! No changes to `.asd` files are required.
+
+          ASDF automatically infers dependencies from `:import-from` declarations.
+          The test system `cl-mcp/tests` loads all imported test packages.
+
+          ❌ WRONG: Editing cl-mcp.asd to add test dependencies manually
+          ✅ CORRECT: Adding `:import-from` to tests.lisp
+
           ⚠️ CRITICAL:
           - Do not use `cl-test` or `fiveam`; use `rove`.
           - Ensure tests do not leave background threads running (cleanup with `unwind-protect`).
           - Tests must be runnable via `(asdf:test-system "cl-mcp")`.
+          - Verify new test files are imported in `tests.lisp`.
 
       - name: security_and_safety
         prompt: |
