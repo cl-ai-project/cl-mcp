@@ -11,7 +11,7 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
-                #:allowed-read-path-p
+                #:allowed-read-path
                 #:ensure-write-path)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
@@ -61,7 +61,7 @@
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
 Signals an error when PATH is outside the allow-list."
-  (let ((pn (allowed-read-path-p path)))
+  (let ((pn (allowed-read-path path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     pn))
@@ -73,7 +73,7 @@ Returns the content string."
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
     (error "limit must be an integer"))
-  (let ((pn (allowed-read-path-p path)))
+  (let ((pn (allowed-read-path path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     (log-event :debug "fs.read.open"
@@ -132,7 +132,7 @@ Returns T on success."
 (defun fs-list-directory (path)
   "List directory entries at PATH respecting read allow-list.
 Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)."
-  (let ((pn (allowed-read-path-p path)))
+  (let ((pn (allowed-read-path path)))
     (unless pn
       (error "Read not permitted for path ~A" path))
     (unless (uiop:directory-exists-p pn)

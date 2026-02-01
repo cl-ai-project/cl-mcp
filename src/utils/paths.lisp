@@ -10,7 +10,7 @@
   (:export #:ensure-project-root
            #:path-inside-p
            #:canonical-path
-           #:allowed-read-path-p
+           #:allowed-read-path
            #:ensure-write-path
            #:resolve-path-in-project
            #:normalize-path-for-display))
@@ -40,13 +40,14 @@ current working directory to synchronize the server's project root."
            (length (asdf/system-registry:registered-systems)))))
 
 (declaim (ftype (function ((or null string pathname) (or null string pathname))
-                           (or null pathname))
+                           boolean)
                 path-inside-p))
 (defun path-inside-p (child parent)
   "Return T when CHILD pathname is a subpath of directory PARENT.
 Handles NIL and relative paths gracefully."
   (and child parent
-       (uiop/pathname:subpathp child parent)))
+       (uiop/pathname:subpathp child parent)
+       t))
 
 (declaim (ftype (function ((or string pathname)
                            &key (:relative-to (or null string pathname)))
@@ -68,8 +69,8 @@ If RELATIVE-TO is NIL, uses *project-root* as the base."
     (uiop/pathname:ensure-pathname abs :want-relative nil)))
 
 (declaim (ftype (function ((or string pathname)) (or null pathname))
-                allowed-read-path-p))
-(defun allowed-read-path-p (pn)
+                allowed-read-path))
+(defun allowed-read-path (pn)
   "Return PN (as absolute pathname) if readable per policy, else NIL.
 Allows project-root subpaths and source dirs of registered ASDF systems."
   (ensure-project-root)
@@ -80,13 +81,13 @@ Allows project-root subpaths and source dirs of registered ASDF systems."
          (project-ok (path-inside-p normalized-abs
                                     (uiop/pathname:ensure-directory-pathname *project-root*))))
     (when project-ok
-      (return-from allowed-read-path-p normalized-abs))
+      (return-from allowed-read-path normalized-abs))
     ;; Check ASDF system directories
     (let ((systems (asdf/system-registry:registered-systems)))
       (dolist (name systems)
         (let ((dir (ignore-errors (asdf/system:system-source-directory name))))
           (when (and dir (path-inside-p normalized-abs dir))
-            (return-from allowed-read-path-p normalized-abs)))))
+            (return-from allowed-read-path normalized-abs)))))
     nil))
 
 (declaim (ftype (function ((or string pathname)) pathname) ensure-write-path))
