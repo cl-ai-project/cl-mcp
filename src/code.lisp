@@ -90,11 +90,6 @@ Returns NIL when the file cannot be read."
                    "error" (princ-to-string e))
         nil))))
 
-(defun %normalize-path (pathname)
-  "Return a namestring, relative to *project-root* when possible.
-Delegates to normalize-path-for-display from paths module."
-  (normalize-path-for-display pathname))
-
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) &optional))
                 code-find-definition))
@@ -117,7 +112,7 @@ Values are PATH (string) and LINE (integer), or NILs when not found."
         (let* ((pathname (funcall path-fn source))
                (char-offset (and offset (funcall offset source)))
                (line (%offset->line pathname char-offset))
-               (path (%normalize-path pathname)))
+               (path (normalize-path-for-display pathname)))
           (return-from code-find-definition (values path line))))
       (log-event :warn "code.find.not-found" "symbol" symbol-name)
       (values nil nil))
@@ -196,7 +191,7 @@ Returns T for any path when *project-root* is not set."
   (let* ((pathname (and path-fn (funcall path-fn source)))
          (char-offset (and offset-fn (funcall offset-fn source)))
          (line (%offset->line pathname char-offset))
-         (path (%normalize-path pathname)))
+         (path (normalize-path-for-display pathname)))
     (values pathname path (or line (and pathname char-offset 1)))))
 
 (defun %finder->type (name)

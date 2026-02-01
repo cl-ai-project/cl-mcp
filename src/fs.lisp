@@ -13,6 +13,8 @@
                 #:ensure-project-root
                 #:allowed-read-path-p
                 #:ensure-write-path)
+  (:import-from #:cl-mcp/src/utils/system
+                #:fd-count)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:getenv
@@ -40,9 +42,6 @@
 (defparameter *skip-extensions* '("fasl" "ufasl" "x86f" "cfasl"))
 (defparameter *fs-read-max-bytes* 1048576
   "Maximum number of characters allowed for fs-read-file when LIMIT is provided.")
-
-(defun %fd-count ()
-  (ignore-errors (length (directory #P"/proc/self/fd/*"))))
 
 (defun %read-file-string (pn offset limit)
   "Read file PN honoring OFFSET and LIMIT (both may be NIL)."
@@ -81,11 +80,11 @@ Returns the content string."
                "path" (namestring pn)
                "offset" offset
                "limit" limit
-               "fd" (%fd-count))
+               "fd" (fd-count))
     (let ((text (%read-file-string pn offset limit)))
       (log-event :debug "fs.read.close"
                  "path" (namestring pn)
-                 "fd" (%fd-count))
+                 "fd" (fd-count))
       text)))
 
 (defun %write-string-to-file (pn content)
@@ -106,12 +105,12 @@ Returns T on success."
     (log-event :debug "fs.write.open"
                "path" (namestring pn)
                "bytes" (length content)
-               "fd" (%fd-count))
+               "fd" (fd-count))
     (unwind-protect
          (%write-string-to-file pn content)
       (log-event :debug "fs.write.close"
                  "path" (namestring pn)
-                 "fd" (%fd-count)))))
+                 "fd" (fd-count)))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
