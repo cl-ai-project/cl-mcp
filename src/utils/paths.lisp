@@ -39,14 +39,19 @@ current working directory to synchronize the server's project root."
            (or (ignore-errors (namestring (uiop/os:getcwd))) "(unknown)")
            (length (asdf/system-registry:registered-systems)))))
 
-(declaim (ftype (function (t t) t) path-inside-p))
+(declaim (ftype (function ((or null string pathname) (or null string pathname))
+                           (or null pathname))
+                path-inside-p))
 (defun path-inside-p (child parent)
   "Return T when CHILD pathname is a subpath of directory PARENT.
 Handles NIL and relative paths gracefully."
   (and child parent
        (uiop/pathname:subpathp child parent)))
 
-(declaim (ftype (function (t &key (:relative-to t)) pathname) canonical-path))
+(declaim (ftype (function ((or string pathname)
+                           &key (:relative-to (or null string pathname)))
+                           pathname)
+                canonical-path))
 (defun canonical-path (path &key relative-to)
   "Turn PATH designator into a physical absolute pathname.
 If RELATIVE-TO is provided and PATH is relative, merge it with RELATIVE-TO.
@@ -62,7 +67,8 @@ If RELATIVE-TO is NIL, uses *project-root* as the base."
                                                   (or relative-to *project-root*)))))
     (uiop/pathname:ensure-pathname abs :want-relative nil)))
 
-(declaim (ftype (function (t) (or pathname null)) allowed-read-path-p))
+(declaim (ftype (function ((or string pathname)) (or null pathname))
+                allowed-read-path-p))
 (defun allowed-read-path-p (pn)
   "Return PN (as absolute pathname) if readable per policy, else NIL.
 Allows project-root subpaths and source dirs of registered ASDF systems."
@@ -83,7 +89,7 @@ Allows project-root subpaths and source dirs of registered ASDF systems."
             (return-from allowed-read-path-p normalized-abs)))))
     nil))
 
-(declaim (ftype (function (t) pathname) ensure-write-path))
+(declaim (ftype (function ((or string pathname)) pathname) ensure-write-path))
 (defun ensure-write-path (path)
   "Ensure PATH is relative to project root and return absolute pathname.
 Signals an error if outside project root or absolute."
@@ -95,7 +101,9 @@ Signals an error if outside project root or absolute."
       (error "Write path ~A is outside project root" path))
     real))
 
-(declaim (ftype (function (t &key (:must-exist boolean)) pathname) resolve-path-in-project))
+(declaim (ftype (function ((or null string pathname) &key (:must-exist boolean))
+                           pathname)
+                resolve-path-in-project))
 (defun resolve-path-in-project (path &key (must-exist nil))
   "Resolve PATH to an absolute pathname within project root.
 If PATH is NIL or empty, returns *project-root*.
@@ -120,7 +128,8 @@ Signals an error if PATH is outside project root."
         (error "Path ~A is outside project root ~A" target base))
       canonical)))
 
-(declaim (ftype (function (t) (or string null)) normalize-path-for-display))
+(declaim (ftype (function ((or null string pathname)) (or null string))
+                normalize-path-for-display))
 (defun normalize-path-for-display (pathname)
   "Return a namestring for PATHNAME, relative to *project-root* when possible.
 Falls back to CWD, then cl-mcp system source directory, else absolute."

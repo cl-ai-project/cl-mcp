@@ -27,12 +27,14 @@ This is an alias for make-string-hash-table from utils/hash.
 Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
   (apply #'make-string-hash-table kvs))
 
-(declaim (ftype (function (t t) hash-table) result))
+(declaim (ftype (function ((or null string integer) t) hash-table) result))
 (defun result (id payload)
   "Create a JSON-RPC 2.0 result response."
   (make-ht "jsonrpc" "2.0" "id" id "result" payload))
 
-(declaim (ftype (function (t integer string &optional t) hash-table) rpc-error))
+(declaim (ftype (function ((or null string integer) integer string &optional t)
+                           hash-table)
+                rpc-error))
 (defun rpc-error (id code message &optional data)
   "Create a JSON-RPC 2.0 error response."
   (let* ((err (make-ht "code" code "message" message))
@@ -40,13 +42,16 @@ Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
     (when data (setf (gethash "data" err) data))
     obj))
 
-(declaim (ftype (function (string) (vector hash-table 1)) text-content))
+(declaim (ftype (function (string) simple-vector) text-content))
 (defun text-content (text)
   "Return a one-element content vector with TEXT as a text part.
 Used for MCP tool response content."
   (vector (make-ht "type" "text" "text" text)))
 
-(declaim (ftype (function (t string &key (:protocol-version (or string null))) hash-table) tool-error))
+(declaim (ftype (function ((or null string integer) string
+                           &key (:protocol-version (or null string)))
+                           hash-table)
+                tool-error))
 (defun tool-error (id message &key (protocol-version nil))
   "Return a tool input validation error in the appropriate format.
 For protocol version 2025-11-25 and later, returns as Tool Execution Error.
