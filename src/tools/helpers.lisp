@@ -5,6 +5,8 @@
 
 (defpackage #:cl-mcp/src/tools/helpers
   (:use #:cl)
+  (:import-from #:cl-mcp/src/utils/hash
+                #:make-string-hash-table)
   (:export #:make-ht
            #:result
            #:rpc-error
@@ -20,11 +22,9 @@
 
 (defun make-ht (&rest kvs)
   "Create a hash-table from alternating key-value pairs.
+This is an alias for make-string-hash-table from utils/hash.
 Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
-  (let ((h (make-hash-table :test #'equal)))
-    (loop for (k v) on kvs by #'cddr
-          do (setf (gethash k h) v))
-    h))
+  (apply #'make-string-hash-table kvs))
 
 (defun result (id payload)
   "Create a JSON-RPC 2.0 result response."
