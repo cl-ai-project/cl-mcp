@@ -110,7 +110,7 @@ When *session-timeout-seconds* is NIL, sessions never expire."
   (setf (hunchentoot:content-type*) "application/json")
   content)
 
-(defun is-initialize-request-p (body)
+(defun initialize-request-p (body)
   "Check if the request body is an initialize request."
   (and (hash-table-p body)
        (string= (gethash "method" body) "initialize")))
@@ -138,7 +138,7 @@ When *session-timeout-seconds* is NIL, sessions never expire."
       (yason:encode outer s))))
 
 (defun %handle-mcp-post-initialize (body)
-  (when (is-initialize-request-p body)
+  (when (initialize-request-p body)
     (let* ((session (create-session))
            (state (http-session-state session))
            (line (with-output-to-string (s)

@@ -20,16 +20,21 @@
 
 (in-package #:cl-mcp/src/tools/helpers)
 
+(declaim (ftype (function (&rest t) hash-table) make-ht))
 (defun make-ht (&rest kvs)
   "Create a hash-table from alternating key-value pairs.
 This is an alias for make-string-hash-table from utils/hash.
 Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
   (apply #'make-string-hash-table kvs))
 
+(declaim (ftype (function ((or null string integer) t) hash-table) result))
 (defun result (id payload)
   "Create a JSON-RPC 2.0 result response."
   (make-ht "jsonrpc" "2.0" "id" id "result" payload))
 
+(declaim (ftype (function ((or null string integer) integer string &optional t)
+                           hash-table)
+                rpc-error))
 (defun rpc-error (id code message &optional data)
   "Create a JSON-RPC 2.0 error response."
   (let* ((err (make-ht "code" code "message" message))
@@ -37,11 +42,16 @@ Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
     (when data (setf (gethash "data" err) data))
     obj))
 
+(declaim (ftype (function (string) simple-vector) text-content))
 (defun text-content (text)
   "Return a one-element content vector with TEXT as a text part.
 Used for MCP tool response content."
   (vector (make-ht "type" "text" "text" text)))
 
+(declaim (ftype (function ((or null string integer) string
+                           &key (:protocol-version (or null string)))
+                           hash-table)
+                tool-error))
 (defun tool-error (id message &key (protocol-version nil))
   "Return a tool input validation error in the appropriate format.
 For protocol version 2025-11-25 and later, returns as Tool Execution Error.
@@ -88,6 +98,7 @@ TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any).
                                   (:array "an array")
                                   (:object "an object"))))))))
 
+(declaim (ftype (function ((or hash-table null) string &key (:type (or keyword null)) (:required boolean)) t) extract-arg))
 (defun extract-arg (args name &key type required)
   "Extract argument NAME from ARGS hash-table with optional validation.
 
@@ -118,6 +129,7 @@ Example:
       ;; Optional and missing
       (t nil))))
 
+(declaim (ftype (function ((or hash-table null) string &key (:default boolean)) boolean) extract-boolean-arg))
 (defun extract-boolean-arg (args name &key (default nil))
   "Extract boolean argument NAME from ARGS with proper nil/false handling.
 
