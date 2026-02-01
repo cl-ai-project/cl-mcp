@@ -40,7 +40,7 @@ Example: (make-ht \"name\" \"foo\" \"type\" \"string\")"
     (when data (setf (gethash "data" err) data))
     obj))
 
-(declaim (ftype (function (string) (vector hash-table 1)) text-content))
+(declaim (ftype (function (string) simple-vector) text-content))
 (defun text-content (text)
   "Return a one-element content vector with TEXT as a text part.
 Used for MCP tool response content."
