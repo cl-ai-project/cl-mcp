@@ -603,3 +603,34 @@
                  (or (search "*READ-EVAL*" text)
                      (search "can't read #." text)))
             "safe_read=true should return error about #. evaluation")))))
+
+(deftest tools-call-repl-eval-include-result-preview-false
+  (testing "tools/call repl-eval with include_result_preview=false omits preview"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"(list 1 2 3)\",\"include_result_preview\":false}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        ;; Should have result_object_id but NOT result_preview
+        (ok (gethash "result_object_id" result) "Should have result_object_id")
+        (ok (null (gethash "result_preview" result)) "Should NOT have result_preview when disabled")))))
+
+(deftest tools-call-repl-eval-include-result-preview-default
+  (testing "tools/call repl-eval includes preview by default for non-primitives"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"(list 1 2 3)\"}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        ;; Should have both result_object_id and result_preview by default
+        (ok (gethash "result_object_id" result) "Should have result_object_id")
+        (ok (gethash "result_preview" result) "Should have result_preview by default")
+        (when (gethash "result_preview" result)
+          (ok (string= (gethash "kind" (gethash "result_preview" result)) "list")
+              "Preview should show kind=list"))))))

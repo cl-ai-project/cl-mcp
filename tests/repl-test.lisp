@@ -2,7 +2,10 @@
 
 (defpackage #:cl-mcp/tests/repl-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/repl #:repl-eval))
+  (:import-from #:cl-mcp/src/repl #:repl-eval)
+  (:import-from #:cl-mcp/src/inspect #:generate-result-preview)
+  (:import-from #:cl-mcp/src/object-registry #:inspectable-p))
+
 
 (in-package #:cl-mcp/tests/repl-test)
 
@@ -227,3 +230,73 @@
       (ok (search "out" stdout) "stdout content preserved")
       (ok (search "err" stderr) "stderr content preserved")
       (ok (search "res" printed) "printed content preserved"))))
+
+(deftest generate-result-preview-list
+  (testing "generates preview for list with kind, summary, elements, id"
+    (let ((preview (generate-result-preview (list 1 2 3))))
+      (ok (hash-table-p preview))
+      (ok (string= (gethash "kind" preview) "list"))
+      (ok (gethash "id" preview) "should have object id")
+      (ok (gethash "elements" preview) "should have elements")
+      (ok (= 3 (length (gethash "elements" preview)))))))
+
+(deftest generate-result-preview-hash-table
+  (testing "generates preview for hash-table"
+    (let ((ht (make-hash-table :test 'equal)))
+      (setf (gethash "key" ht) "value")
+      (let ((preview (generate-result-preview ht)))
+        (ok (string= (gethash "kind" preview) "hash-table"))
+        (ok (gethash "id" preview))
+        (ok (gethash "entries" preview))))))
+
+(deftest generate-result-preview-max-elements
+  (testing "respects max-elements and sets truncated flag"
+    (let ((preview (generate-result-preview (list 1 2 3 4 5 6 7 8 9 10)
+                                            :max-elements 3)))
+      (ok (string= (gethash "kind" preview) "list"))
+      (let ((meta (gethash "meta" preview)))
+        (ok meta "should have meta")
+        (ok (gethash "truncated" meta) "should be truncated"))
+      (ok (<= (length (gethash "elements" preview)) 3)))))
+
+(deftest generate-result-preview-circular-reference
+  (testing "handles circular references without infinite loop"
+    (let ((lst (list 1 2 3)))
+      (setf (cdr (last lst)) lst)
+      (let ((preview (generate-result-preview lst :max-elements 10)))
+        (ok (hash-table-p preview) "should return hash-table")
+        (ok (gethash "id" preview) "should have id")))))
+
+(deftest generate-result-preview-vector
+  (testing "generates preview for vector (as array)"
+    (let ((preview (generate-result-preview #(a b c d e))))
+      (ok (string= (gethash "kind" preview) "array"))
+      (ok (gethash "id" preview))
+      (ok (gethash "elements" preview))
+      (ok (= 5 (length (gethash "elements" preview)))))))
+
+
+(deftest repl-eval-primitive-not-inspectable
+  (testing "primitive values are not inspectable"
+    (multiple-value-bind (printed raw-value)
+        (repl-eval "42")
+      (declare (ignore printed))
+      (ok (not (inspectable-p raw-value)) "number should not be inspectable"))
+    (multiple-value-bind (printed raw-value)
+        (repl-eval "\"hello\"")
+      (declare (ignore printed))
+      (ok (not (inspectable-p raw-value)) "string should not be inspectable"))
+    (multiple-value-bind (printed raw-value)
+        (repl-eval ":keyword")
+      (declare (ignore printed))
+      (ok (not (inspectable-p raw-value)) "symbol should not be inspectable"))))
+
+(deftest repl-eval-non-primitive-inspectable
+  (testing "non-primitive values are inspectable and previewable"
+    (multiple-value-bind (printed raw-value)
+        (repl-eval "(list 1 2 3)")
+      (declare (ignore printed))
+      (ok (inspectable-p raw-value) "list should be inspectable")
+      (let ((preview (generate-result-preview raw-value)))
+        (ok (string= (gethash "kind" preview) "list"))
+        (ok (gethash "id" preview))))))

@@ -12,7 +12,9 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:export #:inspect-object-by-id))
+  (:export #:inspect-object-by-id
+           #:generate-result-preview))
+
 
 
 (in-package #:cl-mcp/src/inspect)
@@ -329,6 +331,24 @@ Returns a hash-table with inspection results or error info."
         (make-ht "error" t
                  "code" "OBJECT_NOT_FOUND"
                  "message" (format nil "Object ID ~A not found (may have been evicted from cache)" id)))))
+
+
+(defun generate-result-preview (object &key (max-depth 1) (max-elements 8))
+  "Generate a lightweight preview of OBJECT for inclusion in repl-eval response.
+Unlike inspect-object-by-id, this takes a raw object (not an ID) and registers it.
+Returns a hash-table with:
+  - id: the registered object ID
+  - kind, type, summary, etc.: structural preview
+  - truncated: T if elements were omitted due to max-elements limit
+For nested non-primitive values, id fields are included for drill-down."
+  (let* ((id (register-object object))
+         (visited (make-hash-table :test 'eq))
+         (result nil))
+    (setf (gethash object visited) id)
+    (setf result
+            (%inspect-object-impl object visited 0 max-depth max-elements))
+    (setf (gethash "id" result) id)
+    result))
 
 ;;; MCP Tool Definition
 
