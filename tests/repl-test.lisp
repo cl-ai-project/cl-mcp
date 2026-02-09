@@ -310,6 +310,30 @@
     (setf (gethash :key my-hash) (list 1 2 3))
     (error "test error")))
 
+(defun %test-error-without-debug ()
+  "Test function without debug optimization (locals may be unavailable)."
+  (declare (optimize (speed 3) (debug 0) (safety 1)))
+  (let ((my-list (list 1 2 3))
+        (my-hash (make-hash-table)))
+    (setf (gethash :key my-hash) my-list)
+    (error "test error without debug 3")))
+
+(deftest repl-eval-locals-preview-without-debug3-safe
+  (testing "locals preview does not fail when debug 3 is not enabled"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-without-debug)"
+                   :locals-preview-frames 10
+                   :locals-preview-max-depth 2
+                   :locals-preview-max-elements 5)
+      (declare (ignore printed raw stdout stderr))
+      (ok error-context "should still return structured error context")
+      (ok (listp (getf error-context :frames)) "frames should still be a list")
+      (ok (every #'listp
+                 (mapcar (lambda (f)
+                           (getf f :locals))
+                         (getf error-context :frames)))
+          "locals should remain list-typed even when debug info is limited"))))
+
 (deftest repl-eval-locals-preview-disabled-by-default
   (testing "locals preview is disabled by default (locals-preview-frames=0)"
     (multiple-value-bind (printed raw stdout stderr error-context)
