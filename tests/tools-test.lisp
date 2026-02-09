@@ -91,6 +91,65 @@
                    (ok (string= (gethash "text" first) "hi")))))
           (ignore-errors (delete-file "tmp-tools-write.txt")))))))
 
+(deftest tools-call-fs-write-rejects-existing-lisp
+  (testing "tools/call fs-write-file rejects overwriting existing .lisp files"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp-existing-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial ";; original\n")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; updated\"}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (process-json-line req))
+                    (obj (parse resp))
+                    (err (gethash "error" obj))
+                    (msg (and err (gethash "message" err)))
+                    (data (and err (gethash "data" err)))
+                    (required (and data (gethash "required_args" data))))
+               (ok err)
+               (ok (stringp msg))
+               (ok (string= msg
+                            "Cannot overwrite existing .lisp/.asd with fs-write-file; use lisp-edit-form."))
+               (ok (hash-table-p data))
+               (ok (string= (gethash "code" data) "existing_lisp_overwrite_forbidden"))
+               (ok (string= (gethash "next_tool" data) "lisp-edit-form"))
+               (ok (eql (gethash "new_file_creation_allowed" data) t))
+               (ok (vectorp required))
+               (ok (= (length required) 5))
+               (ok (string= (aref required 0) "file_path"))
+               (ok (string= (uiop:read-file-string abs-path) initial)))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-fs-write-allows-new-lisp
+  (testing "tools/call fs-write-file allows creating new .lisp files"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp-new-write.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (content ";; new lisp file\n")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\"~A\"}}}")
+                          tmp-path content)))
+        (ignore-errors (delete-file abs-path))
+        (unwind-protect
+             (let* ((resp (process-json-line req))
+                    (obj (parse resp))
+                    (result (gethash "result" obj)))
+               (ok (null (gethash "error" obj)))
+               (ok (gethash "success" result))
+               (ok (string= (uiop:read-file-string abs-path) content)))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-fs-list
   (testing "tools/call fs-list-directory lists entries"
     (with-test-project-root
