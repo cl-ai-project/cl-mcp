@@ -47,6 +47,40 @@
       (let ((result (gethash "result" obj)))
         (and result (gethash "isError" result)))))
 
+(deftest tools-helper-find-tool-descriptor
+  (testing "%find-tool-descriptor finds named descriptor from tools vector"
+    (let* ((tool-a (make-hash-table :test #'equal))
+           (tool-b (make-hash-table :test #'equal))
+           (tools (vector tool-a tool-b)))
+      (setf (gethash "name" tool-a) "alpha")
+      (setf (gethash "name" tool-b) "beta")
+      (ok (eq tool-b (%find-tool-descriptor tools "beta")))
+      (ok (null (%find-tool-descriptor tools "gamma"))))))
+
+(deftest tools-helper-tool-call-failed-p
+  (testing "%tool-call-failed-p detects JSON-RPC and tool-level failures"
+    (let* ((jsonrpc-fail (make-hash-table :test #'equal))
+           (tool-fail (make-hash-table :test #'equal))
+           (tool-fail-result (make-hash-table :test #'equal))
+           (ok-resp (make-hash-table :test #'equal))
+           (ok-result (make-hash-table :test #'equal)))
+      (setf (gethash "error" jsonrpc-fail) (make-hash-table :test #'equal))
+      (setf (gethash "isError" tool-fail-result) t)
+      (setf (gethash "result" tool-fail) tool-fail-result)
+      (setf (gethash "result" ok-resp) ok-result)
+      (ok (%tool-call-failed-p jsonrpc-fail))
+      (ok (%tool-call-failed-p tool-fail))
+      (ok (not (%tool-call-failed-p ok-resp))))))
+
+(deftest tools-helper-tools-list-shape
+  (testing "%tools-list returns parsed tools/list response shape"
+    (multiple-value-bind (obj result tools)
+        (%tools-list)
+      (ok (hash-table-p obj))
+      (ok (hash-table-p result))
+      (ok (vectorp tools))
+      (ok (> (length tools) 0)))))
+
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
     (with-test-project-root

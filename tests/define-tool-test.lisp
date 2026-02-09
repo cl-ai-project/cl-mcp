@@ -141,3 +141,50 @@
         (ok (gethash "uppercase" props))
         ;; "prefix" should be "prefix" (single word)
         (ok (gethash "prefix" props))))))
+
+(deftest define-tool-parse-arg-spec-symbol
+  (testing "%parse-arg-spec normalizes symbol arg specs"
+    (let ((spec (cl-mcp/src/tools/define-tool::%parse-arg-spec 'foo-bar)))
+      (ok (eq (getf spec :name) 'foo-bar))
+      (ok (string= (getf spec :json-name) "foo_bar"))
+      (ok (eq (getf spec :type) :string))
+      (ok (null (getf spec :required)))
+      (ok (null (getf spec :default)))
+      (ok (null (getf spec :enum)))
+      (ok (null (getf spec :description))))))
+
+(deftest define-tool-parse-arg-spec-list
+  (testing "%parse-arg-spec normalizes full list arg specs"
+    (let ((spec (cl-mcp/src/tools/define-tool::%parse-arg-spec
+                 '(path :json-name "file_path"
+                   :type :string
+                   :required t
+                   :default nil
+                   :enum ("a" "b")
+                   :description "Path arg"))))
+      (ok (eq (getf spec :name) 'path))
+      (ok (string= (getf spec :json-name) "file_path"))
+      (ok (eq (getf spec :type) :string))
+      (ok (eql (getf spec :required) t))
+      (ok (equal (getf spec :enum) '("a" "b")))
+      (ok (string= (getf spec :description) "Path arg")))))
+
+(deftest define-tool-type-to-json-type
+  (testing "%type-to-json-type maps known types correctly"
+    (ok (string= "string" (cl-mcp/src/tools/define-tool::%type-to-json-type :string)))
+    (ok (string= "integer" (cl-mcp/src/tools/define-tool::%type-to-json-type :integer)))
+    (ok (string= "number" (cl-mcp/src/tools/define-tool::%type-to-json-type :number)))
+    (ok (string= "boolean" (cl-mcp/src/tools/define-tool::%type-to-json-type :boolean)))
+    (ok (string= "array" (cl-mcp/src/tools/define-tool::%type-to-json-type :array)))
+    (ok (string= "object" (cl-mcp/src/tools/define-tool::%type-to-json-type :object)))))
+
+(deftest define-tool-collect-required-args
+  (testing "%collect-required-args returns JSON names only for required args"
+    (let* ((specs (list (cl-mcp/src/tools/define-tool::%parse-arg-spec
+                         '(path :required t :json-name "path"))
+                        (cl-mcp/src/tools/define-tool::%parse-arg-spec
+                         '(limit :required nil :json-name "limit"))
+                        (cl-mcp/src/tools/define-tool::%parse-arg-spec
+                         '(content :required t :json-name "content"))))
+           (required (cl-mcp/src/tools/define-tool::%collect-required-args specs)))
+      (ok (equal required '("path" "content"))))))

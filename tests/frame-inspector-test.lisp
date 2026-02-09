@@ -95,3 +95,20 @@
       ;; Should complete without error
       (ok (getf ctx :error))
       (ok (stringp (getf ctx :message))))))
+
+(deftest internal-frame-p-prefix-boundary
+  (testing "%internal-frame-p matches package prefixes with boundaries only"
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "CL-MCP/SRC/REPL:REPL-EVAL"))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "CL-MCP/TESTS/REPL-TEST::HELPER")))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "SB-INTROSPECTIVE::FOO")))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "SB-INT:FOO"))))
+
+(deftest internal-frame-p-anonymous-and-standard
+  (testing "%internal-frame-p marks anonymous and standard signaling frames as internal"
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA () ...)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(FLET X)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "ERROR"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "SIGNAL"))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p "MY-APP::PROCESS")))))
