@@ -90,44 +90,80 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
             "<anonymous>"))
     (error () "<unknown>")))
 
+(defparameter *internal-package-prefixes*
+  '("CL-MCP" "SB-" "UIOP" "ASDF" "BORDEAUX-THREADS" "HUNCHENTOOT" "USOCKET")
+  "Package prefixes that indicate internal/infrastructure frames.")
+
+(defun %internal-frame-p (function-name)
+  "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
+Internal frames include:
+- Frames from CL-MCP, SBCL internals (SB-*), ASDF, UIOP, etc.
+- Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
+- Standard CL functions like ERROR, SIGNAL, etc."
+  (or
+   ;; Anonymous/compiler-generated frames
+   (and (> (length function-name) 0)
+        (char= (char function-name 0) #\())
+   ;; Check for internal package prefixes
+   (some (lambda (prefix)
+           (and (>= (length function-name) (length prefix))
+                (string-equal function-name prefix :end1 (length prefix))))
+         *internal-package-prefixes*)
+   ;; Standard error signaling functions
+   (member function-name '("ERROR" "SIGNAL" "CERROR" "WARN"
+                           "INVOKE-DEBUGGER" "BREAK")
+           :test #'string-equal)))
+
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth preview-max-elements)
+                        &key locals-preview-frames preview-max-depth preview-max-elements
+                             locals-preview-skip-internal)
   "Walk stack and collect frame information using SBCL backtrace API.
 LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews (default: 0).
+When LOCALS-PREVIEW-SKIP-INTERNAL is true, only count non-internal (user) frames for preview eligibility.
+Internal frames include CL-MCP, SBCL internals (SB-*), ASDF, UIOP, anonymous functions, etc.
 PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation parameters."
   (let ((frames '())
         (index 0)
-        (preview-frames (or locals-preview-frames 0)))
+        (user-frame-index 0)
+        (preview-frames (or locals-preview-frames 0))
+        (skip-internal (and locals-preview-skip-internal t)))
     (handler-case
-        ;; Use funcall with intern to avoid reader errors for internal symbols
         (let ((map-fn (ignore-errors
                         (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
           (when map-fn
             (funcall map-fn
                      (lambda (frame)
                        (when (< index max-frames)
-                         (let ((source-loc (%frame-source-location frame))
-                               (include-preview (< index preview-frames)))
+                         (let* ((function-name (%frame-function-name frame))
+                                (source-loc (%frame-source-location frame))
+                                (is-internal (and skip-internal
+                                                  (%internal-frame-p function-name)))
+                                (preview-index (if skip-internal user-frame-index index))
+                                (include-preview (< preview-index preview-frames)))
                            (push (list :index index
-                                       :function (%frame-function-name frame)
+                                       :function function-name
                                        :source-file (getf source-loc :file)
                                        :source-line (getf source-loc :line)
                                        :locals (%frame-locals frame print-level print-length
                                                               :include-preview include-preview
                                                               :preview-max-depth preview-max-depth
                                                               :preview-max-elements preview-max-elements))
-                                 frames))
+                                 frames)
+                           (unless is-internal
+                             (incf user-frame-index)))
                          (incf index))))))
       (error () nil))
     (nreverse frames)))
 
 #-sbcl
 (defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth preview-max-elements)
+                        &key locals-preview-frames preview-max-depth preview-max-elements
+                             locals-preview-skip-internal)
   "Fallback for non-SBCL: return empty frame list."
   (declare (ignore max-frames print-level print-length
-                   locals-preview-frames preview-max-depth preview-max-elements))
+                   locals-preview-frames preview-max-depth preview-max-elements
+                   locals-preview-skip-internal))
   nil)
 
 (defun capture-error-context (condition &key (max-frames 20)
@@ -135,12 +171,16 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation parameters
                                              (print-length 10)
                                              (locals-preview-frames 0)
                                              (preview-max-depth 1)
-                                             (preview-max-elements 5))
+                                             (preview-max-elements 5)
+                                             (locals-preview-skip-internal nil))
   "Capture structured error context including frames and locals.
 
 LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (default: 0).
   Set to a positive integer to automatically expand local variables in the top N frames.
   This helps agents immediately see the state of variables without extra inspect-object calls.
+LOCALS-PREVIEW-SKIP-INTERNAL: When true, skip internal frames when counting for preview eligibility.
+  Internal frames include CL-MCP, SBCL internals (SB-*), ASDF, UIOP, anonymous functions, etc.
+  This helps ensure user code frames get previews even when buried under infrastructure frames.
 PREVIEW-MAX-DEPTH: Max nesting depth for local previews (default: 1).
 PREVIEW-MAX-ELEMENTS: Max elements per collection in local previews (default: 5).
 
@@ -160,4 +200,5 @@ Returns a plist with:
         :frames (%collect-frames max-frames print-level print-length
                                  :locals-preview-frames locals-preview-frames
                                  :preview-max-depth preview-max-depth
-                                 :preview-max-elements preview-max-elements)))
+                                 :preview-max-elements preview-max-elements
+                                 :locals-preview-skip-internal locals-preview-skip-internal)))

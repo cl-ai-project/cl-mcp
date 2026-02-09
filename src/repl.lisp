@@ -147,7 +147,8 @@ Removes ANSI escape sequences and other control chars except tab, newline, carri
     last-value))
 
 (defun %do-repl-eval (input package safe-read print-level print-length max-output-length
-                      &key locals-preview-frames locals-preview-max-depth locals-preview-max-elements)
+                      &key locals-preview-frames locals-preview-max-depth
+                           locals-preview-max-elements locals-preview-skip-internal)
   "Evaluate INPUT and return (values printed raw-value stdout stderr error-context).
 ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
@@ -167,7 +168,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                                          :print-length (or print-length 10)
                                                          :locals-preview-frames (or locals-preview-frames 0)
                                                          :preview-max-depth (or locals-preview-max-depth 1)
-                                                         :preview-max-elements (or locals-preview-max-elements 5)))
+                                                         :preview-max-elements (or locals-preview-max-elements 5)
+                                                         :locals-preview-skip-internal locals-preview-skip-internal))
                             ;; Also keep text representation for backward compatibility
                             (setf last-value
                                   (with-output-to-string (out)
@@ -222,7 +224,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                              (safe-read nil)
                              (locals-preview-frames nil)
                              (locals-preview-max-depth nil)
-                             (locals-preview-max-elements nil))
+                             (locals-preview-max-elements nil)
+                             (locals-preview-skip-internal nil))
   "Evaluate INPUT (a string of one or more s-expressions) in PACKAGE.
 
 Forms are read as provided and evaluated sequentially; the last value is
@@ -237,7 +240,8 @@ Options:
 - SAFE-READ: when T, disables `*read-eval*` to block reader evaluation (#.).
 - LOCALS-PREVIEW-FRAMES: number of top frames to include local variable previews (default: 0).
 - LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
-- LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5)."
+- LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
+- LOCALS-PREVIEW-SKIP-INTERNAL: when T, skip internal frames when counting for preview eligibility."
   (let ((thunk (lambda ()
                  (%do-repl-eval input
                                 package
@@ -247,7 +251,8 @@ Options:
                                 max-output-length
                                 :locals-preview-frames locals-preview-frames
                                 :locals-preview-max-depth locals-preview-max-depth
-                                :locals-preview-max-elements locals-preview-max-elements))))
+                                :locals-preview-max-elements locals-preview-max-elements
+                                :locals-preview-skip-internal locals-preview-skip-internal))))
     (%repl-eval-with-timeout thunk timeout-seconds)))
 
 (define-tool "repl-eval"
@@ -270,6 +275,9 @@ When an error occurs, 'error_context' includes stack frames with local variables
 Non-primitive locals include 'object_id' for drill-down via 'inspect-object'.
 Set 'locals_preview_frames' > 0 to auto-expand local variable previews in top N frames,
 providing immediate insight without extra inspect-object calls during debugging.
+Set 'locals_preview_skip_internal' to true to skip internal/infrastructure frames
+(CL-MCP, SBCL internals, ASDF, etc.) when counting frames for preview eligibility.
+This helps ensure user code frames get previews even when buried under infrastructure.
 NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
 SBCL's default optimization does not preserve locals for inspection."
   :args ((code :type :string :required t
@@ -298,7 +306,9 @@ SBCL's default optimization does not preserve locals for inspection."
          (locals-preview-max-depth :type :integer :json-name "locals_preview_max_depth"
                                    :description "Max nesting depth for local variable previews (default: 1)")
          (locals-preview-max-elements :type :integer :json-name "locals_preview_max_elements"
-                                      :description "Max elements per collection in local variable previews (default: 5)"))
+                                      :description "Max elements per collection in local variable previews (default: 5)")
+         (locals-preview-skip-internal :type :boolean :json-name "locals_preview_skip_internal"
+                                       :description "Skip internal frames (CL-MCP, SB-*, ASDF, etc.) when counting for preview eligibility (default: false)"))
   :body
   (multiple-value-bind (printed raw-value stdout stderr error-context)
       (repl-eval code
@@ -310,7 +320,8 @@ SBCL's default optimization does not preserve locals for inspection."
                  :safe-read safe-read
                  :locals-preview-frames locals-preview-frames
                  :locals-preview-max-depth locals-preview-max-depth
-                 :locals-preview-max-elements locals-preview-max-elements)
+                 :locals-preview-max-elements locals-preview-max-elements
+                 :locals-preview-skip-internal locals-preview-skip-internal)
     (let ((ht (make-ht "content" (text-content printed)
                        "stdout" stdout
                        "stderr" stderr)))
