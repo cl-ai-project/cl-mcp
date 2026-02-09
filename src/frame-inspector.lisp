@@ -47,18 +47,24 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
                                           :max-depth (or preview-max-depth 1)
                                           :max-elements (or preview-max-elements 5))))
                             (push (list :name (symbol-name sym)
-                                        :value (safe-prin1 val :level print-level :length print-length)
+                                        :value (safe-prin1 val
+                                                           :level print-level
+                                                           :length print-length)
                                         :object-id (gethash "id" preview)
                                         :preview preview)
                                   locals))
                           (let ((object-id (register-object val)))
                             (push (list :name (symbol-name sym)
-                                        :value (safe-prin1 val :level print-level :length print-length)
+                                        :value (safe-prin1 val
+                                                           :level print-level
+                                                           :length print-length)
                                         :object-id object-id)
                                   locals)))
                       ;; Primitive: just include name and value
                       (push (list :name (symbol-name sym)
-                                  :value (safe-prin1 val :level print-level :length print-length))
+                                  :value (safe-prin1 val
+                                                     :level print-level
+                                                     :length print-length))
                             locals)))
               (error () nil))))
       (error () nil))
@@ -91,8 +97,9 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
     (error () "<unknown>")))
 
 (defparameter *internal-package-prefixes*
-  '("CL-MCP"
-    ;; SBCL internal packages (specific, not just "SB-" to avoid false positives like SB-APP)
+  '(;; CL-MCP implementation (not tests - those are user code to debug)
+    "CL-MCP/SRC"
+    ;; SBCL internal packages (specific to avoid false positives)
     "SB-KERNEL" "SB-INT" "SB-IMPL" "SB-DEBUG" "SB-C" "SB-DI" "SB-VM"
     "SB-EXT" "SB-SYS" "SB-PCL" "SB-MOP" "SB-ALIEN" "SB-THREAD"
     "SB-INTROSPECT" "SB-PROFILE" "SB-LOOP" "SB-PRETTY" "SB-FORMAT"
@@ -101,38 +108,43 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
     ;; Other infrastructure
     "UIOP" "ASDF" "BORDEAUX-THREADS" "HUNCHENTOOT" "USOCKET")
   "Package prefixes that indicate internal/infrastructure frames.
-Note: Uses specific SBCL package names rather than broad 'SB-' to avoid
-false positives with user packages like SB-APP.")
+Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
 Internal frames include:
-- Frames from CL-MCP, SBCL internals (SB-KERNEL, SB-INT, etc.), ASDF, UIOP, etc.
+- Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
 - Standard CL functions like ERROR, SIGNAL, EVAL, etc."
   (or
-   ;; Anonymous/compiler-generated frames
+   ;; Anonymous/compiler-generated frames start with (
    (and (> (length function-name) 0)
         (char= (char function-name 0) #\())
-   ;; Check for internal package prefixes
+   ;; Check for internal package prefixes with proper boundary
+   ;; Prefix must be followed by : or / (package delimiters) or be exact match
    (some (lambda (prefix)
-           (and (>= (length function-name) (length prefix))
-                (string-equal function-name prefix :end1 (length prefix))))
+           (let ((prefix-len (length prefix)))
+             (and (>= (length function-name) prefix-len)
+                  (string-equal function-name prefix :end1 prefix-len)
+                  ;; Verify boundary: next char is : or / or end of string
+                  (or (= (length function-name) prefix-len)
+                      (char= (char function-name prefix-len) #\:)
+                      (char= (char function-name prefix-len) #\/)))))
          *internal-package-prefixes*)
-   ;; Standard error signaling and evaluation functions
+   ;; Standard error signaling and evaluation functions (unqualified)
    (member function-name '("ERROR" "SIGNAL" "CERROR" "WARN"
                            "INVOKE-DEBUGGER" "BREAK" "EVAL")
            :test #'string-equal)))
 
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth preview-max-elements
-                             locals-preview-skip-internal)
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal)
   "Walk stack and collect frame information using SBCL backtrace API.
-LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews (default: 0).
-When LOCALS-PREVIEW-SKIP-INTERNAL is true, only count non-internal (user) frames for preview eligibility.
-Internal frames include CL-MCP, SBCL internals (SB-*), ASDF, UIOP, anonymous functions, etc.
-PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation parameters."
+LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews.
+When LOCALS-PREVIEW-SKIP-INTERNAL is true, only USER frames are counted and
+receive previews; internal frames are skipped entirely for preview purposes.
+PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
   (let ((frames '())
         (index 0)
         (user-frame-index 0)
@@ -140,25 +152,35 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation parameters
         (skip-internal (and locals-preview-skip-internal t)))
     (handler-case
         (let ((map-fn (ignore-errors
-                        (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
+                        (fdefinition
+                         (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
           (when map-fn
             (funcall map-fn
                      (lambda (frame)
                        (when (< index max-frames)
                          (let* ((function-name (%frame-function-name frame))
                                 (source-loc (%frame-source-location frame))
-                                (is-internal (and skip-internal
-                                                  (%internal-frame-p function-name)))
-                                (preview-index (if skip-internal user-frame-index index))
-                                (include-preview (< preview-index preview-frames)))
+                                (is-internal (%internal-frame-p function-name))
+                                ;; When skip-internal: only user frames get preview
+                                ;; When not skip-internal: count all frames
+                                (include-preview
+                                 (if skip-internal
+                                     (and (not is-internal)
+                                          (< user-frame-index preview-frames))
+                                     (< index preview-frames))))
                            (push (list :index index
                                        :function function-name
                                        :source-file (getf source-loc :file)
                                        :source-line (getf source-loc :line)
-                                       :locals (%frame-locals frame print-level print-length
-                                                              :include-preview include-preview
-                                                              :preview-max-depth preview-max-depth
-                                                              :preview-max-elements preview-max-elements))
+                                       :locals
+                                       (%frame-locals frame print-level
+                                                      print-length
+                                                      :include-preview
+                                                      include-preview
+                                                      :preview-max-depth
+                                                      preview-max-depth
+                                                      :preview-max-elements
+                                                      preview-max-elements))
                                  frames)
                            (unless is-internal
                              (incf user-frame-index)))
