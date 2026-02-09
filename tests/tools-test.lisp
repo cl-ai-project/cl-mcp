@@ -47,6 +47,17 @@
       (let ((result (gethash "result" obj)))
         (and result (gethash "isError" result)))))
 
+(defun %tool-call-message (obj)
+  "Extract a human-readable message from a tool response object OBJ."
+  (or (and (gethash "error" obj)
+           (gethash "message" (gethash "error" obj)))
+      (let* ((result (gethash "result" obj))
+             (content (and result (gethash "content" result)))
+             (first (and (arrayp content)
+                         (> (length content) 0)
+                         (aref content 0))))
+        (and first (gethash "text" first)))))
+
 (deftest tools-helper-find-tool-descriptor
   (testing "%find-tool-descriptor finds named descriptor from tools vector"
     (let* ((tool-a (make-hash-table :test #'equal))
@@ -71,6 +82,23 @@
       (ok (%tool-call-failed-p jsonrpc-fail))
       (ok (%tool-call-failed-p tool-fail))
       (ok (not (%tool-call-failed-p ok-resp))))))
+
+(deftest tools-helper-tool-call-message
+  (testing "%tool-call-message extracts message from error or tool content"
+    (let* ((jsonrpc-fail (make-hash-table :test #'equal))
+           (jsonrpc-err (make-hash-table :test #'equal))
+           (tool-fail (make-hash-table :test #'equal))
+           (tool-result (make-hash-table :test #'equal))
+           (tool-content (vector (make-hash-table :test #'equal)))
+           (empty (make-hash-table :test #'equal)))
+      (setf (gethash "message" jsonrpc-err) "rpc failed")
+      (setf (gethash "error" jsonrpc-fail) jsonrpc-err)
+      (setf (gethash "text" (aref tool-content 0)) "tool failed")
+      (setf (gethash "content" tool-result) tool-content)
+      (setf (gethash "result" tool-fail) tool-result)
+      (ok (string= (%tool-call-message jsonrpc-fail) "rpc failed"))
+      (ok (string= (%tool-call-message tool-fail) "tool failed"))
+      (ok (null (%tool-call-message empty))))))
 
 (deftest tools-helper-tools-list-shape
   (testing "%tools-list returns parsed tools/list response shape"
@@ -726,13 +754,24 @@
                             "\"arguments\":{\"query\":\"loop\",\"include_content\":false}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
-             (result (gethash "result" obj)))
+             (result (gethash "result" obj))
+             (failed (%tool-call-failed-p obj))
+             (msg (%tool-call-message obj)))
         (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (null (%tool-call-failed-p obj)) "should not fail")
-        (ok (string= (gethash "symbol" result) "loop"))
-        (ok (stringp (gethash "url" result)))
-        (ok (member (gethash "source" result) '("local" "remote")
-                    :test #'string=))))))
+        (if failed
+            (progn
+              ;; CI may not have Quicklisp/HyperSpec available.
+              (ok (stringp msg) "failure should include message")
+              (ok (or (search "clhs" msg :test #'char-equal)
+                      (search "HyperSpec" msg :test #'char-equal)
+                      (search "Quicklisp" msg :test #'char-equal))
+                  (format nil "unexpected clhs failure message: ~A" msg)))
+            (progn
+              (ok (hash-table-p result) "successful call should return result object")
+              (ok (string= (gethash "symbol" result) "loop"))
+              (ok (stringp (gethash "url" result)))
+              (ok (member (gethash "source" result) '("local" "remote")
+                          :test #'string=))))))))
 
 (deftest tools-call-clhs-lookup-missing-query
   (testing "tools/call clhs-lookup validates required query argument"
@@ -741,12 +780,7 @@
                             "\"params\":{\"name\":\"clhs-lookup\",\"arguments\":{}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
-             (msg (or (and (gethash "error" obj) (gethash "message" (gethash "error" obj)))
-                      (let ((result (gethash "result" obj))
-                            (content nil))
-                        (setf content (and result (gethash "content" result)))
-                        (and (arrayp content) (> (length content) 0)
-                             (gethash "text" (aref content 0)))))))
+             (msg (%tool-call-message obj)))
         (ok (%tool-call-failed-p obj) "should fail on missing required arg")
         (ok (and msg (search "query" msg :test #'char-equal))
             "error should mention missing query")))))
