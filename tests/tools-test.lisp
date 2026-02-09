@@ -25,6 +25,28 @@
        (when original-cwd
          (ignore-errors (uiop:chdir original-cwd))))))
 
+(defun %tools-list ()
+  "Fetch and parse tools/list result."
+  (let* ((req (concatenate 'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":9001,\"method\":\"tools/list\","
+                           "\"params\":{}}"))
+         (resp (process-json-line req))
+         (obj (parse resp))
+         (result (gethash "result" obj)))
+    (values obj result (and result (gethash "tools" result)))))
+
+(defun %find-tool-descriptor (tools name)
+  "Return tool descriptor by NAME from TOOLS vector."
+  (find-if (lambda (tool)
+             (string= (gethash "name" tool) name))
+           (coerce tools 'list)))
+
+(defun %tool-call-failed-p (obj)
+  "Return true when tool call response represents a failure."
+  (or (gethash "error" obj)
+      (let ((result (gethash "result" obj)))
+        (and result (gethash "isError" result)))))
+
 (deftest tools-call-lisp-read-file
   (testing "tools/call lisp-read-file returns collapsed content"
     (with-test-project-root
@@ -661,3 +683,265 @@
         (ok (string= "list" (gethash "kind" depth2-first))
             "max_depth=2 should expand first nested list")
         (ok (= 2 (length (gethash "elements" depth2-first))))))))
+
+(deftest tools-call-clhs-lookup
+  (testing "tools/call clhs-lookup resolves symbol docs"
+    (let ((req (concatenate 'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":35,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"clhs-lookup\","
+                            "\"arguments\":{\"query\":\"loop\",\"include_content\":false}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (null (%tool-call-failed-p obj)) "should not fail")
+        (ok (string= (gethash "symbol" result) "loop"))
+        (ok (stringp (gethash "url" result)))
+        (ok (member (gethash "source" result) '("local" "remote")
+                    :test #'string=))))))
+
+(deftest tools-call-clhs-lookup-missing-query
+  (testing "tools/call clhs-lookup validates required query argument"
+    (let ((req (concatenate 'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":36,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"clhs-lookup\",\"arguments\":{}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (msg (or (and (gethash "error" obj) (gethash "message" (gethash "error" obj)))
+                      (let ((result (gethash "result" obj))
+                            (content nil))
+                        (setf content (and result (gethash "content" result)))
+                        (and (arrayp content) (> (length content) 0)
+                             (gethash "text" (aref content 0)))))))
+        (ok (%tool-call-failed-p obj) "should fail on missing required arg")
+        (ok (and msg (search "query" msg :test #'char-equal))
+            "error should mention missing query")))))
+
+(deftest tools-call-fs-set-project-root
+  (testing "tools/call fs-set-project-root updates root and returns info"
+    (with-test-project-root
+      (let* ((path (namestring cl-mcp/src/project-root:*project-root*))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-set-project-root\","
+                           "\"arguments\":{\"path\":\"~A\"}}}")
+                          path)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (info (and result (gethash "info" result))))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (null (%tool-call-failed-p obj)) "should not fail")
+          (ok (hash-table-p info))
+          (ok (stringp (gethash "project_root" info)))
+          (ok (string= (gethash "project_root" info) path)))))))
+
+(deftest tools-call-fs-set-project-root-invalid
+  (testing "tools/call fs-set-project-root validates path"
+    (let ((req (concatenate 'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":38,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"fs-set-project-root\","
+                            "\"arguments\":{\"path\":\"/definitely/not/a/real/path\"}}}")))
+      (let ((obj (parse (process-json-line req))))
+        (ok (%tool-call-failed-p obj) "should fail for invalid directory")))))
+
+(deftest tools-call-run-tests
+  (testing "tools/call run-tests executes suite and returns summary"
+    (let ((req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":39,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\","
+                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\"}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (and result (gethash "content" result)))
+             (first (and (arrayp content) (> (length content) 0)
+                         (aref content 0)))
+             (text (and first (gethash "text" first))))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (null (%tool-call-failed-p obj)) "should not fail")
+        (ok (stringp text))
+        (ok (or (search "PASS" text)
+                (search "FAIL" text))
+            "summary should include run status")))))
+
+(deftest tools-call-run-tests-missing-system
+  (testing "tools/call run-tests validates required system argument"
+    (let ((req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\",\"arguments\":{}}}")))
+      (let ((obj (parse (process-json-line req))))
+        (ok (%tool-call-failed-p obj) "should fail on missing system arg")))))
+
+(deftest tools-list-includes-tool-descriptors
+  (testing "tools/list exposes descriptors for critical tools"
+    (multiple-value-bind (obj result tools)
+        (%tools-list)
+      (declare (ignore result))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (dolist (tool-name '("clhs-lookup" "fs-set-project-root" "run-tests"))
+        (let ((desc (%find-tool-descriptor tools tool-name)))
+          (ok desc (format nil "descriptor exists for ~A" tool-name))
+          (when desc
+            (ok (stringp (gethash "description" desc)))
+            (ok (hash-table-p (gethash "inputSchema" desc)))))))))
+
+(deftest tools-list-repl-eval-schema-has-locals-preview-controls
+  (testing "tools/list exposes repl-eval locals-preview controls with descriptions"
+    (multiple-value-bind (obj result tools)
+        (%tools-list)
+      (declare (ignore result))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (let* ((desc (%find-tool-descriptor tools "repl-eval"))
+             (schema (and desc (gethash "inputSchema" desc)))
+             (props (and schema (gethash "properties" schema)))
+             (required (and schema (gethash "required" schema))))
+        (ok desc "repl-eval descriptor should exist")
+        (ok (vectorp required))
+        (ok (find "code" required :test #'string=))
+        (dolist (entry '(("include_result_preview" "boolean")
+                         ("preview_max_depth" "integer")
+                         ("preview_max_elements" "integer")
+                         ("locals_preview_frames" "integer")
+                         ("locals_preview_max_depth" "integer")
+                         ("locals_preview_max_elements" "integer")
+                         ("locals_preview_skip_internal" "boolean")))
+          (destructuring-bind (name expected-type) entry
+            (let ((prop (and props (gethash name props))))
+              (ok prop (format nil "property exists: ~A" name))
+              (when prop
+                (ok (string= (gethash "type" prop) expected-type))
+                (let ((desc-text (gethash "description" prop)))
+                  (ok (and (stringp desc-text)
+                           (> (length desc-text) 0))
+                      (format nil "description exists: ~A" name)))))))))))
+
+(deftest tools-call-repl-eval-inspect-object-concurrency
+  (testing "repl-eval and inspect-object remain consistent under concurrent calls"
+    (let ((errors '())
+          (ids '())
+          (lock (bordeaux-threads:make-lock "tools-test-concurrency"))
+          (threads '()))
+      (labels ((record-error (message)
+                 (bordeaux-threads:with-lock-held (lock)
+                   (push message errors)))
+               (record-id (object-id)
+                 (bordeaux-threads:with-lock-held (lock)
+                   (push object-id ids)))
+               (worker (thread-index)
+                 (dotimes (iter 8)
+                   (let* ((req-eval (format nil
+                                            (concatenate
+                                             'string
+                                             "{\"jsonrpc\":\"2.0\",\"id\":~A,"
+                                             "\"method\":\"tools/call\","
+                                             "\"params\":{\"name\":\"repl-eval\","
+                                             "\"arguments\":{\"code\":\"(list 1 2 3)\"}}}")
+                                            (+ 10000 (* thread-index 100) iter)))
+                          (obj-eval (parse (process-json-line req-eval)))
+                          (result-eval (gethash "result" obj-eval))
+                          (object-id (and result-eval
+                                          (gethash "result_object_id" result-eval))))
+                     (if (integerp object-id)
+                         (progn
+                           (record-id object-id)
+                           (let* ((req-inspect (format nil
+                                                       (concatenate
+                                                        'string
+                                                        "{\"jsonrpc\":\"2.0\","
+                                                        "\"id\":~A,\"method\":\"tools/call\","
+                                                        "\"params\":{\"name\":\"inspect-object\","
+                                                        "\"arguments\":{\"id\":~A}}}")
+                                                       (+ 20000 (* thread-index 100) iter)
+                                                       object-id))
+                                  (obj-inspect (parse (process-json-line req-inspect)))
+                                  (result-inspect (gethash "result" obj-inspect)))
+                             (unless (and (hash-table-p result-inspect)
+                                          (string= (gethash "kind" result-inspect) "list"))
+                               (record-error (format nil
+                                                     "inspect failed for object id ~A"
+                                                     object-id)))))
+                         (record-error (format nil
+                                               "missing object id: ~S"
+                                               result-eval)))))))
+        (dotimes (i 6)
+          (let ((thread-index i))
+            (push (bordeaux-threads:make-thread
+                   (lambda () (worker thread-index))
+                   :name (format nil "tools-concurrency-~D" thread-index))
+                  threads)))
+        (dolist (thread threads)
+          (bordeaux-threads:join-thread thread))
+        (ok (null errors)
+            (if errors
+                (format nil "concurrency errors: ~{~A~^, ~}" (nreverse errors))
+                "no concurrency errors"))
+        (ok (> (length ids) 0) "should collect object ids")
+        (ok (= (length ids)
+               (length (remove-duplicates ids)))
+            "result_object_id values should be unique")))))
+
+(deftest tools-call-fs-set-project-root-concurrency
+  (testing "fs-set-project-root and fs reads stay stable under concurrent calls"
+    (with-test-project-root
+      (let* ((root (namestring cl-mcp/src/project-root:*project-root*))
+             (errors '())
+             (lock (bordeaux-threads:make-lock "tools-test-fs-root-concurrency")))
+        (labels ((record-error (message)
+                   (bordeaux-threads:with-lock-held (lock)
+                     (push message errors))))
+          (let ((setter (bordeaux-threads:make-thread
+                         (lambda ()
+                           (dotimes (i 20)
+                             (let* ((req (format nil
+                                                 (concatenate
+                                                  'string
+                                                  "{\"jsonrpc\":\"2.0\",\"id\":~A,"
+                                                  "\"method\":\"tools/call\","
+                                                  "\"params\":{\"name\":\"fs-set-project-root\","
+                                                  "\"arguments\":{\"path\":\"~A\"}}}")
+                                                 (+ 30000 i)
+                                                 root))
+                                    (obj (parse (process-json-line req))))
+                               (when (%tool-call-failed-p obj)
+                                 (record-error "fs-set-project-root failed")))))
+                         :name "tools-fs-root-setter"))
+                (reader (bordeaux-threads:make-thread
+                         (lambda ()
+                           (dotimes (i 20)
+                             (let* ((req-info (concatenate
+                                               'string
+                                               "{\"jsonrpc\":\"2.0\",\"id\":31000,"
+                                               "\"method\":\"tools/call\","
+                                               "\"params\":{\"name\":\"fs-get-project-info\","
+                                               "\"arguments\":{}}}"))
+                                    (obj-info (parse (process-json-line req-info)))
+                                    (result-info (gethash "result" obj-info))
+                                    (project-root (and result-info
+                                                       (gethash "project_root" result-info)))
+                                    (req-list (concatenate
+                                               'string
+                                               "{\"jsonrpc\":\"2.0\",\"id\":32000,"
+                                               "\"method\":\"tools/call\","
+                                               "\"params\":{\"name\":\"fs-list-directory\","
+                                               "\"arguments\":{\"path\":\".\"}}}"))
+                                    (obj-list (parse (process-json-line req-list)))
+                                    (result-list (gethash "result" obj-list))
+                                    (entries (and result-list
+                                                  (gethash "entries" result-list))))
+                               (unless (and (null (%tool-call-failed-p obj-info))
+                                            (stringp project-root)
+                                            (null (%tool-call-failed-p obj-list))
+                                            (arrayp entries))
+                                 (record-error "concurrent fs read failed")))))
+                         :name "tools-fs-root-reader")))
+            (bordeaux-threads:join-thread setter)
+            (bordeaux-threads:join-thread reader))
+          (ok (null errors)
+              (if errors
+                  (format nil "fs/root concurrency errors: ~{~A~^, ~}" (nreverse errors))
+                  "no fs/root concurrency errors")))))))
