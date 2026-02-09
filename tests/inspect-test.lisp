@@ -211,9 +211,9 @@
          (ok (string= "list" (ht-get result "kind")))
          ;; Inner list should be expanded at depth 2
          (let ((first-elem (first (ht-get result "elements"))))
-           ;; At depth 2, inner objects get expanded
-           (ok (or (string= "list" (ht-get first-elem "kind"))
-                   (string= "object-ref" (ht-get first-elem "kind"))))))))))
+           (ok (string= "list" (ht-get first-elem "kind"))
+               "max_depth=2 should expand first nested list")
+           (ok (= 2 (length (ht-get first-elem "elements"))))))))))
 
 (deftest inspect-multi-dimensional-array
   (testing "inspect 2D array"

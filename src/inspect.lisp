@@ -74,10 +74,12 @@ VISITED-TABLE is used for circular reference detection."
   "Return representation of OBJECT, registering if inspectable.
 Returns either a primitive value representation or an object-ref."
   (if (inspectable-p object)
-      (if (and (> depth 0) (< depth max-depth))
-          ;; Recursively inspect nested objects
+      ;; DEPTH here is the parent depth. Expand nested objects only when the
+      ;; child depth (DEPTH + 1) is still below MAX-DEPTH and we have not
+      ;; already visited the object (to preserve circular-reference handling).
+      (if (and (< (1+ depth) max-depth)
+               (null (gethash object visited-table)))
           (%inspect-object-impl object visited-table (1+ depth) max-depth max-elements)
-          ;; Return object reference for deeper inspection
           (%make-object-ref object visited-table))
       (%primitive-value-repr object)))
 
