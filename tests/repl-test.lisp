@@ -300,3 +300,137 @@
       (let ((preview (generate-result-preview raw-value)))
         (ok (string= (gethash "kind" preview) "list"))
         (ok (gethash "id" preview))))))
+
+;;; Tests for locals-preview-frames feature
+
+(defun %test-error-with-locals ()
+  "Test function with debug optimization for local capture."
+  (declare (optimize (debug 3)))
+  (let ((my-hash (make-hash-table)))
+    (setf (gethash :key my-hash) (list 1 2 3))
+    (error "test error")))
+
+(deftest repl-eval-locals-preview-disabled-by-default
+  (testing "locals preview is disabled by default (locals-preview-frames=0)"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)")
+      (declare (ignore printed raw stdout stderr))
+      (ok error-context "should have error context")
+      ;; Find frame with our test function
+      (let ((frame (find-if (lambda (f)
+                              (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                            (getf error-context :frames))))
+        (ok frame "should find test function frame")
+        (when frame
+          (let ((locals (getf frame :locals)))
+            ;; Should have object-id but NOT preview (default behavior)
+            (when locals
+              (let ((local (first locals)))
+                (ok (getf local :object-id) "should have object-id")
+                (ok (null (getf local :preview)) "should NOT have preview by default")))))))))
+
+(deftest repl-eval-locals-preview-enabled
+  (testing "locals preview is generated when locals-preview-frames > 0"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
+                   :locals-preview-frames 10)
+      (declare (ignore printed raw stdout stderr))
+      (ok error-context "should have error context")
+      (let ((frame (find-if (lambda (f)
+                              (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                            (getf error-context :frames))))
+        (ok frame "should find test function frame")
+        (when frame
+          (let ((locals (getf frame :locals)))
+            (when locals
+              (let ((local (first locals)))
+                (ok (getf local :object-id) "should have object-id")
+                (ok (getf local :preview) "should have preview")
+                (when (getf local :preview)
+                  (let ((preview (getf local :preview)))
+                    (ok (string= (gethash "kind" preview) "hash-table")
+                        "preview should show hash-table kind")
+                    (ok (gethash "id" preview) "preview should have id")))))))))))
+
+(deftest repl-eval-locals-preview-only-top-frames
+  (testing "only top N frames get preview when counting all frames"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        ;; Set to 2 - only frames 0 and 1 should get preview
+        ;; Explicitly disable skip-internal to test raw frame counting
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
+                   :locals-preview-frames 2
+                   :locals-preview-skip-internal nil)
+      (declare (ignore printed raw stdout stderr))
+      (ok error-context "should have error context")
+      (let ((frame (find-if (lambda (f)
+                              (search "TEST-ERROR-WITH-LOCALS"
+                                      (getf f :function)))
+                            (getf error-context :frames))))
+        (ok frame "should find test function frame")
+        (ok (> (getf frame :index) 2)
+            "test function should be at index > 2 (buried under infrastructure)")
+        (let ((locals (getf frame :locals)))
+          (ok locals "frame should have locals (requires debug 3)")
+          (let ((local (first locals)))
+            (ok (getf local :object-id) "should have object-id")
+            (ok (null (getf local :preview))
+                "frame beyond locals-preview-frames should NOT have preview")))))))
+
+(deftest repl-eval-locals-preview-skip-internal-basic
+  (testing "skip-internal (default) gives user frames preview"
+    ;; With skip-internal=true (default), preview-frames=2 counts USER frames,
+    ;; so our test function should be included even though its raw index is 5+
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
+                   :locals-preview-frames 2)  ; skip-internal defaults to t
+      (declare (ignore printed raw stdout stderr))
+      (ok error-context "should have error context")
+      (let ((frame (find-if
+                    (lambda (f)
+                      (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                    (getf error-context :frames))))
+        (ok frame "should find test function frame")
+        ;; With skip-internal=true (default), user frame should get preview
+        (let ((locals (getf frame :locals)))
+          (ok locals "frame should have locals (requires debug 3)")
+          (let ((local (first locals)))
+            (ok (getf local :object-id) "should have object-id")
+            (ok (getf local :preview)
+                "user frame should get preview with skip-internal=true")))))))
+
+(deftest repl-eval-locals-preview-skip-internal-comparison
+  (testing "skip-internal=true vs false should differ for same preview-frames"
+    ;; Call with skip-internal=false (frames=2 won't reach our function)
+    (multiple-value-bind (printed-1 raw-1 stdout-1 stderr-1 ctx-1)
+        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
+                   :locals-preview-frames 2
+                   :locals-preview-skip-internal nil)
+      (declare (ignore printed-1 raw-1 stdout-1 stderr-1))
+      ;; Call with skip-internal=true (frames=2 SHOULD reach our function)
+      (multiple-value-bind (printed-2 raw-2 stdout-2 stderr-2 ctx-2)
+          (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
+                     :locals-preview-frames 2
+                     :locals-preview-skip-internal t)
+        (declare (ignore printed-2 raw-2 stdout-2 stderr-2))
+        (let ((frame-1 (find-if
+                        (lambda (f)
+                          (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                        (getf ctx-1 :frames)))
+              (frame-2 (find-if
+                        (lambda (f)
+                          (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                        (getf ctx-2 :frames))))
+          (ok frame-1 "should find test function in ctx-1")
+          (ok frame-2 "should find test function in ctx-2")
+          (ok (> (getf frame-1 :index) 2)
+              "test function should be at index > 2")
+          (let ((locals-1 (getf frame-1 :locals))
+                (locals-2 (getf frame-2 :locals)))
+            (ok locals-1 "frame-1 should have locals")
+            (ok locals-2 "frame-2 should have locals")
+            ;; Without skip-internal, no preview (index > 2)
+            (ok (null (getf (first locals-1) :preview))
+                "without skip-internal, user frame should NOT have preview")
+            ;; With skip-internal, should have preview
+            (ok (getf (first locals-2) :preview)
+                "with skip-internal, user frame SHOULD have preview")))))))
