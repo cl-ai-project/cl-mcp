@@ -18,7 +18,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit code | `lisp-edit-form` | `form_type`, `form_name` |
-| Inspect object | `inspect-object` | `id` (from `result_object_id`) |
+| Inspect deeper | `inspect-object` | `id` (from `result_preview`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
 | Run tests | `run-tests` | `system`, `test` (optional) |
@@ -209,18 +209,39 @@ Use `repl-eval` for:
 
 **WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They are lost if the server restarts. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
 
-**Object Inspection:**
-When `repl-eval` returns a non-primitive result (list, hash-table, CLOS instance, etc.), the response includes a `result_object_id` field. Use this ID with `inspect-object` to drill down into the object's structure:
-```json
-{"code": "(make-hash-table)", "package": "CL-USER"}
-```
-Response includes: `"result_object_id": 42`
+**Object Inspection (with Preview):**
+When `repl-eval` returns a non-primitive result (list, hash-table, CLOS instance, etc.), the response includes:
+- `result_object_id`: ID for use with `inspect-object` for deeper drill-down
+- `result_preview`: A lightweight structural preview (kind, type, elements, etc.)
 
-Then inspect the object:
+The preview reduces round-trips by providing immediate insight into the result structure:
 ```json
-{"id": 42, "max_depth": 1}
+{"code": "(list 1 2 3)", "package": "CL-USER"}
 ```
-This returns the object's kind, entries, slots, or elements depending on type. Nested non-primitive values also include IDs for further drill-down.
+Response includes:
+```json
+{
+  "content": "(1 2 3)",
+  "result_object_id": 42,
+  "result_preview": {
+    "kind": "list",
+    "summary": "(1 2 3)",
+    "elements": [...],
+    "meta": {"total_elements": 3, "truncated": false},
+    "id": 42
+  }
+}
+```
+
+**When to use `inspect-object`:**
+- The preview is truncated (`truncated: true`) and you need more elements
+- You need to drill deeper into nested objects (use their `object_id`)
+- You need to inspect a specific element's internal structure
+
+**Preview parameters** (optional):
+- `include_result_preview`: Set to `false` to disable preview (default: `true`)
+- `preview_max_depth`: Max nesting depth (default: 1)
+- `preview_max_elements`: Max elements per collection (default: 8)
 
 **Best practices:**
 - Specify the `package` argument to ensure correct package context

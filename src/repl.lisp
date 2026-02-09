@@ -9,11 +9,14 @@
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p
                 #:register-object)
+  (:import-from #:cl-mcp/src/inspect
+                #:generate-result-preview)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:repl-eval #:*default-eval-package*))
+
 
 (in-package #:cl-mcp/src/repl)
 
@@ -243,8 +246,12 @@ To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
 to save changes to files.
 
 When the result is a non-primitive object (not a number, string, symbol, or character),
-the response includes a 'result_object_id' field. Use this ID with the 'inspect-object'
-tool to drill down into the object's internal structure."
+the response includes:
+- 'result_object_id': ID for use with 'inspect-object' for deeper drill-down
+- 'result_preview': A lightweight structural preview (kind, type, elements, etc.)
+
+The preview reduces round-trips by providing immediate insight into the result structure.
+Use 'inspect-object' only when you need to drill deeper than the preview shows."
   :args ((code :type :string :required t
                :description "Code string of one or more forms evaluated sequentially")
          (package :type :string
@@ -258,7 +265,13 @@ tool to drill down into the object's internal structure."
          (max-output-length :type :integer :json-name "max_output_length"
                             :description "Maximum characters for printed result/stdout/stderr")
          (safe-read :type :boolean :json-name "safe_read"
-                    :description "When true, disables #. reader evaluation for safety"))
+                    :description "When true, disables #. reader evaluation for safety")
+         (include-result-preview :type :boolean :json-name "include_result_preview"
+                                  :description "Include structural preview of non-primitive results (default: true)")
+         (preview-max-depth :type :integer :json-name "preview_max_depth"
+                            :description "Max nesting depth for preview (default: 1)")
+         (preview-max-elements :type :integer :json-name "preview_max_elements"
+                               :description "Max elements per collection in preview (default: 8)"))
   :body
   (multiple-value-bind (printed raw-value stdout stderr error-context)
       (repl-eval code
@@ -270,13 +283,24 @@ tool to drill down into the object's internal structure."
                  :safe-read safe-read)
     (let ((ht (make-ht "content" (text-content printed)
                        "stdout" stdout
-                       "stderr" stderr)))
-      ;; Register non-primitive results for inspection
+                       "stderr" stderr))
+          ;; Default include-result-preview to T when not specified
+          (include-preview (if (null include-result-preview) t include-result-preview)))
+      ;; Generate preview and register non-primitive results for inspection
       (when (and (null error-context)
                  (inspectable-p raw-value))
-        (let ((object-id (register-object raw-value)))
-          (when object-id
-            (setf (gethash "result_object_id" ht) object-id))))
+        (if include-preview
+            ;; Generate preview (which also registers the object)
+            (let ((preview (generate-result-preview
+                            raw-value
+                            :max-depth (or preview-max-depth 1)
+                            :max-elements (or preview-max-elements 8))))
+              (setf (gethash "result_object_id" ht) (gethash "id" preview))
+              (setf (gethash "result_preview" ht) preview))
+            ;; Just register without preview
+            (let ((object-id (register-object raw-value)))
+              (when object-id
+                (setf (gethash "result_object_id" ht) object-id)))))
       ;; Add error context if present
       (when error-context
         (setf (gethash "error_context" ht)
@@ -300,3 +324,4 @@ tool to drill down into the object's internal structure."
                                                                     (getf f :locals))))
                                         (getf error-context :frames)))))
       (result id ht))))
+
