@@ -251,7 +251,12 @@ the response includes:
 - 'result_preview': A lightweight structural preview (kind, type, elements, etc.)
 
 The preview reduces round-trips by providing immediate insight into the result structure.
-Use 'inspect-object' only when you need to drill deeper than the preview shows."
+Use 'inspect-object' only when you need to drill deeper than the preview shows.
+
+When an error occurs, 'error_context' includes stack frames with local variables.
+Non-primitive locals include 'object_id' for drill-down via 'inspect-object'.
+NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
+SBCL's default optimization does not preserve locals for inspection."
   :args ((code :type :string :required t
                :description "Code string of one or more forms evaluated sequentially")
          (package :type :string

@@ -391,6 +391,13 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
      - `restarts`: Available restarts
      - `frames`: Stack frames with function names, source locations, and local variables
    - Locals in stack frames include `object_id` for non-primitive values, enabling inspection.
+   - **IMPORTANT:** Local variable capture requires `(declare (optimize (debug 3)))` in the function.
+     SBCL's default optimization does not preserve locals. Add the declaration to functions you need to debug:
+     ```lisp
+     (defun my-function (x)
+       (declare (optimize (debug 3)))
+       ...)
+     ```
 
 2. **Inspect Runtime State:** If `repl-eval` returns a complex object, use its `result_object_id` to inspect:
    ```json
