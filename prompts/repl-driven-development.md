@@ -399,28 +399,36 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
        ...)
      ```
 
-2. **Inspect Runtime State:** If `repl-eval` returns a complex object, use its `result_object_id` to inspect:
+2. **Auto-expand Local Previews:** To immediately see local variable contents without extra `inspect-object` calls,
+   set `locals_preview_frames` to include previews in the top N stack frames:
+   ```json
+   {"code": "(my-buggy-function)", "package": "MY-PACKAGE", "locals_preview_frames": 5}
+   ```
+   This adds a `preview` field to each non-primitive local variable in the top 5 frames,
+   showing kind, summary, elements, and nested structure—just like `result_preview` for normal results.
+
+3. **Inspect Runtime State:** If `repl-eval` returns a complex object, use its `result_object_id` to inspect:
    ```json
    {"id": 42}
    ```
    For debugging errors, you can inspect local variables from the error context using their `object_id`.
 
-3. **Analyze:** Use `code-find-references` to see where the problematic symbol is used:
+4. **Analyze:** Use `code-find-references` to see where the problematic symbol is used:
    ```json
    {"symbol": "my-package:problematic-var", "project_only": true}
    ```
 
-4. **Check Syntax:** If you suspect malformed code, use `lisp-check-parens`:
+5. **Check Syntax:** If you suspect malformed code, use `lisp-check-parens`:
    ```json
    {"path": "src/buggy.lisp"}
    ```
 
-5. **Inspect Symbols:** Use `code-describe` to verify function signatures:
+6. **Inspect Symbols:** Use `code-describe` to verify function signatures:
    ```json
    {"symbol": "my-package:my-function"}
    ```
 
-6. **Fix:** Apply the fix using `lisp-edit-form`, then verify with `repl-eval`.
+7. **Fix:** Apply the fix using `lisp-edit-form`, then verify with `repl-eval`.
 
 ### Scenario: Running Tests
 
