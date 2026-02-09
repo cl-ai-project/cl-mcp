@@ -33,14 +33,19 @@
             until (eq form :eof)
             collect form))))
 
-(declaim (ftype (function (string &key (:package (or package symbol string))
-                                  (:print-level (or null (integer 0)))
-                                  (:print-length (or null (integer 0)))
-                                  (:timeout-seconds (or null (real 0)))
-                                  (:max-output-length (or null (integer 0)))
-                                  (:safe-read (member t nil)))
-                          (values string t string string list &optional))
-                repl-eval))
+(declaim (ftype (function (string
+                           &key (:package (or package symbol string))
+                                (:print-level (or null (integer 0)))
+                                (:print-length (or null (integer 0)))
+                                (:timeout-seconds (or null (real 0)))
+                                (:max-output-length (or null (integer 0)))
+                                (:safe-read (member t nil))
+                                (:locals-preview-frames (or null (integer 0)))
+                                (:locals-preview-max-depth (or null (integer 0)))
+                                (:locals-preview-max-elements (or null (integer 0)))
+                                (:locals-preview-skip-internal (member t nil)))
+                           (values string t string string (or null list) &optional))
+                 repl-eval))
 
 (defun %sanitize-control-chars (string)
   "Remove control characters that are invalid in JSON strings.
@@ -366,5 +371,4 @@ SBCL's default optimization does not preserve locals for inspection."
                                                                     (getf f :locals))))
                                         (getf error-context :frames)))))
       (result id ht))))
-
 
