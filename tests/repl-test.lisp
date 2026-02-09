@@ -353,11 +353,13 @@
                     (ok (gethash "id" preview) "preview should have id")))))))))))
 
 (deftest repl-eval-locals-preview-only-top-frames
-  (testing "only top N frames get preview based on locals-preview-frames"
+  (testing "only top N frames get preview based on locals-preview-frames (counting all frames)"
     (multiple-value-bind (printed raw stdout stderr error-context)
         ;; Set to 2 - only frames 0 and 1 should get preview
+        ;; Explicitly disable skip-internal to test raw frame counting
         (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
-                   :locals-preview-frames 2)
+                   :locals-preview-frames 2
+                   :locals-preview-skip-internal nil)
       (declare (ignore printed raw stdout stderr))
       (ok error-context "should have error context")
       ;; Our test function is typically at index 5+, so should NOT have preview
@@ -373,15 +375,12 @@
                     "frame beyond locals-preview-frames should NOT have preview")))))))))
 
 (deftest repl-eval-locals-preview-skip-internal-basic
-  (testing "skip-internal enables preview for user frames buried under infrastructure"
-    ;; Without skip-internal, frames 0-1 are infrastructure (ERROR, SB-*, CL-MCP)
-    ;; Our test function is typically at index 5+, so preview-frames=2 misses it
-    ;; With skip-internal=true, preview-frames=2 counts only USER frames,
-    ;; so our test function should be included
+  (testing "skip-internal (default) enables preview for user frames buried under infrastructure"
+    ;; With skip-internal=true (now default), preview-frames=2 counts only USER frames,
+    ;; so our test function should be included even though its raw index is 5+
     (multiple-value-bind (printed raw stdout stderr error-context)
         (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
-                   :locals-preview-frames 2
-                   :locals-preview-skip-internal t)
+                   :locals-preview-frames 2)  ; skip-internal defaults to t
       (declare (ignore printed raw stdout stderr))
       (ok error-context "should have error context")
       (let ((frame (find-if (lambda (f)
@@ -389,14 +388,14 @@
                             (getf error-context :frames))))
         (ok frame "should find test function frame")
         (when frame
-          ;; With skip-internal, this user frame should get preview
+          ;; With skip-internal=true (default), this user frame should get preview
           ;; even though its index is > 2
           (let ((locals (getf frame :locals)))
             (when locals
               (let ((local (first locals)))
                 (ok (getf local :object-id) "should have object-id")
                 (ok (getf local :preview)
-                    "user frame should get preview when skip-internal=true")))))))))
+                    "user frame should get preview with default skip-internal=true")))))))))
 
 (deftest repl-eval-locals-preview-skip-internal-comparison
   (testing "skip-internal=true vs false should differ for same preview-frames count"

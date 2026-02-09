@@ -91,15 +91,25 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
     (error () "<unknown>")))
 
 (defparameter *internal-package-prefixes*
-  '("CL-MCP" "SB-" "UIOP" "ASDF" "BORDEAUX-THREADS" "HUNCHENTOOT" "USOCKET")
-  "Package prefixes that indicate internal/infrastructure frames.")
+  '("CL-MCP"
+    ;; SBCL internal packages (specific, not just "SB-" to avoid false positives like SB-APP)
+    "SB-KERNEL" "SB-INT" "SB-IMPL" "SB-DEBUG" "SB-C" "SB-DI" "SB-VM"
+    "SB-EXT" "SB-SYS" "SB-PCL" "SB-MOP" "SB-ALIEN" "SB-THREAD"
+    "SB-INTROSPECT" "SB-PROFILE" "SB-LOOP" "SB-PRETTY" "SB-FORMAT"
+    "SB-DISASSEM" "SB-BIGNUM" "SB-WALKER" "SB-CLTL2" "SB-SEQUENCE"
+    "SB-GRAY" "SB-UNICODE" "SB-COVER" "SB-BSD-SOCKETS" "SB-POSIX"
+    ;; Other infrastructure
+    "UIOP" "ASDF" "BORDEAUX-THREADS" "HUNCHENTOOT" "USOCKET")
+  "Package prefixes that indicate internal/infrastructure frames.
+Note: Uses specific SBCL package names rather than broad 'SB-' to avoid
+false positives with user packages like SB-APP.")
 
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
 Internal frames include:
-- Frames from CL-MCP, SBCL internals (SB-*), ASDF, UIOP, etc.
+- Frames from CL-MCP, SBCL internals (SB-KERNEL, SB-INT, etc.), ASDF, UIOP, etc.
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
-- Standard CL functions like ERROR, SIGNAL, etc."
+- Standard CL functions like ERROR, SIGNAL, EVAL, etc."
   (or
    ;; Anonymous/compiler-generated frames
    (and (> (length function-name) 0)
@@ -109,9 +119,9 @@ Internal frames include:
            (and (>= (length function-name) (length prefix))
                 (string-equal function-name prefix :end1 (length prefix))))
          *internal-package-prefixes*)
-   ;; Standard error signaling functions
+   ;; Standard error signaling and evaluation functions
    (member function-name '("ERROR" "SIGNAL" "CERROR" "WARN"
-                           "INVOKE-DEBUGGER" "BREAK")
+                           "INVOKE-DEBUGGER" "BREAK" "EVAL")
            :test #'string-equal)))
 
 #+sbcl
@@ -172,15 +182,15 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation parameters
                                              (locals-preview-frames 0)
                                              (preview-max-depth 1)
                                              (preview-max-elements 5)
-                                             (locals-preview-skip-internal nil))
+                                             (locals-preview-skip-internal t))
   "Capture structured error context including frames and locals.
 
 LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (default: 0).
   Set to a positive integer to automatically expand local variables in the top N frames.
   This helps agents immediately see the state of variables without extra inspect-object calls.
-LOCALS-PREVIEW-SKIP-INTERNAL: When true, skip internal frames when counting for preview eligibility.
-  Internal frames include CL-MCP, SBCL internals (SB-*), ASDF, UIOP, anonymous functions, etc.
-  This helps ensure user code frames get previews even when buried under infrastructure frames.
+LOCALS-PREVIEW-SKIP-INTERNAL: When true (default), skip internal frames when counting for preview.
+  Internal frames include CL-MCP, SBCL internals (SB-KERNEL, etc.), ASDF, UIOP, anonymous functions.
+  This ensures user code frames get previews even when buried under infrastructure frames.
 PREVIEW-MAX-DEPTH: Max nesting depth for local previews (default: 1).
 PREVIEW-MAX-ELEMENTS: Max elements per collection in local previews (default: 5).
 

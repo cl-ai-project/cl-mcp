@@ -225,7 +225,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                              (locals-preview-frames nil)
                              (locals-preview-max-depth nil)
                              (locals-preview-max-elements nil)
-                             (locals-preview-skip-internal nil))
+                             (locals-preview-skip-internal t))
   "Evaluate INPUT (a string of one or more s-expressions) in PACKAGE.
 
 Forms are read as provided and evaluated sequentially; the last value is
@@ -241,7 +241,7 @@ Options:
 - LOCALS-PREVIEW-FRAMES: number of top frames to include local variable previews (default: 0).
 - LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
 - LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
-- LOCALS-PREVIEW-SKIP-INTERNAL: when T, skip internal frames when counting for preview eligibility."
+- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
   (let ((thunk (lambda ()
                  (%do-repl-eval input
                                 package
@@ -275,9 +275,9 @@ When an error occurs, 'error_context' includes stack frames with local variables
 Non-primitive locals include 'object_id' for drill-down via 'inspect-object'.
 Set 'locals_preview_frames' > 0 to auto-expand local variable previews in top N frames,
 providing immediate insight without extra inspect-object calls during debugging.
-Set 'locals_preview_skip_internal' to true to skip internal/infrastructure frames
+The 'locals_preview_skip_internal' parameter (default: true) skips internal frames
 (CL-MCP, SBCL internals, ASDF, etc.) when counting frames for preview eligibility.
-This helps ensure user code frames get previews even when buried under infrastructure.
+This ensures user code frames get previews even when buried under infrastructure.
 NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
 SBCL's default optimization does not preserve locals for inspection."
   :args ((code :type :string :required t
@@ -308,7 +308,8 @@ SBCL's default optimization does not preserve locals for inspection."
          (locals-preview-max-elements :type :integer :json-name "locals_preview_max_elements"
                                       :description "Max elements per collection in local variable previews (default: 5)")
          (locals-preview-skip-internal :type :boolean :json-name "locals_preview_skip_internal"
-                                       :description "Skip internal frames (CL-MCP, SB-*, ASDF, etc.) when counting for preview eligibility (default: false)"))
+                                       :default t
+                                       :description "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
   :body
   (multiple-value-bind (printed raw-value stdout stderr error-context)
       (repl-eval code

@@ -407,12 +407,14 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
    This adds a `preview` field to each non-primitive local variable in the top N frames,
    showing kind, summary, elements, and nested structure—just like `result_preview` for normal results.
 
-   **Tip:** User code frames are often buried under infrastructure frames (CL-MCP, SBCL internals, ASDF, etc.).
-   Set `locals_preview_skip_internal` to `true` to count only user code frames:
+   **Note:** By default, `locals_preview_skip_internal` is `true`, which skips infrastructure frames
+   (CL-MCP, SBCL internals, ASDF, etc.) when counting. This ensures your function's locals get previews
+   even when they appear at frame index 5+ in the raw stack.
+
+   To count all frames including internal ones, set `locals_preview_skip_internal` to `false`:
    ```json
-   {"code": "(my-buggy-function)", "package": "MY-PACKAGE", "locals_preview_frames": 3, "locals_preview_skip_internal": true}
+   {"code": "(my-buggy-function)", "package": "MY-PACKAGE", "locals_preview_frames": 3, "locals_preview_skip_internal": false}
    ```
-   This ensures your function's locals get previews even when they appear at frame index 5+ in the raw stack.
 
 3. **Inspect Runtime State:** If `repl-eval` returns a complex object, use its `result_object_id` to inspect:
    ```json
