@@ -634,3 +634,30 @@
         (when (gethash "result_preview" result)
           (ok (string= (gethash "kind" (gethash "result_preview" result)) "list")
               "Preview should show kind=list"))))))
+
+(deftest tools-call-repl-eval-preview-max-depth
+  (testing "tools/call repl-eval preview_max_depth controls nested expansion"
+    (flet ((first-preview-element (depth request-id)
+             (let* ((req (format nil
+                                 (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":~A,\"method\":\"tools/call\","
+                                  "\"params\":{\"name\":\"repl-eval\","
+                                  "\"arguments\":{\"code\":\"(list (list 1 2) 3)\","
+                                  "\"preview_max_depth\":~A}}}")
+                                 request-id depth))
+                    (resp (process-json-line req))
+                    (obj (parse resp))
+                    (result (gethash "result" obj))
+                    (preview (gethash "result_preview" result))
+                    (elements (and preview (gethash "elements" preview))))
+               (and elements (> (length elements) 0) (aref elements 0)))))
+      (let ((depth1-first (first-preview-element 1 33))
+            (depth2-first (first-preview-element 2 34)))
+        (ok (string= "object-ref" (gethash "kind" depth1-first))
+            "max_depth=1 should keep nested list as object-ref")
+        (ok (null (gethash "elements" depth1-first))
+            "object-ref should not include nested elements")
+        (ok (string= "list" (gethash "kind" depth2-first))
+            "max_depth=2 should expand first nested list")
+        (ok (= 2 (length (gethash "elements" depth2-first))))))))
