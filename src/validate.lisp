@@ -163,6 +163,9 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
           (gethash "required_args" result)
           (vector "file_path" "form_type" "form_name" "operation" "content")))
   result)
+
+
+
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
@@ -251,13 +254,19 @@ lisp-edit-form for existing Lisp files."
                           (if next-tool
                               " Use lisp-edit-form for existing Lisp files."
                               ""))))))
-      (result id
-              (make-ht "content" (text-content summary)
-                       "ok" ok
-                       "kind" (gethash "kind" check-result)
-                       "expected" (gethash "expected" check-result)
-                       "found" (gethash "found" check-result)
-                       "position" (gethash "position" check-result)
-                       "fix_code" (gethash "fix_code" check-result)
-                       "next_tool" (gethash "next_tool" check-result)
-                       "required_args" (gethash "required_args" check-result))))))
+      (let* ((payload
+               (make-ht "content" (text-content summary)
+                        "ok" ok
+                        "kind" (gethash "kind" check-result)
+                        "expected" (gethash "expected" check-result)
+                        "found" (gethash "found" check-result)
+                        "position" (gethash "position" check-result)))
+             (fix-code (gethash "fix_code" check-result))
+             (required-args (gethash "required_args" check-result)))
+        (when fix-code
+          (setf (gethash "fix_code" payload) fix-code))
+        (when next-tool
+          (setf (gethash "next_tool" payload) next-tool))
+        (when required-args
+          (setf (gethash "required_args" payload) required-args))
+        (result id payload)))))

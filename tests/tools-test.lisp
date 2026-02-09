@@ -310,7 +310,19 @@
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
              (result (gethash "result" obj)))
-        (ok (eql (gethash "ok" result) t))))))
+        (ok (eql (gethash "ok" result) t))
+        (multiple-value-bind (val presentp)
+            (gethash "next_tool" result)
+          (declare (ignore val))
+          (ok (not presentp)))
+        (multiple-value-bind (val presentp)
+            (gethash "fix_code" result)
+          (declare (ignore val))
+          (ok (not presentp)))
+        (multiple-value-bind (val presentp)
+            (gethash "required_args" result)
+          (declare (ignore val))
+          (ok (not presentp)))))))
 
 (deftest tools-call-lisp-check-parens-mismatch
   (testing "tools/call lisp-check-parens reports mismatch"

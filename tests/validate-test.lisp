@@ -19,7 +19,11 @@
 (deftest lisp-check-parens-ok-string
   (testing "balanced string returns ok"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2))")))
-      (ok (%ok? res)))))
+      (ok (%ok? res))
+      (multiple-value-bind (val presentp)
+          (gethash "next_tool" res)
+        (declare (ignore val))
+        (ok (not presentp))))))
 
 (deftest lisp-check-parens-extra-close
   (testing "extra closing paren reported"
