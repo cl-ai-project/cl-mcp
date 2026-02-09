@@ -19,7 +19,11 @@
 (deftest lisp-check-parens-ok-string
   (testing "balanced string returns ok"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2))")))
-      (ok (%ok? res)))))
+      (ok (%ok? res))
+      (multiple-value-bind (val presentp)
+          (gethash "next_tool" res)
+        (declare (ignore val))
+        (ok (not presentp))))))
 
 (deftest lisp-check-parens-extra-close
   (testing "extra closing paren reported"
@@ -37,6 +41,15 @@
       (ok (string= (gethash "expected" res) "]"))
       (ok (string= (gethash "found" res) ")")))))
 
+(deftest lisp-check-parens-mismatch-includes-guidance
+  (testing "mismatch result includes lisp-edit-form guidance"
+    (let* ((res (lisp-check-parens :code "( [ ) ]"))
+           (required (gethash "required_args" res)))
+      (ok (string= (gethash "fix_code" res) "use_lisp_edit_form"))
+      (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
+      (ok (vectorp required))
+      (ok (= (length required) 5))
+      (ok (string= (aref required 0) "file_path")))))
 (deftest lisp-check-parens-unclosed
   (testing "unclosed opener at end"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2)")))

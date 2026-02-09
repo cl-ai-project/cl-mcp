@@ -6,7 +6,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content #:rpc-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paths
@@ -111,6 +111,30 @@ Returns T on success."
       (log-event :debug "fs.write.close"
                  "path" (namestring pn)
                  "fd" (fd-count)))))
+
+(defun %lisp-source-pathname-p (pn)
+  "Return T when PN has a Common Lisp source extension."
+  (let ((type (pathname-type pn)))
+    (and type
+         (member (string-downcase type)
+                 '("lisp" "asd")
+                 :test #'string=))))
+
+(defun %existing-lisp-overwrite-error (id path)
+  "Return a structured RPC error for forbidden Lisp overwrite, or NIL.
+New Lisp source file creation is allowed."
+  (let ((pn (ensure-write-path path)))
+    (when (and (probe-file pn)
+               (%lisp-source-pathname-p pn))
+      (rpc-error id -32602
+                 "Cannot overwrite existing .lisp/.asd with fs-write-file; use lisp-edit-form."
+                 (make-ht "code" "existing_lisp_overwrite_forbidden"
+                          "path" path
+                          "next_tool" "lisp-edit-form"
+                          "required_args"
+                          (vector "file_path" "form_type" "form_name"
+                                  "operation" "content")
+                          "new_file_creation_allowed" t)))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
@@ -249,13 +273,16 @@ to preserve structure and comments."
          (content :type :string :required t
                   :description "Text content to write"))
   :body
-  (progn
-    (fs-write-file path content)
-    (result id
-            (make-ht "success" t
-                     "content" (text-content (format nil "Wrote ~A (~D chars)" path (length content)))
-                     "path" path
-                     "bytes" (length content)))))
+  (or (%existing-lisp-overwrite-error id path)
+      (progn
+        (fs-write-file path content)
+        (result id
+                (make-ht "success" t
+                         "content" (text-content
+                                    (format nil "Wrote ~A (~D chars)" path (length content)))
+                         "path" path
+                         "bytes" (length content)))))
+  )
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.
@@ -301,4 +328,3 @@ Do not use arbitrary paths."
     (result id
             (make-ht "content" (text-content (gethash "status" info))
                      "info" info))))
-

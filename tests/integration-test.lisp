@@ -70,7 +70,7 @@
 
 (deftest fs-write-then-readback
   (testing "write file then read it back via tools/call"
-    (let* ((path "tmp-integration-write.txt")
+    (let* ((path "tests/tmp/integration-write.txt")
            (req-write
              (format nil
                      (concatenate
