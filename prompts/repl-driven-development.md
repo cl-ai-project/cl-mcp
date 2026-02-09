@@ -18,7 +18,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit code | `lisp-edit-form` | `form_type`, `form_name` |
-| Inspect deeper | `inspect-object` | `id` (from `result_preview`) |
+| Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
 | Run tests | `run-tests` | `system`, `test` (optional) |
@@ -235,7 +235,7 @@ Response includes:
 
 **When to use `inspect-object`:**
 - The preview is truncated (`truncated: true`) and you need more elements
-- You need to drill deeper into nested objects (use their `object_id`)
+- You need to drill deeper into nested objects (use their `id` field)
 - You need to inspect a specific element's internal structure
 
 **Preview parameters** (optional):

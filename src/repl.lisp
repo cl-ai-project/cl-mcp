@@ -267,6 +267,7 @@ Use 'inspect-object' only when you need to drill deeper than the preview shows."
          (safe-read :type :boolean :json-name "safe_read"
                     :description "When true, disables #. reader evaluation for safety")
          (include-result-preview :type :boolean :json-name "include_result_preview"
+                                  :default t
                                   :description "Include structural preview of non-primitive results (default: true)")
          (preview-max-depth :type :integer :json-name "preview_max_depth"
                             :description "Max nesting depth for preview (default: 1)")
@@ -283,13 +284,11 @@ Use 'inspect-object' only when you need to drill deeper than the preview shows."
                  :safe-read safe-read)
     (let ((ht (make-ht "content" (text-content printed)
                        "stdout" stdout
-                       "stderr" stderr))
-          ;; Default include-result-preview to T when not specified
-          (include-preview (if (null include-result-preview) t include-result-preview)))
+                       "stderr" stderr)))
       ;; Generate preview and register non-primitive results for inspection
       (when (and (null error-context)
                  (inspectable-p raw-value))
-        (if include-preview
+        (if include-result-preview
             ;; Generate preview (which also registers the object)
             (let ((preview (generate-result-preview
                             raw-value
@@ -324,4 +323,5 @@ Use 'inspect-object' only when you need to drill deeper than the preview shows."
                                                                     (getf f :locals))))
                                         (getf error-context :frames)))))
       (result id ht))))
+
 
