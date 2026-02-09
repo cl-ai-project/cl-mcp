@@ -340,14 +340,16 @@ Returns a hash-table with:
   - id: the registered object ID
   - kind, type, summary, etc.: structural preview
   - truncated: T if elements were omitted due to max-elements limit
-For nested non-primitive values, object_id fields are included for drill-down."
+For nested non-primitive values, id fields are included for drill-down."
   (let* ((id (register-object object))
          (visited (make-hash-table :test 'eq))
          (result nil))
     (setf (gethash object visited) id)
-    (setf result (%inspect-object-impl object visited 0 max-depth max-elements))
+    (setf result
+            (%inspect-object-impl object visited 0 max-depth max-elements))
     (setf (gethash "id" result) id)
     result))
+
 ;;; MCP Tool Definition
 
 (define-tool "inspect-object"
