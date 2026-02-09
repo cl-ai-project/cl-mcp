@@ -41,7 +41,7 @@
 (deftest fs-write-file-project
   (testing "fs-write-file writes under project root"
     (with-test-project-root
-      (let ((rel "tests/tmp-fs-write.txt")
+      (let ((rel "tests/tmp/fs-write.txt")
             (content "hello world\n"))
         (unwind-protect
              (progn

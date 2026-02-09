@@ -13,5 +13,7 @@
 .cache/
 .direnv/
 .mcp.json
-tmp-integration-write.txt
-tmp-tools-write.txt
+
+# Test scratch space
+tests/tmp/*
+!tests/tmp/.gitkeep

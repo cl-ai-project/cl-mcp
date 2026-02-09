@@ -155,6 +155,14 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                 :column c))))
     (list :ok t)))
 
+(defun %maybe-add-lisp-edit-guidance (result kind)
+  "Attach machine-readable remediation hints for broken Lisp delimiters."
+  (when (member kind '("extra-close" "mismatch" "unclosed") :test #'string=)
+    (setf (gethash "fix_code" result) "use_lisp_edit_form"
+          (gethash "next_tool" result) "lisp-edit-form"
+          (gethash "required_args" result)
+          (vector "file_path" "form_type" "form_name" "operation" "content")))
+  result)
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
@@ -193,14 +201,16 @@ Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
             (setf (gethash "offset" pos) offset
                   (gethash "line" pos) line
                   (gethash "column" pos) column)
-            (setf (gethash "position" h) pos)))
+            (setf (gethash "position" h) pos))
+          (%maybe-add-lisp-edit-guidance h kind))
         h))))
 
 (define-tool "lisp-check-parens"
   :description "Check balanced parentheses/brackets in a file slice or provided code.
 Use this to DIAGNOSE syntax errors in existing files or validate code snippets
 before/after editing. Returns the first mismatch position if unbalanced, or
-success if balanced."
+success if balanced. Unbalanced delimiter results include guidance to use
+lisp-edit-form for existing Lisp files."
   :args ((path :type :string
                :description "Absolute path inside project or registered ASDF system
 (mutually exclusive with code)")
@@ -221,25 +231,33 @@ success if balanced."
              :arg-name "path/code"
              :message "Either path or code is required"))
     (let* ((check-result (lisp-check-parens :path path
-                                          :code code
-                                          :offset offset
-                                          :limit limit))
-         (ok (gethash "ok" check-result))
-         (summary
-           (if ok
-               "Parentheses are balanced"
-               (let* ((kind (gethash "kind" check-result))
-                      (expected (gethash "expected" check-result))
-                      (found (gethash "found" check-result))
-                      (pos (gethash "position" check-result))
-                      (line (and pos (gethash "line" pos)))
-                      (col (and pos (gethash "column" pos))))
-                 (format nil "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D"
-                         kind expected found line col)))))
+                                            :code code
+                                            :offset offset
+                                            :limit limit))
+           (ok (gethash "ok" check-result))
+           (next-tool (gethash "next_tool" check-result))
+           (summary
+            (if ok
+                "Parentheses are balanced"
+                (let* ((kind (gethash "kind" check-result))
+                       (expected (gethash "expected" check-result))
+                       (found (gethash "found" check-result))
+                       (pos (gethash "position" check-result))
+                       (line (and pos (gethash "line" pos)))
+                       (col (and pos (gethash "column" pos))))
+                  (format nil
+                          "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
+                          kind expected found line col
+                          (if next-tool
+                              " Use lisp-edit-form for existing Lisp files."
+                              ""))))))
       (result id
               (make-ht "content" (text-content summary)
                        "ok" ok
                        "kind" (gethash "kind" check-result)
                        "expected" (gethash "expected" check-result)
                        "found" (gethash "found" check-result)
-                       "position" (gethash "position" check-result))))))
+                       "position" (gethash "position" check-result)
+                       "fix_code" (gethash "fix_code" check-result)
+                       "next_tool" (gethash "next_tool" check-result)
+                       "required_args" (gethash "required_args" check-result))))))

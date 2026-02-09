@@ -69,12 +69,12 @@
       (let ((req-write (concatenate 'string
                          "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
                          "\"params\":{\"name\":\"fs-write-file\","
-                         "\"arguments\":{\"path\":\"tmp-tools-write.txt\","
+                         "\"arguments\":{\"path\":\"tests/tmp/tools-write.txt\","
                          "\"content\":\"hi\"}}}"))
             (req-read (concatenate 'string
                         "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\","
                         "\"params\":{\"name\":\"fs-read-file\","
-                        "\"arguments\":{\"path\":\"tmp-tools-write.txt\"}}}")))
+                        "\"arguments\":{\"path\":\"tests/tmp/tools-write.txt\"}}}")))
         (unwind-protect
              (progn
                (let* ((resp (process-json-line req-write))
@@ -89,12 +89,12 @@
                  (let ((first (aref content 0)))
                    (ok (string= (gethash "type" first) "text"))
                    (ok (string= (gethash "text" first) "hi")))))
-          (ignore-errors (delete-file "tmp-tools-write.txt")))))))
+          (ignore-errors (delete-file "tests/tmp/tools-write.txt")))))))
 
 (deftest tools-call-fs-write-rejects-existing-lisp
   (testing "tools/call fs-write-file rejects overwriting existing .lisp files"
     (with-test-project-root
-      (let* ((tmp-path "tests/tmp-existing-overwrite.lisp")
+      (let* ((tmp-path "tests/tmp/existing-overwrite.lisp")
              (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
              (initial ";; original\n")
              (req (format nil
@@ -130,7 +130,7 @@
 (deftest tools-call-fs-write-allows-new-lisp
   (testing "tools/call fs-write-file allows creating new .lisp files"
     (with-test-project-root
-      (let* ((tmp-path "tests/tmp-new-write.lisp")
+      (let* ((tmp-path "tests/tmp/new-write.lisp")
              (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
              (content ";; new lisp file\n")
              (req (format nil
@@ -320,10 +320,15 @@
                  "\"arguments\":{\"code\":\"(defun foo () [1 2))\"}}}")))
       (let* ((resp (process-json-line req))
              (obj (yason:parse resp))
-             (result (gethash "result" obj)))
+             (result (gethash "result" obj))
+             (required (gethash "required_args" result)))
         (ok (string= (gethash "kind" result) "mismatch"))
         (ok (equal (gethash "expected" result) "]"))
-        (ok (equal (gethash "found" result) ")"))))))
+        (ok (equal (gethash "found" result) ")"))
+        (ok (string= (gethash "fix_code" result) "use_lisp_edit_form"))
+        (ok (string= (gethash "next_tool" result) "lisp-edit-form"))
+        (ok (vectorp required))
+        (ok (= (length required) 5))))))
 
 ;;; Boolean option tests - verify explicit false is handled correctly
 ;;; These tests catch the let vs let* bug where *-present variables weren't set
@@ -364,7 +369,7 @@
   (testing "tools/call lisp-edit-form with dry_run=false applies changes"
     (with-test-project-root
       ;; Create a temporary file
-      (let* ((tmp-path "tests/tmp-dry-run-test.lisp")
+      (let* ((tmp-path "tests/tmp/dry-run-test.lisp")
              (initial-content "(defun test-fn () 1)")
              (new-content "(defun test-fn () 2)"))
         (with-open-file (out (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)
