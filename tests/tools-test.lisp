@@ -955,6 +955,7 @@
         (ok (null (%tool-call-failed-p obj)) "should not fail")
         (ok (stringp text))
         (ok (search "Passed: 2, Failed: 0" text))))))
+
 (deftest tools-call-run-tests-missing-system
   (testing "tools/call run-tests validates required system argument"
     (let ((req (concatenate

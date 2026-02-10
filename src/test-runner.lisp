@@ -137,7 +137,11 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
 (defun %coerce-test-symbol (test-name)
   "Convert TEST-NAME to a fully qualified test symbol."
   (cond
+    ((null test-name)
+     (error "Test name must not be NIL"))
     ((symbolp test-name)
+     (unless (symbol-package test-name)
+       (error "Test symbol must be package-qualified: ~S" test-name))
      test-name)
     ((stringp test-name)
      (let* ((name (string-upcase test-name))
@@ -180,6 +184,12 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
     (t
      (error "framework must be a string or symbol: ~S" framework))))
 
+(defun %ensure-system-loaded (system-name)
+  "Load SYSTEM-NAME to make test packages available for selective execution."
+  (handler-case
+      (asdf:load-system system-name)
+    (error (c)
+      (error "Failed to load test system ~A: ~A" system-name c))))
 (defun %rove-extract-selected-failures (results)
   "Extract failure details from selected test RESULTS returned by rove:run-tests."
   (let* ((pkg (find-package :rove/core/result))
@@ -354,40 +364,47 @@ If TESTS is provided, run those specific tests (array/list of fully qualified na
 Returns a hash table with structured results."
   (when (and test tests)
     (error "Specify either TEST or TESTS, not both"))
-  (let* ((selected-tests (cond
-                           (test (list (%coerce-test-symbol test)))
-                           (tests (%normalize-tests-arg tests))
-                           (t nil)))
-         (fw (%resolve-framework system-name framework)))
+  (let* ((fw (%resolve-framework system-name framework))
+         (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
                "framework" (string-downcase (symbol-name fw))
-               "test" (if selected-tests
-                          (format nil "~{~A~^, ~}" selected-tests)
-                          "all"))
+               "test" (cond
+                         (test (princ-to-string test))
+                         (tests "selected")
+                         (t "all")))
     (case fw
       (:rove
+       (when selective-requested-p
+         (%ensure-system-loaded system-name))
        (if (find-package :rove)
-           (if selected-tests
-               (run-rove-selected-tests selected-tests)
+           (if selective-requested-p
+               (let ((selected-tests (if test
+                                         (list (%coerce-test-symbol test))
+                                         (%normalize-tests-arg tests))))
+                 (run-rove-selected-tests selected-tests))
                (run-rove-tests system-name))
-           (progn
-             (log-event :warn "test-runner" "message"
-                        "Rove not loaded, using ASDF fallback")
-             (run-asdf-fallback system-name))))
+           (if selective-requested-p
+               (error
+                "Selective test execution with TEST/TESTS requires Rove for system ~A"
+                system-name)
+               (progn
+                 (log-event :warn "test-runner" "message"
+                            "Rove not loaded, using ASDF fallback")
+                 (run-asdf-fallback system-name)))))
       (:fiveam
-       (when selected-tests
+       (when selective-requested-p
          (error "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "FiveAM support not yet implemented")
        (run-asdf-fallback system-name))
       (:prove
-       (when selected-tests
+       (when selective-requested-p
          (error "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "Prove support not yet implemented")
        (run-asdf-fallback system-name))
       (t
-       (when selected-tests
+       (when selective-requested-p
          (error "Selective test execution is currently supported only with Rove"))
        (run-asdf-fallback system-name)))))
 
