@@ -118,6 +118,37 @@ necessary to leave one blank line between top-level forms."
           (concatenate 'string between
                        (make-string missing :initial-element #\Newline))))))
 
+(defun %whitespace-char-p (ch)
+  (member ch '(#\Space #\Tab #\Newline #\Return)))
+
+(defun %split-leading-whitespace (text)
+  "Split TEXT into two values: leading whitespace and the remaining text."
+  (let ((ws-end (or (position-if-not #'%whitespace-char-p text)
+                    (length text))))
+    (values (subseq text 0 ws-end)
+            (subseq text ws-end))))
+
+(defun %split-trailing-whitespace (text)
+  "Split TEXT into two values: text without trailing whitespace and trailing whitespace."
+  (let ((last-non-ws (position-if-not #'%whitespace-char-p text :from-end t)))
+    (if last-non-ws
+        (values (subseq text 0 (1+ last-non-ws))
+                (subseq text (1+ last-non-ws)))
+        (values "" text))))
+
+(defun %normalized-separator (left-text right-text)
+  "Return normalized separator between LEFT-TEXT and RIGHT-TEXT at top-level.
+No separator is emitted before the first form. Between top-level forms use one
+blank line. For EOF boundary use a single newline."
+  (cond
+    ((zerop (length left-text)) "")
+    ((zerop (length right-text)) (string #\Newline))
+    (t (format nil "~%~%"))))
+
+(defun %trim-outer-whitespace (text)
+  "Trim leading/trailing horizontal and vertical whitespace from TEXT."
+  (string-trim '(#\Space #\Tab #\Newline #\Return) text))
+
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools."
   (let ((resolved (fs-resolve-read-path file-path))
@@ -250,7 +281,7 @@ If multiple matches exist without an index, signals an error with candidate info
            (error "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                   form-type form-name descriptions)))))))
 
-(defun %apply-operation (text node operation content)
+(defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
         (end (cst-node-end node))
         (snippet (ecase operation
@@ -278,8 +309,57 @@ If multiple matches exist without an index, signals an error with candidate info
               (prefix (subseq text 0 end)))
          (concatenate 'string prefix between snippet rest))))))
 
+(defun %apply-operation-normalized (text node operation content)
+  (let* ((start (cst-node-start node))
+         (end (cst-node-end node))
+         (snippet (%trim-outer-whitespace content)))
+    (ecase operation
+      (:replace
+       (multiple-value-bind (prefix-core _)
+           (%split-trailing-whitespace (subseq text 0 start))
+         (declare (ignore _))
+         (multiple-value-bind (_ suffix-core)
+             (%split-leading-whitespace (subseq text end))
+           (declare (ignore _))
+           (concatenate 'string
+                        prefix-core
+                        (%normalized-separator prefix-core snippet)
+                        snippet
+                        (%normalized-separator snippet suffix-core)
+                        suffix-core))))
+      (:insert-before
+       (multiple-value-bind (prefix-core _)
+           (%split-trailing-whitespace (subseq text 0 start))
+         (declare (ignore _))
+         (let ((target (subseq text start end))
+               (suffix (subseq text end)))
+           (concatenate 'string
+                        prefix-core
+                        (%normalized-separator prefix-core snippet)
+                        snippet
+                        (%normalized-separator snippet target)
+                        target
+                        suffix))))
+      (:insert-after
+       (multiple-value-bind (_ suffix-core)
+           (%split-leading-whitespace (subseq text end))
+         (declare (ignore _))
+         (let ((prefix (subseq text 0 end)))
+           (concatenate 'string
+                        prefix
+                        (%normalized-separator prefix snippet)
+                        snippet
+                        (%normalized-separator snippet suffix-core)
+                        suffix-core)))))))
 
-(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run readtable)
+(defun %apply-operation (text node operation content normalize-blank-lines)
+  (if normalize-blank-lines
+      (%apply-operation-normalized text node operation content)
+      (%apply-operation-preserve-spacing text node operation content)))
+
+
+(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run
+                            (normalize-blank-lines t) readtable)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
@@ -294,6 +374,8 @@ to use for parsing both the file and the new content."
     (error "All parameters (file_path, form_type, form_name, operation, content) must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
+  (unless (member normalize-blank-lines '(t nil))
+    (error "normalize-blank-lines must be boolean"))
   (let* ((op-normalized (string-downcase operation))
          (op-key (cond ((string= op-normalized "replace") :replace)
                        ((string= op-normalized "insert_before") :insert-before)
@@ -311,13 +393,15 @@ to use for parsing both the file and the new content."
         (let* ((start (cst-node-start target))
                (end (cst-node-end target))
                (target-snippet (subseq original start end))
-               (updated (%apply-operation original target op-key validated-content))
+               (updated (%apply-operation original target op-key validated-content
+                                         normalize-blank-lines))
                (would-change (not (string= original updated))))
           (log-event :debug "lisp-edit-form"
                      "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
                      "form_name" form-name
+                     "normalize_blank_lines" normalize-blank-lines
                      "bytes" (length updated)
                      "dry_run" dry-run
                      "would_change" would-change)
@@ -355,6 +439,9 @@ e.g., \"print-object (my-class t)\"")
                   :description "Full Lisp form to insert or replace with. Must contain exactly ONE top-level form; multiple forms in a single call are not supported. Use separate insert_after calls to add multiple forms.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
+         (normalize_blank_lines :type :boolean
+                                :default t
+                                :description "When true (default), normalize blank lines around edited top-level forms.")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
@@ -368,6 +455,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                      :operation operation
                                      :content content
                                      :dry-run dry_run
+                                     :normalize-blank-lines normalize_blank_lines
                                      :readtable (when readtable
                                                  (let ((colon-pos (position #\: readtable)))
                                                    (if colon-pos
