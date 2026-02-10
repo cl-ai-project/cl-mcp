@@ -954,7 +954,7 @@
         (ok (%tool-call-failed-p obj) "should fail for invalid directory")))))
 
 (deftest tools-call-run-tests
-  (testing "tools/call run-tests executes suite and returns summary"
+  (testing "tools/call run-tests returns summary and structured fields"
     (let ((req (concatenate
                 'string
                 "{\"jsonrpc\":\"2.0\",\"id\":39,\"method\":\"tools/call\","
@@ -972,7 +972,13 @@
         (ok (stringp text))
         (ok (or (search "PASS" text)
                 (search "FAIL" text))
-            "summary should include run status")))))
+            "summary should include run status")
+        (ok (integerp (gethash "passed" result)))
+        (ok (integerp (gethash "failed" result)))
+        (ok (integerp (gethash "duration_ms" result)))
+        (ok (integerp (gethash "pending" result)))
+        (ok (stringp (gethash "framework" result)))
+        (ok (vectorp (gethash "failed_tests" result)))))))
 
 (deftest tools-call-run-tests-with-tests-array
   (testing "tools/call run-tests supports tests array selection"
@@ -989,11 +995,36 @@
              (content (and result (gethash "content" result)))
              (first (and (arrayp content) (> (length content) 0)
                          (aref content 0)))
-             (text (and first (gethash "text" first))))
+             (text (and first (gethash "text" first)))
+             (failed-tests (gethash "failed_tests" result)))
         (ok (string= (gethash "jsonrpc" obj) "2.0"))
         (ok (null (%tool-call-failed-p obj)) "should not fail")
         (ok (stringp text))
-        (ok (search "Passed: 2, Failed: 0" text))))))
+        (ok (search "Passed: 2, Failed: 0" text))
+        (ok (= 2 (gethash "passed" result)))
+        (ok (= 0 (gethash "failed" result)))
+        (ok (vectorp failed-tests))
+        (ok (= 0 (length failed-tests)))))))
+
+(deftest tools-call-run-tests-failure-details
+  (testing "tools/call run-tests returns structured failed_tests entries"
+    (let ((req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":3902,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\","
+                "\"arguments\":{\"system\":\"cl-mcp/tests/test-runner-test-error\"}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (failed-tests (gethash "failed_tests" result)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (null (%tool-call-failed-p obj)) "should not fail")
+        (ok (> (gethash "failed" result) 0))
+        (ok (vectorp failed-tests))
+        (ok (> (length failed-tests) 0))
+        (let ((first-failure (aref failed-tests 0)))
+          (ok (stringp (gethash "test_name" first-failure)))
+          (ok (stringp (gethash "reason" first-failure))))))))
 
 (deftest tools-call-run-tests-missing-system
   (testing "tools/call run-tests validates required system argument"
