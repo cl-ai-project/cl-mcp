@@ -481,6 +481,7 @@
           (ok (gethash "would_change" result))
           (ok (stringp preview))
           (ok (search "(defun version () :v2)" preview)))))))
+
 (deftest tools-call-lisp-edit-form-dry-run-false
   (testing "tools/call lisp-edit-form with dry_run=false applies changes"
     (with-test-project-root
@@ -564,6 +565,7 @@
           (ok err)
           (ok (hash-table-p data))
           (ok (string= (gethash "code" data) "multiple_forms_not_supported")))))))
+
 (deftest tools-call-lisp-edit-form-trailing-garbage-no-multiple-forms-guidance
   (testing "tools/call lisp-edit-form does not return multiple-forms guidance for trailing garbage"
     (with-test-project-root
