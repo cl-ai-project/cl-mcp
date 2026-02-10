@@ -161,28 +161,25 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
                  (values nil e)))))
       (multiple-value-bind (result err)
           (try-parse content)
-        (cond
-          (result
-           result)
-          ((typep err 'multiple-top-level-forms-error)
-           (error err))
-          (t
-           ;; First parse failed, try parinfer repair
-           (let ((repaired (apply-indent-mode content)))
-             (multiple-value-bind (repaired-result repaired-err)
-                 (try-parse repaired)
-               (cond
-                 (repaired-result
-                  (log-event :info "lisp-edit-form"
-                             "auto-repair" "success"
-                             "original-error" (princ-to-string err))
-                  repaired-result)
-                 ((typep repaired-err 'multiple-top-level-forms-error)
-                  (error repaired-err))
-                 (t
-                  ;; Repair failed, signal the original error
-                  (error "content parse error: ~A (repair also failed: ~A)"
-                         err repaired-err)))))))))))
+        (if result
+            result
+            ;; First parse failed, try parinfer repair
+            (let ((repaired (apply-indent-mode content)))
+              (multiple-value-bind (repaired-result repaired-err)
+                  (try-parse repaired)
+                (cond
+                  (repaired-result
+                   (log-event :info "lisp-edit-form"
+                              "auto-repair" "success"
+                              "original-error" (princ-to-string err))
+                   repaired-result)
+                  ((and (typep err 'multiple-top-level-forms-error)
+                        (typep repaired-err 'multiple-top-level-forms-error))
+                   (error err))
+                  (t
+                   ;; Repair failed, signal the original error
+                   (error "content parse error: ~A (repair also failed: ~A)"
+                          err repaired-err))))))))))
 
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.

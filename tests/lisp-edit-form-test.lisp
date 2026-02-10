@@ -265,6 +265,27 @@ then clean up."
                     t)
                 (error () nil))))))))
 
+(deftest lisp-edit-form-auto-repair-extra-trailing-paren
+  (testing "extra trailing close paren is auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-extra-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        ;; Content has an extra trailing ")" but should still be repairable.
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () :new))")
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun target () :new)" updated))
+          (ok (null (search ":old" updated)))
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+
 (deftest lisp-edit-form-auto-repair-nested-missing-parens
   (testing "nested forms with missing parens are auto-repaired"
     (with-temp-file "tests/tmp/edit-form-auto-repair-nested.lisp"
