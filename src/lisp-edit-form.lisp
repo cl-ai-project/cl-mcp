@@ -8,8 +8,6 @@
                           #:cst-node-value
                           #:cst-node-start
                           #:cst-node-end)
-  (:import-from #:alexandria
-                #:string-trim)
   (:import-from #:cl-ppcre
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
