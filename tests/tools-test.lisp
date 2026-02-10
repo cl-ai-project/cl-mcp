@@ -941,9 +941,9 @@
                 'string
                 "{\"jsonrpc\":\"2.0\",\"id\":3901,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"run-tests\","
-                "\"arguments\":{\"system\":\"cl-mcp/tests/clhs-test\","
-                "\"tests\":[\"cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen\","
-                "\"cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol\"]}}}")))
+                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\","
+                "\"tests\":[\"cl-mcp/tests/utils-strings-test::ensure-trailing-newline-adds-newline\","
+                "\"cl-mcp/tests/utils-strings-test::ensure-trailing-newline-preserves-existing\"]}}}")))
       (let* ((resp (process-json-line req))
              (obj (parse resp))
              (result (gethash "result" obj))
