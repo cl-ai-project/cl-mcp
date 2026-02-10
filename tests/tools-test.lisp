@@ -935,6 +935,26 @@
                 (search "FAIL" text))
             "summary should include run status")))))
 
+(deftest tools-call-run-tests-with-tests-array
+  (testing "tools/call run-tests supports tests array selection"
+    (let ((req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":3901,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\","
+                "\"arguments\":{\"system\":\"cl-mcp/tests/clhs-test\","
+                "\"tests\":[\"cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen\","
+                "\"cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol\"]}}}")))
+      (let* ((resp (process-json-line req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (and result (gethash "content" result)))
+             (first (and (arrayp content) (> (length content) 0)
+                         (aref content 0)))
+             (text (and first (gethash "text" first))))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (null (%tool-call-failed-p obj)) "should not fail")
+        (ok (stringp text))
+        (ok (search "Passed: 2, Failed: 0" text))))))
 (deftest tools-call-run-tests-missing-system
   (testing "tools/call run-tests validates required system argument"
     (let ((req (concatenate

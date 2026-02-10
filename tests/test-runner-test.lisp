@@ -130,3 +130,29 @@
       (ok (string= "asdf" (gethash "framework" result)))
       ;; ASDF fallback returns success boolean instead of counts
       (ok (gethash "success" result)))))
+
+(deftest run-tests-single-test-runs-only-target
+  (testing "run-tests runs only the specified single test"
+    (let ((result (run-tests "cl-mcp/tests/clhs-test"
+                             :test "cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen")))
+      (ok (= 1 (gethash "passed" result)))
+      (ok (= 0 (gethash "failed" result))))))
+
+(deftest run-tests-tests-array-runs-selected-tests
+  (testing "run-tests runs only tests listed in :tests"
+    (let ((result (run-tests "cl-mcp/tests/clhs-test"
+                             :tests '("cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen"
+                                      "cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol"))))
+      (ok (= 2 (gethash "passed" result)))
+      (ok (= 0 (gethash "failed" result))))))
+
+(deftest run-tests-framework-auto-detects
+  (testing "run-tests treats framework=auto as automatic detection"
+    (let ((result (run-tests "cl-mcp/tests/clhs-test" :framework "auto")))
+      (ok (string= "rove" (gethash "framework" result))))))
+
+(deftest run-tests-rejects-test-and-tests-together
+  (testing "run-tests signals error when test and tests are both provided"
+    (ok (signals (run-tests "cl-mcp/tests/clhs-test"
+                            :test "cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen"
+                            :tests '("cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol"))))))
