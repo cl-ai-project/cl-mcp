@@ -191,7 +191,8 @@ then clean up."
     (with-temp-file "tests/tmp/edit-form-invalid.lisp"
         (format nil "(defun sample () :ok)~%")
       (lambda (path)
-        (let ((before (fs-read-file path)))
+        (let ((before (fs-read-file path))
+              (err-msg nil))
           (ok (handler-case
                   (progn
                     (lisp-edit-form :file-path path
@@ -201,7 +202,35 @@ then clean up."
                                     ;; Multiple forms - cannot be single valid form
                                     :content (format nil "(defun sample () 1) (defun other () 2)"))
                     nil)
-                (error () t)))
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t)))
+          (ok (stringp err-msg))
+          (ok (search "content must contain exactly one top-level form" err-msg))
+          (ok (search "multiple forms are not supported in a single call" err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-edit-form-trailing-garbage-errors
+  (testing "trailing malformed content is not classified as multiple forms"
+    (with-temp-file "tests/tmp/edit-form-trailing-garbage.lisp"
+        (format nil "(defun sample () :ok)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (ok (handler-case
+                  (progn
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "sample"
+                                    :operation "replace"
+                                    :content "(defun sample () :new) #<")
+                    nil)
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t)))
+          (ok (stringp err-msg))
+          (ok (search "trailing malformed characters" err-msg))
+          (ok (null (search "multiple forms are not supported in a single call" err-msg)))
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-edit-form-read-eval-disabled
@@ -253,6 +282,135 @@ then clean up."
           (ok (search "(* x 2)" updated))
           (ok (null (search "(+ x 1)" updated)))
           ;; Verify the updated content is valid Lisp (can be read)
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+(deftest lisp-edit-form-auto-repair-extra-trailing-paren
+  (testing "extra trailing close paren is auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-extra-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        ;; Content has an extra trailing ")" but should still be repairable.
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () :new))")
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun target () :new)" updated))
+          (ok (null (search ":old" updated)))
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+
+(deftest lisp-edit-form-auto-repair-dry-run-extra-trailing-paren
+  (testing "dry-run preview applies auto-repair but does not write"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-dry-run-extra-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (result (lisp-edit-form :file-path path
+                                      :form-type "defun"
+                                      :form-name "target"
+                                      :operation "replace"
+                                      :content "(defun target () :new))"
+                                      :dry-run t)))
+          (ok (hash-table-p result))
+          (ok (gethash "would_change" result))
+          (ok (search "(defun target () :new)" (gethash "preview" result)))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-edit-form-auto-repair-insert-after-extra-trailing-paren
+  (testing "insert_after with extra trailing close paren is auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-insert-after-extra-close.lisp"
+        (format nil "(defun anchor () :ok)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "anchor"
+                        :operation "insert_after"
+                        :content "(defun repaired () :ok))")
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun anchor () :ok)" updated))
+          (ok (search "(defun repaired () :ok)" updated))
+          (ok (handler-case
+                  (let ((*read-eval* nil)
+                        (forms 0))
+                    (with-input-from-string (s updated)
+                      (loop for form = (read s nil :eof)
+                            until (eq form :eof)
+                            do (incf forms)))
+                    (= forms 2))
+                (error () nil))))))))
+
+(deftest lisp-edit-form-auto-repair-preserves-neighbor-forms
+  (testing "auto-repair only updates target form and keeps neighbors unchanged"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-preserve-neighbors.lisp"
+        (format nil
+                "(defun target (x)~%  (+ x 1))~%~%(defun neighbor () :keep)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content (format nil "(defun target (x)~%  (* x 3"))
+        (let ((updated (fs-read-file path)))
+          (ok (search "(* x 3)" updated))
+          (ok (search "(defun neighbor () :keep)" updated))
+          (ok (null (search "(+ x 1)" updated))))))))
+
+(deftest lisp-edit-form-auto-repair-crlf-missing-parens
+  (testing "auto-repair handles CRLF content with missing close parens"
+    (with-temp-file "tests/tmp/edit-form-auto-repair-crlf.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content (format nil
+                                         "(defun target (x)~C~C  (* x 2"
+                                         #\Return #\Newline))
+        (let ((updated (fs-read-file path)))
+          (ok (search "(* x 2)" updated))
+          (ok (handler-case
+                  (let ((*read-eval* nil))
+                    (read-from-string updated)
+                    t)
+                (error () nil))))))))
+
+(deftest lisp-edit-form-content-with-trailing-whitespace
+  (testing "single form content with trailing whitespace is accepted"
+    (with-temp-file "tests/tmp/edit-form-trailing-whitespace.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content (format nil "(defun target () :new)~%~%  ~%"))
+        (let ((updated (fs-read-file path)))
+          (ok (search "(defun target () :new)" updated))
+          (ok (null (search ":old" updated))))))))
+
+(deftest lisp-edit-form-content-with-string-parens
+  (testing "parenthesis-like characters inside strings do not confuse parsing"
+    (with-temp-file "tests/tmp/edit-form-string-parens.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () \"(())\")")
+        (let ((updated (fs-read-file path)))
+          (ok (search "\"(())\"" updated))
           (ok (handler-case
                   (let ((*read-eval* nil))
                     (read-from-string updated)

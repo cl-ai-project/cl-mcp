@@ -461,6 +461,27 @@
           (ok (gethash "would_change" result) "dry_run=true should return would_change")
           (ok (gethash "preview" result) "dry_run=true should return preview"))))))
 
+(deftest tools-call-lisp-edit-form-dry-run-repairs-extra-trailing-paren
+  (testing "tools/call lisp-edit-form dry_run preview shows repaired content"
+    (with-test-project-root
+      (let ((req (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":2101,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"lisp-edit-form\","
+                  "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                  "\"form_type\":\"defun\",\"form_name\":\"version\","
+                  "\"operation\":\"replace\","
+                  "\"content\":\"(defun version () :v2))\","
+                  "\"dry_run\":true}}}")))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (preview (and result (gethash "preview" result))))
+          (ok (string= (gethash "jsonrpc" obj) "2.0"))
+          (ok (gethash "would_change" result))
+          (ok (stringp preview))
+          (ok (search "(defun version () :v2)" preview)))))))
+
 (deftest tools-call-lisp-edit-form-dry-run-false
   (testing "tools/call lisp-edit-form with dry_run=false applies changes"
     (with-test-project-root
@@ -492,6 +513,84 @@
                    (ok (search "2)" file-content) "File should contain new content"))))
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
+
+(deftest tools-call-lisp-edit-form-multiple-forms-guidance
+  (testing "tools/call lisp-edit-form returns actionable guidance for multiple forms"
+    (with-test-project-root
+      (let* ((content "(defun version () :v1) (defun other () :ok)")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"lisp-edit-form\","
+                           "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                           "\"form_type\":\"defun\",\"form_name\":\"version\","
+                           "\"operation\":\"replace\",\"content\":\"~A\"}}}")
+                          content)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (err (gethash "error" obj))
+               (msg (and err (gethash "message" err)))
+               (data (and err (gethash "data" err)))
+               (example (and data (gethash "example_operation_sequence" data))))
+          (ok err)
+          (ok (string= msg
+                       "content must contain exactly one top-level form; multiple forms are not supported in a single call"))
+          (ok (hash-table-p data))
+          (ok (string= (gethash "code" data) "multiple_forms_not_supported"))
+          (ok (string= (gethash "next_tool" data) "lisp-edit-form"))
+          (ok (string= (gethash "action" data) "split_into_multiple_calls"))
+          (ok (vectorp example))
+          (ok (> (length example) 0))
+          (ok (every (lambda (step) (string= step "insert_after"))
+                     (coerce example 'list))))))))
+
+(deftest tools-call-lisp-edit-form-multiple-forms-guidance-newline
+  (testing "multiple forms separated by escaped newline still return guidance"
+    (with-test-project-root
+      (let* ((content "(defun version () :v1)\\n(defun other () :ok)")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":2302,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"lisp-edit-form\","
+                           "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                           "\"form_type\":\"defun\",\"form_name\":\"version\","
+                           "\"operation\":\"replace\",\"content\":\"~A\"}}}")
+                          content)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (err (gethash "error" obj))
+               (data (and err (gethash "data" err))))
+          (ok err)
+          (ok (hash-table-p data))
+          (ok (string= (gethash "code" data) "multiple_forms_not_supported")))))))
+
+(deftest tools-call-lisp-edit-form-trailing-garbage-no-multiple-forms-guidance
+  (testing "tools/call lisp-edit-form does not return multiple-forms guidance for trailing garbage"
+    (with-test-project-root
+      (let* ((content "(defun version () :v1) #<")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"lisp-edit-form\","
+                           "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                           "\"form_type\":\"defun\",\"form_name\":\"version\","
+                           "\"operation\":\"replace\",\"content\":\"~A\"}}}")
+                          content)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (err (gethash "error" obj))
+               (msg (and err (gethash "message" err)))
+               (data (and err (gethash "data" err)))
+               (code (and data (gethash "code" data))))
+          (ok err)
+          (ok (stringp msg))
+          (ok (search "trailing malformed characters" msg))
+          (ok (null (search "multiple forms are not supported in a single call" msg)))
+          (ok (not (and (stringp code)
+                        (string= code "multiple_forms_not_supported")))))))))
 
 (deftest tools-call-code-find-references-project-only-false
   (testing "tools/call code-find-references with project_only=false includes external refs"
