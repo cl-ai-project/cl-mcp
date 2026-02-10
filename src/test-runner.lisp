@@ -134,61 +134,127 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
                                        (push assertion results)))))))
     (nreverse results)))
 
-(defun run-rove-single-test (test-name)
-  "Run a single Rove test by name and return structured results.
-TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name').
-Uses rove:run-test to ensure any :around methods (e.g., test environment setup) are invoked."
-  (log-event :info "test-runner" "framework" "rove" "test" (princ-to-string test-name))
+(defun %coerce-test-symbol (test-name)
+  "Convert TEST-NAME to a fully qualified test symbol."
+  (cond
+    ((null test-name)
+     (error "Test name must not be NIL"))
+    ((symbolp test-name)
+     (unless (symbol-package test-name)
+       (error "Test symbol must be package-qualified: ~S" test-name))
+     test-name)
+    ((stringp test-name)
+     (let* ((name (string-upcase test-name))
+            (colon-pos (search "::" name)))
+       (unless colon-pos
+         (error "Test name must be fully qualified (pkg::name): ~A" test-name))
+       (let* ((pkg-name (subseq name 0 colon-pos))
+              (sym-name (subseq name (+ colon-pos 2)))
+              (pkg (find-package pkg-name)))
+         (unless pkg
+           (error "Test package not found: ~A" pkg-name))
+         (intern sym-name pkg))))
+    (t
+     (error "Test name must be a string or symbol: ~S" test-name))))
+
+(defun %normalize-tests-arg (tests)
+  "Normalize TESTS to a non-empty list of fully-qualified test symbols."
+  (let ((items (cond
+                 ((null tests) nil)
+                 ((vectorp tests) (coerce tests 'list))
+                 ((listp tests) tests)
+                 (t (error "tests must be an array of test names")))))
+    (when (and tests (null items))
+      (error "tests must contain at least one test name"))
+    (mapcar #'%coerce-test-symbol items)))
+
+(defun %resolve-framework (system-name framework)
+  "Resolve FRAMEWORK argument to a backend keyword.
+When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
+  (cond
+    ((null framework)
+     (detect-test-framework system-name))
+    ((and (stringp framework)
+          (string-equal framework "auto"))
+     (detect-test-framework system-name))
+    ((stringp framework)
+     (intern (string-upcase framework) :keyword))
+    ((symbolp framework)
+     (intern (string-upcase (symbol-name framework)) :keyword))
+    (t
+     (error "framework must be a string or symbol: ~S" framework))))
+
+(defun %ensure-system-loaded (system-name)
+  "Load SYSTEM-NAME to make test packages available for selective execution."
+  (handler-case
+      (asdf:load-system system-name)
+    (error (c)
+      (error "Failed to load test system ~A: ~A" system-name c))))
+
+(defun %rove-extract-selected-failures (results)
+  "Extract failure details from selected test RESULTS returned by rove:run-tests."
+  (let* ((pkg (find-package :rove/core/result))
+         (test-name-fn (fdefinition (find-symbol "TEST-NAME" pkg)))
+         (test-failed-fn (fdefinition (find-symbol "TEST-FAILED-TESTS" pkg)))
+         (failure-details nil))
+    (dolist (test-result results)
+      (let ((test-name (funcall test-name-fn test-result)))
+        (dolist (testing-fail (funcall test-failed-fn test-result))
+          (let* ((testing-desc (funcall test-name-fn testing-fail))
+                 (assertions (%rove-extract-assertions testing-fail)))
+            (dolist (assertion assertions)
+              (setf (gethash "test_name" assertion)
+                    (format nil "~A / ~A" test-name testing-desc))
+              (push assertion failure-details))))))
+    (nreverse failure-details)))
+
+(defun run-rove-selected-tests (test-symbols)
+  "Run Rove TEST-SYMBOLS and return structured results."
+  (log-event :info "test-runner" "framework" "rove" "selected_tests"
+             (format nil "~{~A~^, ~}" test-symbols))
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
          (rove-pkg (find-package :rove))
-         (run-test-fn (fdefinition (find-symbol "RUN-TEST" rove-pkg)))
+         (run-tests-fn (fdefinition (find-symbol "RUN-TESTS" rove-pkg)))
          (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
          (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
-         ;; Parse test name string to symbol
-         (test-sym (if (symbolp test-name)
-                       test-name
-                       (let* ((name (string-upcase (string test-name)))
-                              (colon-pos (search "::" name)))
-                         (if colon-pos
-                             (let ((pkg-name (subseq name 0 colon-pos))
-                                   (sym-name (subseq name (+ colon-pos 2))))
-                               (intern sym-name (find-package pkg-name)))
-                             (error "Test name must be fully qualified (pkg::name): ~A" test-name)))))
          (start-time (get-internal-real-time))
-         successp test-result)
-    ;; Run with suppressed output using rove:run-test (triggers :around methods)
-    (setf (values successp test-result)
+         successp
+         results)
+    (declare (ignore successp))
+    (setf (values successp results)
           (funcall
            (compile nil
-                    `(lambda (run-test-fn test-sym)
+                    `(lambda (run-tests-fn tests)
                        (let ((,report-stream-sym (make-broadcast-stream))
                              (*standard-output* (make-broadcast-stream)))
-                         (funcall run-test-fn test-sym))))
-           run-test-fn test-sym))
+                         (funcall run-tests-fn tests))))
+           run-tests-fn test-symbols))
     (let* ((end-time (get-internal-real-time))
-           (duration-ms (round (* 1000 (/ (- end-time start-time)
-                                          internal-time-units-per-second))))
-           (passed (length (funcall passed-tests-fn test-result)))
-           (failed (length (funcall failed-tests-fn test-result)))
-           (pending (length (funcall pending-tests-fn test-result)))
-           (failure-details nil))
-      ;; Extract failure details if any
-      (when (plusp failed)
-        (let ((failed-list (funcall failed-tests-fn test-result)))
-          (dolist (fail failed-list)
-            (push (make-failure-detail
-                   :test-name (princ-to-string fail)
-                   :reason "Test failed (see rove output for details)")
-                  failure-details))))
+           (duration-ms (round (* 1000
+                                  (/ (- end-time start-time)
+                                     internal-time-units-per-second))))
+           (passed 0)
+           (failed 0)
+           (pending 0))
+      (dolist (test-result results)
+        (incf passed (length (funcall passed-tests-fn test-result)))
+        (incf failed (length (funcall failed-tests-fn test-result)))
+        (incf pending (length (funcall pending-tests-fn test-result))))
       (make-test-result :passed passed
                         :failed failed
                         :pending pending
-                        :failed-tests (nreverse failure-details)
+                        :failed-tests (when (plusp failed)
+                                        (%rove-extract-selected-failures results))
                         :framework :rove
                         :duration duration-ms))))
+(defun run-rove-single-test (test-name)
+  "Run a single Rove test by name and return structured results.
+TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
+  (run-rove-selected-tests
+   (list (%coerce-test-symbol test-name))))
 
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
@@ -292,34 +358,56 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
 ;;; Main Entry Point
 ;;; ---------------------------------------------------------------------------
 
-(defun run-tests (system-name &key framework test)
+(defun run-tests (system-name &key framework test tests)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
-If TEST is provided, run only that specific test (fully qualified symbol name).
+If TEST is provided, run only that specific test.
+If TESTS is provided, run those specific tests (array/list of fully qualified names).
 Returns a hash table with structured results."
-  (let ((fw (or (and framework (intern (string-upcase framework) :keyword))
-                (detect-test-framework system-name))))
+  (when (and test tests)
+    (error "Specify either TEST or TESTS, not both"))
+  (let* ((fw (%resolve-framework system-name framework))
+         (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
-               "framework" (string-downcase fw)
-               "test" (or test "all"))
+               "framework" (string-downcase (symbol-name fw))
+               "test" (cond
+                         (test (princ-to-string test))
+                         (tests "selected")
+                         (t "all")))
     (case fw
       (:rove
+       (when selective-requested-p
+         (%ensure-system-loaded system-name))
        (if (find-package :rove)
-           (if test
-               (run-rove-single-test test)
+           (if selective-requested-p
+               (let ((selected-tests (if test
+                                         (list (%coerce-test-symbol test))
+                                         (%normalize-tests-arg tests))))
+                 (run-rove-selected-tests selected-tests))
                (run-rove-tests system-name))
-           (progn
-             (log-event :warn "test-runner" "message"
-                        "Rove not loaded, using ASDF fallback")
-             (run-asdf-fallback system-name))))
+           (if selective-requested-p
+               (error
+                "Selective test execution with TEST/TESTS requires Rove for system ~A"
+                system-name)
+               (progn
+                 (log-event :warn "test-runner" "message"
+                            "Rove not loaded, using ASDF fallback")
+                 (run-asdf-fallback system-name)))))
       (:fiveam
+       (when selective-requested-p
+         (error "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "FiveAM support not yet implemented")
        (run-asdf-fallback system-name))
       (:prove
+       (when selective-requested-p
+         (error "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "Prove support not yet implemented")
        (run-asdf-fallback system-name))
-      (t (run-asdf-fallback system-name)))))
+      (t
+       (when selective-requested-p
+         (error "Selective test execution is currently supported only with Rove"))
+       (run-asdf-fallback system-name)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tool Definition
@@ -340,38 +428,40 @@ Returns:
 
 Examples:
   Run all tests: system='cl-mcp/tests/clhs-test'
-  Run single test: system='cl-mcp/tests/clhs-test' test='cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table'"
+  Run single test: system='cl-mcp/tests/clhs-test' test='cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table'
+  Run selected tests: system='cl-mcp/tests/clhs-test' tests=['cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table']"
   :args ((system :type :string :required t
                  :description "System name to test (e.g., 'my-project/tests')")
          (framework :type :string :required nil
-                    :description "Force framework: 'rove', 'fiveam', or 'auto' (default: auto-detect)")
+                    :description "Force framework: 'rove', 'fiveam', 'prove', or 'auto' (default: auto-detect)")
          (test :type :string :required nil
-               :description "Run only this specific test (fully qualified: 'package::test-name')"))
+               :description "Run only this specific test (fully qualified: 'package::test-name')")
+         (tests :type :array :required nil
+                :description "Run only these specific tests (array of 'package::test-name')"))
   :body
-  (let ((fw (when (and (boundp 'framework) framework)
-              framework))
-        (tst (when (and (boundp 'test) test)
-               test)))
-    (let* ((test-result (run-tests system :framework fw :test tst))
-           (passed (gethash "passed" test-result 0))
-           (failed (gethash "failed" test-result 0))
-           (pending (gethash "pending" test-result 0))
-           (duration (gethash "duration_ms" test-result))
-           (failed-tests (gethash "failed_tests" test-result))
-           (summary (with-output-to-string (s)
-                      (format s "~A~%"
-                              (if (zerop failed) "✓ PASS" "✗ FAIL"))
-                      (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
-                              passed failed (when (plusp pending) pending))
-                      (when duration
-                        (format s "Duration: ~Dms~%" duration))
-                      (when (and failed-tests (plusp (length failed-tests)))
-                        (format s "~%Failures:~%")
-                        (loop for fail across failed-tests
-                              for i from 1
-                              do (format s "  ~D. ~A~%"
-                                         i (gethash "test_name" fail))
-                                 (when (gethash "reason" fail)
-                                   (format s "     Reason: ~A~%"
-                                           (gethash "reason" fail))))))))
-      (result id (make-ht "content" (text-content summary))))))
+  (let* ((test-result (run-tests system
+                                 :framework framework
+                                 :test test
+                                 :tests tests))
+         (passed (gethash "passed" test-result 0))
+         (failed (gethash "failed" test-result 0))
+         (pending (gethash "pending" test-result 0))
+         (duration (gethash "duration_ms" test-result))
+         (failed-tests (gethash "failed_tests" test-result))
+         (summary (with-output-to-string (s)
+                    (format s "~A~%"
+                            (if (zerop failed) "✓ PASS" "✗ FAIL"))
+                    (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
+                            passed failed (when (plusp pending) pending))
+                    (when duration
+                      (format s "Duration: ~Dms~%" duration))
+                    (when (and failed-tests (plusp (length failed-tests)))
+                      (format s "~%Failures:~%")
+                      (loop for fail across failed-tests
+                            for i from 1
+                            do (format s "  ~D. ~A~%"
+                                       i (gethash "test_name" fail))
+                               (when (gethash "reason" fail)
+                                 (format s "     Reason: ~A~%"
+                                         (gethash "reason" fail))))))))
+    (result id (make-ht "content" (text-content summary)))))
