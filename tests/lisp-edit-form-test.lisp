@@ -416,6 +416,7 @@ then clean up."
                     (read-from-string updated)
                     t)
                 (error () nil))))))))
+
 (deftest lisp-edit-form-auto-repair-nested-missing-parens
   (testing "nested forms with missing parens are auto-repaired"
     (with-temp-file "tests/tmp/edit-form-auto-repair-nested.lisp"
