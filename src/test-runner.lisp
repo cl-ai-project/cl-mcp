@@ -36,17 +36,18 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
 (defun make-test-result (&key passed failed pending passed-tests failed-tests
                            framework duration)
   "Create a unified test result hash table."
-  (let ((ht (make-ht "passed" passed
-                     "failed" failed
-                     "framework" (string-downcase (symbol-name framework)))))
+  (let* ((normalized-failed-tests (if (vectorp failed-tests)
+                                      failed-tests
+                                      (coerce (or failed-tests '()) 'vector)))
+         (ht (make-ht "passed" (or passed 0)
+                      "failed" (or failed 0)
+                      "framework" (string-downcase (symbol-name framework))
+                      "failed_tests" normalized-failed-tests
+                      "duration_ms" (or duration 0))))
     (when pending
       (setf (gethash "pending" ht) pending))
     (when passed-tests
       (setf (gethash "passed_tests" ht) (coerce passed-tests 'vector)))
-    (when failed-tests
-      (setf (gethash "failed_tests" ht) (coerce failed-tests 'vector)))
-    (when duration
-      (setf (gethash "duration_ms" ht) duration))
     ht))
 
 (defun make-failure-detail (&key test-name description form values reason source)
@@ -331,7 +332,8 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
   (let ((output (make-string-output-stream))
         (error-output (make-string-output-stream))
         (start-time (get-internal-real-time))
-        success)
+        (success nil)
+        (condition-message nil))
     (handler-case
         (progn
           (let ((*standard-output* output)
@@ -339,20 +341,33 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
             (asdf:test-system system-name))
           (setf success t))
       (error (c)
+        (setf condition-message (princ-to-string c))
         (format error-output "~&Error: ~A~%" c)))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
            (stdout (get-output-stream-string output))
-           (stderr (get-output-stream-string error-output)))
-      (let ((ht (make-ht "framework" "asdf"
-                         "success" success
-                         "duration_ms" duration-ms)))
-        (when (plusp (length stdout))
-          (setf (gethash "stdout" ht) stdout))
-        (when (plusp (length stderr))
-          (setf (gethash "stderr" ht) stderr))
-        ht))))
+           (stderr (get-output-stream-string error-output))
+           (failure-reason (or condition-message
+                               (and (plusp (length stderr)) stderr)
+                               "asdf:test-system failed"))
+           (failed-tests (if success
+                             #()
+                             (vector (make-failure-detail
+                                      :test-name system-name
+                                      :reason failure-reason))))
+           (ht (make-ht "passed" 0
+                        "failed" (if success 0 1)
+                        "pending" 0
+                        "framework" "asdf"
+                        "duration_ms" duration-ms
+                        "failed_tests" failed-tests
+                        "success" success)))
+      (when (plusp (length stdout))
+        (setf (gethash "stdout" ht) stdout))
+      (when (plusp (length stderr))
+        (setf (gethash "stderr" ht) stderr))
+      ht)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Main Entry Point
@@ -422,9 +437,13 @@ Supports multiple test frameworks with automatic detection:
 - ASDF fallback: Text output capture
 
 Returns:
-- passed/failed counts
-- failure details (test name, form, values, reason)
-- execution duration
+- content (summary text, backward compatible)
+- passed (integer)
+- failed (integer)
+- pending (integer)
+- framework (string)
+- duration_ms (integer)
+- failed_tests (array of objects)
 
 Examples:
   Run all tests: system='cl-mcp/tests/clhs-test'
@@ -446,22 +465,37 @@ Examples:
          (passed (gethash "passed" test-result 0))
          (failed (gethash "failed" test-result 0))
          (pending (gethash "pending" test-result 0))
-         (duration (gethash "duration_ms" test-result))
+         (framework-name (or (gethash "framework" test-result) "unknown"))
+         (duration (gethash "duration_ms" test-result 0))
          (failed-tests (gethash "failed_tests" test-result))
+         (failed-tests-vector (if (vectorp failed-tests)
+                                  failed-tests
+                                  (coerce (or failed-tests '()) 'vector)))
          (summary (with-output-to-string (s)
                     (format s "~A~%"
                             (if (zerop failed) "✓ PASS" "✗ FAIL"))
                     (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
                             passed failed (when (plusp pending) pending))
-                    (when duration
-                      (format s "Duration: ~Dms~%" duration))
-                    (when (and failed-tests (plusp (length failed-tests)))
+                    (format s "Duration: ~Dms~%" duration)
+                    (when (plusp (length failed-tests-vector))
                       (format s "~%Failures:~%")
-                      (loop for fail across failed-tests
+                      (loop for fail across failed-tests-vector
                             for i from 1
                             do (format s "  ~D. ~A~%"
                                        i (gethash "test_name" fail))
                                (when (gethash "reason" fail)
                                  (format s "     Reason: ~A~%"
                                          (gethash "reason" fail))))))))
-    (result id (make-ht "content" (text-content summary)))))
+    (let ((response (make-ht "content" (text-content summary)
+                             "passed" passed
+                             "failed" failed
+                             "pending" pending
+                             "framework" framework-name
+                             "duration_ms" duration
+                             "failed_tests" failed-tests-vector)))
+      (dolist (field '("success" "stdout" "stderr" "passed_tests"))
+        (multiple-value-bind (value presentp)
+            (gethash field test-result)
+          (when presentp
+            (setf (gethash field response) value))))
+      (result id response))))

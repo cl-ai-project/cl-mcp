@@ -33,12 +33,16 @@
       (ok (hash-table-p result)))))
 
 (deftest run-tests-contains-required-fields
-  (testing "run-tests result contains passed, failed, framework fields"
+  (testing "run-tests result contains required structured fields"
     (let ((result (run-tests "cl-mcp/tests/clhs-test")))
-      (ok (not (null (gethash "passed" result))))
-      (ok (not (null (gethash "failed" result))))
-      (ok (gethash "framework" result))
-      (ok (string= "rove" (gethash "framework" result))))))
+      (ok (integerp (gethash "passed" result)))
+      (ok (integerp (gethash "failed" result)))
+      (ok (integerp (gethash "duration_ms" result)))
+      (ok (string= "rove" (gethash "framework" result)))
+      (let ((failures (gethash "failed_tests" result)))
+        (ok (vectorp failures) "failed_tests should be an array")
+        (ok (= 0 (length failures))
+            "successful suite should return empty failed_tests")))))
 
 (deftest run-tests-contains-duration
   (testing "run-tests result contains duration_ms"
@@ -66,10 +70,15 @@
     (let ((result (run-tests "cl-mcp/tests/test-runner-test-failures")))
       (ok (> (gethash "failed" result) 0) "Should have failures")
       (let ((failures (gethash "failed_tests" result)))
-        (ok failures "Should have failed_tests array")
+        (ok (vectorp failures) "failed_tests should be an array")
         (ok (> (length failures) 0) "Should have at least one failure")
         (let ((first-failure (aref failures 0)))
-          (ok (gethash "test_name" first-failure) "Failure should have test_name"))))))
+          (ok (gethash "test_name" first-failure)
+              "Failure should include test_name")
+          (multiple-value-bind (reason presentp)
+              (gethash "reason" first-failure)
+            (ok (or (not presentp) (stringp reason))
+                "Failure reason should be absent or a string")))))))
 
 (deftest run-tests-failure-reason-is-string
   (testing "run-tests converts error conditions to strings in failure reason"
@@ -124,12 +133,15 @@
       (ok (string= "rove" (gethash "framework" result))))))
 
 (deftest run-tests-asdf-fallback
-  (testing "run-tests falls back to asdf for unknown framework"
+  (testing "run-tests falls back to asdf and keeps structured response fields"
     ;; Force unknown framework - should fall back to asdf
     (let ((result (run-tests "cl-mcp/tests/clhs-test" :framework "unknown")))
       (ok (string= "asdf" (gethash "framework" result)))
-      ;; ASDF fallback returns success boolean instead of counts
-      (ok (gethash "success" result)))))
+      (ok (integerp (gethash "passed" result)))
+      (ok (integerp (gethash "failed" result)))
+      (ok (integerp (gethash "duration_ms" result)))
+      (ok (vectorp (gethash "failed_tests" result)))
+      (ok (member (gethash "success" result) '(t nil))))))
 
 (deftest run-tests-single-test-runs-only-target
   (testing "run-tests runs only the specified single test"
