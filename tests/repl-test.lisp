@@ -267,6 +267,18 @@
         (ok (hash-table-p preview) "should return hash-table")
         (ok (gethash "id" preview) "should have id")))))
 
+(deftest generate-result-preview-shared-reference-not-circular
+  (testing "shared nested objects are object-ref, not circular-ref, at max_depth boundary"
+    (let* ((shared (list :x))
+           (preview (generate-result-preview (list shared shared) :max-depth 1))
+           (elements (gethash "elements" preview))
+           (first (first elements))
+           (second (second elements)))
+      (ok (string= "object-ref" (gethash "kind" first)))
+      (ok (string= "object-ref" (gethash "kind" second)))
+      (ok (= (gethash "id" first) (gethash "id" second)))
+      (ok (null (gethash "ref_id" second))))))
+
 (deftest generate-result-preview-vector
   (testing "generates preview for vector (as array)"
     (let ((preview (generate-result-preview #(a b c d e))))
