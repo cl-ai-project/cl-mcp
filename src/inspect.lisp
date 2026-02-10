@@ -53,39 +53,51 @@
      (make-ht "value" (safe-prin1 object)
               "type" (%type-name object)))))
 
-(defun %make-object-ref (object visited-table)
-  "Register OBJECT and return an object-ref hash-table.
-VISITED-TABLE is used for circular reference detection."
-  (let ((existing-id (gethash object visited-table)))
-    (if existing-id
-        ;; Circular reference
-        (make-ht "kind" "circular-ref"
-                 "ref_id" existing-id
-                 "summary" (format nil "<circular to #~A>" existing-id))
-        ;; New object reference
-        (let ((id (register-object object)))
-          (setf (gethash object visited-table) id)
-          (make-ht "kind" "object-ref"
-                   "id" id
-                   "summary" (safe-prin1 object)
-                   "type" (%type-name object))))))
+(defun %ensure-object-id (object seen-table)
+  "Return OBJECT's ID from SEEN-TABLE, registering it if needed."
+  (or (gethash object seen-table)
+      (let ((id (register-object object)))
+        (setf (gethash object seen-table) id)
+        id)))
 
-(defun %value-repr (object visited-table depth max-depth max-elements)
+(defun %make-object-ref (object seen-table &key circular-p)
+  "Return a reference hash-table for OBJECT.
+When CIRCULAR-P is true, returns a circular reference marker."
+  (let ((id (%ensure-object-id object seen-table)))
+    (if circular-p
+        (make-ht "kind" "circular-ref"
+                 "ref_id" id
+                 "summary" (format nil "<circular to #~A>" id))
+        (make-ht "kind" "object-ref"
+                 "id" id
+                 "summary" (safe-prin1 object)
+                 "type" (%type-name object)))))
+
+(defun %value-repr (object seen-table active-table depth max-depth max-elements)
   "Return representation of OBJECT, registering if inspectable.
-Returns either a primitive value representation or an object-ref."
+Returns either a primitive value representation, an object-ref, or a circular-ref."
   (if (inspectable-p object)
-      ;; DEPTH here is the parent depth. Expand nested objects only when the
-      ;; child depth (DEPTH + 1) is still below MAX-DEPTH and we have not
-      ;; already visited the object (to preserve circular-reference handling).
-      (if (and (< (1+ depth) max-depth)
-               (null (gethash object visited-table)))
-          (%inspect-object-impl object visited-table (1+ depth) max-depth max-elements)
-          (%make-object-ref object visited-table))
+      (let ((child-depth (1+ depth)))
+        (cond
+          ;; Object appears on the active path: true cycle.
+          ((gethash object active-table)
+           (%make-object-ref object seen-table :circular-p t))
+          ;; Respect depth boundary by returning a reference.
+          ((>= child-depth max-depth)
+           (%make-object-ref object seen-table))
+          ;; Already seen elsewhere: shared reference, not a cycle.
+          ((gethash object seen-table)
+           (%make-object-ref object seen-table))
+          ;; First time and depth allows expansion.
+          (t
+           (%ensure-object-id object seen-table)
+           (%inspect-object-impl object seen-table active-table child-depth
+                                 max-depth max-elements))))
       (%primitive-value-repr object)))
 
 ;;; Type-specific inspection functions
 
-(defun %inspect-cons (object visited-table depth max-depth max-elements)
+(defun %inspect-cons (object seen-table active-table depth max-depth max-elements)
   "Inspect a cons/list."
   (let ((elements '())
         (count 0)
@@ -97,14 +109,16 @@ Returns either a primitive value representation or an object-ref."
                  (progn (setf truncated t)
                         (return))
                  (progn
-                   (push (%value-repr (car current) visited-table depth max-depth max-elements)
+                   (push (%value-repr (car current) seen-table active-table
+                                      depth max-depth max-elements)
                          elements)
                    (incf count)
                    (setf current (cdr current)))))
     ;; Handle dotted list tail
     (when (and current (not truncated))
       (push (make-ht "kind" "dotted-tail"
-                     "value" (%value-repr current visited-table depth max-depth max-elements))
+                     "value" (%value-repr current seen-table active-table
+                                          depth max-depth max-elements))
             elements))
     (let ((ht (make-ht "kind" "list"
                        "summary" (safe-prin1 object)
@@ -115,12 +129,13 @@ Returns either a primitive value representation or an object-ref."
                      "max_elements" max-elements))
       ht)))
 
-(defun %inspect-vector (object visited-table depth max-depth max-elements)
+(defun %inspect-vector (object seen-table active-table depth max-depth max-elements)
   "Inspect a vector."
   (let* ((len (length object))
          (limit (min len max-elements))
          (elements (loop for i from 0 below limit
-                         collect (%value-repr (aref object i) visited-table depth max-depth max-elements)))
+                         collect (%value-repr (aref object i) seen-table active-table
+                                              depth max-depth max-elements)))
          (truncated (> len max-elements)))
     (let ((ht (make-ht "kind" "array"
                        "summary" (safe-prin1 object)
@@ -134,13 +149,15 @@ Returns either a primitive value representation or an object-ref."
                      "max_elements" max-elements))
       ht)))
 
-(defun %inspect-array (object visited-table depth max-depth max-elements)
+(defun %inspect-array (object seen-table active-table depth max-depth max-elements)
   "Inspect a multi-dimensional array."
   (let* ((dims (array-dimensions object))
          (total (array-total-size object))
          (limit (min total max-elements))
          (elements (loop for i from 0 below limit
-                         collect (%value-repr (row-major-aref object i) visited-table depth max-depth max-elements)))
+                         collect (%value-repr (row-major-aref object i)
+                                              seen-table active-table
+                                              depth max-depth max-elements)))
          (truncated (> total max-elements)))
     (let ((ht (make-ht "kind" "array"
                        "summary" (safe-prin1 object)
@@ -154,7 +171,7 @@ Returns either a primitive value representation or an object-ref."
                      "max_elements" max-elements))
       ht)))
 
-(defun %inspect-hash-table (object visited-table depth max-depth max-elements)
+(defun %inspect-hash-table (object seen-table active-table depth max-depth max-elements)
   "Inspect a hash-table."
   (let ((entries '())
         (count 0)
@@ -165,8 +182,10 @@ Returns either a primitive value representation or an object-ref."
                  (when (>= count max-elements)
                    (setf truncated t)
                    (return-from collect))
-                 (push (make-ht "key" (%value-repr k visited-table depth max-depth max-elements)
-                                "value" (%value-repr v visited-table depth max-depth max-elements))
+                 (push (make-ht "key" (%value-repr k seen-table active-table
+                                                    depth max-depth max-elements)
+                                "value" (%value-repr v seen-table active-table
+                                                      depth max-depth max-elements))
                        entries)
                  (incf count))
                object))
@@ -210,7 +229,7 @@ Returns either a primitive value representation or an object-ref."
        (let ((class (class-of object)))
          (typep class 'structure-class))))
 
-(defun %inspect-structure (object visited-table depth max-depth max-elements)
+(defun %inspect-structure (object seen-table active-table depth max-depth max-elements)
   "Inspect a structure."
   (let ((slots '())
         (class-name (%type-name object)))
@@ -240,7 +259,8 @@ Returns either a primitive value representation or an object-ref."
                                        "value" (if (eq value :unbound)
                                                    (make-ht "kind" "unbound"
                                                             "summary" "#<unbound-slot>")
-                                                   (%value-repr value visited-table depth max-depth max-elements)))
+                                                   (%value-repr value seen-table active-table
+                                                                depth max-depth max-elements)))
                               slots)))))))))
       (error () nil))  ; Silently ignore if internal API not available
     (let ((ht (make-ht "kind" "structure"
@@ -251,7 +271,7 @@ Returns either a primitive value representation or an object-ref."
             (make-ht "slot_count" (length slots)))
       ht)))
 
-(defun %inspect-instance (object visited-table depth max-depth max-elements)
+(defun %inspect-instance (object seen-table active-table depth max-depth max-elements)
   "Inspect a CLOS instance."
   (let ((slots '())
         (class (class-of object))
@@ -274,7 +294,8 @@ Returns either a primitive value representation or an object-ref."
                                "value" (if (eq value :unbound)
                                            (make-ht "kind" "unbound"
                                                     "summary" "#<unbound-slot>")
-                                           (%value-repr value visited-table depth max-depth max-elements)))
+                                           (%value-repr value seen-table active-table
+                                                        depth max-depth max-elements)))
                       slots)))))
       (error () nil))
     #-sbcl
@@ -287,53 +308,56 @@ Returns either a primitive value representation or an object-ref."
             (make-ht "slot_count" (length slots)))
       ht)))
 
-(defun %inspect-object-impl (object visited-table depth max-depth max-elements)
+(defun %inspect-object-impl (object seen-table active-table depth max-depth max-elements)
   "Internal implementation of object inspection."
-  (cond
-    ;; List/cons
-    ((consp object)
-     (%inspect-cons object visited-table depth max-depth max-elements))
-    ;; Vector (1D array)
-    ((and (arrayp object) (= 1 (array-rank object)))
-     (%inspect-vector object visited-table depth max-depth max-elements))
-    ;; Multi-dimensional array
-    ((arrayp object)
-     (%inspect-array object visited-table depth max-depth max-elements))
-    ;; Hash-table
-    ((hash-table-p object)
-     (%inspect-hash-table object visited-table depth max-depth max-elements))
-    ;; Function
-    ((functionp object)
-     (%inspect-function object))
-    ;; Structure (SBCL-specific check)
-    #+sbcl
-    ((%sbcl-structure-p object)
-     (%inspect-structure object visited-table depth max-depth max-elements))
-    ;; CLOS instance
-    ((typep object 'standard-object)
-     (%inspect-instance object visited-table depth max-depth max-elements))
-    ;; Fallback: other types
-    (t
-     (make-ht "kind" "other"
-              "summary" (safe-prin1 object)
-              "type" (%type-name object)))))
+  (setf (gethash object active-table) t)
+  (unwind-protect
+       (cond
+         ;; List/cons
+         ((consp object)
+          (%inspect-cons object seen-table active-table depth max-depth max-elements))
+         ;; Vector (1D array)
+         ((and (arrayp object) (= 1 (array-rank object)))
+          (%inspect-vector object seen-table active-table depth max-depth max-elements))
+         ;; Multi-dimensional array
+         ((arrayp object)
+          (%inspect-array object seen-table active-table depth max-depth max-elements))
+         ;; Hash-table
+         ((hash-table-p object)
+          (%inspect-hash-table object seen-table active-table depth max-depth max-elements))
+         ;; Function
+         ((functionp object)
+          (%inspect-function object))
+         ;; Structure (SBCL-specific check)
+         #+sbcl
+         ((%sbcl-structure-p object)
+          (%inspect-structure object seen-table active-table depth max-depth max-elements))
+         ;; CLOS instance
+         ((typep object 'standard-object)
+          (%inspect-instance object seen-table active-table depth max-depth max-elements))
+         ;; Fallback: other types
+         (t
+          (make-ht "kind" "other"
+                   "summary" (safe-prin1 object)
+                   "type" (%type-name object))))
+    (remhash object active-table)))
 
 (defun inspect-object-by-id (id &key (max-depth 1) (max-elements 50))
   "Inspect object by ID from the registry.
 Returns a hash-table with inspection results or error info."
   (let ((object (lookup-object id)))
     (if object
-        (let ((visited (make-hash-table :test 'eq))
+        (let ((seen (make-hash-table :test 'eq))
+              (active (make-hash-table :test 'eq))
               (result nil))
-          ;; Mark the root object as visited with its ID
-          (setf (gethash object visited) id)
-          (setf result (%inspect-object-impl object visited 0 max-depth max-elements))
+          ;; Seed root ID so child references to root point to the caller-visible ID.
+          (setf (gethash object seen) id)
+          (setf result (%inspect-object-impl object seen active 0 max-depth max-elements))
           (setf (gethash "id" result) id)
           result)
         (make-ht "error" t
                  "code" "OBJECT_NOT_FOUND"
                  "message" (format nil "Object ID ~A not found (may have been evicted from cache)" id)))))
-
 
 (defun generate-result-preview (object &key (max-depth 1) (max-elements 8))
   "Generate a lightweight preview of OBJECT for inclusion in repl-eval response.
@@ -344,11 +368,12 @@ Returns a hash-table with:
   - truncated: T if elements were omitted due to max-elements limit
 For nested non-primitive values, id fields are included for drill-down."
   (let* ((id (register-object object))
-         (visited (make-hash-table :test 'eq))
+         (seen (make-hash-table :test 'eq))
+         (active (make-hash-table :test 'eq))
          (result nil))
-    (setf (gethash object visited) id)
+    (setf (gethash object seen) id)
     (setf result
-            (%inspect-object-impl object visited 0 max-depth max-elements))
+          (%inspect-object-impl object seen active 0 max-depth max-elements))
     (setf (gethash "id" result) id)
     result))
 

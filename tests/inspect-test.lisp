@@ -200,6 +200,22 @@
          (let ((first-elem (first (ht-get result "elements"))))
            (ok (string= "object-ref" (ht-get first-elem "kind")))))))))
 
+(deftest inspect-depth-shared-reference-not-circular
+  (testing "shared nested object is not treated as circular at max_depth boundary"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((shared (list :x))
+              (obj (list shared shared))
+              (id (register-object obj))
+              (result (inspect-object-by-id id :max-depth 1))
+              (elements (ht-get result "elements"))
+              (first (first elements))
+              (second (second elements)))
+         (ok (string= "object-ref" (ht-get first "kind")))
+         (ok (string= "object-ref" (ht-get second "kind")))
+         (ok (= (ht-get first "id") (ht-get second "id")))
+         (ok (null (ht-get second "ref_id"))))))))
+
 (deftest inspect-depth-expands-nested
   (testing "max_depth > 0 expands nested objects"
     (with-fresh-registry
