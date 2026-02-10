@@ -226,7 +226,7 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
                   (try-parse repaired)
                 (cond
                   (repaired-result
-                   (log-event :info "lisp-edit-form"
+                   (log-event :info "lisp.edit.form"
                               "auto-repair" "success"
                               "original-error" (princ-to-string err))
                    repaired-result)
@@ -396,7 +396,7 @@ to use for parsing both the file and the new content."
                (updated (%apply-operation original target op-key validated-content
                                          normalize-blank-lines))
                (would-change (not (string= original updated))))
-          (log-event :debug "lisp-edit-form"
+          (log-event :debug "lisp.edit.form"
                      "path" (namestring abs)
                      "operation" op-normalized
                      "form_type" form-type
