@@ -84,6 +84,26 @@ then clean up."
           (ok target-pos)
           (ok (< helper-pos target-pos)))))))
 
+(deftest lisp-edit-form-insert-before-normalizes-blank-lines
+  (testing "insert_before normalizes blank lines around inserted form"
+    (with-temp-file "tests/tmp/edit-form-insert-before-normalize-blank-lines.lisp"
+        (format nil "(defun alpha () :a)~%(defun target () :t)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "insert_before"
+                        :content "(defun beta () :b)")
+        (let ((text (fs-read-file path)))
+          (ok (search (format nil "(defun alpha () :a)~%~%(defun beta () :b)") text))
+          (ok (search (format nil "(defun beta () :b)~%~%(defun target () :t)") text))
+          (ok (null (search
+                     (format nil "(defun alpha () :a)~%(defun beta () :b)")
+                     text)))
+          (ok (null (search
+                     (format nil "(defun beta () :b)~%(defun target () :t)")
+                     text))))))))
+
 (deftest lisp-edit-form-insert-after-defmethod
   (testing "insert_after matches defmethod with specializers"
     (with-temp-file "tests/tmp/edit-form-insert-after.lisp"
@@ -168,6 +188,65 @@ then clean up."
           (ok (null (search (make-string 3 :initial-element #\Newline) between)))
           (ok (search "(defun gamma () :g)" text)))
       ))))
+
+(deftest lisp-edit-form-replace-normalizes-blank-lines-around-target
+  (testing "replace normalizes blank lines before and after the edited form"
+    (with-temp-file "tests/tmp/edit-form-replace-normalize-blank-lines.lisp"
+        (format nil
+                "(defun alpha () :a)~%~%~%(defun target () :old)~%(defun omega () :z)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () :new)")
+        (let ((text (fs-read-file path)))
+          (ok (search (format nil "(defun alpha () :a)~%~%(defun target () :new)") text))
+          (ok (null (search
+                     (format nil "(defun alpha () :a)~%~%~%(defun target () :new)")
+                     text)))
+          (ok (search (format nil "(defun target () :new)~%~%(defun omega () :z)") text))
+          (ok (null (search
+                     (format nil "(defun target () :new)~%(defun omega () :z)")
+                     text))))))))
+
+(deftest lisp-edit-form-replace-preserves-spacing-when-normalization-disabled
+  (testing "replace keeps existing spacing when normalize_blank_lines is nil"
+    (with-temp-file "tests/tmp/edit-form-replace-preserve-spacing.lisp"
+        (format nil
+                "(defun alpha () :a)~%(defun target () :old)~%~%~%(defun omega () :z)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () :new)"
+                        :normalize-blank-lines nil)
+        (let ((text (fs-read-file path)))
+          (ok (search (format nil "(defun alpha () :a)~%(defun target () :new)") text))
+          (ok (search
+               (format nil "(defun target () :new)~%~%~%(defun omega () :z)")
+               text))
+          (ok (null (search
+                     (format nil "(defun alpha () :a)~%~%(defun target () :new)")
+                     text))))))))
+
+(deftest lisp-edit-form-insert-after-normalizes-following-boundary
+  (testing "insert_after ensures one blank line before both adjacent forms"
+    (with-temp-file "tests/tmp/edit-form-insert-after-following-boundary.lisp"
+        (format nil "(defun alpha () :a)~%(defun omega () :z)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "alpha"
+                        :operation "insert_after"
+                        :content "(defun beta () :b)")
+        (let ((text (fs-read-file path)))
+          (ok (search (format nil "(defun alpha () :a)~%~%(defun beta () :b)") text))
+          (ok (search (format nil "(defun beta () :b)~%~%(defun omega () :z)") text))
+          (ok (null (search
+                     (format nil "(defun beta () :b)~%(defun omega () :z)")
+                     text))))))))
 
 (deftest lisp-edit-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"

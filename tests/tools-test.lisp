@@ -514,6 +514,45 @@
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
 
+(deftest tools-call-lisp-edit-form-default-normalizes-blank-lines
+  (testing "tools/call lisp-edit-form normalizes blank lines when option is omitted"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-edit-form-normalize-default.lisp")
+             (initial-content (format nil
+                                      "(defun alpha () :a)~%(defun target () :old)~%~%~%(defun omega () :z)~%"))
+             (new-content "(defun target () :new)"))
+        (with-open-file (out (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)
+                             :direction :output :if-exists :supersede)
+          (write-string initial-content out))
+        (unwind-protect
+             (let ((req (concatenate
+                         'string
+                         "{\"jsonrpc\":\"2.0\",\"id\":2201,\"method\":\"tools/call\","
+                         "\"params\":{\"name\":\"lisp-edit-form\","
+                         "\"arguments\":{\"file_path\":\"" tmp-path "\","
+                         "\"form_type\":\"defun\",\"form_name\":\"target\","
+                         "\"operation\":\"replace\","
+                         "\"content\":\"" new-content "\"}}}")))
+               (let* ((resp (process-json-line req))
+                      (obj (parse resp))
+                      (err (gethash "error" obj)))
+                 (ok (null err))
+                 (let ((file-content
+                         (uiop:read-file-string
+                          (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))
+                   (ok (search
+                        (format nil "(defun alpha () :a)~%~%(defun target () :new)")
+                        file-content))
+                   (ok (search
+                        (format nil "(defun target () :new)~%~%(defun omega () :z)")
+                        file-content))
+                   (ok (null
+                        (search
+                         (format nil "(defun target () :new)~%~%~%(defun omega () :z)")
+                         file-content))))))
+          (ignore-errors
+            (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
+
 (deftest tools-call-lisp-edit-form-multiple-forms-guidance
   (testing "tools/call lisp-edit-form returns actionable guidance for multiple forms"
     (with-test-project-root
