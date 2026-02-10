@@ -523,6 +523,7 @@
           (ok (> (length example) 0))
           (ok (every (lambda (step) (string= step "insert_after"))
                      (coerce example 'list))))))))
+
 (deftest tools-call-code-find-references-project-only-false
   (testing "tools/call code-find-references with project_only=false includes external refs"
     ;; Use a project symbol that we know exists
