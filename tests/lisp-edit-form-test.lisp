@@ -84,6 +84,26 @@ then clean up."
           (ok target-pos)
           (ok (< helper-pos target-pos)))))))
 
+(deftest lisp-edit-form-insert-before-normalizes-blank-lines
+  (testing "insert_before normalizes blank lines around inserted form"
+    (with-temp-file "tests/tmp/edit-form-insert-before-normalize-blank-lines.lisp"
+        (format nil "(defun alpha () :a)~%(defun target () :t)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "insert_before"
+                        :content "(defun beta () :b)")
+        (let ((text (fs-read-file path)))
+          (ok (search (format nil "(defun alpha () :a)~%~%(defun beta () :b)") text))
+          (ok (search (format nil "(defun beta () :b)~%~%(defun target () :t)") text))
+          (ok (null (search
+                     (format nil "(defun alpha () :a)~%(defun beta () :b)")
+                     text)))
+          (ok (null (search
+                     (format nil "(defun beta () :b)~%(defun target () :t)")
+                     text))))))))
+
 (deftest lisp-edit-form-insert-after-defmethod
   (testing "insert_after matches defmethod with specializers"
     (with-temp-file "tests/tmp/edit-form-insert-after.lisp"
