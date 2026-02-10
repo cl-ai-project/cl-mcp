@@ -147,6 +147,7 @@
                    "cl-mcp/tests/utils-strings-test::ensure-trailing-newline-adds-newline")))
       (ok (= 1 (gethash "passed" result)))
       (ok (= 0 (gethash "failed" result))))))
+
 (deftest run-tests-tests-array-runs-selected-tests
   (testing "run-tests runs only tests listed in :tests"
     (let ((result (run-tests "cl-mcp/tests/clhs-test"

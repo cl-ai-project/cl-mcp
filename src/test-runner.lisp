@@ -190,6 +190,7 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
       (asdf:load-system system-name)
     (error (c)
       (error "Failed to load test system ~A: ~A" system-name c))))
+
 (defun %rove-extract-selected-failures (results)
   "Extract failure details from selected test RESULTS returned by rove:run-tests."
   (let* ((pkg (find-package :rove/core/result))
