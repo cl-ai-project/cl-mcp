@@ -191,7 +191,8 @@ then clean up."
     (with-temp-file "tests/tmp/edit-form-invalid.lisp"
         (format nil "(defun sample () :ok)~%")
       (lambda (path)
-        (let ((before (fs-read-file path)))
+        (let ((before (fs-read-file path))
+              (err-msg nil))
           (ok (handler-case
                   (progn
                     (lisp-edit-form :file-path path
@@ -201,7 +202,12 @@ then clean up."
                                     ;; Multiple forms - cannot be single valid form
                                     :content (format nil "(defun sample () 1) (defun other () 2)"))
                     nil)
-                (error () t)))
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t)))
+          (ok (stringp err-msg))
+          (ok (search "content must contain exactly one top-level form" err-msg))
+          (ok (search "multiple forms are not supported in a single call" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-edit-form-read-eval-disabled

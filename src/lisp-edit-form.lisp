@@ -40,6 +40,25 @@
 
 (in-package #:cl-mcp/src/lisp-edit-form)
 
+(defun %multiple-top-level-forms-error-message ()
+  "Return the user-facing error message for multiple top-level form content."
+  "content must contain exactly one top-level form; multiple forms are not supported in a single call")
+
+(define-condition multiple-top-level-forms-error (error)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string (%multiple-top-level-forms-error-message) stream))))
+
+(defun %multiple-top-level-forms-error-data ()
+  "Return machine-readable remediation guidance for multiple-form content errors."
+  (make-ht "code" "multiple_forms_not_supported"
+           "next_tool" "lisp-edit-form"
+           "action" "split_into_multiple_calls"
+           "example_operation_sequence" (vector "insert_after" "insert_after")
+           "required_args"
+           (vector "file_path" "form_type" "form_name" "operation" "content")))
+
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
 
@@ -136,28 +155,34 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
                    (let ((rest (string-trim '(#\Space #\Tab #\Newline)
                                             (subseq text pos))))
                      (when (> (length rest) 0)
-                       (error "content contains extra characters after the first form")))
+                       (error 'multiple-top-level-forms-error)))
                    text)
                (error (e)
                  (values nil e)))))
       (multiple-value-bind (result err)
           (try-parse content)
-        (if result
-            result
-            ;; First parse failed, try parinfer repair
-            (let ((repaired (apply-indent-mode content)))
-              (multiple-value-bind (repaired-result repaired-err)
-                  (try-parse repaired)
-                (cond
-                  (repaired-result
-                   (log-event :info "lisp-edit-form"
-                              "auto-repair" "success"
-                              "original-error" (princ-to-string err))
-                   repaired-result)
-                  (t
-                   ;; Repair failed, signal the original error
-                   (error "content parse error: ~A (repair also failed: ~A)"
-                          err repaired-err))))))))))
+        (cond
+          (result
+           result)
+          ((typep err 'multiple-top-level-forms-error)
+           (error err))
+          (t
+           ;; First parse failed, try parinfer repair
+           (let ((repaired (apply-indent-mode content)))
+             (multiple-value-bind (repaired-result repaired-err)
+                 (try-parse repaired)
+               (cond
+                 (repaired-result
+                  (log-event :info "lisp-edit-form"
+                             "auto-repair" "success"
+                             "original-error" (princ-to-string err))
+                  repaired-result)
+                 ((typep repaired-err 'multiple-top-level-forms-error)
+                  (error repaired-err))
+                 (t
+                  ;; Repair failed, signal the original error
+                  (error "content parse error: ~A (repair also failed: ~A)"
+                         err repaired-err)))))))))))
 
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.
@@ -313,50 +338,55 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
-  (let ((updated (lisp-edit-form :file-path file_path
-                                 :form-type form_type
-                                 :form-name form_name
-                                 :operation operation
-                                 :content content
-                                 :dry-run dry_run
-                                 :readtable (when readtable
-                                             (let ((colon-pos (position #\: readtable)))
-                                               (if colon-pos
-                                                   ;; Package-qualified: "pkg:sym" or "pkg::sym"
-                                                   (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                          (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                              (char= (char readtable (1+ colon-pos)) #\:))
-                                                                         (+ colon-pos 2)
-                                                                         (1+ colon-pos)))
-                                                          (sym-name (subseq readtable sym-start))
-                                                          (pkg (find-package (string-upcase pkg-name))))
-                                                     (if pkg
-                                                         (intern (string-upcase sym-name) pkg)
-                                                         (error "Package ~A not found for readtable ~A"
-                                                                pkg-name readtable)))
-                                                   ;; Keyword symbol (no colon prefix)
-                                                   (intern (string-upcase readtable) :keyword)))))))
-    (if dry_run
-        (let* ((preview (gethash "preview" updated))
-               (would-change (gethash "would_change" updated))
-               (original-form (gethash "original" updated))
-               (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])"
-                                operation form_type file_path would-change)))
-          (result id
-                  (make-ht "path" file_path
-                           "operation" operation
-                           "form_type" form_type
-                           "form_name" form_name
-                           "would_change" would-change
-                           "original" original-form
-                           "preview" preview
-                           "content" (text-content summary))))
-        (result id
-                (make-ht "path" file_path
-                         "operation" operation
-                         "form_type" form_type
-                         "form_name" form_name
-                         "bytes" (length updated)
-                         "content" (text-content
-                                    (format nil "Applied ~A to ~A ~A (~D chars)"
-                                            operation form_type file_path (length updated))))))))
+  (handler-case
+      (let ((updated (lisp-edit-form :file-path file_path
+                                     :form-type form_type
+                                     :form-name form_name
+                                     :operation operation
+                                     :content content
+                                     :dry-run dry_run
+                                     :readtable (when readtable
+                                                 (let ((colon-pos (position #\: readtable)))
+                                                   (if colon-pos
+                                                       ;; Package-qualified: "pkg:sym" or "pkg::sym"
+                                                       (let* ((pkg-name (subseq readtable 0 colon-pos))
+                                                              (sym-start (if (and (< (1+ colon-pos) (length readtable))
+                                                                                  (char= (char readtable (1+ colon-pos)) #\:))
+                                                                             (+ colon-pos 2)
+                                                                             (1+ colon-pos)))
+                                                              (sym-name (subseq readtable sym-start))
+                                                              (pkg (find-package (string-upcase pkg-name))))
+                                                         (if pkg
+                                                             (intern (string-upcase sym-name) pkg)
+                                                             (error "Package ~A not found for readtable ~A"
+                                                                    pkg-name readtable)))
+                                                       ;; Keyword symbol (no colon prefix)
+                                                       (intern (string-upcase readtable) :keyword)))))))
+        (if dry_run
+            (let* ((preview (gethash "preview" updated))
+                   (would-change (gethash "would_change" updated))
+                   (original-form (gethash "original" updated))
+                   (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])"
+                                    operation form_type file_path would-change)))
+              (result id
+                      (make-ht "path" file_path
+                               "operation" operation
+                               "form_type" form_type
+                               "form_name" form_name
+                               "would_change" would-change
+                               "original" original-form
+                               "preview" preview
+                               "content" (text-content summary))))
+            (result id
+                    (make-ht "path" file_path
+                             "operation" operation
+                             "form_type" form_type
+                             "form_name" form_name
+                             "bytes" (length updated)
+                             "content" (text-content
+                                        (format nil "Applied ~A to ~A ~A (~D chars)"
+                                                operation form_type file_path (length updated)))))))
+    (multiple-top-level-forms-error ()
+      (cl-mcp/src/tools/helpers:rpc-error
+       id -32602 (%multiple-top-level-forms-error-message)
+       (%multiple-top-level-forms-error-data)))))

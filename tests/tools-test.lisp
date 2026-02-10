@@ -493,6 +493,36 @@
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
 
+(deftest tools-call-lisp-edit-form-multiple-forms-guidance
+  (testing "tools/call lisp-edit-form returns actionable guidance for multiple forms"
+    (with-test-project-root
+      (let* ((content "(defun version () :v1) (defun other () :ok)")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"lisp-edit-form\","
+                           "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                           "\"form_type\":\"defun\",\"form_name\":\"version\","
+                           "\"operation\":\"replace\",\"content\":\"~A\"}}}")
+                          content)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (err (gethash "error" obj))
+               (msg (and err (gethash "message" err)))
+               (data (and err (gethash "data" err)))
+               (example (and data (gethash "example_operation_sequence" data))))
+          (ok err)
+          (ok (string= msg
+                       "content must contain exactly one top-level form; multiple forms are not supported in a single call"))
+          (ok (hash-table-p data))
+          (ok (string= (gethash "code" data) "multiple_forms_not_supported"))
+          (ok (string= (gethash "next_tool" data) "lisp-edit-form"))
+          (ok (string= (gethash "action" data) "split_into_multiple_calls"))
+          (ok (vectorp example))
+          (ok (> (length example) 0))
+          (ok (every (lambda (step) (string= step "insert_after"))
+                     (coerce example 'list))))))))
 (deftest tools-call-code-find-references-project-only-false
   (testing "tools/call code-find-references with project_only=false includes external refs"
     ;; Use a project symbol that we know exists
