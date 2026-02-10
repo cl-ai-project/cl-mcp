@@ -210,6 +210,28 @@ then clean up."
           (ok (search "multiple forms are not supported in a single call" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-edit-form-trailing-garbage-errors
+  (testing "trailing malformed content is not classified as multiple forms"
+    (with-temp-file "tests/tmp/edit-form-trailing-garbage.lisp"
+        (format nil "(defun sample () :ok)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (ok (handler-case
+                  (progn
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "sample"
+                                    :operation "replace"
+                                    :content "(defun sample () :new) #<")
+                    nil)
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t)))
+          (ok (stringp err-msg))
+          (ok (null (search "multiple forms are not supported in a single call" err-msg)))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))

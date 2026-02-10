@@ -524,6 +524,31 @@
           (ok (every (lambda (step) (string= step "insert_after"))
                      (coerce example 'list))))))))
 
+(deftest tools-call-lisp-edit-form-trailing-garbage-no-multiple-forms-guidance
+  (testing "tools/call lisp-edit-form does not return multiple-forms guidance for trailing garbage"
+    (with-test-project-root
+      (let* ((content "(defun version () :v1) #<")
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"lisp-edit-form\","
+                           "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                           "\"form_type\":\"defun\",\"form_name\":\"version\","
+                           "\"operation\":\"replace\",\"content\":\"~A\"}}}")
+                          content)))
+        (let* ((resp (process-json-line req))
+               (obj (parse resp))
+               (err (gethash "error" obj))
+               (msg (and err (gethash "message" err)))
+               (data (and err (gethash "data" err)))
+               (code (and data (gethash "code" data))))
+          (ok err)
+          (ok (stringp msg))
+          (ok (null (search "multiple forms are not supported in a single call" msg)))
+          (ok (not (and (stringp code)
+                        (string= code "multiple_forms_not_supported")))))))))
+
 (deftest tools-call-code-find-references-project-only-false
   (testing "tools/call code-find-references with project_only=false includes external refs"
     ;; Use a project symbol that we know exists

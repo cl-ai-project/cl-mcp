@@ -146,19 +146,47 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
          (*readtable* (if custom-rt
                           custom-rt
                           (copy-readtable nil))))
-    (flet ((try-parse (text)
-             (handler-case
-                 (multiple-value-bind (form pos)
-                     (cl:read-from-string text nil :eof)
-                   (when (eq form :eof)
-                     (error "content is empty"))
-                   (let ((rest (string-trim '(#\Space #\Tab #\Newline)
-                                            (subseq text pos))))
-                     (when (> (length rest) 0)
-                       (error 'multiple-top-level-forms-error)))
-                   text)
-               (error (e)
-                 (values nil e)))))
+    (labels ((whitespace-char-p (ch)
+               (member ch '(#\Space #\Tab #\Newline #\Return)))
+             (rest-parses-as-complete-forms-p (text start)
+               (let ((len (length text)))
+                 (handler-case
+                     (loop with cursor = start
+                           with saw-form = nil
+                           do (setf cursor
+                                    (or (position-if-not #'whitespace-char-p text
+                                                         :start cursor)
+                                        len))
+                              (when (>= cursor len)
+                                (return saw-form))
+                              (multiple-value-bind (next-form next-pos)
+                                  (cl:read-from-string text nil :eof
+                                                       :start cursor
+                                                       :end len)
+                                (when (eq next-form :eof)
+                                  (return saw-form))
+                                (setf saw-form t
+                                      cursor next-pos)))
+                   (error ()
+                     nil))))
+             (try-parse (text)
+               (handler-case
+                   (multiple-value-bind (form pos)
+                       (cl:read-from-string text nil :eof)
+                     (when (eq form :eof)
+                       (error "content is empty"))
+                     (let* ((len (length text))
+                            (rest-start (or (position-if-not #'whitespace-char-p text
+                                                              :start pos)
+                                            len)))
+                       (when (< rest-start len)
+                         (if (rest-parses-as-complete-forms-p text rest-start)
+                             (error 'multiple-top-level-forms-error)
+                             (error
+                              "content has trailing malformed characters after the first form"))))
+                     text)
+                 (error (e)
+                   (values nil e)))))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
