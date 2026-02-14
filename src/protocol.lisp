@@ -17,6 +17,8 @@
                 #:get-tool-handler)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-file)
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
@@ -34,8 +36,6 @@
    #:protocol-version
    #:make-state
    #:process-json-line))
-
-
 
 (in-package #:cl-mcp/src/protocol)
 
@@ -134,14 +134,20 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
   (%result id (make-ht "tools" (get-all-tool-descriptors))))
 
 (defun %prompts-directory ()
-  "Return prompts directory pathname, or NIL when unavailable."
-  (let* ((system-root (handler-case
+  "Return prompts directory pathname, preferring project root over system root."
+  (let* ((project-dir (and *project-root*
+                           (merge-pathnames "prompts/" *project-root*)))
+         (system-root (handler-case
                           (asdf:system-source-directory "cl-mcp")
                         (error () nil)))
-         (base (or system-root *project-root*))
-         (dir (and base (merge-pathnames "prompts/" base))))
-    (when (and dir (uiop/filesystem:directory-exists-p dir))
-      dir)))
+         (system-dir (and system-root
+                          (merge-pathnames "prompts/" system-root))))
+    (cond
+      ((and project-dir (uiop/filesystem:directory-exists-p project-dir))
+       project-dir)
+      ((and system-dir (uiop/filesystem:directory-exists-p system-dir))
+       system-dir)
+      (t nil))))
 
 (defun %markdown-heading-text (line)
   "Return heading text when LINE is a Markdown heading, else NIL."
@@ -188,7 +194,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
                            :key #'namestring)))
           (loop for file in files
                 for name = (string-downcase (or (pathname-name file) ""))
-                for content = (uiop:read-file-string file)
+                for content = (fs-read-file (namestring file))
                 for title = (%extract-prompt-title content name)
                 for description = (%extract-prompt-description content)
                 collect (make-ht "name" name
@@ -225,7 +231,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
         (return-from handle-prompts-get
           (%error id -32602 (format nil "Prompt ~A not found" name))))
       (handler-case
-          (let* ((text (uiop:read-file-string (gethash "file_path" prompt)))
+          (let* ((text (fs-read-file (gethash "file_path" prompt)))
                  (messages (vector
                             (make-ht "role" "user"
                                      "content" (make-ht "type" "text"
