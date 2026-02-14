@@ -9,7 +9,7 @@ Adopt a production-quality Common Lisp engineering mindset. Every function has d
 
 - **CLOS Protocol-First**: Define generic functions and methods; prefer protocols over concrete implementations.
 - **Minimal Global State**: Avoid special variables unless truly dynamic; prefer explicit parameters.
-- **Package Discipline**: One package per file via ASDF `package-inferred-system`. Export only the public API. Never use `::` in production code.
+- **Package Discipline**: Follow the project's package/ASDF layout. For `package-inferred-system`, use one package per file; for explicit `:components`, follow existing module conventions. Export only the public API. Never use `::` in production code.
 - **Conditions & Restarts**: Define custom condition types for domain errors. Provide restarts (`use-value`, `retry`, `skip`) so callers can recover.
 - **Explicit Resource Lifecycle**: Wrap external resources with `unwind-protect` or `with-*` macros.
 

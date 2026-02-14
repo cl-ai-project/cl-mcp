@@ -74,6 +74,5 @@ Run a quick interactive verification of the main feature:
 [ ] Style guide compliance
 [ ] lisp-check-parens on changed files
 [ ] Smoke test passes
-[ ] .asd updated if new files added
-[ ] Test system updated if new test files added
+[ ] Build/test registration updated for project style (package-inferred imports or `.asd` components)
 ```

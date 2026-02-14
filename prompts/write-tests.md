@@ -82,7 +82,9 @@ Refactor the implementation or tests while keeping the suite green. Re-run after
 When creating a new test file:
 1. Create minimal file with `fs-write-file`
 2. Verify with `lisp-check-parens`
-3. Add to `.asd` test system dependencies
+3. Register the test in the project's test system:
+   - package-inferred style: add the test package import/entry point expected by the project
+   - explicit `:components` style: add the test file to the test system in `.asd`
 4. Expand with `lisp-edit-form`
 
 ```lisp

@@ -1,5 +1,5 @@
 # Add New Feature or Module
-Create new packages, files, and functions following ASDF package-inferred-system conventions.
+Create new packages, files, and functions that match the target project's ASDF conventions.
 
 ## Goal
 
@@ -66,7 +66,10 @@ Add helper functions:
 ```
 
 ### Step 5: Update .asd Dependencies
-Add the new module to the system definition using `lisp-edit-form` on the `.asd` file.
+Register the new source file according to the project's system style:
+
+- **Package-inferred system**: ensure the package naming/import graph makes the new module reachable.
+- **Traditional `:components` system**: add the new file to the `.asd` definition with `lisp-edit-form`.
 
 ### Step 6: Load and Test Interactively
 ```json
@@ -84,12 +87,12 @@ Test the new function:
 ```
 
 ### Step 7: Add Tests
-Create a test file following the same minimal-then-expand pattern, add to `.asd` test dependencies, and run:
+Create a test file following the same minimal-then-expand pattern, register it in the test system, and run:
 ```json
 {"name": "run-tests", "arguments": {"system": "my-project/tests"}}
 ```
 
-## Package-Inferred-System Template
+## Package-Inferred-System Template (if applicable)
 
 For projects using `package-inferred-system`, each file defines its own package:
 
@@ -106,6 +109,8 @@ For projects using `package-inferred-system`, each file defines its own package:
 - Package name matches file path: `src/foo.lisp` → `my-project/src/foo`
 - Use `:import-from` for explicit inter-module dependencies
 - Export only the public API
+
+If the project uses explicit ASDF `:components` instead, keep package/file naming consistent with existing modules and update `.asd` entries explicitly.
 
 ## Tips
 

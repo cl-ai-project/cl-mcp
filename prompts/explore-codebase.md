@@ -34,7 +34,7 @@ Read the `.asd` file to understand dependencies, subsystems, and test configurat
 ```json
 {"name": "fs-list-directory", "arguments": {"path": "src/"}}
 ```
-Note the file organization: one file per module, package-inferred naming, test mirrors.
+Note the file organization: module boundaries, package naming style, and how tests mirror sources.
 
 ### Step 4: Scan Each Source File
 Use collapsed view to see all top-level forms (functions, classes, macros) without reading bodies:
