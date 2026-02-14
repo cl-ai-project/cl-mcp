@@ -81,9 +81,12 @@ EXPLORE ──→ EXPERIMENT ──→ REFINE ────────┘
 
 **Allowed shell commands:**
 - `git` operations (status, commit, diff, etc.)
-- `rove` / test runners
 - `mallet` (linting)
 - User-requested commands explicitly
+
+**Test execution preference:**
+- Prefer `run-tests` for structured test execution.
+- Use `repl-eval` with `asdf:test-system` / `rove:run` only when you need custom behavior.
 
 **Why prefer cl-mcp tools?**
 - `clgrep-search` returns form type, name, signature, and package context
@@ -492,7 +495,9 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 
 2. **Verify syntax:** `lisp-check-parens` on the new file
 
-3. **Update .asd:** Add to system dependencies (use `lisp-edit-form` on the `.asd` file)
+3. **Register in build system:** follow the project's ASDF style:
+   - `package-inferred-system`: ensure package/import graph makes the file reachable
+   - explicit `:components`: add file entry in `.asd` via `lisp-edit-form`
 
 4. **Load and test:** `(ql:quickload :my-system)` then iterate with `repl-eval`
 
@@ -530,8 +535,9 @@ When primary tools fail or are insufficient:
 - **Primary:** `code-find` cannot locate symbol
 - **Fallback:** Use `lisp-read-file` with `name_pattern` (regex search):
   ```json
-  {"path": "src/", "name_pattern": "my-func.*"}
+  {"path": "src/core.lisp", "name_pattern": "my-func.*"}
   ```
+  Choose the file path from `clgrep-search` results.
 - **Last resort:** Use `fs-read-file` to read the entire file and search manually
 
 ### Complex Multi-File Edits
@@ -551,8 +557,9 @@ When primary tools fail or are insufficient:
 - **Diagnosis:** System might not be loaded despite `(ql:quickload ...)`
 - **Solution:** Use `lisp-read-file` with `name_pattern` as filesystem-level search:
   ```json
-  {"path": "src/", "name_pattern": "^my-symbol$"}
+  {"path": "src/core.lisp", "name_pattern": "^my-symbol$"}
   ```
+  Use `clgrep-search` first to identify candidate files.
 
 ## Troubleshooting
 

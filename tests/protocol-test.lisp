@@ -29,7 +29,8 @@
                (caps (gethash "capabilities" result)))
           (ok (stringp (gethash "name" server)))
           (ok (stringp (gethash "version" server)))
-          (ok (gethash "tools" caps)))))))
+          (ok (hash-table-p (gethash "tools" caps)))
+          (ok (hash-table-p (gethash "prompts" caps))))))))
 
 (deftest initialized-notification
   (testing "notifications/initialized returns no response"
@@ -39,6 +40,71 @@
                  "\"method\":\"notifications/initialized\","
                  "\"params\":{\"protocolVersion\":\"2025-06-18\"}}")))
       (ok (null (process-json-line line))))))
+
+(deftest prompts-list-returns-known-prompt
+  (testing "prompts/list returns prompt descriptors from prompts directory"
+    (let* ((resp (process-json-line
+                  "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"prompts/list\",\"params\":{}}"))
+           (obj (parse resp))
+           (result (gethash "result" obj))
+           (prompts (gethash "prompts" result)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 50))
+      (ok (vectorp prompts))
+      (ok (> (length prompts) 0))
+      (ok (find "repl-driven-development"
+                (coerce prompts 'list)
+                :test #'string=
+                :key (lambda (prompt)
+                       (gethash "name" prompt)))))))
+
+(deftest prompts-get-returns-user-message
+  (testing "prompts/get returns prompt body as user text message"
+    (let* ((resp (process-json-line
+                  (concatenate
+                   'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"prompts/get\","
+                   "\"params\":{\"name\":\"repl-driven-development\"}}")))
+           (obj (parse resp))
+           (result (gethash "result" obj))
+           (messages (gethash "messages" result))
+           (first-message (and (vectorp messages)
+                               (> (length messages) 0)
+                               (aref messages 0)))
+           (content (and first-message (gethash "content" first-message))))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 51))
+      (ok (stringp (gethash "description" result)))
+      (ok (vectorp messages))
+      (ok (string= (gethash "role" first-message) "user"))
+      (ok (string= (gethash "type" content) "text"))
+      (ok (search "Common Lisp REPL-Driven Development Assistant"
+                  (gethash "text" content))))))
+
+(deftest prompts-get-missing-name-returns-invalid-params
+  (testing "prompts/get validates required name parameter"
+    (let* ((resp (process-json-line
+                  "{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"prompts/get\",\"params\":{}}"))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 52))
+      (ok (= (gethash "code" err) -32602))
+      (ok (search "name" (gethash "message" err))))))
+
+(deftest prompts-get-unknown-name-returns-invalid-params
+  (testing "prompts/get returns error when prompt name is unknown"
+    (let* ((resp (process-json-line
+                  (concatenate
+                   'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"prompts/get\","
+                   "\"params\":{\"name\":\"definitely-missing-prompt\"}}")))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 53))
+      (ok (= (gethash "code" err) -32602))
+      (ok (search "not found" (gethash "message" err))))))
 
 (deftest initialize-echo-version
   (testing "initialize echoes client protocolVersion when supported"
@@ -193,3 +259,107 @@
       ;; 2025-06-18 is before 2025-11-25, should use old format
       (ok err "Should have error object")
       (ok (= (gethash "code" err) -32602)))))
+
+(deftest prompts-directory-prefers-project-root
+  (testing "*project-root* prompts dir is preferred over ASDF system root"
+    (let* ((tmp (merge-pathnames
+                 (format nil "cl-mcp-test-~A/" (get-universal-time))
+                 (uiop:temporary-directory)))
+           (prompts-dir (merge-pathnames "prompts/" tmp))
+           (test-file (merge-pathnames "test.md" prompts-dir)))
+      (ensure-directories-exist test-file)
+      (unwind-protect
+           (progn
+             (with-open-file (s test-file :direction :output)
+               (write-string "# Test Prompt" s))
+             (let ((cl-mcp/src/project-root:*project-root* tmp))
+               (let ((result (cl-mcp/src/protocol::%prompts-directory)))
+                 (ok (pathnamep result) "returns a pathname")
+                 (ok (uiop:subpathp result tmp)
+                     "returns path under *project-root*, not ASDF system root"))))
+        (uiop:delete-directory-tree tmp :validate t)))))
+
+(deftest prompts-list-skips-unreadable-files
+  (testing "prompts/list skips unreadable files and returns remaining prompts"
+    (let* ((tmp (merge-pathnames
+                 (format nil "cl-mcp-test-~A/" (get-universal-time))
+                 (uiop:temporary-directory)))
+           (prompts-dir (merge-pathnames "prompts/" tmp))
+           (good-file (merge-pathnames "good.md" prompts-dir))
+           (bad-file (merge-pathnames "bad.md" prompts-dir)))
+      (ensure-directories-exist good-file)
+      (unwind-protect
+           (progn
+             (with-open-file (s good-file :direction :output)
+               (write-string "# Good Prompt
+A good prompt description." s))
+             (with-open-file (s bad-file :direction :output)
+               (write-string "# Bad Prompt" s))
+             (uiop:run-program (list "chmod" "000" (namestring bad-file)))
+             (let* ((cl-mcp/src/project-root:*project-root* tmp)
+                    (resp (process-json-line
+                           "{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"prompts/list\",\"params\":{}}"))
+                    (obj (parse resp))
+                    (result (gethash "result" obj))
+                    (prompts (gethash "prompts" result)))
+               (ok (vectorp prompts))
+               (ok (= (length prompts) 1) "only readable prompt is returned")
+               (ok (string= (gethash "name" (aref prompts 0)) "good")
+                   "the readable prompt is 'good'")))
+        (ignore-errors
+         (uiop:run-program (list "chmod" "644" (namestring bad-file))))
+        (ignore-errors
+         (uiop:delete-directory-tree tmp :validate t))))))
+
+(deftest prompts-list-returns-all-prompt-files
+  (testing "prompts/list names match bundled prompts/*.md file names"
+    (let* ((resp (process-json-line
+                  "{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"prompts/list\",\"params\":{}}"))
+           (obj (parse resp))
+           (result (gethash "result" obj))
+           (prompts (gethash "prompts" result))
+           (names (sort (map 'list
+                             (lambda (p) (gethash "name" p))
+                             prompts)
+                        #'string<))
+           (prompts-dir (cl-mcp/src/protocol::%prompts-directory))
+           (expected (sort (mapcar (lambda (pn)
+                                     (string-downcase
+                                      (or (pathname-name pn) "")))
+                                   (directory (merge-pathnames "*.md" prompts-dir)))
+                           #'string<)))
+      (ok (= (length prompts) (length expected))
+          (format nil "expected ~D prompts, got ~D"
+                  (length expected)
+                  (length prompts)))
+      (ok (equal names expected)
+          (format nil "prompt names: ~A" names)))))
+
+(deftest prompts-get-returns-content-for-each-prompt
+  (testing "prompts/get returns valid content for every discovered prompt"
+    (let* ((list-resp (process-json-line
+                       "{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"prompts/list\",\"params\":{}}"))
+           (list-obj (parse list-resp))
+           (prompts (gethash "prompts" (gethash "result" list-obj))))
+      (loop for prompt across prompts
+            for name = (gethash "name" prompt)
+            for req = (format nil
+                        "{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"prompts/get\",\"params\":{\"name\":\"~A\"}}"
+                        name)
+            for resp = (process-json-line req)
+            for obj = (parse resp)
+            for result = (gethash "result" obj)
+            for messages = (gethash "messages" result)
+            for first-msg = (and (vectorp messages) (> (length messages) 0)
+                                 (aref messages 0))
+            for content = (and first-msg (gethash "content" first-msg))
+            do (ok result
+                   (format nil "~A: result present" name))
+               (ok (vectorp messages)
+                   (format nil "~A: messages is vector" name))
+               (ok (string= (gethash "role" first-msg) "user")
+                   (format nil "~A: role is user" name))
+               (ok (string= (gethash "type" content) "text")
+                   (format nil "~A: content type is text" name))
+               (ok (> (length (gethash "text" content)) 100)
+                   (format nil "~A: content is non-trivial" name))))))
