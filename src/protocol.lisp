@@ -185,7 +185,8 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
           finally (return ""))))
 
 (defun discover-prompts ()
-  "Return prompt metadata list discovered from prompts/*.md."
+  "Return prompt metadata list discovered from prompts/*.md.
+Skips files that cannot be read and logs a warning for each."
   (let ((prompts-dir (%prompts-directory)))
     (if (null prompts-dir)
         '()
@@ -194,13 +195,18 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
                            :key #'namestring)))
           (loop for file in files
                 for name = (string-downcase (or (pathname-name file) ""))
-                for content = (fs-read-file (namestring file))
-                for title = (%extract-prompt-title content name)
-                for description = (%extract-prompt-description content)
-                collect (make-ht "name" name
-                                 "title" title
-                                 "description" description
-                                 "file_path" (namestring file)))))))
+                for content = (handler-case
+                                  (fs-read-file (namestring file))
+                                (error (e)
+                                  (log-event :warn "prompts.read-fail"
+                                             "file" (namestring file)
+                                             "error" (princ-to-string e))
+                                  nil))
+                when content
+                  collect (make-ht "name" name
+                                   "title" (%extract-prompt-title content name)
+                                   "description" (%extract-prompt-description content)
+                                   "file_path" (namestring file)))))))
 
 (defun %find-prompt-by-name (name)
   "Return prompt metadata hash table for NAME, or NIL when not found."
@@ -210,15 +216,19 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 
 (defun handle-prompts-list (id)
   "Return available prompts from prompts/*.md."
-  (let* ((prompts (discover-prompts))
-         (items (coerce
-                 (mapcar (lambda (prompt)
-                           (make-ht "name" (gethash "name" prompt)
-                                    "title" (gethash "title" prompt)
-                                    "description" (gethash "description" prompt)))
-                         prompts)
-                 'vector)))
-    (%result id (make-ht "prompts" items))))
+  (handler-case
+      (let* ((prompts (discover-prompts))
+             (items (coerce
+                     (mapcar (lambda (prompt)
+                               (make-ht "name" (gethash "name" prompt)
+                                        "title" (gethash "title" prompt)
+                                        "description" (gethash "description" prompt)))
+                             prompts)
+                     'vector)))
+        (%result id (make-ht "prompts" items)))
+    (error (e)
+      (%error id -32603
+              (format nil "Failed to list prompts: ~A" e)))))
 
 (defun handle-prompts-get (id params)
   "Return prompt content as MCP prompt messages for NAME."
