@@ -17,8 +17,6 @@
                 #:get-tool-handler)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
-  (:import-from #:cl-mcp/src/fs
-                #:fs-read-file)
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
@@ -134,20 +132,18 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
   (%result id (make-ht "tools" (get-all-tool-descriptors))))
 
 (defun %prompts-directory ()
-  "Return prompts directory pathname, preferring project root over system root."
-  (let* ((project-dir (and *project-root*
-                           (merge-pathnames "prompts/" *project-root*)))
-         (system-root (handler-case
-                          (asdf:system-source-directory "cl-mcp")
-                        (error () nil)))
-         (system-dir (and system-root
-                          (merge-pathnames "prompts/" system-root))))
-    (cond
-      ((and project-dir (uiop/filesystem:directory-exists-p project-dir))
-       project-dir)
-      ((and system-dir (uiop/filesystem:directory-exists-p system-dir))
-       system-dir)
-      (t nil))))
+  "Return bundled prompts directory pathname under the cl-mcp system root."
+  (handler-case
+      (let* ((system-root (asdf:system-source-directory "cl-mcp"))
+             (system-dir (and system-root
+                              (merge-pathnames "prompts/" system-root))))
+        (when (and system-dir (uiop/filesystem:directory-exists-p system-dir))
+          system-dir))
+    (error () nil)))
+
+(defun %read-prompt-file (file)
+  "Read bundled prompt FILE as a UTF-8 text string."
+  (uiop:read-file-string file :external-format :utf-8))
 
 (defun %markdown-heading-text (line)
   "Return heading text when LINE is a Markdown heading, else NIL."
@@ -185,7 +181,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
           finally (return ""))))
 
 (defun discover-prompts ()
-  "Return prompt metadata list discovered from prompts/*.md.
+  "Return prompt metadata list discovered from bundled prompts/*.md.
 Skips files that cannot be read and logs a warning for each."
   (let ((prompts-dir (%prompts-directory)))
     (if (null prompts-dir)
@@ -196,7 +192,7 @@ Skips files that cannot be read and logs a warning for each."
           (loop for file in files
                 for name = (string-downcase (or (pathname-name file) ""))
                 for content = (handler-case
-                                  (fs-read-file (namestring file))
+                                  (%read-prompt-file file)
                                 (error (e)
                                   (log-event :warn "prompts.read-fail"
                                              "file" (namestring file)
@@ -215,7 +211,7 @@ Skips files that cannot be read and logs a warning for each."
            (discover-prompts)))
 
 (defun handle-prompts-list (id)
-  "Return available prompts from prompts/*.md."
+  "Return available bundled prompts from prompts/*.md."
   (handler-case
       (let* ((prompts (discover-prompts))
              (items (coerce
@@ -241,7 +237,7 @@ Skips files that cannot be read and logs a warning for each."
         (return-from handle-prompts-get
           (%error id -32602 (format nil "Prompt ~A not found" name))))
       (handler-case
-          (let* ((text (fs-read-file (gethash "file_path" prompt)))
+          (let* ((text (%read-prompt-file (gethash "file_path" prompt)))
                  (messages (vector
                             (make-ht "role" "user"
                                      "content" (make-ht "type" "text"
