@@ -110,7 +110,8 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
           (cond (supported supported)
                 ((null client-ver) (first +supported-protocol-versions+))
                 (t nil)))
-         (caps (make-ht "tools" (make-ht "listChanged" t))))
+         (caps (make-ht "tools" (make-ht "listChanged" t)
+                        "prompts" (make-ht "listChanged" yason:false))))
     (if (null chosen)
         (%error id -32602
                 (format nil "Unsupported protocolVersion ~A" client-ver)
@@ -131,6 +132,109 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
   (%result id (make-ht "tools" (get-all-tool-descriptors))))
+
+(defun %prompts-directory ()
+  "Return prompts directory pathname, or NIL when unavailable."
+  (let* ((system-root (handler-case
+                          (asdf:system-source-directory "cl-mcp")
+                        (error () nil)))
+         (base (or system-root *project-root*))
+         (dir (and base (merge-pathnames "prompts/" base))))
+    (when (and dir (uiop/filesystem:directory-exists-p dir))
+      dir)))
+
+(defun %markdown-heading-text (line)
+  "Return heading text when LINE is a Markdown heading, else NIL."
+  (let* ((trimmed (string-trim '(#\Space #\Tab #\Return) line))
+         (len (length trimmed)))
+    (when (and (> len 1)
+               (char= (char trimmed 0) #\#))
+      (let ((idx (loop for i from 0 below len
+                       while (char= (char trimmed i) #\#)
+                       finally (return i))))
+        (when (and (< idx len)
+                   (char= (char trimmed idx) #\Space))
+          (string-trim '(#\Space #\Tab)
+                       (subseq trimmed (1+ idx))))))))
+
+(defun %extract-prompt-title (content default-title)
+  "Extract the first Markdown heading from CONTENT, else DEFAULT-TITLE."
+  (with-input-from-string (in content)
+    (loop for raw = (read-line in nil nil)
+          while raw
+          for heading = (%markdown-heading-text raw)
+          when (and heading (plusp (length heading)))
+            do (return heading)
+          finally (return default-title))))
+
+(defun %extract-prompt-description (content)
+  "Extract the first non-empty non-heading line from CONTENT."
+  (with-input-from-string (in content)
+    (loop for raw = (read-line in nil nil)
+          while raw
+          for line = (string-trim '(#\Space #\Tab #\Return) raw)
+          unless (string= line "")
+            do (unless (%markdown-heading-text line)
+                 (return line))
+          finally (return ""))))
+
+(defun discover-prompts ()
+  "Return prompt metadata list discovered from prompts/*.md."
+  (let ((prompts-dir (%prompts-directory)))
+    (if (null prompts-dir)
+        '()
+        (let ((files (sort (directory (merge-pathnames "*.md" prompts-dir))
+                           #'string<
+                           :key #'namestring)))
+          (loop for file in files
+                for name = (string-downcase (or (pathname-name file) ""))
+                for content = (uiop:read-file-string file)
+                for title = (%extract-prompt-title content name)
+                for description = (%extract-prompt-description content)
+                collect (make-ht "name" name
+                                 "title" title
+                                 "description" description
+                                 "file_path" (namestring file)))))))
+
+(defun %find-prompt-by-name (name)
+  "Return prompt metadata hash table for NAME, or NIL when not found."
+  (find-if (lambda (prompt)
+             (string= (gethash "name" prompt) name))
+           (discover-prompts)))
+
+(defun handle-prompts-list (id)
+  "Return available prompts from prompts/*.md."
+  (let* ((prompts (discover-prompts))
+         (items (coerce
+                 (mapcar (lambda (prompt)
+                           (make-ht "name" (gethash "name" prompt)
+                                    "title" (gethash "title" prompt)
+                                    "description" (gethash "description" prompt)))
+                         prompts)
+                 'vector)))
+    (%result id (make-ht "prompts" items))))
+
+(defun handle-prompts-get (id params)
+  "Return prompt content as MCP prompt messages for NAME."
+  (let ((name (and params (gethash "name" params))))
+    (unless (and (stringp name) (plusp (length name)))
+      (return-from handle-prompts-get
+        (%error id -32602 "name is required")))
+    (let ((prompt (%find-prompt-by-name name)))
+      (unless prompt
+        (return-from handle-prompts-get
+          (%error id -32602 (format nil "Prompt ~A not found" name))))
+      (handler-case
+          (let* ((text (uiop:read-file-string (gethash "file_path" prompt)))
+                 (messages (vector
+                            (make-ht "role" "user"
+                                     "content" (make-ht "type" "text"
+                                                        "text" text)))))
+            (%result id (make-ht "description" (gethash "title" prompt)
+                                 "messages" messages)))
+        (error (e)
+          (%error id -32603
+                  (format nil "Failed to read prompt ~A: ~A" name e)))))))
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -180,6 +284,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     ((string= method "tools/call")
      (or (handle-asdf-tools-call id params)
          (handle-tools-call state id params)))
+    ((string= method "prompts/list") (handle-prompts-list id))
+    ((string= method "prompts/get") (handle-prompts-get id params))
     ((string= method "ping") (%result id (make-ht)))
     (t (%error id -32601 (format nil "Method ~A not found" method)))))
 

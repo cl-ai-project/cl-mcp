@@ -29,7 +29,8 @@
                (caps (gethash "capabilities" result)))
           (ok (stringp (gethash "name" server)))
           (ok (stringp (gethash "version" server)))
-          (ok (gethash "tools" caps)))))))
+          (ok (hash-table-p (gethash "tools" caps)))
+          (ok (hash-table-p (gethash "prompts" caps))))))))
 
 (deftest initialized-notification
   (testing "notifications/initialized returns no response"
@@ -39,6 +40,71 @@
                  "\"method\":\"notifications/initialized\","
                  "\"params\":{\"protocolVersion\":\"2025-06-18\"}}")))
       (ok (null (process-json-line line))))))
+
+(deftest prompts-list-returns-known-prompt
+  (testing "prompts/list returns prompt descriptors from prompts directory"
+    (let* ((resp (process-json-line
+                  "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"prompts/list\",\"params\":{}}"))
+           (obj (parse resp))
+           (result (gethash "result" obj))
+           (prompts (gethash "prompts" result)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 50))
+      (ok (vectorp prompts))
+      (ok (> (length prompts) 0))
+      (ok (find "repl-driven-development"
+                (coerce prompts 'list)
+                :test #'string=
+                :key (lambda (prompt)
+                       (gethash "name" prompt)))))))
+
+(deftest prompts-get-returns-user-message
+  (testing "prompts/get returns prompt body as user text message"
+    (let* ((resp (process-json-line
+                  (concatenate
+                   'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"prompts/get\","
+                   "\"params\":{\"name\":\"repl-driven-development\"}}")))
+           (obj (parse resp))
+           (result (gethash "result" obj))
+           (messages (gethash "messages" result))
+           (first-message (and (vectorp messages)
+                               (> (length messages) 0)
+                               (aref messages 0)))
+           (content (and first-message (gethash "content" first-message))))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 51))
+      (ok (stringp (gethash "description" result)))
+      (ok (vectorp messages))
+      (ok (string= (gethash "role" first-message) "user"))
+      (ok (string= (gethash "type" content) "text"))
+      (ok (search "Common Lisp REPL-Driven Development Assistant"
+                  (gethash "text" content))))))
+
+(deftest prompts-get-missing-name-returns-invalid-params
+  (testing "prompts/get validates required name parameter"
+    (let* ((resp (process-json-line
+                  "{\"jsonrpc\":\"2.0\",\"id\":52,\"method\":\"prompts/get\",\"params\":{}}"))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 52))
+      (ok (= (gethash "code" err) -32602))
+      (ok (search "name" (gethash "message" err))))))
+
+(deftest prompts-get-unknown-name-returns-invalid-params
+  (testing "prompts/get returns error when prompt name is unknown"
+    (let* ((resp (process-json-line
+                  (concatenate
+                   'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":53,\"method\":\"prompts/get\","
+                   "\"params\":{\"name\":\"definitely-missing-prompt\"}}")))
+           (obj (parse resp))
+           (err (gethash "error" obj)))
+      (ok (string= (gethash "jsonrpc" obj) "2.0"))
+      (ok (eql (gethash "id" obj) 53))
+      (ok (= (gethash "code" err) -32602))
+      (ok (search "not found" (gethash "message" err))))))
 
 (deftest initialize-echo-version
   (testing "initialize echoes client protocolVersion when supported"
