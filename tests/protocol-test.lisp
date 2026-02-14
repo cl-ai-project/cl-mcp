@@ -261,24 +261,32 @@
       (ok (= (gethash "code" err) -32602)))))
 
 (deftest prompts-directory-prefers-project-root
-  (testing "bundled prompts directory is resolved from cl-mcp system root"
-    (let* ((result (cl-mcp/src/protocol::%prompts-directory))
-           (system-root (asdf:system-source-directory "cl-mcp")))
-      (ok (pathnamep result))
-      (ok (uiop:subpathp result system-root)))))
+  (testing "*project-root* prompts dir is preferred over ASDF system root"
+    (let* ((tmp (merge-pathnames
+                 (format nil "cl-mcp-test-~A/" (get-universal-time))
+                 (uiop:temporary-directory)))
+           (prompts-dir (merge-pathnames "prompts/" tmp))
+           (test-file (merge-pathnames "test.md" prompts-dir)))
+      (ensure-directories-exist test-file)
+      (unwind-protect
+           (progn
+             (with-open-file (s test-file :direction :output)
+               (write-string "# Test Prompt" s))
+             (let ((cl-mcp/src/project-root:*project-root* tmp))
+               (let ((result (cl-mcp/src/protocol::%prompts-directory)))
+                 (ok (pathnamep result) "returns a pathname")
+                 (ok (uiop:subpathp result tmp)
+                     "returns path under *project-root*, not ASDF system root"))))
+        (uiop:delete-directory-tree tmp :validate t)))))
 
 (deftest prompts-list-skips-unreadable-files
-  (testing "prompts/list skips prompt files that fail to read"
+  (testing "prompts/list skips unreadable files and returns remaining prompts"
     (let* ((tmp (merge-pathnames
                  (format nil "cl-mcp-test-~A/" (get-universal-time))
                  (uiop:temporary-directory)))
            (prompts-dir (merge-pathnames "prompts/" tmp))
            (good-file (merge-pathnames "good.md" prompts-dir))
-           (bad-file (merge-pathnames "bad.md" prompts-dir))
-           (orig-prompts-dir
-             (symbol-function 'cl-mcp/src/protocol::%prompts-directory))
-           (orig-read
-             (symbol-function 'cl-mcp/src/protocol::%read-prompt-file)))
+           (bad-file (merge-pathnames "bad.md" prompts-dir)))
       (ensure-directories-exist good-file)
       (unwind-protect
            (progn
@@ -287,14 +295,9 @@
 A good prompt description." s))
              (with-open-file (s bad-file :direction :output)
                (write-string "# Bad Prompt" s))
-             (setf (symbol-function 'cl-mcp/src/protocol::%prompts-directory)
-                   (lambda () prompts-dir))
-             (setf (symbol-function 'cl-mcp/src/protocol::%read-prompt-file)
-                   (lambda (path)
-                     (if (search "bad.md" (namestring path))
-                         (error "forced read error")
-                         (funcall orig-read path))))
-             (let* ((resp (process-json-line
+             (uiop:run-program (list "chmod" "000" (namestring bad-file)))
+             (let* ((cl-mcp/src/project-root:*project-root* tmp)
+                    (resp (process-json-line
                            "{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"prompts/list\",\"params\":{}}"))
                     (obj (parse resp))
                     (result (gethash "result" obj))
@@ -303,8 +306,8 @@ A good prompt description." s))
                (ok (= (length prompts) 1) "only readable prompt is returned")
                (ok (string= (gethash "name" (aref prompts 0)) "good")
                    "the readable prompt is 'good'")))
-        (setf (symbol-function 'cl-mcp/src/protocol::%read-prompt-file) orig-read)
-        (setf (symbol-function 'cl-mcp/src/protocol::%prompts-directory) orig-prompts-dir)
+        (ignore-errors
+         (uiop:run-program (list "chmod" "644" (namestring bad-file))))
         (ignore-errors
          (uiop:delete-directory-tree tmp :validate t))))))
 

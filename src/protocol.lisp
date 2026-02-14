@@ -132,14 +132,20 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
   (%result id (make-ht "tools" (get-all-tool-descriptors))))
 
 (defun %prompts-directory ()
-  "Return bundled prompts directory pathname under the cl-mcp system root."
-  (handler-case
-      (let* ((system-root (asdf:system-source-directory "cl-mcp"))
-             (system-dir (and system-root
-                              (merge-pathnames "prompts/" system-root))))
-        (when (and system-dir (uiop/filesystem:directory-exists-p system-dir))
-          system-dir))
-    (error () nil)))
+  "Return prompts directory pathname, preferring project root over system root."
+  (let* ((project-dir (and *project-root*
+                           (merge-pathnames "prompts/" *project-root*)))
+         (system-root (handler-case
+                          (asdf:system-source-directory "cl-mcp")
+                        (error () nil)))
+         (system-dir (and system-root
+                          (merge-pathnames "prompts/" system-root))))
+    (cond
+      ((and project-dir (uiop/filesystem:directory-exists-p project-dir))
+       project-dir)
+      ((and system-dir (uiop/filesystem:directory-exists-p system-dir))
+       system-dir)
+      (t nil))))
 
 (defun %read-prompt-file (file)
   "Read bundled prompt FILE as a UTF-8 text string."
@@ -181,28 +187,28 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
           finally (return ""))))
 
 (defun discover-prompts ()
-  "Return prompt metadata list discovered from bundled prompts/*.md.
+  "Return prompt metadata list discovered from prompts/*.md.
 Skips files that cannot be read and logs a warning for each."
   (let ((prompts-dir (%prompts-directory)))
     (if (null prompts-dir)
-        '()
-        (let ((files (sort (directory (merge-pathnames "*.md" prompts-dir))
-                           #'string<
-                           :key #'namestring)))
+        'nil
+        (let ((files
+               (sort (directory (merge-pathnames "*.md" prompts-dir)) #'string<
+                     :key #'namestring)))
           (loop for file in files
                 for name = (string-downcase (or (pathname-name file) ""))
-                for content = (handler-case
-                                  (%read-prompt-file file)
-                                (error (e)
-                                  (log-event :warn "prompts.read-fail"
-                                             "file" (namestring file)
-                                             "error" (princ-to-string e))
-                                  nil))
+                for content = (handler-case (%read-prompt-file file)
+                                            (error (e)
+                                                   (log-event :warn
+                                                    "prompts.read-fail" "file"
+                                                    (namestring file) "error"
+                                                    (princ-to-string e))
+                                                   nil))
                 when content
-                  collect (make-ht "name" name
-                                   "title" (%extract-prompt-title content name)
-                                   "description" (%extract-prompt-description content)
-                                   "file_path" (namestring file)))))))
+                collect (make-ht "name" name "title"
+                         (%extract-prompt-title content name) "description"
+                         (%extract-prompt-description content) "file_path"
+                         (namestring file)))))))
 
 (defun %find-prompt-by-name (name)
   "Return prompt metadata hash table for NAME, or NIL when not found."
@@ -211,20 +217,20 @@ Skips files that cannot be read and logs a warning for each."
            (discover-prompts)))
 
 (defun handle-prompts-list (id)
-  "Return available bundled prompts from prompts/*.md."
+  "Return available prompts from prompts/*.md."
   (handler-case
       (let* ((prompts (discover-prompts))
-             (items (coerce
-                     (mapcar (lambda (prompt)
-                               (make-ht "name" (gethash "name" prompt)
-                                        "title" (gethash "title" prompt)
-                                        "description" (gethash "description" prompt)))
-                             prompts)
-                     'vector)))
+             (items
+              (coerce
+               (mapcar
+                (lambda (prompt)
+                  (make-ht "name" (gethash "name" prompt) "title"
+                   (gethash "title" prompt) "description"
+                   (gethash "description" prompt)))
+                prompts)
+               'vector)))
         (%result id (make-ht "prompts" items)))
-    (error (e)
-      (%error id -32603
-              (format nil "Failed to list prompts: ~A" e)))))
+    (error (e) (%error id -32603 (format nil "Failed to list prompts: ~A" e)))))
 
 (defun handle-prompts-get (id params)
   "Return prompt content as MCP prompt messages for NAME."
