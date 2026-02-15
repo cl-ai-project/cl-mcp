@@ -12,16 +12,21 @@
                 #:client-info
                 #:protocol-version
                 #:make-state)
+  (:shadowing-import-from #:cl-mcp/src/prompts
+                          #:prompts-directory
+                          #:discover-prompts
+                          #:find-prompt-by-name
+                          #:read-prompt-file)
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
+                #:make-ht
+                #:result
+                #:rpc-error)
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
-  (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -35,17 +40,12 @@
    #:make-state
    #:process-json-line))
 
-
-
 (in-package #:cl-mcp/src/protocol)
 
 (defparameter +protocol-version+ "2025-11-25")
 (defparameter +supported-protocol-versions+
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions, ordered by preference.")
-
-;; server-state, initialized-p, client-info, protocol-version, make-state
-;; are now imported from cl-mcp/src/state
 
 (defun %decode-json (line)
   (yason:parse line))
@@ -54,73 +54,51 @@
   (with-output-to-string (stream)
     (yason:encode obj stream)))
 
-(defun %result (id payload)
-  (make-ht "jsonrpc" "2.0" "id" id "result" payload))
-
-(defun %error (id code message &optional data)
-  (let* ((err (make-ht "code" code "message" message))
-         (obj (make-ht "jsonrpc" "2.0" "id" id "error" err)))
-    (when data (setf (gethash "data" err) data))
-    obj))
-
-(defun %text-content (text)
-  "Return a one-element content vector with TEXT as a text part."
-  (vector (make-ht "type" "text" "text" text)))
-
-(defun %tool-error (state id message)
-  "Return a tool input validation error in the appropriate format.
-For protocol version 2025-11-25 and later, returns as Tool Execution Error.
-For older versions, returns as JSON-RPC Protocol Error (-32602)."
-  (if (and state
-           (protocol-version state)
-           (string>= (protocol-version state) "2025-11-25"))
-      ;; New format: Tool Execution Error with isError flag
-      (%result id (make-ht "content" (%text-content message) "isError" t))
-      ;; Old format: JSON-RPC Protocol Error
-      (%error id -32602 message)))
-
 (defun handle-initialize (state id params)
   ;; Sync rootPath from client if provided
   (when params
     (let* ((root-path (gethash "rootPath" params))
            (root-uri (gethash "rootUri" params))
            (root
-            (or root-path
-                (and root-uri
-                     (if (uiop/utility:string-prefix-p "file://" root-uri)
-                         (subseq root-uri 7)
-                         root-uri)))))
+             (or root-path
+                 (and root-uri
+                      (if (uiop/utility:string-prefix-p "file://" root-uri)
+                          (subseq root-uri 7)
+                          root-uri)))))
       (when (and root (stringp root) (plusp (length root)))
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                (setf *project-root* root-dir)
+                (setf cl-mcp/src/project-root:*project-root* root-dir)
                 (uiop/os:chdir root-dir)
-                (log-event :info "initialize.sync-root" "rootPath"
-                           (namestring root-dir) "source"
-                           (if root-path "rootPath" "rootUri"))))
+                (log-event :info "initialize.sync-root"
+                           "rootPath" (namestring root-dir)
+                           "source" (if root-path "rootPath" "rootUri"))))
           (error (e)
-            (log-event :warn "initialize.sync-root-failed" "path" root
+            (log-event :warn "initialize.sync-root-failed"
+                       "path" root
                        "error" (princ-to-string e)))))))
   (let* ((client-ver (and params (gethash "protocolVersion" params)))
          (supported
-          (and client-ver
-               (find client-ver +supported-protocol-versions+ :test #'string=)))
+           (and client-ver
+                (find client-ver +supported-protocol-versions+ :test #'string=)))
          (chosen
-          (cond (supported supported)
-                ((null client-ver) (first +supported-protocol-versions+))
-                (t nil)))
-         (caps (make-ht "tools" (make-ht "listChanged" t))))
+           (cond (supported supported)
+                 ((null client-ver) (first +supported-protocol-versions+))
+                 (t nil)))
+         (caps (make-ht "tools" (make-ht "listChanged" t)
+                        "prompts" (make-ht "listChanged" yason:false))))
     (if (null chosen)
-        (%error id -32602
-                (format nil "Unsupported protocolVersion ~A" client-ver)
-                (make-ht "supportedVersions" +supported-protocol-versions+))
+        (rpc-error id -32602
+                   (format nil "Unsupported protocolVersion ~A" client-ver)
+                   (make-ht "supportedVersions" +supported-protocol-versions+))
         (progn
           (setf (protocol-version state) chosen)
-          (%result id
-                   (make-ht "protocolVersion" chosen "serverInfo"
-                             (make-ht "name" "cl-mcp" "version" (version))
-                             "capabilities" caps))))))
+          (result id
+                  (make-ht "protocolVersion" chosen
+                           "serverInfo" (make-ht "name" "cl-mcp"
+                                                  "version" (version))
+                           "capabilities" caps))))))
 
 (defun handle-notification (state method params)
   (declare (ignore state params))
@@ -130,7 +108,50 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
-  (%result id (make-ht "tools" (get-all-tool-descriptors))))
+  (result id (make-ht "tools" (get-all-tool-descriptors))))
+
+(defun %prompts-directory ()
+  "Compatibility wrapper for tests; delegates to cl-mcp/src/prompts."
+  (prompts-directory))
+
+(defun handle-prompts-list (id)
+  "Return available prompts from prompts/*.md."
+  (handler-case
+      (let* ((prompts (discover-prompts))
+             (items
+               (coerce
+                (mapcar
+                 (lambda (prompt)
+                   (make-ht "name" (gethash "name" prompt)
+                            "title" (gethash "title" prompt)
+                            "description" (gethash "description" prompt)))
+                 prompts)
+                'vector)))
+        (result id (make-ht "prompts" items)))
+    (error (e)
+      (rpc-error id -32603 (format nil "Failed to list prompts: ~A" e)))))
+
+(defun handle-prompts-get (id params)
+  "Return prompt content as MCP prompt messages for NAME."
+  (let ((name (and params (gethash "name" params))))
+    (unless (and (stringp name) (plusp (length name)))
+      (return-from handle-prompts-get
+        (rpc-error id -32602 "name is required")))
+    (let ((prompt (find-prompt-by-name name)))
+      (unless prompt
+        (return-from handle-prompts-get
+          (rpc-error id -32602 (format nil "Prompt ~A not found" name))))
+      (handler-case
+          (let* ((text (read-prompt-file (gethash "file_path" prompt)))
+                 (messages (vector
+                            (make-ht "role" "user"
+                                     "content" (make-ht "type" "text"
+                                                        "text" text)))))
+            (result id (make-ht "description" (gethash "title" prompt)
+                                "messages" messages)))
+        (error (e)
+          (rpc-error id -32603
+                     (format nil "Failed to read prompt ~A: ~A" name e)))))))
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -145,43 +166,27 @@ Returns a downcased local tool name (string)."
   (let ((local (%normalize-tool-name name)))
     (substitute #\- #\_ local)))
 
-(defun handle-asdf-tools-call (id params)
-  ;; TODO: Temporarily disabled due to unresolved "Transport closed" errors.
-  ;;
-  ;; Issue:
-  ;; Executing this tool causes the MCP client to disconnect with "Transport closed"
-  ;; or timeout, even though the server logs show immediate and successful JSON response
-  ;; transmission.
-  ;;
-  ;; Investigation Status:
-  ;; 1. ASDF Output: Stdout noise is already suppressed via `with-silenced-output`.
-  ;; 2. TCP Timeout: Keep-alive logic is implemented; server does not close the socket.
-  ;; 3. Server Logs: Show `rpc.result` and `tcp.flushed` occurring immediately.
-  "Handle ASDF-related tool calls.
-Returns a JSON-RPC response hash-table when handled, or NIL to defer."
-  (declare (ignore id params))
-  nil)
-
 (defun handle-tools-call (state id params)
   "Dispatch a tool call to the appropriate handler from the registry."
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
          (local (and name (%normalize-tool-alias name))))
-    (when name (log-event :debug "tools.call" "name" name "local" local))
+    (when name
+      (log-event :debug "tools.call" "name" name "local" local))
     (let ((handler (and local (get-tool-handler local))))
       (if handler
           (funcall handler state id args)
-          (%error id -32601 (format nil "Tool ~A not found" name))))))
+          (rpc-error id -32601 (format nil "Tool ~A not found" name))))))
 
 (defun handle-request (state id method params)
   (cond
     ((string= method "initialize") (handle-initialize state id params))
     ((string= method "tools/list") (handle-tools-list id))
-    ((string= method "tools/call")
-     (or (handle-asdf-tools-call id params)
-         (handle-tools-call state id params)))
-    ((string= method "ping") (%result id (make-ht)))
-    (t (%error id -32601 (format nil "Method ~A not found" method)))))
+    ((string= method "tools/call") (handle-tools-call state id params))
+    ((string= method "prompts/list") (handle-prompts-list id))
+    ((string= method "prompts/get") (handle-prompts-get id params))
+    ((string= method "ping") (result id (make-ht)))
+    (t (rpc-error id -32601 (format nil "Method ~A not found" method)))))
 
 (defun process-json-line (line &optional (state (make-state)))
   "Process one JSON-RPC line and return a JSON line to send, or NIL for notifications."
@@ -196,18 +201,18 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                               "line" trimmed
                               "error" (princ-to-string e))
                    (return-from process-json-line
-                     (%encode-json (%error nil -32700 "Parse error")))))))
+                     (%encode-json (rpc-error nil -32700 "Parse error")))))))
       (unless (hash-table-p msg)
         (log-event :warn "rpc.invalid" "reason" "message not object")
         (return-from process-json-line
-          (%encode-json (%error nil -32600 "Invalid Request"))))
+          (%encode-json (rpc-error nil -32600 "Invalid Request"))))
       (let ((jsonrpc (gethash "jsonrpc" msg))
             (id (gethash "id" msg))
             (method (gethash "method" msg))
             (params (gethash "params" msg)))
         (log-event :debug "rpc.dispatch" "id" id "method" method)
         (unless (and (stringp jsonrpc) (string= jsonrpc "2.0"))
-          (let ((resp (%encode-json (%error id -32600 "Invalid Request"))))
+          (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
             (log-event :warn "rpc.invalid" "reason" "bad jsonrpc version")
             (return-from process-json-line resp)))
         (handler-case
@@ -222,7 +227,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                (log-event :debug "rpc.notify" "method" method)
                nil)
               (t
-               (let ((resp (%encode-json (%error id -32600 "Invalid Request"))))
+               (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
                  (log-event :warn "rpc.invalid" "reason" "missing method")
                  resp)))
           (error (e)
@@ -230,4 +235,4 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                        "id" id
                        "method" method
                        "error" (princ-to-string e))
-            (%encode-json (%error id -32603 "Internal error"))))))))
+            (%encode-json (rpc-error id -32603 "Internal error"))))))))

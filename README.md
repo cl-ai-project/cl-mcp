@@ -3,8 +3,8 @@
 
 A minimal Model Context Protocol (MCP) server for Common Lisp. It provides a
 newline‑delimited JSON‑RPC 2.0 transport over stdio or TCP, a small protocol
-layer (initialize, ping, tools/list, tools/call), and a REPL tool that evaluates
-forms and returns the last value.
+layer (initialize, ping, tools/list, tools/call, prompts/list, prompts/get), and
+a REPL tool that evaluates forms and returns the last value.
 
 This repo is intentionally small and test-first. It’s designed for editor/agent
 clients to drive Common Lisp development via MCP.
@@ -12,6 +12,7 @@ clients to drive Common Lisp development via MCP.
 ## Features
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
+- Prompts API (`prompts/list`, `prompts/get`) backed by `prompts/*.md`
 - Tools API
   - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
   - `inspect-object` — drill down into complex objects (CLOS instances, hash-tables, lists, arrays) by ID
@@ -30,7 +31,7 @@ clients to drive Common Lisp development via MCP.
 - Rove test suite wired through ASDF `test-op`
 
 ## Protocol Support
-- Protocol versions recognized: `2025-06-18`, `2025-03-26`, `2024-11-05`
+- Protocol versions recognized: `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`
   - On `initialize`, if the client’s `protocolVersion` is supported it is echoed
     back; if it is **not** supported the server returns `error.code = -32602`
     with `data.supportedVersions`.
@@ -189,38 +190,6 @@ Example workflow:
 {"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":42}}}
 // Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":42}
 ```
-
-### ASDF tools (disabled)
-`asdf-system-info` and `asdf-list-systems` are temporarily disabled.
-
-<!--
-### `asdf-system-info`
-Return detailed information about an ASDF system, including dependencies and source locations.
-
-Input:
-- `system_name` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"alexandria"`)
-
-Output fields:
-- `name` (string)
-- `version` / `description` / `author` / `license` (string|null)
-- `depends_on` (array): direct dependencies
-- `defsystem_depends_on` (array): defsystem dependencies
-- `source_file` / `source_directory` (string|null)
-- `loaded` (boolean)
-
-Example JSON‑RPC request:
-```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call",
- "params":{"name":"asdf-system-info","arguments":{"system_name":"cl-mcp"}}}
-```
-
-### `asdf-list-systems`
-List all registered ASDF systems (may be large).
-
-Input: none
-
-Output: array of lower-case system names.
--->
 
 ### `fs-read-file`
 Read text from an allow‑listed path.
@@ -433,6 +402,20 @@ Notes:
 - Auto-detects Rove framework when loaded; falls back to ASDF `test-system` for text capture
 - Single test execution requires the test package to be loaded first
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
+
+### Prompt APIs
+
+`prompts/list` returns prompt descriptors discovered from `prompts/*.md`.
+
+```json
+{"jsonrpc":"2.0","id":70,"method":"prompts/list","params":{}}
+```
+
+`prompts/get` returns the selected prompt as a `messages` array.
+
+```json
+{"jsonrpc":"2.0","id":71,"method":"prompts/get","params":{"name":"repl-driven-development"}}
+```
 
 ## Logging
 - Structured JSON line logs to `*error-output*`.
