@@ -2,6 +2,12 @@
 
 (defpackage #:cl-mcp/tests/protocol-test
   (:use #:cl #:rove)
+  (:import-from #:asdf
+                #:system-source-directory)
+  (:import-from #:uiop
+                #:ensure-directory-pathname
+                #:temporary-directory
+                #:delete-directory-tree)
   (:import-from #:cl-mcp/src/protocol
                 #:process-json-line
                 #:protocol-version
@@ -260,56 +266,66 @@
       (ok err "Should have error object")
       (ok (= (gethash "code" err) -32602)))))
 
-(deftest prompts-directory-prefers-project-root
-  (testing "*project-root* prompts dir is preferred over ASDF system root"
+(deftest prompts-directory-uses-bundled-path
+  (testing "%prompts-directory resolves to cl-mcp bundled prompts"
+    (let* ((actual (cl-mcp/src/protocol::%prompts-directory))
+           (expected (merge-pathnames "prompts/"
+                                      (ensure-directory-pathname
+                                       (system-source-directory "cl-mcp")))))
+      (ok (pathnamep actual))
+      (ok (equal (namestring (truename actual))
+                 (namestring (truename expected)))))))
+
+(deftest prompts-list-ignores-project-root-prompts
+  (testing "prompts/list does not include prompts from *project-root*"
     (let* ((tmp (merge-pathnames
                  (format nil "cl-mcp-test-~A/" (get-universal-time))
-                 (uiop:temporary-directory)))
+                 (temporary-directory)))
            (prompts-dir (merge-pathnames "prompts/" tmp))
-           (test-file (merge-pathnames "test.md" prompts-dir)))
+           (test-file (merge-pathnames "zz-project-only.md" prompts-dir)))
       (ensure-directories-exist test-file)
       (unwind-protect
            (progn
-             (with-open-file (s test-file :direction :output)
-               (write-string "# Test Prompt" s))
-             (let ((cl-mcp/src/project-root:*project-root* tmp))
-               (let ((result (cl-mcp/src/protocol::%prompts-directory)))
-                 (ok (pathnamep result) "returns a pathname")
-                 (ok (uiop:subpathp result tmp)
-                     "returns path under *project-root*, not ASDF system root"))))
-        (uiop:delete-directory-tree tmp :validate t)))))
-
-(deftest prompts-list-skips-unreadable-files
-  (testing "prompts/list skips unreadable files and returns remaining prompts"
-    (let* ((tmp (merge-pathnames
-                 (format nil "cl-mcp-test-~A/" (get-universal-time))
-                 (uiop:temporary-directory)))
-           (prompts-dir (merge-pathnames "prompts/" tmp))
-           (good-file (merge-pathnames "good.md" prompts-dir))
-           (bad-file (merge-pathnames "bad.md" prompts-dir)))
-      (ensure-directories-exist good-file)
-      (unwind-protect
-           (progn
-             (with-open-file (s good-file :direction :output)
-               (write-string "# Good Prompt
-A good prompt description." s))
-             (with-open-file (s bad-file :direction :output)
-               (write-string "# Bad Prompt" s))
-             (uiop:run-program (list "chmod" "000" (namestring bad-file)))
+             (with-open-file (s test-file :direction :output :if-exists :supersede)
+               (write-string "# Project Only Prompt" s))
              (let* ((cl-mcp/src/project-root:*project-root* tmp)
                     (resp (process-json-line
                            "{\"jsonrpc\":\"2.0\",\"id\":60,\"method\":\"prompts/list\",\"params\":{}}"))
                     (obj (parse resp))
                     (result (gethash "result" obj))
-                    (prompts (gethash "prompts" result)))
+                    (prompts (gethash "prompts" result))
+                    (names (map 'list (lambda (p) (gethash "name" p)) prompts)))
                (ok (vectorp prompts))
-               (ok (= (length prompts) 1) "only readable prompt is returned")
-               (ok (string= (gethash "name" (aref prompts 0)) "good")
-                   "the readable prompt is 'good'")))
-        (ignore-errors
-         (uiop:run-program (list "chmod" "644" (namestring bad-file))))
-        (ignore-errors
-         (uiop:delete-directory-tree tmp :validate t))))))
+               (ok (not (find "zz-project-only" names :test #'string=)))))
+        (ignore-errors (delete-directory-tree tmp :validate t))))))
+
+(deftest prompts-get-ignores-project-root-shadow
+  (testing "prompts/get returns bundled prompt content even when *project-root* has shadow file"
+    (let* ((tmp (merge-pathnames
+                 (format nil "cl-mcp-test-~A/" (get-universal-time))
+                 (temporary-directory)))
+           (prompts-dir (merge-pathnames "prompts/" tmp))
+           (shadow-file (merge-pathnames "repl-driven-development.md" prompts-dir)))
+      (ensure-directories-exist shadow-file)
+      (unwind-protect
+           (progn
+             (with-open-file (s shadow-file :direction :output :if-exists :supersede)
+               (write-string "# Shadow Prompt\nPROJECT-OVERRIDE-MARKER" s))
+             (let* ((cl-mcp/src/project-root:*project-root* tmp)
+                    (resp (process-json-line
+                           (concatenate
+                            'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"prompts/get\","
+                            "\"params\":{\"name\":\"repl-driven-development\"}}")))
+                    (obj (parse resp))
+                    (result (gethash "result" obj))
+                    (messages (gethash "messages" result))
+                    (first-message (aref messages 0))
+                    (content (gethash "content" first-message))
+                    (text (gethash "text" content)))
+               (ok (search "Common Lisp REPL-Driven Development Assistant" text))
+               (ok (not (search "PROJECT-OVERRIDE-MARKER" text)))))
+        (ignore-errors (delete-directory-tree tmp :validate t))))))
 
 (deftest prompts-list-returns-all-prompt-files
   (testing "prompts/list names match bundled prompts/*.md file names"
@@ -334,6 +350,43 @@ A good prompt description." s))
                   (length prompts)))
       (ok (equal names expected)
           (format nil "prompt names: ~A" names)))))
+
+(deftest removed-asdf-tools-return-not-found
+  (testing "removed asdf tools return method-not-found at tool lookup"
+    (dolist (tool-name '("asdf-system-info" "asdf-list-systems"))
+      (let* ((req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"~A\",\"arguments\":{}}}")
+                          tool-name))
+             (resp (process-json-line req))
+             (obj (parse resp))
+             (err (gethash "error" obj)))
+        (ok err)
+        (ok (= (gethash "code" err) -32601))
+        (ok (search tool-name (gethash "message" err)))))))
+
+(deftest namespaced-tool-name-resolves-to-registered-tool
+  (testing "tools/call normalizes namespaced tool names"
+    (let ((root (ensure-directory-pathname (system-source-directory "cl-mcp"))))
+      (let ((cl-mcp/src/project-root:*project-root* root))
+        (dolist (tool-name '("ns.fs-read-file" "ns/fs-read-file"))
+          (let* ((req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"~A\","
+                               "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":16}}}")
+                              tool-name))
+                 (resp (process-json-line req))
+                 (obj (parse resp))
+                 (result (gethash "result" obj))
+                 (content (and result (gethash "content" result)))
+                 (first (and (vectorp content) (> (length content) 0) (aref content 0))))
+            (ok (null (gethash "error" obj)))
+            (ok (stringp (and first (gethash "text" first))))
+            (ok (> (length (gethash "text" first)) 0))))))))
 
 (deftest prompts-get-returns-content-for-each-prompt
   (testing "prompts/get returns valid content for every discovered prompt"

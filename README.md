@@ -191,38 +191,6 @@ Example workflow:
 // Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":42}
 ```
 
-### ASDF tools (disabled)
-`asdf-system-info` and `asdf-list-systems` are temporarily disabled.
-
-<!--
-### `asdf-system-info`
-Return detailed information about an ASDF system, including dependencies and source locations.
-
-Input:
-- `system_name` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"alexandria"`)
-
-Output fields:
-- `name` (string)
-- `version` / `description` / `author` / `license` (string|null)
-- `depends_on` (array): direct dependencies
-- `defsystem_depends_on` (array): defsystem dependencies
-- `source_file` / `source_directory` (string|null)
-- `loaded` (boolean)
-
-Example JSON‑RPC request:
-```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call",
- "params":{"name":"asdf-system-info","arguments":{"system_name":"cl-mcp"}}}
-```
-
-### `asdf-list-systems`
-List all registered ASDF systems (may be large).
-
-Input: none
-
-Output: array of lower-case system names.
--->
-
 ### `fs-read-file`
 Read text from an allow‑listed path.
 
