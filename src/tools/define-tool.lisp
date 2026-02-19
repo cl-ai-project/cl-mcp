@@ -5,14 +5,17 @@
 
 (defpackage #:cl-mcp/src/tools/define-tool
   (:use #:cl)
-  (:import-from #:cl-mcp/src/state
-                #:protocol-version)
+  (:import-from #:cl-mcp/src/state #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:rpc-error #:tool-error
-                #:arg-validation-error #:validation-message
-                #:extract-arg #:extract-boolean-arg)
-  (:import-from #:cl-mcp/src/tools/registry
-                #:register-tool)
+                #:make-ht
+                #:rpc-error
+                #:tool-error
+                #:arg-validation-error
+                #:validation-message
+                #:extract-arg
+                #:extract-boolean-arg)
+  (:import-from #:cl-mcp/src/tools/registry #:register-tool)
+  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json)
   (:export #:define-tool))
 
 (in-package #:cl-mcp/src/tools/define-tool)
@@ -167,7 +170,9 @@ Example:
                          :protocol-version (protocol-version ,state-sym)))
            (error (e)
              (rpc-error ,id-sym -32603
-                        (format nil "Internal error during ~A: ~A" ,name e)))))
+                        (sanitize-for-json
+                         (format nil "Internal error during ~A: ~A"
+                                 ,name e))))))
 
        ;; Registration
        (register-tool ,name (,descriptor-name) #',handler-name)

@@ -193,3 +193,68 @@
       ;; 2025-06-18 is before 2025-11-25, should use old format
       (ok err "Should have error object")
       (ok (= (gethash "code" err) -32602)))))
+
+;;; JSON encoding resilience tests
+
+(deftest process-json-line-valid-json-with-control-chars
+  (testing "process-json-line produces valid JSON when tool response contains control chars"
+    (let* ((code (format nil "(format nil \"result~~C~~Cend\" (code-char 7) (code-char 127))"))
+           (req (format nil
+                        (concatenate
+                         'string
+                         "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"tools/call\","
+                         "\"params\":{\"name\":\"repl-eval\","
+                         "\"arguments\":{\"code\":~S}}}")
+                        code))
+           (resp (process-json-line req))
+           (obj (parse resp)))
+      (ok obj "response should parse as valid JSON")
+      (ok (null (gethash "error" obj)) "should not be an error response")
+      (let* ((result (gethash "result" obj))
+             (content (gethash "content" result))
+             (text (and (vectorp content) (> (length content) 0)
+                        (gethash "text" (aref content 0)))))
+        (ok (stringp text) "should have text content")
+        ;; Verify no control chars in the JSON text
+        (ok (not (find-if (lambda (c)
+                            (or (and (< (char-code c) 32)
+                                     (not (member c '(#\Tab #\Newline #\Return))))
+                                (= (char-code c) 127)))
+                          text))
+            "text should not contain control chars or DEL")))))
+
+(deftest encode-json-fallback-produces-valid-json
+  (testing "%encode-json returns hardcoded error JSON for unencodable objects"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           ;; Pass an object yason cannot encode: a hash-table with a symbol value
+           (ht (make-hash-table :test 'equal))
+           (_ (setf (gethash "data" ht) (make-condition 'simple-error)))
+           (result (funcall encode-fn ht)))
+      (declare (ignore _))
+      (ok (stringp result) "should return a string")
+      ;; Should be valid JSON (the hardcoded fallback)
+      (let ((obj (parse result)))
+        (ok obj "result should parse as valid JSON")
+        ;; The fallback is a JSON-RPC error response
+        (ok (gethash "error" obj)
+            "fallback should be a JSON-RPC error response")
+        (ok (= (gethash "code" (gethash "error" obj)) -32603)
+            "error code should be -32603")))))
+
+(deftest encode-json-fallback-preserves-request-id
+  (testing "%encode-json fallback preserves integer id from the response object"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (ht (make-hash-table :test 'equal))
+           (_ (progn
+                (setf (gethash "jsonrpc" ht) "2.0")
+                (setf (gethash "id" ht) 42)
+                (setf (gethash "result" ht) (make-condition 'simple-error))))
+           (result (funcall encode-fn ht)))
+      (declare (ignore _))
+      (ok (stringp result) "should return a string")
+      (let ((obj (parse result)))
+        (ok obj "result should parse as valid JSON")
+        (ok (= (gethash "id" obj) 42)
+            "fallback should preserve the integer request id")
+        (ok (gethash "error" obj)
+            "fallback should be a JSON-RPC error response")))))

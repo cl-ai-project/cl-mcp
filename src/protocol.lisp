@@ -22,6 +22,8 @@
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -34,8 +36,6 @@
    #:protocol-version
    #:make-state
    #:process-json-line))
-
-
 
 (in-package #:cl-mcp/src/protocol)
 
@@ -50,9 +50,47 @@
 (defun %decode-json (line)
   (yason:parse line))
 
+(defun %sanitize-for-encoding (obj &optional (depth 0))
+  "Recursively sanitize all strings in a JSON-compatible structure.
+Walks hash-tables, vectors, lists, and strings. Depth-limited to 20 levels."
+  (when (> depth 20) (return-from %sanitize-for-encoding obj))
+  (typecase obj
+    (string (sanitize-for-json obj))
+    (hash-table
+     (let ((clean (make-hash-table :test (hash-table-test obj))))
+       (maphash (lambda (k v)
+                  (setf (gethash (if (stringp k) (sanitize-for-json k) k) clean)
+                        (%sanitize-for-encoding v (1+ depth))))
+                obj)
+       clean))
+    (vector
+     (map 'vector (lambda (elt) (%sanitize-for-encoding elt (1+ depth))) obj))
+    (cons
+     (mapcar (lambda (elt) (%sanitize-for-encoding elt (1+ depth))) obj))
+    (t obj)))
+
 (defun %encode-json (obj)
-  (with-output-to-string (stream)
-    (yason:encode obj stream)))
+  "Encode OBJ as a JSON string with resilient error handling.
+Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+On second failure, return a hardcoded valid JSON-RPC error response."
+  (handler-case
+      (with-output-to-string (stream) (yason:encode obj stream))
+    (error (e1)
+      (log-event :warn "json-encode-retry"
+                 "reason" (ignore-errors (princ-to-string e1)))
+      (handler-case
+          (let ((clean (%sanitize-for-encoding obj)))
+            (with-output-to-string (stream) (yason:encode clean stream)))
+        (error (e2)
+          (log-event :error "json-encode-failed"
+                     "reason" (ignore-errors (princ-to-string e2)))
+          (let* ((id (ignore-errors
+                       (and (hash-table-p obj) (gethash "id" obj))))
+                 (id-str (if (integerp id)
+                             (princ-to-string id)
+                             "null")))
+            (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
+                    id-str)))))))
 
 (defun %result (id payload)
   (make-ht "jsonrpc" "2.0" "id" id "result" payload))
