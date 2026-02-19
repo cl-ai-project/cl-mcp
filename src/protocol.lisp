@@ -121,14 +121,22 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                              (let ((safe (sanitize-for-json id)))
                                (format nil "\"~A\""
                                        (with-output-to-string (s)
+                                         ;; RFC 8259 compliant JSON string escaper.
+                                         ;; Self-sufficient: does not depend on
+                                         ;; sanitize-for-json pre-filtering.
                                          (loop for c across safe
-                                               do (case c
-                                                    (#\" (write-string "\\\"" s))
-                                                    (#\\ (write-string "\\\\" s))
-                                                    (#\Newline (write-string "\\n" s))
-                                                    (#\Tab (write-string "\\t" s))
-                                                    (#\Return (write-string "\\r" s))
-                                                    (t (write-char c s))))))))
+                                               do (let ((code (char-code c)))
+                                                    (cond
+                                                      ((char= c #\") (write-string "\\\"" s))
+                                                      ((char= c #\\) (write-string "\\\\" s))
+                                                      ((char= c #\Backspace) (write-string "\\b" s))
+                                                      ((char= c #\Page) (write-string "\\f" s))
+                                                      ((char= c #\Newline) (write-string "\\n" s))
+                                                      ((char= c #\Tab) (write-string "\\t" s))
+                                                      ((char= c #\Return) (write-string "\\r" s))
+                                                      ((< code #x20)
+                                                       (format s "\\u~4,'0X" code))
+                                                      (t (write-char c s)))))))))
                             (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
                     id-json)))))))
