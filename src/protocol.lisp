@@ -87,7 +87,11 @@ On second failure, return a hardcoded valid JSON-RPC error response."
           (let* ((id (ignore-errors
                        (and (hash-table-p obj) (gethash "id" obj))))
                  (id-json (cond
-                            ((integerp id) (princ-to-string id))
+                            ((numberp id)
+                             (or (ignore-errors
+                                   (with-output-to-string (s)
+                                     (yason:encode id s)))
+                                 "null"))
                             ((stringp id)
                              (let ((safe (sanitize-for-json id)))
                                (format nil "\"~A\""

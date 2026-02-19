@@ -259,6 +259,24 @@
         (ok (gethash "error" obj)
             "fallback should be a JSON-RPC error response")))))
 
+(deftest encode-json-fallback-preserves-fractional-id
+  (testing "%encode-json fallback preserves non-integer numeric id"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (ht (make-hash-table :test 'equal))
+           (_ (progn
+                (setf (gethash "jsonrpc" ht) "2.0")
+                (setf (gethash "id" ht) 1.5)
+                (setf (gethash "result" ht) (make-condition 'simple-error))))
+           (result (funcall encode-fn ht)))
+      (declare (ignore _))
+      (ok (stringp result) "should return a string")
+      (let ((obj (parse result)))
+        (ok obj "result should parse as valid JSON")
+        (ok (= (gethash "id" obj) 1.5)
+            "fallback should preserve the fractional numeric id")
+        (ok (gethash "error" obj)
+            "fallback should be a JSON-RPC error response")))))
+
 (deftest encode-json-fallback-preserves-string-id
   (testing "%encode-json fallback preserves string id from the response object"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
