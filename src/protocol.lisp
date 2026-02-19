@@ -187,8 +187,9 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
                            (namestring root-dir) "source"
                            (if root-path "rootPath" "rootUri"))))
           (error (e)
-            (log-event :warn "initialize.sync-root-failed" "path" root
-                       "error" (princ-to-string e)))))))
+            (ignore-errors
+              (log-event :warn "initialize.sync-root-failed" "path" root
+                         "error" (princ-to-string e))))))))
   (let* ((client-ver (and params (gethash "protocolVersion" params)))
          (supported
           (and client-ver
@@ -279,9 +280,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     (let ((msg (handler-case
                    (%decode-json trimmed)
                  (error (e)
-                   (log-event :warn "rpc.parse-error"
-                              "line" trimmed
-                              "error" (princ-to-string e))
+                   (ignore-errors
+                     (log-event :warn "rpc.parse-error"
+                                "line" trimmed
+                                "error" (princ-to-string e)))
                    (return-from process-json-line
                      (%encode-json (%error nil -32700 "Parse error")))))))
       (unless (hash-table-p msg)
