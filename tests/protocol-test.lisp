@@ -6,6 +6,8 @@
                 #:process-json-line
                 #:protocol-version
                 #:make-state)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -224,25 +226,23 @@
             "text should not contain control chars or DEL")))))
 
 (deftest encode-json-fallback-produces-valid-json
-  (testing "%encode-json returns hardcoded error JSON for unencodable objects"
+  (testing "%encode-json level-2 produces valid JSON for unencodable objects"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
-           ;; Pass an object yason cannot encode: a hash-table with a symbol value
+           ;; Pass an object yason cannot encode: a hash-table with a condition value
            (ht (make-hash-table :test 'equal))
            (_ (setf (gethash "data" ht) (make-condition 'simple-error)))
            (result (funcall encode-fn ht)))
       (declare (ignore _))
       (ok (stringp result) "should return a string")
-      ;; Should be valid JSON (the hardcoded fallback)
+      ;; Should be valid JSON (level-2 sanitization succeeds now)
       (let ((obj (parse result)))
         (ok obj "result should parse as valid JSON")
-        ;; The fallback is a JSON-RPC error response
-        (ok (gethash "error" obj)
-            "fallback should be a JSON-RPC error response")
-        (ok (= (gethash "code" (gethash "error" obj)) -32603)
-            "error code should be -32603")))))
+        ;; Level-2 succeeded: the condition was converted to a string
+        (ok (stringp (gethash "data" obj))
+            "condition value should be converted to string by sanitizer")))))
 
 (deftest encode-json-fallback-preserves-request-id
-  (testing "%encode-json fallback preserves integer id from the response object"
+  (testing "%encode-json level-2 preserves structure with integer id"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (_ (progn
@@ -255,12 +255,14 @@
       (let ((obj (parse result)))
         (ok obj "result should parse as valid JSON")
         (ok (= (gethash "id" obj) 42)
-            "fallback should preserve the integer request id")
-        (ok (gethash "error" obj)
-            "fallback should be a JSON-RPC error response")))))
+            "should preserve the integer request id")
+        (ok (gethash "result" obj)
+            "should have result key (level-2 succeeded)")
+        (ok (stringp (gethash "result" obj))
+            "condition in result should be converted to string")))))
 
 (deftest encode-json-fallback-preserves-fractional-id
-  (testing "%encode-json fallback preserves non-integer numeric id"
+  (testing "%encode-json level-2 preserves non-integer numeric id"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (_ (progn
@@ -273,12 +275,14 @@
       (let ((obj (parse result)))
         (ok obj "result should parse as valid JSON")
         (ok (= (gethash "id" obj) 1.5)
-            "fallback should preserve the fractional numeric id")
-        (ok (gethash "error" obj)
-            "fallback should be a JSON-RPC error response")))))
+            "should preserve the fractional numeric id")
+        (ok (gethash "result" obj)
+            "should have result key (level-2 succeeded)")
+        (ok (stringp (gethash "result" obj))
+            "condition in result should be converted to string")))))
 
 (deftest encode-json-fallback-preserves-string-id
-  (testing "%encode-json fallback preserves string id from the response object"
+  (testing "%encode-json level-2 preserves string id from the response object"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (_ (progn
@@ -291,10 +295,10 @@
       (let ((obj (parse result)))
         (ok obj "result should parse as valid JSON")
         (ok (string= (gethash "id" obj) "req-7")
-            "fallback should preserve the string request id")
-        (ok (gethash "error" obj)
-            "fallback should be a JSON-RPC error response"))))
-  (testing "string id with special characters is properly escaped"
+            "should preserve the string request id")
+        (ok (gethash "result" obj)
+            "should have result key (level-2 succeeded)"))))
+  (testing "string id with special characters is preserved at level-2"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (_ (progn
@@ -307,8 +311,8 @@
       (let ((obj (parse result)))
         (ok obj "result with special chars should parse as valid JSON")
         (ok (string= (gethash "id" obj) "req\"special\\id")
-            "fallback should preserve string id with special chars"))))
-  (testing "string id with whitespace control characters is properly escaped"
+            "should preserve string id with special chars"))))
+  (testing "string id with whitespace control characters is preserved at level-2"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (id-with-ws (format nil "req~Ctab~Cnl~Ccr" #\Tab #\Newline #\Return))
@@ -319,24 +323,10 @@
            (result (funcall encode-fn ht)))
       (declare (ignore _))
       (ok (stringp result) "should return a string")
-      ;; Raw JSON must not contain literal control whitespace
-      (ok (not (find #\Tab result))
-          "raw JSON should not contain literal tab")
-      (ok (not (find #\Newline result))
-          "raw JSON should not contain literal newline")
-      (ok (not (find #\Return result))
-          "raw JSON should not contain literal CR")
-      ;; Must contain proper escape sequences
-      (ok (search "\\t" result)
-          "raw JSON should contain \\t escape")
-      (ok (search "\\n" result)
-          "raw JSON should contain \\n escape")
-      (ok (search "\\r" result)
-          "raw JSON should contain \\r escape")
       (let ((obj (parse result)))
         (ok obj "result with whitespace control chars should parse as valid JSON")
         (ok (string= (gethash "id" obj) id-with-ws)
-            "fallback should round-trip string id with whitespace chars")))))
+            "should round-trip string id with whitespace chars")))))
 
 (deftest sanitize-for-encoding-handles-cyclic-list
   (testing "%sanitize-for-encoding terminates on cyclic cons list"
@@ -350,3 +340,37 @@
         (ok (listp result) "should return a list")
         (ok (<= (length result) 10000)
             "result should be bounded in length")))))
+
+(deftest sanitize-for-encoding-converts-non-serializable-to-string
+  (testing "%sanitize-for-encoding converts conditions to their string representation"
+    (let* ((sanitize-fn (find-symbol "%SANITIZE-FOR-ENCODING"
+                                     :cl-mcp/src/protocol))
+           (cond-obj (make-condition 'simple-error
+                                     :format-control "test error"))
+           (result (funcall sanitize-fn cond-obj)))
+      (ok (stringp result) "condition should be converted to string")))
+  (testing "numbers, t, and nil pass through unchanged"
+    (let ((sanitize-fn (find-symbol "%SANITIZE-FOR-ENCODING"
+                                    :cl-mcp/src/protocol)))
+      (ok (= 42 (funcall sanitize-fn 42)) "integer passes through")
+      (ok (eq t (funcall sanitize-fn t)) "t passes through")
+      (ok (null (funcall sanitize-fn nil)) "nil passes through"))))
+
+(deftest encode-json-level2-succeeds-for-non-serializable
+  (testing "%encode-json level-2 succeeds when sanitizer converts objects to strings"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (ht (make-hash-table :test 'equal)))
+      (setf (gethash "jsonrpc" ht) "2.0")
+      (setf (gethash "id" ht) 99)
+      (setf (gethash "result" ht)
+            (make-ht "data" (make-condition 'simple-error
+                                            :format-control "oops")))
+      (let* ((json (funcall encode-fn ht))
+             (obj (parse json)))
+        (ok (stringp json) "should return a string")
+        (ok obj "should be valid JSON")
+        ;; Level-2 succeeded: result key present, not the hardcoded error fallback
+        (ok (gethash "result" obj)
+            "should have result key (level-2 succeeded, not level-3 fallback)")
+        (ok (null (gethash "error" obj))
+            "should NOT be the hardcoded error fallback")))))

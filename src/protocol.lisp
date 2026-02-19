@@ -55,18 +55,25 @@
 Guards against cyclic or extremely long lists causing OOM.")
 
 (defun %sanitize-for-encoding (obj &optional (depth 0))
-  "Recursively sanitize all strings in a JSON-compatible structure.
-Walks hash-tables, vectors, lists, and strings. Depth-limited to 20 levels.
-Lists and vectors are capped at +sanitize-max-elements+ to guard against
-cyclic structures."
+  "Recursively sanitize a JSON-compatible structure for encoding.
+Walks hash-tables, vectors, lists, and strings. Converts non-serializable
+leaf objects to their string representation. Depth-limited to 20 levels.
+Collections are capped at +sanitize-max-elements+ to guard against
+cyclic or extremely large structures."
   (when (> depth 20) (return-from %sanitize-for-encoding obj))
   (typecase obj
     (string (sanitize-for-json obj))
     (hash-table
-     (let ((clean (make-hash-table :test (hash-table-test obj))))
+     (let ((clean (make-hash-table :test (hash-table-test obj)))
+           (count 0))
        (maphash (lambda (k v)
-                  (setf (gethash (if (stringp k) (sanitize-for-json k) k) clean)
-                        (%sanitize-for-encoding v (1+ depth))))
+                  (when (< count +sanitize-max-elements+)
+                    (setf (gethash (if (stringp k)
+                                       (sanitize-for-json k)
+                                       (princ-to-string k))
+                                   clean)
+                          (%sanitize-for-encoding v (1+ depth)))
+                    (incf count)))
                 obj)
        clean))
     (vector
@@ -80,7 +87,10 @@ cyclic structures."
      (loop for elt in obj
            for i below +sanitize-max-elements+
            collect (%sanitize-for-encoding elt (1+ depth))))
-    (t obj)))
+    (t (cond
+         ((or (numberp obj) (eq obj t) (null obj)) obj)
+         (t (or (ignore-errors (princ-to-string obj))
+                "#<unrepresentable>"))))))
 
 (defun %encode-json (obj)
   "Encode OBJ as a JSON string with resilient error handling.
