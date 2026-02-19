@@ -21,15 +21,22 @@ Returns NIL when given NIL."
           do (let ((char (char string i)))
                (cond
                 ;; Strip ANSI escape sequences: ESC [ ... <final-byte>
+                ;; CSI parameter bytes are ASCII bytes outside 0x40-0x7E.
+                ;; Non-ASCII bytes (>= 0x80) are NOT CSI parameters per ECMA-48.
                 ;; CSI final byte range is 0x40-0x7E (@ through ~)
                 ((and (char= char (code-char 27)) (< (1+ i) len)
                       (char= (char string (1+ i)) #\[))
                  (incf i 2)
                  (loop while (and (< i len)
                                   (let ((code (char-code (char string i))))
-                                    (not (<= #x40 code #x7e))))
+                                    (and (< code #x80)
+                                         (not (<= #x40 code #x7e)))))
                        do (incf i))
-                 (when (< i len) (incf i)))
+                 ;; Skip the final byte only if it is actually a CSI final byte
+                 (when (and (< i len)
+                            (let ((code (char-code (char string i))))
+                              (<= #x40 code #x7e)))
+                   (incf i)))
                 ;; Preserve allowed whitespace
                 ((member char '(#\Tab #\Newline #\Return))
                  (vector-push-extend char result) (incf i))

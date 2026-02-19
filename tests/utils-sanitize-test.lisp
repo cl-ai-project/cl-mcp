@@ -72,3 +72,18 @@
 
 (deftest sanitize-for-json-empty-string
   (ok (string= "" (sanitize-for-json ""))))
+
+(deftest sanitize-for-json-preserves-non-ascii-after-csi
+  (testing "Non-ASCII characters after partial CSI sequences are preserved"
+    (let ((esc (code-char 27)))
+      ;; Japanese text after a CSI sequence should survive
+      (ok (string= "hello world"
+                    (sanitize-for-json
+                     (format nil "~C[31mhello~C[0m world" esc esc))))
+      ;; Standalone non-ASCII text is never consumed
+      (ok (string= "日本語テスト"
+                    (sanitize-for-json "日本語テスト")))
+      ;; Non-ASCII immediately after ESC[ should not be consumed as CSI parameter
+      (ok (search "日本語"
+                  (sanitize-for-json
+                   (format nil "~C[日本語text" esc)))))))
