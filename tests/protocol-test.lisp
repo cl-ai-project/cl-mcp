@@ -375,15 +375,21 @@
         (ok (null (gethash "error" obj))
             "should NOT be the hardcoded error fallback")))))
 
-(deftest encode-json-fallback-escapes-all-control-chars
-  (testing "level-3 fallback string escaper handles backspace and form-feed"
+(deftest encode-json-preserves-string-id-with-control-chars
+  (testing "level-2 fallback preserves string ID containing \\b and \\f"
     (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
-           (id-with-bs (format nil "req~Cbs~Cff" #\Backspace #\Page)))
+           (id-with-ctrl (format nil "req~Cbs~Cff" #\Backspace #\Page)))
       (setf (gethash "jsonrpc" ht) "2.0")
-      (setf (gethash "id" ht) id-with-bs)
-      (setf (gethash "result" ht) (make-condition 'simple-error))
-      (let ((result (funcall encode-fn ht)))
-        (ok (stringp result) "should return a string")
-        (let ((obj (parse result)))
-          (ok obj "result should parse as valid JSON"))))))
+      (setf (gethash "id" ht) id-with-ctrl)
+      ;; Non-serializable in result forces level-1 to fail, level-2 sanitizes
+      (setf (gethash "result" ht)
+            (make-ht "data" (make-condition 'simple-error
+                                            :format-control "oops")))
+      (let ((json (funcall encode-fn ht)))
+        (ok (stringp json) "should return a string")
+        (let ((obj (parse json)))
+          (ok obj "should be valid JSON")
+          ;; ID must round-trip: yason encodes \b and \f as JSON escapes
+          (ok (string= id-with-ctrl (gethash "id" obj))
+              "ID must match original including \\b and \\f"))))))

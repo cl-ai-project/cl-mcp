@@ -103,7 +103,14 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (log-event :warn "json-encode-retry"
                    "reason" (ignore-errors (princ-to-string e1))))
       (handler-case
-          (let ((clean (%sanitize-for-encoding obj)))
+          (let* ((id-preserved (ignore-errors
+                                 (and (hash-table-p obj) (gethash "id" obj))))
+                 (clean (%sanitize-for-encoding obj)))
+            ;; Restore original "id" so yason:encode escapes it properly.
+            ;; %sanitize-for-encoding strips \b/\f via sanitize-for-json,
+            ;; which would break JSON-RPC ID correlation.
+            (when (and id-preserved (hash-table-p clean))
+              (setf (gethash "id" clean) id-preserved))
             (with-output-to-string (stream) (yason:encode clean stream)))
         (error (e2)
           (ignore-errors
@@ -118,13 +125,12 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                      (yason:encode id s)))
                                  "null"))
                             ((stringp id)
-                             (let ((safe (sanitize-for-json id)))
-                               (format nil "\"~A\""
-                                       (with-output-to-string (s)
-                                         ;; RFC 8259 compliant JSON string escaper.
-                                         ;; Self-sufficient: does not depend on
-                                         ;; sanitize-for-json pre-filtering.
-                                         (loop for c across safe
+                             (format nil "\"~A\""
+                                     (with-output-to-string (s)
+                                       ;; RFC 8259 compliant JSON string escaper.
+                                       ;; Operates on raw id to preserve all chars
+                                       ;; (sanitize-for-json would strip \b and \f).
+                                       (loop for c across id
                                                do (let ((code (char-code c)))
                                                     (cond
                                                       ((char= c #\") (write-string "\\\"" s))
@@ -136,7 +142,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                                       ((char= c #\Return) (write-string "\\r" s))
                                                       ((< code #x20)
                                                        (format s "\\u~4,'0X" code))
-                                                      (t (write-char c s)))))))))
+                                                      (t (write-char c s))))))))
                             (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
                     id-json)))))))
