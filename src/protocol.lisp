@@ -99,14 +99,16 @@ On second failure, return a hardcoded valid JSON-RPC error response."
   (handler-case
       (with-output-to-string (stream) (yason:encode obj stream))
     (error (e1)
-      (log-event :warn "json-encode-retry"
-                 "reason" (ignore-errors (princ-to-string e1)))
+      (ignore-errors
+        (log-event :warn "json-encode-retry"
+                   "reason" (ignore-errors (princ-to-string e1))))
       (handler-case
           (let ((clean (%sanitize-for-encoding obj)))
             (with-output-to-string (stream) (yason:encode clean stream)))
         (error (e2)
-          (log-event :error "json-encode-failed"
-                     "reason" (ignore-errors (princ-to-string e2)))
+          (ignore-errors
+            (log-event :error "json-encode-failed"
+                       "reason" (ignore-errors (princ-to-string e2))))
           (let* ((id (ignore-errors
                        (and (hash-table-p obj) (gethash "id" obj))))
                  (id-json (cond
@@ -303,8 +305,9 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                  (log-event :warn "rpc.invalid" "reason" "missing method")
                  resp)))
           (error (e)
-            (log-event :error "rpc.internal"
-                       "id" id
-                       "method" method
-                       "error" (princ-to-string e))
+            (ignore-errors
+              (log-event :error "rpc.internal"
+                         "id" id
+                         "method" method
+                         "error" (princ-to-string e)))
             (%encode-json (%error id -32603 "Internal error"))))))))
