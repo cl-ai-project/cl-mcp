@@ -50,9 +50,15 @@
 (defun %decode-json (line)
   (yason:parse line))
 
+(defparameter +sanitize-max-elements+ 10000
+  "Maximum number of list/vector elements %sanitize-for-encoding will process.
+Guards against cyclic or extremely long lists causing OOM.")
+
 (defun %sanitize-for-encoding (obj &optional (depth 0))
   "Recursively sanitize all strings in a JSON-compatible structure.
-Walks hash-tables, vectors, lists, and strings. Depth-limited to 20 levels."
+Walks hash-tables, vectors, lists, and strings. Depth-limited to 20 levels.
+Lists and vectors are capped at +sanitize-max-elements+ to guard against
+cyclic structures."
   (when (> depth 20) (return-from %sanitize-for-encoding obj))
   (typecase obj
     (string (sanitize-for-json obj))
@@ -64,9 +70,16 @@ Walks hash-tables, vectors, lists, and strings. Depth-limited to 20 levels."
                 obj)
        clean))
     (vector
-     (map 'vector (lambda (elt) (%sanitize-for-encoding elt (1+ depth))) obj))
+     (let* ((limit (min (length obj) +sanitize-max-elements+))
+            (result (make-array limit)))
+       (loop for i below limit
+             do (setf (aref result i)
+                      (%sanitize-for-encoding (aref obj i) (1+ depth))))
+       result))
     (cons
-     (mapcar (lambda (elt) (%sanitize-for-encoding elt (1+ depth))) obj))
+     (loop for elt in obj
+           for i below +sanitize-max-elements+
+           collect (%sanitize-for-encoding elt (1+ depth))))
     (t obj)))
 
 (defun %encode-json (obj)

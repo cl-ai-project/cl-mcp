@@ -337,3 +337,16 @@
         (ok obj "result with whitespace control chars should parse as valid JSON")
         (ok (string= (gethash "id" obj) id-with-ws)
             "fallback should round-trip string id with whitespace chars")))))
+
+(deftest sanitize-for-encoding-handles-cyclic-list
+  (testing "%sanitize-for-encoding terminates on cyclic cons list"
+    (let* ((sanitize-fn (find-symbol "%SANITIZE-FOR-ENCODING"
+                                     :cl-mcp/src/protocol))
+           (cell (list "a" "b" "c")))
+      ;; Make it cyclic: (nconc cell cell) → infinite loop for mapcar
+      (setf (cdr (last cell)) cell)
+      ;; Must terminate and return a list (capped at +sanitize-max-elements+)
+      (let ((result (funcall sanitize-fn cell)))
+        (ok (listp result) "should return a list")
+        (ok (<= (length result) 10000)
+            "result should be bounded in length")))))

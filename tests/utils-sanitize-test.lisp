@@ -54,5 +54,21 @@
                   (sanitize-for-json
                    (format nil "hello world~C" #\Newline))))))
 
+(deftest sanitize-for-json-strips-csi-with-tilde-terminator
+  (testing "CSI sequences ending with ~ (e.g. bracketed paste) are fully stripped"
+    (let ((esc (code-char 27)))
+      ;; ESC[200~ is bracketed paste mode start
+      (ok (string= "pasted text"
+                    (sanitize-for-json
+                     (format nil "~C[200~~pasted text~C[201~~" esc esc))))
+      ;; ESC[2~ is Insert key
+      (ok (string= "after"
+                    (sanitize-for-json
+                     (format nil "~C[2~~after" esc))))
+      ;; ESC[1;5C is Ctrl+Right (C is alpha, was already handled)
+      (ok (string= "word"
+                    (sanitize-for-json
+                     (format nil "~C[1;5Cword" esc)))))))
+
 (deftest sanitize-for-json-empty-string
   (ok (string= "" (sanitize-for-json ""))))

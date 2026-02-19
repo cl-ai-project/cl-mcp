@@ -20,13 +20,14 @@ Returns NIL when given NIL."
     (loop while (< i len)
           do (let ((char (char string i)))
                (cond
-                ;; Strip ANSI escape sequences: ESC [ ... <alpha>
+                ;; Strip ANSI escape sequences: ESC [ ... <final-byte>
+                ;; CSI final byte range is 0x40-0x7E (@ through ~)
                 ((and (char= char (code-char 27)) (< (1+ i) len)
                       (char= (char string (1+ i)) #\[))
                  (incf i 2)
                  (loop while (and (< i len)
-                                  (let ((c (char string i)))
-                                    (not (alpha-char-p c))))
+                                  (let ((code (char-code (char string i))))
+                                    (not (<= #x40 code #x7e))))
                        do (incf i))
                  (when (< i len) (incf i)))
                 ;; Preserve allowed whitespace
