@@ -10,8 +10,12 @@
   "Remove characters that are invalid in JSON strings.
 Strips ANSI escape sequences, control characters (codes 0-31 except tab,
 newline, carriage return), and the DEL character (code 127).
-Returns NIL when given NIL."
+Returns NIL when given NIL. Non-string inputs are converted via
+princ-to-string then sanitized."
   (when (null string) (return-from sanitize-for-json nil))
+  (unless (stringp string)
+    (return-from sanitize-for-json
+      (sanitize-for-json (princ-to-string string))))
   (let ((result
          (make-array (length string) :element-type 'character :fill-pointer 0
                      :adjustable t))

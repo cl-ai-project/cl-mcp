@@ -87,3 +87,11 @@
       (ok (search "日本語"
                   (sanitize-for-json
                    (format nil "~C[日本語text" esc)))))))
+
+(deftest sanitize-for-json-handles-non-string-input
+  (testing "Integer input is converted to its string representation"
+    (ok (string= "42" (sanitize-for-json 42))))
+  (testing "Symbol input is converted to its string representation"
+    (ok (stringp (sanitize-for-json :hello))))
+  (testing "Float input is converted to its string representation"
+    (ok (stringp (sanitize-for-json 3.14)))))
