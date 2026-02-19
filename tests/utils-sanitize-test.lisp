@@ -95,3 +95,60 @@
     (ok (stringp (sanitize-for-json :hello))))
   (testing "Float input is converted to its string representation"
     (ok (stringp (sanitize-for-json 3.14)))))
+
+(deftest sanitize-for-json-strips-osc-sequence
+  (testing "OSC sequence (ESC ] ... BEL) is fully stripped"
+    (let ((esc (code-char 27))
+          (bel (code-char 7)))
+      (ok (string= "before after"
+                    (sanitize-for-json
+                     (format nil "before~C]0;window title~C after" esc bel))))))
+  (testing "OSC sequence terminated by ST (ESC \\) is fully stripped"
+    (let ((esc (code-char 27)))
+      (ok (string= "before after"
+                    (sanitize-for-json
+                     (format nil "before~C]0;title~C\\ after" esc esc)))))))
+
+(deftest sanitize-for-json-strips-ss3-sequence
+  (testing "SS3 sequence (ESC O) is stripped as 2-byte sequence"
+    (let ((esc (code-char 27)))
+      ;; ESC O P is F1 key in SS3 mode
+      (ok (string= "P after"
+                    (sanitize-for-json
+                     (format nil "~COP after" esc))))
+      ;; ESC N is SS2
+      (ok (string= "x after"
+                    (sanitize-for-json
+                     (format nil "~CNx after" esc)))))))
+
+(deftest sanitize-for-json-strips-dcs-sequence
+  (testing "DCS sequence (ESC P ... ST) is fully stripped"
+    (let ((esc (code-char 27)))
+      (ok (string= "before after"
+                    (sanitize-for-json
+                     (format nil "before~CP1$r0m~C\\ after" esc esc)))))))
+
+(deftest sanitize-for-json-preserves-non-ascii-after-esc
+  (testing "Non-ASCII byte after bare ESC is preserved"
+    (let ((esc (code-char 27)))
+      ;; ESC followed by a non-ASCII char — ESC is stripped, char preserved
+      (ok (search "日本語"
+                  (sanitize-for-json
+                   (format nil "~C日本語" esc)))))))
+
+(deftest sanitize-for-json-strips-bare-esc-at-end
+  (testing "Bare ESC at end of string is stripped"
+    (let ((esc (code-char 27)))
+      (ok (string= "text" (sanitize-for-json (format nil "text~C" esc)))))))
+
+(deftest sanitize-for-json-handles-unterminated-sequences
+  (testing "Unterminated OSC consumes to end of string"
+    (let ((esc (code-char 27)))
+      (ok (string= "before"
+                    (sanitize-for-json
+                     (format nil "before~C]0;title with no terminator" esc))))))
+  (testing "Unterminated DCS consumes to end of string"
+    (let ((esc (code-char 27)))
+      (ok (string= "before"
+                    (sanitize-for-json
+                     (format nil "before~CPunterminated dcs" esc)))))))
