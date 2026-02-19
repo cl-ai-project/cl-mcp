@@ -96,6 +96,9 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                                do (case c
                                                     (#\" (write-string "\\\"" s))
                                                     (#\\ (write-string "\\\\" s))
+                                                    (#\Newline (write-string "\\n" s))
+                                                    (#\Tab (write-string "\\t" s))
+                                                    (#\Return (write-string "\\r" s))
                                                     (t (write-char c s))))))))
                             (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
