@@ -86,11 +86,20 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                      "reason" (ignore-errors (princ-to-string e2)))
           (let* ((id (ignore-errors
                        (and (hash-table-p obj) (gethash "id" obj))))
-                 (id-str (if (integerp id)
-                             (princ-to-string id)
-                             "null")))
+                 (id-json (cond
+                            ((integerp id) (princ-to-string id))
+                            ((stringp id)
+                             (let ((safe (sanitize-for-json id)))
+                               (format nil "\"~A\""
+                                       (with-output-to-string (s)
+                                         (loop for c across safe
+                                               do (case c
+                                                    (#\" (write-string "\\\"" s))
+                                                    (#\\ (write-string "\\\\" s))
+                                                    (t (write-char c s))))))))
+                            (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
-                    id-str)))))))
+                    id-json)))))))
 
 (defun %result (id payload)
   (make-ht "jsonrpc" "2.0" "id" id "result" payload))

@@ -258,3 +258,35 @@
             "fallback should preserve the integer request id")
         (ok (gethash "error" obj)
             "fallback should be a JSON-RPC error response")))))
+
+(deftest encode-json-fallback-preserves-string-id
+  (testing "%encode-json fallback preserves string id from the response object"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (ht (make-hash-table :test 'equal))
+           (_ (progn
+                (setf (gethash "jsonrpc" ht) "2.0")
+                (setf (gethash "id" ht) "req-7")
+                (setf (gethash "result" ht) (make-condition 'simple-error))))
+           (result (funcall encode-fn ht)))
+      (declare (ignore _))
+      (ok (stringp result) "should return a string")
+      (let ((obj (parse result)))
+        (ok obj "result should parse as valid JSON")
+        (ok (string= (gethash "id" obj) "req-7")
+            "fallback should preserve the string request id")
+        (ok (gethash "error" obj)
+            "fallback should be a JSON-RPC error response"))))
+  (testing "string id with special characters is properly escaped"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (ht (make-hash-table :test 'equal))
+           (_ (progn
+                (setf (gethash "jsonrpc" ht) "2.0")
+                (setf (gethash "id" ht) "req\"special\\id")
+                (setf (gethash "result" ht) (make-condition 'simple-error))))
+           (result (funcall encode-fn ht)))
+      (declare (ignore _))
+      (ok (stringp result) "should return a string")
+      (let ((obj (parse result)))
+        (ok obj "result with special chars should parse as valid JSON")
+        (ok (string= (gethash "id" obj) "req\"special\\id")
+            "fallback should preserve string id with special chars")))))
