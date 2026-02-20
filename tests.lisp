@@ -25,7 +25,8 @@
   (:import-from #:cl-mcp/tests/utils-hash-test)
   (:import-from #:cl-mcp/tests/utils-printing-test)
   (:import-from #:cl-mcp/tests/utils-sanitize-test)
-  (:import-from #:cl-mcp/tests/utils-system-test))
+  (:import-from #:cl-mcp/tests/utils-system-test)
+  (:import-from #:cl-mcp/tests/system-loader-test))
 
 
 
