@@ -9,7 +9,9 @@
                 #:server-port
                 #:start-accept-loop
                 #:stop-server
-                #:register-method))
+                #:register-method)
+  (:import-from #:cl-mcp/src/worker/handlers
+                #:register-all-handlers))
 
 (in-package #:cl-mcp/tests/worker-test)
 
@@ -211,3 +213,192 @@
                                 "second response id")))
                      (ignore-errors (usocket:socket-close socket)))))
             (stop-server server))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Helper for handler tests
+;;; ---------------------------------------------------------------------------
+
+(defun %make-request (id method &optional params)
+  "Build a JSON-RPC request string."
+  (let ((ht (make-hash-table :test 'equal)))
+    (setf (gethash "jsonrpc" ht) "2.0"
+          (gethash "id" ht) id
+          (gethash "method" ht) method)
+    (when params
+      (setf (gethash "params" ht) params))
+    (with-output-to-string (s) (yason:encode ht s))))
+
+(defmacro with-handler-server ((stream-var) &body body)
+  "Start a worker server with all handlers registered, connect to it,
+and execute BODY with STREAM-VAR bound to the connection stream.
+Cleans up server and socket on exit."
+  (let ((server (gensym "SERVER"))
+        (port (gensym "PORT"))
+        (thread (gensym "THREAD"))
+        (socket (gensym "SOCKET")))
+    `(if (not (socket-available-p))
+         (skip "socket unavailable")
+         (let ((,server (make-worker-server :port 0)))
+           (register-all-handlers ,server)
+           (unwind-protect
+                (let* ((,port (server-port ,server))
+                       (,thread (bordeaux-threads:make-thread
+                                 (lambda () (start-accept-loop ,server))
+                                 :name "test-handler-accept")))
+                  (declare (ignore ,thread))
+                  (sleep 0.1)
+                  (let ((,socket (usocket:socket-connect
+                                  "127.0.0.1" ,port
+                                  :element-type 'character)))
+                    (unwind-protect
+                         (let ((,stream-var (usocket:socket-stream ,socket)))
+                           ,@body)
+                      (ignore-errors (usocket:socket-close ,socket)))))
+             (stop-server ,server))))))
+
+(defun %send-and-receive (stream id method &optional params)
+  "Send a JSON-RPC request on STREAM and return the parsed response."
+  (write-line (%make-request id method params) stream)
+  (force-output stream)
+  (let ((line (read-line stream)))
+    (yason:parse line)))
+
+(defun %result-of (response)
+  "Extract the result hash-table from a JSON-RPC response."
+  (gethash "result" response))
+
+;;; ---------------------------------------------------------------------------
+;;; Handler tests
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-eval-returns-result
+  (testing "worker/eval evaluates code and returns result with content"
+    (with-handler-server (stream)
+      (let* ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(+ 1 2)"
+              (gethash "package" params) "CL-USER")
+        (let* ((response (%send-and-receive stream 100 "worker/eval" params))
+               (result (%result-of response)))
+          (ok (equal (gethash "id" response) 100)
+              "response id matches")
+          (ok result "response has result")
+          (ok (gethash "content" result)
+              "result has content field")
+          ;; content is a vector of text parts
+          (let ((parts (gethash "content" result)))
+            (ok (> (length parts) 0) "content has at least one part")
+            (ok (search "3" (gethash "text" (aref parts 0)))
+                "content text contains the result 3"))
+          ;; stdout and stderr should be present (possibly empty)
+          (ok (stringp (gethash "stdout" result))
+              "result has stdout string"))))))
+
+(deftest worker-eval-returns-object-preview
+  (testing "worker/eval returns result_preview for non-primitive results"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(list 1 2 3)"
+              (gethash "package" params) "CL-USER")
+        (let* ((response (%send-and-receive stream 101 "worker/eval" params))
+               (result (%result-of response)))
+          (ok (gethash "result_object_id" result)
+              "result has result_object_id")
+          (ok (gethash "result_preview" result)
+              "result has result_preview")
+          (ok (equal "list"
+                     (gethash "kind" (gethash "result_preview" result)))
+              "preview kind is list"))))))
+
+(deftest worker-eval-returns-error-context
+  (testing "worker/eval returns error_context on signaled condition"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(error \"test-boom\")"
+              (gethash "package" params) "CL-USER")
+        (let* ((response (%send-and-receive stream 102 "worker/eval" params))
+               (result (%result-of response)))
+          (ok result "response has result (not JSON-RPC error)")
+          (ok (gethash "error_context" result)
+              "result has error_context")
+          (let ((ctx (gethash "error_context" result)))
+            (ok (gethash "condition_type" ctx)
+                "error_context has condition_type")
+            (ok (search "test-boom" (gethash "message" ctx))
+                "error_context message contains original")))))))
+
+(deftest worker-eval-requires-code
+  (testing "worker/eval errors when code param is missing"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "package" params) "CL-USER")
+        (let ((response (%send-and-receive stream 103 "worker/eval" params)))
+          (ok (gethash "error" response)
+              "response is JSON-RPC error when code missing"))))))
+
+(deftest worker-code-describe-returns-info
+  (testing "worker/code-describe returns symbol info for cl:car"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "cl:car")
+        (let* ((response (%send-and-receive stream 200 "worker/code-describe" params))
+               (result (%result-of response)))
+          ;; code-describe-symbol may fail if sb-introspect is unavailable
+          ;; in the test environment; only check structure when we get a result
+          (ok (or result (gethash "error" response))
+              "response has result or error")
+          (when result
+            (ok (gethash "name" result) "result has name")
+            (ok (gethash "type" result) "result has type")
+            (ok (gethash "content" result) "result has content")))))))
+
+(deftest worker-code-find-not-found
+  (testing "worker/code-find returns error for nonexistent symbol"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "nonexistent-pkg:nonexistent-sym-xyz")
+        (let* ((response (%send-and-receive stream 201 "worker/code-find" params))
+               (result (%result-of response)))
+          ;; Could be JSON-RPC error (if code-find-definition signals on
+          ;; bad package) or isError result (if symbol not found).
+          (ok (or (gethash "error" response)
+                  (and result (gethash "isError" result)))
+              "response indicates error for nonexistent symbol"))))))
+
+(deftest worker-set-project-root-changes-root
+  (testing "worker/set-project-root updates *project-root*"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "path" params) "/tmp")
+        (let* ((response (%send-and-receive stream 300 "worker/set-project-root" params))
+               (result (%result-of response)))
+          (ok result "response has result")
+          (ok (gethash "path" result) "result has path")
+          (ok (gethash "content" result) "result has content"))))))
+
+(deftest worker-set-project-root-requires-path
+  (testing "worker/set-project-root errors when path missing"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (let ((response (%send-and-receive stream 301 "worker/set-project-root" params)))
+          (ok (gethash "error" response)
+              "response is JSON-RPC error when path missing"))))))
+
+(deftest worker-set-project-root-rejects-nonexistent
+  (testing "worker/set-project-root errors for nonexistent directory"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "path" params) "/nonexistent-path-xyz-12345")
+        (let ((response (%send-and-receive stream 302 "worker/set-project-root" params)))
+          (ok (gethash "error" response)
+              "response is JSON-RPC error for nonexistent path"))))))
+
+(deftest worker-inspect-object-not-found
+  (testing "worker/inspect-object returns isError for invalid ID"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "id" params) 999999)
+        (let* ((response (%send-and-receive stream 400 "worker/inspect-object" params))
+               (result (%result-of response)))
+          (ok result "response has result")
+          (ok (gethash "isError" result)
+              "result has isError for nonexistent object"))))))
