@@ -178,15 +178,16 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
               when (not (bordeaux-threads:thread-alive-p worker))
               do (return-from %repl-eval-with-timeout (values-list result-box))
               do (sleep 0.05d0))
-        ;; timed out
-        ;; Avoid destroying a thread that already exited while we were checking.
-        (when (bordeaux-threads:thread-alive-p worker)
-          (bordeaux-threads:destroy-thread worker))
-        (values (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
-                :timeout
-                ""
-                ""
-                nil))
+        ;; Worker may have completed during the last sleep window.
+        ;; Re-check before declaring timeout.
+        (cond
+          ((not (bordeaux-threads:thread-alive-p worker))
+           (values-list result-box))
+          (t
+           (ignore-errors (bordeaux-threads:destroy-thread worker))
+           (values
+            (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
+            :timeout "" "" nil))))
       (funcall thunk)))
 
 (defun repl-eval (input &key (package *default-eval-package*)

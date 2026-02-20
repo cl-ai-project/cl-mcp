@@ -54,9 +54,16 @@ ERRORED-P is T if the thunk signaled an error."
                          (values (list error-box) nil t)
                          (values result-box nil nil)))
               do (sleep 0.05d0))
-        (when (thread-alive-p worker)
-          (ignore-errors (destroy-thread worker)))
-        (values nil t nil))
+        ;; Worker may have completed during the last sleep window.
+        ;; Re-check before declaring timeout.
+        (cond
+          ((not (thread-alive-p worker))
+           (if error-box
+               (values (list error-box) nil t)
+               (values result-box nil nil)))
+          (t
+           (ignore-errors (destroy-thread worker))
+           (values nil t nil))))
       (handler-case
           (values (multiple-value-list (funcall thunk)) nil nil)
         (error (c)
