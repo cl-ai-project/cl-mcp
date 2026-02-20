@@ -136,8 +136,7 @@ changed files are picked up. When CLEAR-FASLS is true, forces full
 recompilation from source. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds."
   (check-type system-name string)
-  (when (and timeout-seconds (not (plusp timeout-seconds)))
-    (setf timeout-seconds 120))
+  (check-type timeout-seconds (or null (real (0))))
   (let ((start-time (get-internal-real-time)))
     (log-event :info "load-system"
                "system" system-name
