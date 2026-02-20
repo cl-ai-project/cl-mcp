@@ -11,7 +11,9 @@
                 #:stop-server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/handlers
-                #:register-all-handlers))
+                #:register-all-handlers)
+  (:import-from #:cl-mcp/src/worker/main
+                #:start))
 
 (in-package #:cl-mcp/tests/worker-test)
 
@@ -402,3 +404,112 @@ Cleans up server and socket on exit."
           (ok result "response has result")
           (ok (gethash "isError" result)
               "result has isError for nonexistent object"))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Worker entry point tests (src/worker/main.lisp)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-handshake-json-format
+  (testing "handshake output is valid JSON with required keys"
+    (let* ((output (with-output-to-string (s)
+                     (cl-mcp/src/worker/main::%output-handshake
+                      12345 4005 s)))
+           (parsed (yason:parse output)))
+      (ok (integerp (gethash "tcp_port" parsed))
+          "tcp_port is an integer")
+      (ok (= 12345 (gethash "tcp_port" parsed))
+          "tcp_port matches supplied value")
+      (ok (integerp (gethash "swank_port" parsed))
+          "swank_port is an integer when supplied")
+      (ok (= 4005 (gethash "swank_port" parsed))
+          "swank_port matches supplied value")
+      (ok (integerp (gethash "pid" parsed))
+          "pid is an integer")
+      (ok (plusp (gethash "pid" parsed))
+          "pid is positive"))))
+
+(deftest worker-handshake-null-swank-port
+  (testing "handshake output has null swank_port when Swank unavailable"
+    (let* ((output (with-output-to-string (s)
+                     (cl-mcp/src/worker/main::%output-handshake
+                      9999 nil s)))
+           (parsed (yason:parse output)))
+      (ok (= 9999 (gethash "tcp_port" parsed))
+          "tcp_port matches supplied value")
+      (ok (null (gethash "swank_port" parsed))
+          "swank_port is null when nil supplied")
+      (ok (integerp (gethash "pid" parsed))
+          "pid is present"))))
+
+(deftest worker-handshake-ends-with-newline
+  (testing "handshake output ends with a newline for line-based reading"
+    (let ((output (with-output-to-string (s)
+                    (cl-mcp/src/worker/main::%output-handshake
+                     8080 nil s))))
+      (ok (char= #\Newline (char output (1- (length output))))
+          "output ends with newline")
+      ;; Verify it's exactly one line
+      (ok (= 1 (count #\Newline output))
+          "output contains exactly one newline"))))
+
+(deftest worker-start-creates-server-and-handshakes
+  (testing "start creates a server, outputs handshake, and accepts connections"
+    (if (not (socket-available-p))
+        (skip "socket unavailable")
+        ;; We cannot call start directly because it blocks in
+        ;; start-accept-loop.  Instead, verify the components work
+        ;; together: create server, register handlers, output
+        ;; handshake, then connect and ping.
+        (let* ((server (make-worker-server :port 0))
+               (tcp-port (server-port server))
+               (handshake-output
+                 (with-output-to-string (s)
+                   (cl-mcp/src/worker/main::%output-handshake
+                    tcp-port nil s)))
+               (parsed (yason:parse handshake-output)))
+          (register-all-handlers server)
+          (unwind-protect
+               (progn
+                 ;; Verify handshake contains the right port
+                 (ok (= tcp-port (gethash "tcp_port" parsed))
+                     "handshake tcp_port matches server port")
+                 ;; Start accept loop in background and connect
+                 (let ((thread (bordeaux-threads:make-thread
+                                (lambda () (start-accept-loop server))
+                                :name "test-start-accept")))
+                   (declare (ignore thread))
+                   (sleep 0.1)
+                   (let ((socket (usocket:socket-connect
+                                  "127.0.0.1" tcp-port
+                                  :element-type 'character)))
+                     (unwind-protect
+                          (let ((stream (usocket:socket-stream socket)))
+                            (write-line
+                             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"worker/ping\"}"
+                             stream)
+                            (force-output stream)
+                            (let* ((line (read-line stream))
+                                   (response (yason:parse line)))
+                              (ok (gethash "pong"
+                                           (gethash "result" response))
+                                  "server responds to ping after handshake setup")))
+                       (ignore-errors (usocket:socket-close socket))))))
+            (stop-server server))))))
+
+(deftest worker-setup-project-root-from-env
+  (testing "setup-project-root reads MCP_PROJECT_ROOT and sets *project-root*"
+    (let ((cl-mcp/src/project-root:*project-root* nil))
+      ;; Save and restore the environment variable
+      (let ((prev-env (uiop/os:getenv "MCP_PROJECT_ROOT")))
+        (unwind-protect
+             (progn
+               (setf (uiop/os:getenv "MCP_PROJECT_ROOT") "/tmp")
+               (let ((result
+                       (cl-mcp/src/worker/main::%setup-project-root)))
+                 (ok result "setup-project-root returns a pathname")
+                 (ok cl-mcp/src/project-root:*project-root*
+                     "*project-root* is set")))
+          ;; Restore
+          (if prev-env
+              (setf (uiop/os:getenv "MCP_PROJECT_ROOT") prev-env)
+              (setf (uiop/os:getenv "MCP_PROJECT_ROOT") "")))))))
