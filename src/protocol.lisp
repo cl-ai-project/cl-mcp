@@ -11,7 +11,8 @@
                 #:initialized-p
                 #:client-info
                 #:protocol-version
-                #:make-state)
+                #:make-state
+                #:*current-session-id*)
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
@@ -45,15 +46,8 @@
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions, ordered by preference.")
 
-(defvar *current-session-id* nil
-  "Bound by each transport to the current session identifier string.
-Used by the proxy layer to determine worker affinity.
-- HTTP transport: the Mcp-Session-Id header value
-- TCP transport: \"tcp-{conn-id}\" format
-- stdio transport: the fixed string \"stdio\"")
-
-;; server-state, initialized-p, client-info, protocol-version, make-state
-;; are now imported from cl-mcp/src/state
+;; *current-session-id*, server-state, initialized-p, client-info,
+;; protocol-version, make-state are imported from cl-mcp/src/state
 
 (defun %decode-json (line)
   (yason:parse line))

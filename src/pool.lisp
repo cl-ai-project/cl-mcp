@@ -22,7 +22,7 @@
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held
                 #:make-condition-variable #:condition-wait
-                #:condition-broadcast
+                #:condition-notify
                 #:make-thread #:threadp #:thread-alive-p
                 #:join-thread)
   (:import-from #:cl-mcp/src/worker-client

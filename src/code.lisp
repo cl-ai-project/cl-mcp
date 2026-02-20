@@ -10,6 +10,9 @@
                 #:make-ht #:result #:rpc-error #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/proxy
+                #:proxy-to-worker
+                #:*use-worker-pool*)
   (:export
    #:code-find-definition
    #:code-describe-symbol
@@ -32,17 +35,23 @@ Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
   :body
-  (multiple-value-bind (path line)
-      (code-find-definition symbol :package package)
-    (if path
-        (result id
-                (make-ht "path" path
-                         "line" line
-                         "content" (text-content
-                                    (format nil "~A defined in ~A at line ~D"
-                                            symbol path line))))
-        (rpc-error id -32004
-                   (format nil "Definition not found for ~A" symbol)))))
+  (if *use-worker-pool*
+      (result id
+              (proxy-to-worker "worker/code-find"
+                               (make-ht "symbol" symbol
+                                        "package" package)))
+      ;; Fallback: inline execution
+      (multiple-value-bind (path line)
+          (code-find-definition symbol :package package)
+        (if path
+            (result id
+                    (make-ht "path" path
+                             "line" line
+                             "content" (text-content
+                                        (format nil "~A defined in ~A at line ~D"
+                                                symbol path line))))
+            (rpc-error id -32004
+                       (format nil "Definition not found for ~A" symbol))))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
@@ -59,18 +68,24 @@ Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
   :body
-  (multiple-value-bind (name type arglist doc path line)
-      (code-describe-symbol symbol :package package)
-    (result id
-            (make-ht "name" name
-                     "type" type
-                     "arglist" arglist
-                     "documentation" doc
-                     "path" path
-                     "line" line
-                     "content" (text-content
-                                (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
-                                        name type arglist doc path line))))))
+  (if *use-worker-pool*
+      (result id
+              (proxy-to-worker "worker/code-describe"
+                               (make-ht "symbol" symbol
+                                        "package" package)))
+      ;; Fallback: inline execution
+      (multiple-value-bind (name type arglist doc path line)
+          (code-describe-symbol symbol :package package)
+        (result id
+                (make-ht "name" name
+                         "type" type
+                         "arglist" arglist
+                         "documentation" doc
+                         "path" path
+                         "line" line
+                         "content" (text-content
+                                    (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                                            name type arglist doc path line)))))))
 
 (define-tool "code-find-references"
   :description "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
@@ -88,23 +103,30 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
          (project-only :type :boolean :json-name "project_only" :default t
                        :description "When true (default), only include references under the project root"))
   :body
-  (multiple-value-bind (refs count)
-      (code-find-references symbol :package package :project-only project-only)
-    (let* ((summary-lines
-            (map 'list
-                 (lambda (h)
-                   (format nil "~A:~D ~A ~A"
-                           (gethash "path" h)
-                           (gethash "line" h)
-                           (gethash "type" h)
-                           (gethash "context" h)))
-                 refs))
-           (summary (if summary-lines
-                        (format nil "~{~A~%~}" summary-lines)
-                        "")))
+  (if *use-worker-pool*
       (result id
-              (make-ht "refs" refs
-                       "count" count
-                       "symbol" symbol
-                       "project_only" project-only
-                       "content" (text-content summary))))))
+              (proxy-to-worker "worker/code-find-references"
+                               (make-ht "symbol" symbol
+                                        "package" package
+                                        "project_only" project-only)))
+      ;; Fallback: inline execution
+      (multiple-value-bind (refs count)
+          (code-find-references symbol :package package :project-only project-only)
+        (let* ((summary-lines
+                (map 'list
+                     (lambda (h)
+                       (format nil "~A:~D ~A ~A"
+                               (gethash "path" h)
+                               (gethash "line" h)
+                               (gethash "type" h)
+                               (gethash "context" h)))
+                     refs))
+               (summary (if summary-lines
+                            (format nil "~{~A~%~}" summary-lines)
+                            "")))
+          (result id
+                  (make-ht "refs" refs
+                           "count" count
+                           "symbol" symbol
+                           "project_only" project-only
+                           "content" (text-content summary)))))))

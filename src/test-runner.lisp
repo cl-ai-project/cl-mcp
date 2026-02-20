@@ -9,6 +9,9 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/proxy
+                #:proxy-to-worker
+                #:*use-worker-pool*)
   (:export #:run-tests
            #:detect-test-framework))
 
@@ -48,44 +51,52 @@ Examples:
          (tests :type :array :required nil
                 :description "Run only these specific tests (array of 'package::test-name')"))
   :body
-  (let* ((test-result (run-tests system
-                                 :framework framework
-                                 :test test
-                                 :tests tests))
-         (passed (gethash "passed" test-result 0))
-         (failed (gethash "failed" test-result 0))
-         (pending (gethash "pending" test-result 0))
-         (framework-name (or (gethash "framework" test-result) "unknown"))
-         (duration (gethash "duration_ms" test-result 0))
-         (failed-tests (gethash "failed_tests" test-result))
-         (failed-tests-vector (if (vectorp failed-tests)
-                                  failed-tests
-                                  (coerce (or failed-tests '()) 'vector)))
-         (summary (with-output-to-string (s)
-                    (format s "~A~%"
-                            (if (zerop failed) "✓ PASS" "✗ FAIL"))
-                    (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
-                            passed failed (when (plusp pending) pending))
-                    (format s "Duration: ~Dms~%" duration)
-                    (when (plusp (length failed-tests-vector))
-                      (format s "~%Failures:~%")
-                      (loop for fail across failed-tests-vector
-                            for i from 1
-                            do (format s "  ~D. ~A~%"
-                                       i (gethash "test_name" fail))
-                               (when (gethash "reason" fail)
-                                 (format s "     Reason: ~A~%"
-                                         (gethash "reason" fail))))))))
-    (let ((response (make-ht "content" (text-content summary)
-                             "passed" passed
-                             "failed" failed
-                             "pending" pending
-                             "framework" framework-name
-                             "duration_ms" duration
-                             "failed_tests" failed-tests-vector)))
-      (dolist (field '("success" "stdout" "stderr" "passed_tests"))
-        (multiple-value-bind (value presentp)
-            (gethash field test-result)
-          (when presentp
-            (setf (gethash field response) value))))
-      (result id response))))
+  (if *use-worker-pool*
+      (result id
+              (proxy-to-worker "worker/run-tests"
+                               (make-ht "system" system
+                                        "framework" framework
+                                        "test" test
+                                        "tests" tests)))
+      ;; Fallback: inline execution
+      (let* ((test-result (run-tests system
+                                     :framework framework
+                                     :test test
+                                     :tests tests))
+             (passed (gethash "passed" test-result 0))
+             (failed (gethash "failed" test-result 0))
+             (pending (gethash "pending" test-result 0))
+             (framework-name (or (gethash "framework" test-result) "unknown"))
+             (duration (gethash "duration_ms" test-result 0))
+             (failed-tests (gethash "failed_tests" test-result))
+             (failed-tests-vector (if (vectorp failed-tests)
+                                      failed-tests
+                                      (coerce (or failed-tests '()) 'vector)))
+             (summary (with-output-to-string (s)
+                        (format s "~A~%"
+                                (if (zerop failed) "✓ PASS" "✗ FAIL"))
+                        (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
+                                passed failed (when (plusp pending) pending))
+                        (format s "Duration: ~Dms~%" duration)
+                        (when (plusp (length failed-tests-vector))
+                          (format s "~%Failures:~%")
+                          (loop for fail across failed-tests-vector
+                                for i from 1
+                                do (format s "  ~D. ~A~%"
+                                           i (gethash "test_name" fail))
+                                   (when (gethash "reason" fail)
+                                     (format s "     Reason: ~A~%"
+                                             (gethash "reason" fail))))))))
+        (let ((response (make-ht "content" (text-content summary)
+                                 "passed" passed
+                                 "failed" failed
+                                 "pending" pending
+                                 "framework" framework-name
+                                 "duration_ms" duration
+                                 "failed_tests" failed-tests-vector)))
+          (dolist (field '("success" "stdout" "stderr" "passed_tests"))
+            (multiple-value-bind (value presentp)
+                (gethash field test-result)
+              (when presentp
+                (setf (gethash field response) value))))
+          (result id response)))))
