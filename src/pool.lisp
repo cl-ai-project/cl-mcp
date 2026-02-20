@@ -22,7 +22,7 @@
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held
                 #:make-condition-variable #:condition-wait
-                #:condition-notify
+                #:condition-broadcast
                 #:make-thread #:threadp #:thread-alive-p
                 #:join-thread)
   (:import-from #:cl-mcp/src/worker-client
@@ -108,13 +108,12 @@ the failure.  Returns the worker on success."
            (bt:with-lock-held (*pool-lock*)
              (setf (gethash session-id *affinity-map*) new-worker)
              (push new-worker *all-workers*))
-           ;; Notify waiters under placeholder lock.
-           ;; Uses condition-notify (wakes one waiter); the woken
-           ;; waiter cascades to the next in %wait-for-placeholder.
+           ;; Notify ALL waiters under placeholder lock.
+           ;; Uses condition-broadcast to wake all threads at once.
            (bt:with-lock-held ((worker-placeholder-lock placeholder))
              (setf (worker-placeholder-worker placeholder) new-worker
                    (worker-placeholder-state placeholder) :ready)
-             (bt:condition-notify
+             (bt:condition-broadcast
               (worker-placeholder-condvar placeholder)))
            (log-event :info "pool.worker.bound"
                       "session" session-id
@@ -131,7 +130,7 @@ the failure.  Returns the worker on success."
           (setf (worker-placeholder-state placeholder) :failed
                 (worker-placeholder-error-message placeholder)
                 "Worker process failed to start.")
-          (bt:condition-notify
+          (bt:condition-broadcast
            (worker-placeholder-condvar placeholder)))
         ;; Kill partially started worker
         (when new-worker
@@ -146,17 +145,14 @@ the failure.  Returns the worker on success."
 session.  Returns the worker on success, or signals an error on
 failure or timeout.
 
-Uses cascade notification: when a waiter wakes and sees the state
-has changed, it calls condition-notify to wake the next waiter
-before returning."
+The spawning thread uses condition-broadcast to wake ALL waiters
+simultaneously."
   (bt:with-lock-held ((worker-placeholder-lock placeholder))
     (loop while (eq (worker-placeholder-state placeholder) :spawning)
           do (bt:condition-wait
               (worker-placeholder-condvar placeholder)
               (worker-placeholder-lock placeholder)
-              :timeout 5))
-    ;; Cascade: wake the next waiter (if any) before returning
-    (bt:condition-notify (worker-placeholder-condvar placeholder))
+              :timeout 30))
     (case (worker-placeholder-state placeholder)
       (:ready
        (worker-placeholder-worker placeholder))
