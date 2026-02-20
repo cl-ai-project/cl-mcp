@@ -233,11 +233,15 @@ Options:
 
 (define-tool "repl-eval" :description
  "Evaluate Common Lisp forms and return the last value as printed text.
-Use this for testing, inspection, debugging, or loading systems (ql:quickload).
+Use this for testing, inspection, debugging, or exploring runtime state.
 Provide an existing package (e.g., CL-USER) and set print_level/print_length when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
 To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
 to save changes to files.
+
+IMPORTANT: For loading ASDF systems, prefer the dedicated 'load-system' tool.
+It handles staleness (force-reload), output suppression, and timeouts automatically.
+Only use repl-eval with ql:quickload if you need non-standard load options.
 
 When the result is a non-primitive object (not a number, string, symbol, or character),
 the response includes:

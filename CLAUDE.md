@@ -15,7 +15,11 @@ cl-mcp is a Model Context Protocol (MCP) server for Common Lisp, providing JSON-
 
 ### Loading the System
 ```lisp
+;; From a REPL (human developer)
 (ql:quickload :cl-mcp)
+
+;; AI agents should prefer the load-system MCP tool instead:
+;;   {"name": "load-system", "arguments": {"system": "cl-mcp"}}
 ```
 
 ### Starting the Server
@@ -88,11 +92,12 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 
 **Tool Categories**
 1. **REPL** (`src/repl.lisp`): Form evaluation with package context, print controls, timeout
-2. **File System** (`src/fs.lisp`): Read/write/list with project root security policy
-3. **Lisp-Aware Reading** (`src/lisp-read-file.lisp`): Collapsed signatures, pattern-based expansion
-4. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement using Eclector
-5. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
-6. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
+2. **System Loader** (`src/system-loader.lisp`): ASDF system loading with force-reload, output suppression, timeout
+3. **File System** (`src/fs.lisp`): Read/write/list with project root security policy
+4. **Lisp-Aware Reading** (`src/lisp-read-file.lisp`): Collapsed signatures, pattern-based expansion
+5. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement using Eclector
+6. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
+7. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
 
 ### Security Model
 
@@ -142,7 +147,7 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 4. Use `fs-read-file` only for plain text (README, JSON, YAML, config)
 
 ### Symbol Operations
-1. **Always load systems first**: `(ql:quickload :system-name)`
+1. **Always load systems first**: Use the `load-system` tool (preferred over `repl-eval` + `ql:quickload`)
 2. Use package-qualified symbols: `"cl-mcp:run"` not `"run"`
 3. Fallback to `lisp-read-file` with `name_pattern` if `code-find` fails (symbol not loaded)
 
