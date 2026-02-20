@@ -149,13 +149,19 @@ session.  Returns the worker on success, or signals an error on
 failure or timeout.
 
 The spawning thread uses condition-broadcast to wake ALL waiters
-simultaneously."
+simultaneously.  Uses a 30-second deadline to avoid hanging
+indefinitely if the spawn thread stalls."
   (bt:with-lock-held ((worker-placeholder-lock placeholder))
-    (loop while (eq (worker-placeholder-state placeholder) :spawning)
-          do (bt:condition-wait
-              (worker-placeholder-condvar placeholder)
-              (worker-placeholder-lock placeholder)
-              :timeout 30))
+    (let ((deadline (+ (get-internal-real-time)
+                       (* 30 internal-time-units-per-second))))
+      (loop while (eq (worker-placeholder-state placeholder) :spawning)
+            for remaining = (/ (max 0 (- deadline (get-internal-real-time)))
+                               internal-time-units-per-second)
+            when (zerop remaining) do (loop-finish)
+            do (bt:condition-wait
+                (worker-placeholder-condvar placeholder)
+                (worker-placeholder-lock placeholder)
+                :timeout remaining)))
     (case (worker-placeholder-state placeholder)
       (:ready
        (worker-placeholder-worker placeholder))
@@ -358,14 +364,19 @@ Signals an error if the worker cannot be created."
     (bt:with-lock-held (*pool-lock*)
       (setf entry (gethash session-id *affinity-map*))
       (cond
-        ;; Path 1: Existing worker bound to this session
-        ((and entry (typep entry 'worker))
+        ;; Path 1: Existing live worker bound to this session
+        ((and entry (typep entry 'worker) (eq :bound (worker-state entry)))
          (return-from get-or-assign-worker entry))
+        ;; Path 1b: Existing dead/crashed worker — remove and reassign
+        ((and entry (typep entry 'worker))
+         (remhash session-id *affinity-map*)
+         (setf *all-workers* (remove entry *all-workers*))
+         (setf entry nil))
         ;; Path 2: Another thread is already spawning for this session
         ((and entry (typep entry 'worker-placeholder))
-         nil)
-        ;; Path 3: No entry -- pop standby or create placeholder
-        (t
+         nil))
+      ;; Path 3: No entry (or dead entry cleared above) — assign
+      (when (null entry)
          (if *standby-workers*
              ;; Standby available -- assign immediately
              (let ((w (pop *standby-workers*)))
@@ -378,7 +389,7 @@ Signals an error if the worker cannot be created."
                         :session-id session-id)))
                (setf (gethash session-id *affinity-map*) ph
                      entry ph
-                     need-spawn t))))))
+                     need-spawn t)))))
     ;; Phase 2: Outside pool-lock
     (cond
       (assigned-from-standby

@@ -76,6 +76,11 @@ When *session-timeout-seconds* is NIL, sessions never expire."
            ((> (- now (http-session-last-access session))
                *session-timeout-seconds*)
             (remhash session-id *sessions*)
+            ;; Release the worker pool assignment.  Lock ordering is
+            ;; safe: *sessions-lock* -> *pool-lock* (pool never
+            ;; acquires *sessions-lock*).
+            (when *use-worker-pool*
+              (release-session session-id))
             nil)
            ;; Not expired - update last access and return
            (t
