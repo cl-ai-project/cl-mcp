@@ -79,6 +79,13 @@
 ;;; Placeholder struct -- coordinates concurrent spawn requests
 ;;; ---------------------------------------------------------------------------
 
+(defun %condition-broadcast (condvar)
+  "Wake ALL threads waiting on CONDVAR.
+On SBCL, uses sb-thread:condition-broadcast.  On other
+implementations, falls back to condition-notify (wakes at least one)."
+  #+sbcl (sb-thread:condition-broadcast condvar)
+  #-sbcl (bt:condition-notify condvar))
+
 (defstruct worker-placeholder
   "Placeholder inserted into the affinity map while a worker is being
 spawned.  Other threads requesting the same session wait on the
@@ -113,7 +120,7 @@ the failure.  Returns the worker on success."
            (bt:with-lock-held ((worker-placeholder-lock placeholder))
              (setf (worker-placeholder-worker placeholder) new-worker
                    (worker-placeholder-state placeholder) :ready)
-             (bt:condition-broadcast
+             (%condition-broadcast
               (worker-placeholder-condvar placeholder)))
            (log-event :info "pool.worker.bound"
                       "session" session-id
@@ -130,7 +137,7 @@ the failure.  Returns the worker on success."
           (setf (worker-placeholder-state placeholder) :failed
                 (worker-placeholder-error-message placeholder)
                 "Worker process failed to start.")
-          (bt:condition-broadcast
+          (%condition-broadcast
            (worker-placeholder-condvar placeholder)))
         ;; Kill partially started worker
         (when new-worker
