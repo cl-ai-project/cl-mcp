@@ -31,7 +31,11 @@
 
 (defun %load-with-timeout (thunk timeout-seconds)
   "Execute THUNK in a worker thread with TIMEOUT-SECONDS limit.
-Returns (values result-list timed-out-p)."
+Returns (values result-list timed-out-p errored-p).
+RESULT-LIST is a list of the thunk's multiple return values on success,
+or a single-element list containing the error condition on failure.
+TIMED-OUT-P is T if the operation exceeded the timeout.
+ERRORED-P is T if the thunk signaled an error."
   (if (and timeout-seconds (plusp timeout-seconds))
       (let* ((result-box nil)
              (error-box nil)
@@ -51,7 +55,7 @@ Returns (values result-list timed-out-p)."
                          (values result-box nil nil)))
               do (sleep 0.05d0))
         (when (thread-alive-p worker)
-          (destroy-thread worker))
+          (ignore-errors (destroy-thread worker)))
         (values nil t nil))
       (handler-case
           (values (multiple-value-list (funcall thunk)) nil nil)
@@ -64,6 +68,7 @@ Returns (values thunk-result warning-count warning-details)."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
         (stderr (make-string-output-stream)))
+    #+sbcl
     (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
           (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
           (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
@@ -78,7 +83,8 @@ Returns (values thunk-result warning-count warning-details)."
                      (lambda (w)
                        (incf warning-count)
                        (format warning-details "~A~%" w)
-                       (muffle-warning w))))
+                       (when (find-restart 'muffle-warning)
+                         (invoke-restart 'muffle-warning)))))
                 (let ((*compile-verbose* nil)
                       (*compile-print* nil)
                       (*load-verbose* nil)
@@ -88,10 +94,31 @@ Returns (values thunk-result warning-count warning-details)."
                       (*error-output* stderr))
                   (if syms
                       (progv (nreverse syms) (nreverse vals)
-                        (funcall thunk))
-                      (funcall thunk))))))
+                        (with-compilation-unit (:override t)
+                          (funcall thunk)))
+                      (with-compilation-unit (:override t)
+                        (funcall thunk)))))))
         (values result warning-count
-                (get-output-stream-string warning-details))))))
+                (get-output-stream-string warning-details))))
+    #-sbcl
+    (let ((result
+            (handler-bind
+                ((warning
+                   (lambda (w)
+                     (incf warning-count)
+                     (format warning-details "~A~%" w)
+                     (when (find-restart 'muffle-warning)
+                       (invoke-restart 'muffle-warning)))))
+              (let ((*compile-verbose* nil)
+                    (*compile-print* nil)
+                    (*load-verbose* nil)
+                    (*load-print* nil)
+                    (*standard-output* (make-string-output-stream))
+                    (*trace-output* (make-string-output-stream))
+                    (*error-output* stderr))
+                (funcall thunk)))))
+      (values result warning-count
+              (get-output-stream-string warning-details)))))
 
 (defun load-system (system-name &key (force t) (clear-fasls nil)
                                      (timeout-seconds 120))
@@ -99,18 +126,22 @@ Returns (values thunk-result warning-count warning-details)."
 
 When FORCE is true (default), clears loaded state before loading so
 changed files are picked up. When CLEAR-FASLS is true, forces full
-recompilation from source. TIMEOUT-SECONDS limits the operation duration."
+recompilation from source. TIMEOUT-SECONDS must be a positive number
+or NIL (no timeout). Default is 120 seconds."
+  (check-type system-name string)
+  (when (and timeout-seconds (not (plusp timeout-seconds)))
+    (setf timeout-seconds 120))
   (let ((start-time (get-internal-real-time)))
     (log-event :info "load-system"
                "system" system-name
                "force" force
                "clear_fasls" clear-fasls
                "timeout" timeout-seconds)
-    (when (and force (asdf:find-system system-name nil))
-      (asdf:clear-system system-name))
     (multiple-value-bind (result-list timed-out-p errored-p)
         (%load-with-timeout
          (lambda ()
+           (when (and force (asdf:find-system system-name nil))
+             (asdf:clear-system system-name))
            (%call-with-suppressed-output
             (lambda ()
               (if clear-fasls
@@ -136,18 +167,21 @@ recompilation from source. TIMEOUT-SECONDS limits the operation duration."
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              (setf (gethash "message" ht)
-                   (sanitize-for-json (princ-to-string err)))
+                   (sanitize-for-json
+                    (or (ignore-errors (princ-to-string err))
+                        (format nil "~A" (type-of err)))))
              (log-event :error "load-system-error"
                         "system" system-name
-                        "error" (princ-to-string err))))
+                        "error" (or (ignore-errors (princ-to-string err))
+                                    "unprintable error"))))
           (t
            (destructuring-bind (load-result warning-count warning-details)
                result-list
              (declare (ignore load-result))
              (setf (gethash "status" ht) "loaded")
              (setf (gethash "duration_ms" ht) elapsed-ms)
-             (setf (gethash "forced" ht) (if force t nil))
-             (setf (gethash "clear_fasls" ht) (if clear-fasls t nil))
+             (setf (gethash "forced" ht) force)
+             (setf (gethash "clear_fasls" ht) clear-fasls)
              (setf (gethash "warnings" ht) warning-count)
              (when (plusp warning-count)
                (setf (gethash "warning_details" ht)

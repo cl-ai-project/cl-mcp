@@ -45,18 +45,17 @@
       (ok (string= (gethash "status" ht) "loaded"))
       (ok (null (gethash "clear_fasls" ht))))))
 
-(deftest load-system-warning-capture
-  (testing "warnings are counted and captured"
-    ;; Define a function that produces a warning when compiled
-    (eval '(defun cl-mcp/tests/system-loader-test::%warning-producer ()
-             (declare (optimize (speed 3) (safety 0)))
-             (let ((x "hello"))
-               (+ x 1))))
-    ;; The load-system function itself captures warnings during system loading.
-    ;; We verify the warning fields exist and are properly typed.
+(deftest load-system-warning-fields
+  (testing "warning fields are properly typed in response"
+    ;; Verify the warning-related fields exist and have correct types.
+    ;; An already-loaded system should produce zero warnings.
     (let ((ht (load-system "cl-mcp" :force nil)))
       (ok (hash-table-p ht))
-      (ok (integerp (gethash "warnings" ht))))))
+      (ok (string= (gethash "status" ht) "loaded"))
+      (ok (integerp (gethash "warnings" ht)))
+      (ok (zerop (gethash "warnings" ht)))
+      ;; No warning_details key when warnings are zero
+      (ok (null (gethash "warning_details" ht))))))
 
 (deftest load-system-force-false-no-clear
   (testing "force=false skips clearing and uses quickload"
