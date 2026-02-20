@@ -70,7 +70,8 @@
   (:import-from #:cl-mcp/src/pool
                 #:*worker-pool-warmup*
                 #:initialize-pool
-                #:shutdown-pool)
+                #:shutdown-pool
+                #:broadcast-root-to-workers)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -133,6 +134,7 @@
            #:*use-worker-pool*
            #:*worker-pool-warmup*
            #:initialize-pool
-           #:shutdown-pool))
+           #:shutdown-pool
+           #:broadcast-root-to-workers))
 
 (in-package #:cl-mcp/main)

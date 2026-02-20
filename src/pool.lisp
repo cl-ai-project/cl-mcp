@@ -38,6 +38,7 @@
            #:shutdown-pool
            #:get-or-assign-worker
            #:release-session
+           #:broadcast-root-to-workers
            #:pool-worker-info))
 
 (in-package #:cl-mcp/src/pool)
@@ -444,6 +445,33 @@ impending kill as a crash."
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- pool-worker-info
 ;;; ---------------------------------------------------------------------------
+
+(defun broadcast-root-to-workers (path)
+  "Send worker/set-project-root RPC to all live workers.
+Called when the parent's *project-root* changes to keep workers
+synchronized.  No-op when the pool is empty.  Failures on
+individual workers are logged but do not propagate."
+  (let ((workers nil))
+    (bt:with-lock-held (*pool-lock*)
+      (setf workers (copy-list *all-workers*)))
+    (when workers
+      (let ((path-string (if (pathnamep path)
+                             (namestring path)
+                             path)))
+        (log-event :info "pool.broadcast-root"
+                   "path" path-string
+                   "worker_count" (length workers))
+        (let ((params (make-hash-table :test 'equal)))
+          (setf (gethash "path" params) path-string)
+          (dolist (w workers)
+            (when (member (worker-state w) '(:bound :standby))
+              (handler-case
+                  (worker-rpc w "worker/set-project-root" params
+                              :timeout 5)
+                (error (e)
+                  (log-event :warn "pool.broadcast-root.failed"
+                             "worker_id" (worker-id w)
+                             "error" (princ-to-string e)))))))))))
 
 (defun pool-worker-info ()
   "Return a vector of worker info hash-tables suitable for inclusion

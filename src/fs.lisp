@@ -28,7 +28,8 @@
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/pool
-                #:pool-worker-info)
+                #:pool-worker-info
+                #:broadcast-root-to-workers)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
   (:export #:fs-resolve-read-path
@@ -235,6 +236,9 @@ Returns a hash-table with updated path information:
       (log-event :info "fs.set-project-root"
                  "previous" (if prev-root (namestring prev-root) "(not set)")
                  "new" (namestring new-root))
+      ;; Propagate root change to all pool workers
+      (when *use-worker-pool*
+        (ignore-errors (broadcast-root-to-workers new-root)))
       ;; Return updated path information
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "project_root" h) (namestring new-root)

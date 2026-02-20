@@ -23,6 +23,8 @@
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/pool
+                #:broadcast-root-to-workers)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:yason
@@ -191,6 +193,8 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
               (when (uiop/filesystem:directory-exists-p root-dir)
                 (setf *project-root* root-dir)
                 (uiop/os:chdir root-dir)
+                ;; Propagate root to all pool workers (no-op if pool empty)
+                (ignore-errors (broadcast-root-to-workers root-dir))
                 (log-event :info "initialize.sync-root" "rootPath"
                            (namestring root-dir) "source"
                            (if root-path "rootPath" "rootUri"))))
