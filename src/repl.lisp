@@ -168,6 +168,9 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
               nil))))
 
 (defun %repl-eval-with-timeout (thunk timeout-seconds)
+  "Execute THUNK with a polling-based timeout (50ms granularity).
+If the worker completes during the final polling interval, returns
+the result as success -- completed work is never discarded as a timeout."
   (if (and timeout-seconds (plusp timeout-seconds))
       (let* ((result-box nil)
              (worker (bordeaux-threads:make-thread

@@ -32,11 +32,16 @@
       (ok (stringp (gethash "message" ht))))))
 
 (deftest load-system-timeout
-  (testing "returns timeout status when operation exceeds time limit"
-    (let ((ht (load-system "cl-mcp" :force t :timeout-seconds 0.001)))
-      (ok (hash-table-p ht))
-      (ok (string= (gethash "status" ht) "timeout"))
-      (ok (stringp (gethash "message" ht))))))
+  (testing "returns timeout status when worker is still running at deadline"
+    ;; Use %load-with-timeout directly with a thunk that sleeps well beyond
+    ;; the polling window to guarantee the worker is still alive at deadline.
+    (multiple-value-bind (result-list timed-out-p errored-p)
+        (cl-mcp/src/system-loader::%load-with-timeout
+         (lambda () (sleep 10) :never-reached)
+         0.05)
+      (ok timed-out-p "should report timeout")
+      (ok (not errored-p))
+      (ok (null result-list)))))
 
 (deftest load-system-clear-fasls-flag
   (testing "clear_fasls flag is reflected in response"
@@ -63,3 +68,17 @@
       (ok (hash-table-p ht))
       (ok (string= (gethash "status" ht) "loaded"))
       (ok (null (gethash "forced" ht))))))
+
+(deftest timeout-returns-completed-work
+  (testing "worker completing within polling granularity returns success, not timeout"
+    ;; The timeout mechanism polls every 50ms. A thunk that completes within
+    ;; the polling window should return success even if timeout-seconds is
+    ;; shorter than the actual execution time. Completed work is never
+    ;; discarded as a timeout.
+    (multiple-value-bind (result-list timed-out-p errored-p)
+        (cl-mcp/src/system-loader::%load-with-timeout
+         (lambda () (sleep 0.02) :done)
+         0.001)
+      (ok (not timed-out-p) "completed work should not be reported as timeout")
+      (ok (not errored-p))
+      (ok (equal result-list '(:done))))))

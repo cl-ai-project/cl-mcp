@@ -34,8 +34,13 @@
 Returns (values result-list timed-out-p errored-p).
 RESULT-LIST is a list of the thunk's multiple return values on success,
 or a single-element list containing the error condition on failure.
-TIMED-OUT-P is T if the operation exceeded the timeout.
-ERRORED-P is T if the thunk signaled an error."
+TIMED-OUT-P is T if the worker was still running when the deadline passed.
+ERRORED-P is T if the thunk signaled an error.
+
+NOTE: This is a polling-based safety net, not a strict deadline enforcer.
+The worker is polled every 50ms, so the effective granularity is 50ms.
+If the worker completes during the final polling interval, the result is
+returned as a success -- completed work is never discarded as a timeout."
   (if (and timeout-seconds (plusp timeout-seconds))
       (let* ((result-box nil)
              (error-box nil)
