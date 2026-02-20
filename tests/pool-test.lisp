@@ -11,7 +11,15 @@
                 #:worker-id #:worker-session-id
                 #:worker-needs-reset-notification
                 #:clear-reset-notification
-                #:worker-spawn-failed))
+                #:worker-spawn-failed)
+  (:import-from #:cl-mcp/src/pool
+                #:*use-worker-pool*
+                #:*worker-pool-warmup*
+                #:initialize-pool
+                #:shutdown-pool
+                #:get-or-assign-worker
+                #:release-session
+                #:pool-worker-info))
 
 (in-package #:cl-mcp/tests/pool-test)
 
@@ -159,3 +167,127 @@ in the cleanup form regardless of success or failure."
                "worker IDs are distinct")
         (kill-worker worker1)
         (kill-worker worker2)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Pool manager helpers
+;;; ---------------------------------------------------------------------------
+
+(defmacro with-pool (() &body body)
+  "Initialize the pool, execute BODY, and always shut down the pool."
+  `(unwind-protect
+        (progn
+          (initialize-pool)
+          ,@body)
+     (shutdown-pool)))
+
+;;; ---------------------------------------------------------------------------
+;;; Pool manager unit tests — placeholder struct
+;;; ---------------------------------------------------------------------------
+
+(deftest placeholder-struct-defaults
+  (testing "worker-placeholder has correct defaults"
+    (let ((ph (cl-mcp/src/pool::make-worker-placeholder)))
+      (ok (eq :spawning (cl-mcp/src/pool::worker-placeholder-state ph))
+          "default state is :spawning")
+      (ok (null (cl-mcp/src/pool::worker-placeholder-worker ph))
+          "worker is nil by default")
+      (ok (null (cl-mcp/src/pool::worker-placeholder-error-message ph))
+          "error-message is nil by default"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Pool manager integration tests (require ros)
+;;; ---------------------------------------------------------------------------
+
+(deftest pool-assigns-worker-to-session
+  (testing "get-or-assign-worker returns a bound worker"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((worker (get-or-assign-worker "session-A")))
+        (ok worker "worker is returned")
+        (ok (eq :bound (worker-state worker))
+            "worker state is :bound")
+        (ok (string= "session-A" (worker-session-id worker))
+            "worker session-id matches")))))
+
+(deftest pool-reuses-worker-for-same-session
+  (testing "same session gets same worker"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((w1 (get-or-assign-worker "session-A"))
+            (w2 (get-or-assign-worker "session-A")))
+        (ok (eq w1 w2) "same worker returned for same session")))))
+
+(deftest pool-different-sessions-get-different-workers
+  (testing "different sessions get different workers"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((w1 (get-or-assign-worker "session-A"))
+            (w2 (get-or-assign-worker "session-B")))
+        (ok (not (eq w1 w2))
+            "different workers for different sessions")))))
+
+(deftest pool-assigned-worker-responds-to-rpc
+  (testing "worker from pool responds to ping"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let* ((worker (get-or-assign-worker "rpc-test"))
+             (result (worker-rpc worker "worker/ping" nil)))
+        (ok (hash-table-p result) "ping returns a hash-table")
+        (ok (gethash "pong" result) "ping result contains pong")))))
+
+(deftest pool-release-kills-worker
+  (testing "release-session kills the worker"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((worker (get-or-assign-worker "session-X")))
+        (ok worker "worker is returned")
+        (release-session "session-X")
+        (ok (eq :dead (worker-state worker))
+            "worker state is :dead after release")))))
+
+(deftest pool-release-allows-new-assignment
+  (testing "after release, a new worker is assigned for the same session"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((w1 (get-or-assign-worker "session-Y")))
+        (release-session "session-Y")
+        (let ((w2 (get-or-assign-worker "session-Y")))
+          (ok (not (eq w1 w2))
+              "new worker assigned after release"))))))
+
+(deftest pool-worker-info-returns-vector
+  (testing "pool-worker-info returns worker metadata"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (get-or-assign-worker "info-test")
+      (let ((info (pool-worker-info)))
+        (ok (vectorp info) "info is a vector")
+        (ok (> (length info) 0) "info has at least one entry")
+        (let ((entry (aref info 0)))
+          (ok (hash-table-p entry) "entry is a hash-table")
+          (ok (gethash "tcp_port" entry) "entry has tcp_port")
+          (ok (gethash "pid" entry) "entry has pid")
+          (ok (gethash "state" entry) "entry has state"))))))
+
+(deftest pool-shutdown-kills-all-workers
+  (testing "shutdown-pool kills all workers"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (initialize-pool)
+    (let ((w1 (get-or-assign-worker "shut-A"))
+          (w2 (get-or-assign-worker "shut-B")))
+      (shutdown-pool)
+      (ok (eq :dead (worker-state w1))
+          "first worker is dead after shutdown")
+      (ok (eq :dead (worker-state w2))
+          "second worker is dead after shutdown")
+      (let ((info (pool-worker-info)))
+        (ok (zerop (length info))
+            "no workers in pool after shutdown")))))
