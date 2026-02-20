@@ -71,14 +71,14 @@
 
 (deftest timeout-returns-completed-work
   (testing "worker completing within polling granularity returns success, not timeout"
-    ;; The timeout mechanism polls every 50ms. A thunk that completes within
-    ;; the polling window should return success even if timeout-seconds is
-    ;; shorter than the actual execution time. Completed work is never
-    ;; discarded as a timeout.
+    ;; Keep this test stable on slower CI runners.
+    ;; timeout-seconds=0.0501 rounds up to two 50ms polling intervals
+    ;; (about 100ms effective). The worker sleeps 60ms, so it exceeds the
+    ;; nominal timeout but still completes before the rounded polling deadline.
     (multiple-value-bind (result-list timed-out-p errored-p)
         (cl-mcp/src/system-loader::%load-with-timeout
-         (lambda () (sleep 0.02) :done)
-         0.001)
+         (lambda () (sleep 0.06) :done)
+         0.0501)
       (ok (not timed-out-p) "completed work should not be reported as timeout")
       (ok (not errored-p))
       (ok (equal result-list '(:done))))))
