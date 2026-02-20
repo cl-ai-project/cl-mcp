@@ -137,7 +137,9 @@ successfully started, or NIL if the start attempt failed."
 (defun %process-stream (stream socket conn-id remote)
   (let ((state (make-state))
         (log-context (list "conn" conn-id "remote" remote)))
-    (let ((cl-mcp/src/log:*log-context* log-context))
+    (let ((cl-mcp/src/log:*log-context* log-context)
+          (cl-mcp/src/protocol:*current-session-id*
+            (format nil "tcp-~A" conn-id)))
       (loop
         ;; Use timeout as a heartbeat to check for the stop flag
         for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)

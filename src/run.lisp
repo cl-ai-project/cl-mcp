@@ -18,6 +18,7 @@
                                 (:accept-once t) (:on-listening function))
                           (values boolean &optional))
                 run))
+
 (defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
                  (host "127.0.0.1") (port 0) (accept-once t) on-listening)
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
@@ -26,7 +27,8 @@ and writes responses to OUT. Returns T when input is exhausted (EOF).
 This is a minimal loop for E2E bring-up; full transport features come later."
   (ecase transport
     (:stdio
-     (let ((state (make-state)))
+     (let ((state (make-state))
+           (cl-mcp/src/protocol:*current-session-id* "stdio"))
        (log-event :info "stdio.start")
        (loop for line = (read-line in nil :eof)
              until (eq line :eof)

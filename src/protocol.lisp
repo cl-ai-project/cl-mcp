@@ -30,6 +30,7 @@
   (:export
    #:+protocol-version+
    #:+supported-protocol-versions+
+   #:*current-session-id*
    #:server-state
    #:initialized-p
    #:client-info
@@ -43,6 +44,13 @@
 (defparameter +supported-protocol-versions+
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions, ordered by preference.")
+
+(defvar *current-session-id* nil
+  "Bound by each transport to the current session identifier string.
+Used by the proxy layer to determine worker affinity.
+- HTTP transport: the Mcp-Session-Id header value
+- TCP transport: \"tcp-{conn-id}\" format
+- stdio transport: the fixed string \"stdio\"")
 
 ;; server-state, initialized-p, client-info, protocol-version, make-state
 ;; are now imported from cl-mcp/src/state

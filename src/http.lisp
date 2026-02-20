@@ -143,7 +143,8 @@ When *session-timeout-seconds* is NIL, sessions never expire."
            (state (http-session-state session))
            (line (with-output-to-string (s)
                    (yason:encode body s)))
-           (response (process-json-line line state)))
+           (response (let ((cl-mcp/src/protocol:*current-session-id* (http-session-id session)))
+                       (process-json-line line state))))
       (log-event :info "http.initialize"
                  "session-id" (http-session-id session))
       (set-header :mcp-session-id (http-session-id session))
@@ -156,7 +157,8 @@ When *session-timeout-seconds* is NIL, sessions never expire."
     (let* ((state (http-session-state session))
            (line (with-output-to-string (s)
                    (yason:encode body s)))
-           (response (process-json-line line state)))
+           (response (let ((cl-mcp/src/protocol:*current-session-id* session-id))
+                       (process-json-line line state))))
       (log-event :debug "http.response"
                  "session-id" session-id
                  "has-response" (not (null response)))
