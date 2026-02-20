@@ -1,19 +1,20 @@
 # cl-mcp
 [![CI](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml)
 
-A minimal Model Context Protocol (MCP) server for Common Lisp. It provides a
-newline‑delimited JSON‑RPC 2.0 transport over stdio or TCP, a small protocol
-layer (initialize, ping, tools/list, tools/call), and a REPL tool that evaluates
-forms and returns the last value.
+A Model Context Protocol (MCP) server for Common Lisp, providing JSON-RPC 2.0
+over stdio, TCP, and HTTP (Streamable HTTP). It enables AI agents to interact
+with Common Lisp environments through structured tools for REPL evaluation,
+system loading, file operations, code introspection, and structure-aware editing.
 
-This repo is intentionally small and test-first. It’s designed for editor/agent
-clients to drive Common Lisp development via MCP.
+This repo is test-first and designed for editor/agent clients to drive Common
+Lisp development via MCP.
 
 ## Features
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
 - Tools API
   - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
+  - `load-system` — load ASDF systems with force-reload, output suppression, and timeout support
   - `inspect-object` — drill down into complex objects (CLOS instances, hash-tables, lists, arrays) by ID
   - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
   - `fs-get-project-info` — report project root and cwd info for path normalization
@@ -92,7 +93,7 @@ Configure Claude Code to connect (in `~/.claude/settings.json` or project `.mcp.
 {
   "mcpServers": {
     "cl-mcp": {
-      "type": "http",
+      "type": "url",
       "url": "http://127.0.0.1:3000/mcp"
     }
   }
@@ -190,37 +191,36 @@ Example workflow:
 // Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":42}
 ```
 
-### ASDF tools (disabled)
-`asdf-system-info` and `asdf-list-systems` are temporarily disabled.
-
-<!--
-### `asdf-system-info`
-Return detailed information about an ASDF system, including dependencies and source locations.
+### `load-system`
+Load an ASDF system with structured output and reload support. Preferred over
+`(ql:quickload ...)` via `repl-eval` for AI agents.
 
 Input:
-- `system_name` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"alexandria"`)
+- `system` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"my-project/tests"`)
+- `force` (boolean, default `true`): clear loaded state before loading to pick up file changes
+- `clear_fasls` (boolean, default `false`): force full recompilation from source
+- `timeout_seconds` (number, default `120`): timeout for the load operation
 
 Output fields:
-- `name` (string)
-- `version` / `description` / `author` / `license` (string|null)
-- `depends_on` (array): direct dependencies
-- `defsystem_depends_on` (array): defsystem dependencies
-- `source_file` / `source_directory` (string|null)
-- `loaded` (boolean)
+- `system` (string): echoed system name
+- `status` (string): `"loaded"`, `"timeout"`, or `"error"`
+- `duration_ms` (integer): load time in milliseconds
+- `warnings` (integer): number of compiler warnings (when loaded)
+- `warning_details` (string|null): warning text (when warnings > 0)
+- `forced` (boolean): whether force-reload was applied
+- `clear_fasls` (boolean): whether full recompilation was done
+- `message` (string|null): error or timeout message
 
-Example JSON‑RPC request:
+Solves three problems with using `ql:quickload` via `repl-eval`:
+1. **Staleness**: `force=true` (default) clears loaded state before reloading
+2. **Output noise**: suppresses verbose compilation/load output
+3. **Timeout**: dedicated timeout prevents hanging on large systems
+
+Example JSON-RPC request:
 ```json
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
- "params":{"name":"asdf-system-info","arguments":{"system_name":"cl-mcp"}}}
+ "params":{"name":"load-system","arguments":{"system":"cl-mcp"}}}
 ```
-
-### `asdf-list-systems`
-List all registered ASDF systems (may be large).
-
-Input: none
-
-Output: array of lower-case system names.
--->
 
 ### `fs-read-file`
 Read text from an allow‑listed path.
@@ -473,9 +473,11 @@ Note: Running tests compiles FASLs into `~/.cache/...`. Ensure your environment
 allows writing there or configure SBCL’s cache directory accordingly.
 
 ## Project Layout
-- `src/` — packages, logging, REPL, protocol, TCP, run entrypoint
+- `src/` — core implementation (protocol, tools, transports)
 - `tests/` — Rove test suites invoked by ASDF `test-op`
 - `scripts/` — helper clients and a stdio↔TCP bridge
+- `prompts/` — system prompts for AI agents (repl-driven-development.md)
+- `agents/` — agent persona guidelines (common-lisp-expert.md)
 - `cl-mcp.asd` — main and test systems (delegates `test-op` to Rove)
 
 ## Security Notes
@@ -576,8 +578,9 @@ The server will use this path during initialization, though calling `fs-set-proj
 explicitly is still recommended for dynamic project switching.
 
 ## Roadmap
-- Error taxonomy as condition types mapped to JSON‑RPC errors
+- Error taxonomy as condition types mapped to JSON-RPC errors
 - Bounds/quotas for tool outputs (content length caps)
+- `asdf-system-info` / `asdf-list-systems` tools (currently disabled)
 
 ## License
 MIT
