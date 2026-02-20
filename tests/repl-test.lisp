@@ -171,12 +171,15 @@
                         stdout))))))
 
 (defun %has-control-chars-p (string)
-  "Check if STRING contains any disallowed control characters."
+  "Check if STRING contains any disallowed control characters.
+Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
   (and string
-       (find-if (lambda (c)
-                  (and (< (char-code c) 32)
-                       (not (member c '(#\Tab #\Newline #\Return)))))
-                string)))
+       (find-if
+        (lambda (c)
+          (or (and (< (char-code c) 32)
+                   (not (member c '(#\Tab #\Newline #\Return))))
+              (= (char-code c) 127)))
+        string)))
 
 (deftest repl-eval-no-control-chars-in-printed
   (testing "printed result never contains control characters"
@@ -230,6 +233,16 @@
       (ok (search "out" stdout) "stdout content preserved")
       (ok (search "err" stderr) "stderr content preserved")
       (ok (search "res" printed) "printed content preserved"))))
+
+(deftest repl-eval-strips-del-character
+  (testing "DEL character (127) is stripped from all outputs"
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(progn (format t \"a~Cb\" (code-char 127)) (format nil \"x~Cy\" (code-char 127)))")
+      (declare (ignore value))
+      (ok (string= stdout "ab") "DEL stripped from stdout")
+      (ok (string= printed "\"xy\"") "DEL stripped from printed")
+      (ok (not (%has-control-chars-p stdout)) "no control chars in stdout")
+      (ok (not (%has-control-chars-p stderr)) "no control chars in stderr"))))
 
 (deftest generate-result-preview-list
   (testing "generates preview for list with kind, summary, elements, id"

@@ -22,6 +22,8 @@
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -34,8 +36,6 @@
    #:protocol-version
    #:make-state
    #:process-json-line))
-
-
 
 (in-package #:cl-mcp/src/protocol)
 
@@ -50,9 +50,102 @@
 (defun %decode-json (line)
   (yason:parse line))
 
+(defparameter +sanitize-max-elements+ 10000
+  "Maximum number of list/vector elements %sanitize-for-encoding will process.
+Guards against cyclic or extremely long lists causing OOM.")
+
+(defun %sanitize-for-encoding (obj &optional (depth 0))
+  "Recursively sanitize a JSON-compatible structure for encoding.
+Walks hash-tables, vectors, lists, and strings. Converts non-serializable
+leaf objects to their string representation. Depth-limited to 20 levels.
+Collections are capped at +sanitize-max-elements+ to guard against
+cyclic or extremely large structures."
+  (when (> depth 20) (return-from %sanitize-for-encoding obj))
+  (typecase obj
+    (string (sanitize-for-json obj))
+    (hash-table
+     (let ((clean (make-hash-table :test (hash-table-test obj)))
+           (count 0))
+       (maphash (lambda (k v)
+                  (when (< count +sanitize-max-elements+)
+                    (setf (gethash (if (stringp k)
+                                       (sanitize-for-json k)
+                                       (princ-to-string k))
+                                   clean)
+                          (%sanitize-for-encoding v (1+ depth)))
+                    (incf count)))
+                obj)
+       clean))
+    (vector
+     (let* ((limit (min (length obj) +sanitize-max-elements+))
+            (result (make-array limit)))
+       (loop for i below limit
+             do (setf (aref result i)
+                      (%sanitize-for-encoding (aref obj i) (1+ depth))))
+       result))
+    (cons
+     (loop for elt in obj
+           for i below +sanitize-max-elements+
+           collect (%sanitize-for-encoding elt (1+ depth))))
+    (t (cond
+         ((or (numberp obj) (eq obj t) (null obj)) obj)
+         (t (or (ignore-errors (princ-to-string obj))
+                "#<unrepresentable>"))))))
+
 (defun %encode-json (obj)
-  (with-output-to-string (stream)
-    (yason:encode obj stream)))
+  "Encode OBJ as a JSON string with resilient error handling.
+Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+On second failure, return a hardcoded valid JSON-RPC error response."
+  (handler-case
+      (with-output-to-string (stream) (yason:encode obj stream))
+    (error (e1)
+      (ignore-errors
+        (log-event :warn "json-encode-retry"
+                   "reason" (ignore-errors (princ-to-string e1))))
+      (handler-case
+          (let* ((id-preserved (ignore-errors
+                                 (and (hash-table-p obj) (gethash "id" obj))))
+                 (clean (%sanitize-for-encoding obj)))
+            ;; Restore original "id" so yason:encode escapes it properly.
+            ;; %sanitize-for-encoding strips \b/\f via sanitize-for-json,
+            ;; which would break JSON-RPC ID correlation.
+            (when (and id-preserved (hash-table-p clean))
+              (setf (gethash "id" clean) id-preserved))
+            (with-output-to-string (stream) (yason:encode clean stream)))
+        (error (e2)
+          (ignore-errors
+            (log-event :error "json-encode-failed"
+                       "reason" (ignore-errors (princ-to-string e2))))
+          (let* ((id (ignore-errors
+                       (and (hash-table-p obj) (gethash "id" obj))))
+                 (id-json (cond
+                            ((numberp id)
+                             (or (ignore-errors
+                                   (with-output-to-string (s)
+                                     (yason:encode id s)))
+                                 "null"))
+                            ((stringp id)
+                             (format nil "\"~A\""
+                                     (with-output-to-string (s)
+                                       ;; RFC 8259 compliant JSON string escaper.
+                                       ;; Operates on raw id to preserve all chars
+                                       ;; (sanitize-for-json would strip \b and \f).
+                                       (loop for c across id
+                                               do (let ((code (char-code c)))
+                                                    (cond
+                                                      ((char= c #\") (write-string "\\\"" s))
+                                                      ((char= c #\\) (write-string "\\\\" s))
+                                                      ((char= c #\Backspace) (write-string "\\b" s))
+                                                      ((char= c #\Page) (write-string "\\f" s))
+                                                      ((char= c #\Newline) (write-string "\\n" s))
+                                                      ((char= c #\Tab) (write-string "\\t" s))
+                                                      ((char= c #\Return) (write-string "\\r" s))
+                                                      ((< code #x20)
+                                                       (format s "\\u~4,'0X" code))
+                                                      (t (write-char c s))))))))
+                            (t "null"))))
+            (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
+                    id-json)))))))
 
 (defun %result (id payload)
   (make-ht "jsonrpc" "2.0" "id" id "result" payload))
@@ -100,8 +193,9 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
                            (namestring root-dir) "source"
                            (if root-path "rootPath" "rootUri"))))
           (error (e)
-            (log-event :warn "initialize.sync-root-failed" "path" root
-                       "error" (princ-to-string e)))))))
+            (ignore-errors
+              (log-event :warn "initialize.sync-root-failed" "path" root
+                         "error" (princ-to-string e))))))))
   (let* ((client-ver (and params (gethash "protocolVersion" params)))
          (supported
           (and client-ver
@@ -192,9 +286,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     (let ((msg (handler-case
                    (%decode-json trimmed)
                  (error (e)
-                   (log-event :warn "rpc.parse-error"
-                              "line" trimmed
-                              "error" (princ-to-string e))
+                   (ignore-errors
+                     (log-event :warn "rpc.parse-error"
+                                "line" trimmed
+                                "error" (princ-to-string e)))
                    (return-from process-json-line
                      (%encode-json (%error nil -32700 "Parse error")))))))
       (unless (hash-table-p msg)
@@ -226,8 +321,9 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                  (log-event :warn "rpc.invalid" "reason" "missing method")
                  resp)))
           (error (e)
-            (log-event :error "rpc.internal"
-                       "id" id
-                       "method" method
-                       "error" (princ-to-string e))
+            (ignore-errors
+              (log-event :error "rpc.internal"
+                         "id" id
+                         "method" method
+                         "error" (princ-to-string e)))
             (%encode-json (%error id -32603 "Internal error"))))))))

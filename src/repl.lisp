@@ -3,20 +3,20 @@
 (defpackage #:cl-mcp/src/repl
   (:use #:cl)
   (:import-from #:uiop #:print-backtrace)
-  (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread)
-  (:import-from #:cl-mcp/src/frame-inspector
-                #:capture-error-context)
-  (:import-from #:cl-mcp/src/object-registry
-                #:inspectable-p
-                #:register-object)
-  (:import-from #:cl-mcp/src/inspect
-                #:generate-result-preview)
+  (:import-from #:bordeaux-threads
+                #:thread-alive-p
+                #:make-thread
+                #:destroy-thread)
+  (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
+  (:import-from #:cl-mcp/src/object-registry #:inspectable-p #:register-object)
+  (:import-from #:cl-mcp/src/inspect #:generate-result-preview)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json)
   (:export #:repl-eval #:*default-eval-package*))
-
 
 (in-package #:cl-mcp/src/repl)
 
@@ -49,41 +49,8 @@
 
 (defun %sanitize-control-chars (string)
   "Remove control characters that are invalid in JSON strings.
-Removes ANSI escape sequences and other control chars except tab, newline, carriage return."
-  (when (null string)
-    (return-from %sanitize-control-chars string))
-  (let ((result (make-array (length string)
-                            :element-type 'character
-                            :fill-pointer 0
-                            :adjustable t))
-        (i 0)
-        (len (length string)))
-    (loop while (< i len)
-          do (let ((char (char string i)))
-               (cond
-                 ;; ANSI escape sequence: ESC [ ... (ending with letter)
-                 ((and (char= char (code-char 27)) ; ESC
-                       (< (1+ i) len)
-                       (char= (char string (1+ i)) #\[))
-                  ;; Skip until we find a letter (end of ANSI sequence)
-                  (incf i 2)
-                  (loop while (and (< i len)
-                                   (let ((c (char string i)))
-                                     (not (alpha-char-p c))))
-                        do (incf i))
-                  (when (< i len) (incf i))) ; skip the final letter
-                 ;; Keep tab, newline, carriage return
-                 ((member char '(#\Tab #\Newline #\Return))
-                  (vector-push-extend char result)
-                  (incf i))
-                 ;; Remove other control characters (ASCII 0-31)
-                 ((< (char-code char) 32)
-                  (incf i))
-                 ;; Keep normal characters
-                 (t
-                  (vector-push-extend char result)
-                  (incf i)))))
-    (coerce result 'string)))
+Delegates to sanitize-for-json which also strips DEL (127)."
+  (sanitize-for-json string))
 
 (defun %truncate-output (string max-output-length)
   (let ((sanitized (%sanitize-control-chars string)))
@@ -260,8 +227,8 @@ Options:
                                 :locals-preview-skip-internal locals-preview-skip-internal))))
     (%repl-eval-with-timeout thunk timeout-seconds)))
 
-(define-tool "repl-eval"
-  :description "Evaluate Common Lisp forms and return the last value as printed text.
+(define-tool "repl-eval" :description
+ "Evaluate Common Lisp forms and return the last value as printed text.
 Use this for testing, inspection, debugging, or loading systems (ql:quickload).
 Provide an existing package (e.g., CL-USER) and set print_level/print_length when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
@@ -285,90 +252,96 @@ The 'locals_preview_skip_internal' parameter (default: true) skips internal fram
 This ensures user code frames get previews even when buried under infrastructure.
 NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
 SBCL's default optimization does not preserve locals for inspection."
-  :args ((code :type :string :required t
-               :description "Code string of one or more forms evaluated sequentially")
-         (package :type :string
-                  :description "Existing package name (e.g., CL-USER); forms are read/evaluated there")
-         (print-level :type :integer :json-name "print_level"
-                      :description "Integer to limit printed nesting depth (omit to print fully)")
-         (print-length :type :integer :json-name "print_length"
-                       :description "Integer to limit printed list length (omit to print fully)")
-         (timeout-seconds :type :number :json-name "timeout_seconds"
-                          :description "Seconds to wait before timing out evaluation")
-         (max-output-length :type :integer :json-name "max_output_length"
-                            :description "Maximum characters for printed result/stdout/stderr")
-         (safe-read :type :boolean :json-name "safe_read"
-                    :description "When true, disables #. reader evaluation for safety")
-         (include-result-preview :type :boolean :json-name "include_result_preview"
-                                  :default t
-                                  :description "Include structural preview of non-primitive results (default: true)")
-         (preview-max-depth :type :integer :json-name "preview_max_depth"
-                            :description "Max nesting depth for preview (default: 1)")
-         (preview-max-elements :type :integer :json-name "preview_max_elements"
-                               :description "Max elements per collection in preview (default: 8)")
-         (locals-preview-frames :type :integer :json-name "locals_preview_frames"
-                                :description "Number of top stack frames to include local variable previews on error (default: 0)")
-         (locals-preview-max-depth :type :integer :json-name "locals_preview_max_depth"
-                                   :description "Max nesting depth for local variable previews (default: 1)")
-         (locals-preview-max-elements :type :integer :json-name "locals_preview_max_elements"
-                                      :description "Max elements per collection in local variable previews (default: 5)")
-         (locals-preview-skip-internal :type :boolean :json-name "locals_preview_skip_internal"
-                                       :default t
-                                       :description "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
-  :body
-  (multiple-value-bind (printed raw-value stdout stderr error-context)
-      (repl-eval code
-                 :package (or package *package*)
-                 :print-level print-level
-                 :print-length print-length
-                 :timeout-seconds timeout-seconds
-                 :max-output-length max-output-length
-                 :safe-read safe-read
-                 :locals-preview-frames locals-preview-frames
-                 :locals-preview-max-depth locals-preview-max-depth
-                 :locals-preview-max-elements locals-preview-max-elements
-                 :locals-preview-skip-internal locals-preview-skip-internal)
-    (let ((ht (make-ht "content" (text-content printed)
-                       "stdout" stdout
-                       "stderr" stderr)))
-      ;; Generate preview and register non-primitive results for inspection
-      (when (and (null error-context)
-                 (inspectable-p raw-value))
-        (if include-result-preview
-            ;; Generate preview (which also registers the object)
-            (let ((preview (generate-result-preview
-                            raw-value
-                            :max-depth (or preview-max-depth 1)
-                            :max-elements (or preview-max-elements 8))))
-              (setf (gethash "result_object_id" ht) (gethash "id" preview))
-              (setf (gethash "result_preview" ht) preview))
-            ;; Just register without preview
-            (let ((object-id (register-object raw-value)))
-              (when object-id
-                (setf (gethash "result_object_id" ht) object-id)))))
-      ;; Add error context if present
-      (when error-context
-        (setf (gethash "error_context" ht)
-              (make-ht "condition_type" (getf error-context :condition-type)
-                       "message" (getf error-context :message)
-                       "restarts" (mapcar (lambda (r)
-                                            (make-ht "name" (getf r :name)
-                                                     "description" (getf r :description)))
-                                          (getf error-context :restarts))
-                       "frames" (mapcar (lambda (f)
-                                          (make-ht "index" (getf f :index)
-                                                   "function" (getf f :function)
-                                                   "source_file" (getf f :source-file)
-                                                   "source_line" (getf f :source-line)
-                                                   "locals" (mapcar (lambda (l)
-                                                                      (let ((ht (make-ht "name" (getf l :name)
-                                                                                         "value" (getf l :value))))
-                                                                        (when (getf l :object-id)
-                                                                          (setf (gethash "object_id" ht) (getf l :object-id)))
-                                                                        (when (getf l :preview)
-                                                                          (setf (gethash "preview" ht) (getf l :preview)))
-                                                                        ht))
-                                                                    (getf f :locals))))
-                                        (getf error-context :frames)))))
-      (result id ht))))
-
+ :args
+ ((code :type :string :required t :description
+   "Code string of one or more forms evaluated sequentially")
+  (package :type :string :description
+   "Existing package name (e.g., CL-USER); forms are read/evaluated there")
+  (print-level :type :integer :json-name "print_level" :description
+   "Integer to limit printed nesting depth (omit to print fully)")
+  (print-length :type :integer :json-name "print_length" :description
+   "Integer to limit printed list length (omit to print fully)")
+  (timeout-seconds :type :number :json-name "timeout_seconds" :description
+   "Seconds to wait before timing out evaluation")
+  (max-output-length :type :integer :json-name "max_output_length" :description
+   "Maximum characters for printed result/stdout/stderr")
+  (safe-read :type :boolean :json-name "safe_read" :description
+   "When true, disables #. reader evaluation for safety")
+  (include-result-preview :type :boolean :json-name "include_result_preview"
+   :default t :description
+   "Include structural preview of non-primitive results (default: true)")
+  (preview-max-depth :type :integer :json-name "preview_max_depth" :description
+   "Max nesting depth for preview (default: 1)")
+  (preview-max-elements :type :integer :json-name "preview_max_elements"
+   :description "Max elements per collection in preview (default: 8)")
+  (locals-preview-frames :type :integer :json-name "locals_preview_frames"
+   :description
+   "Number of top stack frames to include local variable previews on error (default: 0)")
+  (locals-preview-max-depth :type :integer :json-name
+   "locals_preview_max_depth" :description
+   "Max nesting depth for local variable previews (default: 1)")
+  (locals-preview-max-elements :type :integer :json-name
+   "locals_preview_max_elements" :description
+   "Max elements per collection in local variable previews (default: 5)")
+  (locals-preview-skip-internal :type :boolean :json-name
+   "locals_preview_skip_internal" :default t :description
+   "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
+ :body
+ (multiple-value-bind (printed raw-value stdout stderr error-context)
+     (repl-eval code :package (or package *package*) :print-level print-level
+      :print-length print-length :timeout-seconds timeout-seconds
+      :max-output-length max-output-length :safe-read safe-read
+      :locals-preview-frames locals-preview-frames :locals-preview-max-depth
+      locals-preview-max-depth :locals-preview-max-elements
+      locals-preview-max-elements :locals-preview-skip-internal
+      locals-preview-skip-internal)
+   (let ((ht
+          (make-ht "content" (text-content printed) "stdout" stdout "stderr"
+           stderr)))
+     (when (and (null error-context) (inspectable-p raw-value))
+       (if include-result-preview
+           (let ((preview
+                  (generate-result-preview raw-value :max-depth
+                   (or preview-max-depth 1) :max-elements
+                   (or preview-max-elements 8))))
+             (setf (gethash "result_object_id" ht) (gethash "id" preview))
+             (setf (gethash "result_preview" ht) preview))
+           (let ((object-id (register-object raw-value)))
+             (when object-id
+               (setf (gethash "result_object_id" ht) object-id)))))
+     (when error-context
+       (setf (gethash "error_context" ht)
+               (make-ht "condition_type"
+                (sanitize-for-json (getf error-context :condition-type))
+                "message"
+                (sanitize-for-json (getf error-context :message))
+                "restarts"
+                (mapcar
+                 (lambda (r)
+                   (make-ht "name" (sanitize-for-json (getf r :name))
+                    "description"
+                    (sanitize-for-json (getf r :description))))
+                 (getf error-context :restarts))
+                "frames"
+                (mapcar
+                 (lambda (f)
+                   (make-ht "index" (getf f :index) "function"
+                    (sanitize-for-json (getf f :function))
+                    "source_file" (getf f :source-file)
+                    "source_line" (getf f :source-line) "locals"
+                    (mapcar
+                     (lambda (l)
+                       (let ((ht
+                              (make-ht "name"
+                               (sanitize-for-json (getf l :name))
+                               "value"
+                               (sanitize-for-json (getf l :value)))))
+                         (when (getf l :object-id)
+                           (setf (gethash "object_id" ht)
+                                   (getf l :object-id)))
+                         (when (getf l :preview)
+                           (setf (gethash "preview" ht) (getf l :preview)))
+                         ht))
+                     (getf f :locals))))
+                 (getf error-context :frames)))))
+     (result id ht))))

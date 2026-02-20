@@ -47,7 +47,7 @@
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" year mon day hour min sec)))
 
 (defun should-log-p (level)
-  (<= (%level->int level) (%level->int *log-level*)))
+  (>= (%level->int level) (%level->int *log-level*)))
 
 (defun log-event (level event &rest kvs)
   "Emit a JSON log line to *log-stream* with LEVEL and EVENT.
