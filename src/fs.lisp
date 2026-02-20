@@ -25,6 +25,10 @@
                 #:directory
                 #:directory-exists-p
                 #:absolute-pathname-p)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:pool-worker-info)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
   (:export #:fs-resolve-read-path
@@ -199,6 +203,8 @@ Returns a hash-table with keys:
         (when (and cwd (uiop:subpathp cwd root))
           (setf (gethash "relative_cwd" h)
                 (uiop:native-namestring (uiop:enough-pathname cwd root)))))
+      (when *use-worker-pool*
+        (setf (gethash "workers" h) (pool-worker-info)))
       h)))
 
 (defun fs-set-project-root (path)
