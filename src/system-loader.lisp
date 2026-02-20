@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:result
-                #:text-content)
+                #:text-content
+                #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -229,7 +230,12 @@ Examples:
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds (default: 120)"))
   :body
-  (let* ((ht (load-system system
+  (progn
+    (when (and timeout-seconds (not (plusp timeout-seconds)))
+      (error 'arg-validation-error
+             :arg-name "timeout_seconds"
+             :message "timeout_seconds must be a positive number"))
+    (let* ((ht (load-system system
                           :force force
                           :clear-fasls clear-fasls
                           :timeout-seconds (or timeout-seconds 120)))
@@ -248,5 +254,5 @@ Examples:
                ((string= status "error")
                 (format s "Error loading ~A: ~A"
                         system (gethash "message" ht)))))))
-    (setf (gethash "content" ht) (text-content summary))
-    (result id ht)))
+      (setf (gethash "content" ht) (text-content summary))
+      (result id ht))))
