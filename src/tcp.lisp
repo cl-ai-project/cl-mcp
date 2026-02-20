@@ -6,6 +6,10 @@
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:usocket)
   (:export
@@ -195,6 +199,9 @@ successfully started, or NIL if the start attempt failed."
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))
+      (when *use-worker-pool*
+        (ignore-errors
+         (release-session (format nil "tcp-~A" conn-id))))
       (log-event :info "tcp.conn.closed"
                  "conn" conn-id
                  "fd" (fd-count)))))

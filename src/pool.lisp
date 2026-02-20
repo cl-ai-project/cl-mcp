@@ -181,29 +181,37 @@ indefinitely if the spawn thread stalls."
 
 (defun %replenish-standbys ()
   "Spawn standby workers until the pool has *worker-pool-warmup*
-standbys.  Called in a background thread."
+standbys.  Called in a background thread.  Exits early when
+*pool-running* becomes NIL (shutdown in progress)."
   (unwind-protect
-       (loop
-         (let ((need-more nil))
-           (bt:with-lock-held (*pool-lock*)
-             (when (< (length *standby-workers*) *worker-pool-warmup*)
-               (setf need-more t)))
-           (unless need-more
-             (return))
-           (handler-case
-               (let ((w (spawn-worker)))
-                 (bt:with-lock-held (*pool-lock*)
-                   (push w *standby-workers*)
-                   (push w *all-workers*))
-                 (log-event :info "pool.standby.spawned"
-                            "worker_id" (worker-id w)))
-             (error (e)
-               (log-event :warn "pool.standby.spawn.failed"
-                          "error" (princ-to-string e))
-               ;; Avoid tight retry loop on persistent failures
-               (return)))))
-    ;; Always clear the flag so future replenish requests proceed
-    (bt:with-lock-held (*pool-lock*)
+      (loop
+       (unless *pool-running* (return))
+       (let ((need-more nil))
+         (bordeaux-threads:with-lock-held (*pool-lock*)
+           (when (and *pool-running*
+                      (< (length *standby-workers*) *worker-pool-warmup*))
+             (setf need-more t)))
+         (unless need-more (return))
+         (handler-case
+          (let ((w (spawn-worker)))
+            (bordeaux-threads:with-lock-held (*pool-lock*)
+              (cond
+               (*pool-running*
+                (push w *standby-workers*)
+                (push w *all-workers*))
+               (t
+                ;; Pool shutting down — kill the just-spawned worker
+                ;; to avoid orphans.
+                (ignore-errors (kill-worker w))
+                (return))))
+            (log-event :info "pool.standby.spawned"
+                       "worker_id" (worker-id w)))
+          (error (e)
+                 (log-event :warn "pool.standby.spawn.failed"
+                            "error" (princ-to-string e))
+                 ;; Avoid tight retry loop on persistent failures
+                 (return)))))
+    (bordeaux-threads:with-lock-held (*pool-lock*)
       (setf *replenish-running* nil))))
 
 (defun %schedule-replenish ()
@@ -225,41 +233,35 @@ Skips if a replenish thread is already running."
 
 (defun %handle-worker-crash (crashed-worker)
   "Handle a crashed worker: spawn a replacement, bind it to the same
-session, and set the needs-reset-notification flag."
+session, and set the needs-reset-notification flag.
+Skips workers whose state is not :bound (e.g. intentionally released)."
+  ;; Guard: if the worker was released between the monitor's snapshot
+  ;; and this call, its state will be :released — skip silently.
+  (unless (eq (worker-state crashed-worker) :bound)
+    (return-from %handle-worker-crash))
   (let ((session-id (worker-session-id crashed-worker)))
-    (log-event :warn "pool.worker.crashed"
-               "worker_id" (worker-id crashed-worker)
-               "session" session-id)
-    ;; Kill the crashed worker (cleanup resources)
+    (log-event :warn "pool.worker.crashed" "worker_id"
+     (worker-id crashed-worker) "session" session-id)
     (ignore-errors (kill-worker crashed-worker))
-    ;; Attempt to spawn a replacement
     (handler-case
-        (let ((new-worker (spawn-worker)))
-          (setf (worker-state new-worker) :bound)
-          (setf (worker-session-id new-worker) session-id)
-          (setf (worker-needs-reset-notification new-worker) t)
-          (bt:with-lock-held (*pool-lock*)
-            ;; Replace in affinity map
-            (when session-id
-              (setf (gethash session-id *affinity-map*) new-worker))
-            ;; Update all-workers: remove old, add new
-            (setf *all-workers* (remove crashed-worker *all-workers*))
-            (push new-worker *all-workers*))
-          (log-event :info "pool.worker.recovered"
-                     "old_worker_id" (worker-id crashed-worker)
-                     "new_worker_id" (worker-id new-worker)
-                     "session" session-id))
-      (error (e)
-        (log-event :error "pool.worker.recovery.failed"
-                   "worker_id" (worker-id crashed-worker)
-                   "session" session-id
-                   "error" (princ-to-string e))
-        ;; Remove the dead worker from pool state
-        (bt:with-lock-held (*pool-lock*)
-          (when session-id
-            (remhash session-id *affinity-map*))
-          (setf *all-workers*
-                (remove crashed-worker *all-workers*)))))))
+     (let ((new-worker (spawn-worker)))
+       (setf (worker-state new-worker) :bound)
+       (setf (worker-session-id new-worker) session-id)
+       (setf (worker-needs-reset-notification new-worker) t)
+       (bordeaux-threads:with-lock-held (*pool-lock*)
+         (when session-id (setf (gethash session-id *affinity-map*) new-worker))
+         (setf *all-workers* (remove crashed-worker *all-workers*))
+         (push new-worker *all-workers*))
+       (log-event :info "pool.worker.recovered" "old_worker_id"
+        (worker-id crashed-worker) "new_worker_id" (worker-id new-worker)
+        "session" session-id))
+     (error (e)
+            (log-event :error "pool.worker.recovery.failed" "worker_id"
+             (worker-id crashed-worker) "session" session-id "error"
+             (princ-to-string e))
+            (bordeaux-threads:with-lock-held (*pool-lock*)
+              (when session-id (remhash session-id *affinity-map*))
+              (setf *all-workers* (remove crashed-worker *all-workers*)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- health monitor
@@ -330,29 +332,31 @@ down any existing pool first)."
 
 (defun shutdown-pool ()
   "Shut down all workers and clean up the pool.  Stops the health
-monitor thread."
+monitor and waits for any in-flight replenish thread before
+snapshotting and killing workers."
   (log-event :info "pool.shutting-down")
-  ;; Stop health monitor
   (setf *pool-running* nil)
-  (when (and *health-thread*
-             (bt:threadp *health-thread*)
-             (bt:thread-alive-p *health-thread*))
-    ;; Give it time to notice *pool-running* = nil
-    (handler-case
-        (bt:join-thread *health-thread*)
-      (error ()
-        ;; Thread may have already exited
-        nil)))
+  ;; Join the health monitor thread.
+  (when
+      (and *health-thread* (bordeaux-threads:threadp *health-thread*)
+           (bordeaux-threads:thread-alive-p *health-thread*))
+    (handler-case (bordeaux-threads:join-thread *health-thread*)
+                  (error nil nil)))
   (setf *health-thread* nil)
-  ;; Kill all workers
+  ;; Wait for any in-flight replenish thread to finish.  The thread
+  ;; checks *pool-running* each iteration and will exit promptly.
+  (loop repeat 100
+        while (bordeaux-threads:with-lock-held (*pool-lock*)
+                *replenish-running*)
+        do (sleep 0.05))
+  ;; Snapshot and kill all workers.
   (let ((workers nil))
-    (bt:with-lock-held (*pool-lock*)
+    (bordeaux-threads:with-lock-held (*pool-lock*)
       (setf workers (copy-list *all-workers*))
       (setf *all-workers* nil
             *standby-workers* nil)
       (clrhash *affinity-map*))
-    (dolist (w workers)
-      (ignore-errors (kill-worker w))))
+    (dolist (w workers) (ignore-errors (kill-worker w))))
   (log-event :info "pool.shutdown-complete"))
 
 ;;; ---------------------------------------------------------------------------
@@ -416,12 +420,18 @@ Signals an error if the worker cannot be created."
 (defun release-session (session-id)
   "Release the worker bound to SESSION-ID.  Kills the worker and
 removes it from the pool.  No-op if the session has no bound
-worker."
+worker.
+
+The worker's state is set to :released under the pool lock so
+that the health monitor (which snapshots workers under the lock
+then checks state outside it) will skip it and not treat the
+impending kill as a crash."
   (let ((worker-to-kill nil))
-    (bt:with-lock-held (*pool-lock*)
+    (bordeaux-threads:with-lock-held (*pool-lock*)
       (let ((entry (gethash session-id *affinity-map*)))
         (when (and entry (typep entry 'worker))
           (setf worker-to-kill entry)
+          (setf (worker-state worker-to-kill) :released)
           (remhash session-id *affinity-map*)
           (setf *all-workers* (remove worker-to-kill *all-workers*)))))
     (when worker-to-kill

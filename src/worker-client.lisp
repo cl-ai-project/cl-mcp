@@ -246,6 +246,27 @@ Signals an error if the response contains a JSON-RPC error."
 ;;; Public API — spawn
 ;;; ---------------------------------------------------------------------------
 
+(defun %start-stderr-drain (worker)
+  "Start a daemon thread that drains the worker's stderr pipe.
+Without this, the child's log output (written to *error-output*)
+accumulates in an unread OS pipe buffer.  Once that buffer fills
+(typically 64 KB on Linux), the child blocks on every write to
+stderr, causing worker RPC calls to hang or time out."
+  (let ((process (worker-process-info worker))
+        (wid (worker-id worker)))
+    (when process
+      (let ((err (sb-ext:process-error process)))
+        (when err
+          (bordeaux-threads:make-thread
+           (lambda ()
+             (unwind-protect
+                 (ignore-errors
+                  (let ((buf (make-string 4096)))
+                    (loop for n = (read-sequence buf err)
+                          while (plusp n))))
+               (ignore-errors (close err))))
+           :name (format nil "worker-stderr-~A" wid)))))))
+
 (defun spawn-worker ()
   "Launch a worker child process and return a WORKER struct.
 The worker is launched via Roswell, reads its JSON handshake to
@@ -278,6 +299,7 @@ the handshake fails."
                            :tcp-port tcp-port
                            :swank-port swank-port
                            :pid pid)))
+              (%start-stderr-drain worker)
               (log-event :info "worker.spawned"
                          "id" id
                          "tcp_port" tcp-port
