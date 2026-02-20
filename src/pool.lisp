@@ -33,8 +33,7 @@
                 #:worker-tcp-port #:worker-swank-port
                 #:worker-pid #:worker-id)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:export #:*use-worker-pool*
-           #:*worker-pool-warmup*
+  (:export #:*worker-pool-warmup*
            #:initialize-pool
            #:shutdown-pool
            #:get-or-assign-worker
@@ -46,9 +45,6 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Configuration
 ;;; ---------------------------------------------------------------------------
-
-(defvar *use-worker-pool* nil
-  "When non-nil, delegate eval/introspect operations to worker processes.")
 
 (defvar *worker-pool-warmup* 1
   "Number of standby workers to pre-spawn and maintain.")

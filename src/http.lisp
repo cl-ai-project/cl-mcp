@@ -5,6 +5,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
+  (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -88,9 +91,11 @@ When *session-timeout-seconds* is NIL, sessions never expire."
     session))
 
 (defun delete-session (session-id)
-  "Delete a session by ID."
+  "Delete a session by ID.  Also releases the worker pool assignment."
   (bordeaux-threads:with-lock-held (*sessions-lock*)
-    (remhash session-id *sessions*)))
+    (remhash session-id *sessions*))
+  (when *use-worker-pool*
+    (release-session session-id)))
 
 ;;; ------------------------------------------------------------
 ;;; HTTP Handlers
@@ -307,6 +312,9 @@ Returns the acceptor instance and port number."
   (hunchentoot:start *http-server*)
   (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
 
+  (when *use-worker-pool*
+    (initialize-pool))
+
   (log-event :info "http.started"
              "host" host
              "port" *http-server-port*
@@ -321,6 +329,9 @@ Returns the acceptor instance and port number."
     (hunchentoot:stop *http-server*)
     (setf *http-server* nil
           *http-server-port* nil)
+    ;; Shut down worker pool before clearing sessions
+    (when *use-worker-pool*
+      (shutdown-pool))
     ;; Clear all sessions
     (bordeaux-threads:with-lock-held (*sessions-lock*)
       (clrhash *sessions*))
