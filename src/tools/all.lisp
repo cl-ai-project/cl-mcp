@@ -40,7 +40,9 @@
   (:import-from #:cl-mcp/src/clhs
                 #:clhs-lookup)
   (:import-from #:cl-mcp/src/test-runner
-                #:run-tests))
+                #:run-tests)
+  (:import-from #:cl-mcp/src/system-loader
+                #:load-system))
 
 (in-package #:cl-mcp/src/tools/all)
 

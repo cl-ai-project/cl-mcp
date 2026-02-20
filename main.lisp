@@ -63,6 +63,8 @@
   (:import-from #:cl-mcp/src/test-runner
                 #:run-tests
                 #:detect-test-framework)
+  (:import-from #:cl-mcp/src/system-loader
+                #:load-system)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -89,6 +91,8 @@
            ;; Test runner
            #:run-tests
            #:detect-test-framework
+           ;; System loader
+           #:load-system
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls
@@ -119,6 +123,5 @@
            #:http-server-running-p
            #:start-http-server
            #:stop-http-server))
-
 
 (in-package #:cl-mcp/main)

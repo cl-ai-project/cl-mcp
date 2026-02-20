@@ -16,6 +16,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 |------|------|------------|
 | Find symbol | `clgrep-search` | `pattern`, `form_types` |
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
+| Load system | `load-system` | `system`, `force` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit code | `lisp-edit-form` | `form_type`, `form_name` |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
@@ -105,6 +106,9 @@ What do you need to do?
 │   ├─ .lisp/.asd file ────→ lisp-read-file (collapsed=true, then name_pattern)
 │   └─ Other files ────────→ fs-read-file
 │
+├─ LOAD SYSTEM
+│   └─ Load/reload ASDF system ──→ load-system (PREFERRED over repl-eval + ql:quickload)
+│
 ├─ EXECUTE
 │   ├─ Test expression ────→ repl-eval
 │   └─ Inspect result ─────→ inspect-object (use result_object_id)
@@ -117,7 +121,7 @@ What do you need to do?
     └─ CL language spec ───→ clhs-lookup (symbol or section number)
 ```
 
-**Key Principle:** `clgrep-search` works without loading systems; `code-*` tools require `(ql:quickload ...)` first.
+**Key Principle:** `clgrep-search` works without loading systems; `code-*` tools require the system to be loaded first (use `load-system`).
 
 ### 1. Editing Code
 
@@ -202,10 +206,12 @@ When creating a new file with `fs-write-file`, follow this safe workflow:
 
 Use `repl-eval` for:
 - Testing expressions (`(+ 1 2)`).
-- Loading systems (`(ql:quickload :my-system)`).
 - Inspecting global state.
 - Verifying changes immediately after editing.
 - (Optional) Compiling definitions to surface warnings early.
+
+**For loading ASDF systems, prefer `load-system`** over `(ql:quickload ...)` via `repl-eval`.
+`load-system` handles staleness (force-reload), output suppression, and timeouts automatically.
 
 **WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They are lost if the server restarts. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
 
@@ -269,12 +275,11 @@ Response includes:
 
 ### Dependencies
 - **Symbol not found?** The defining system might not be loaded.
-- **Solution:** Load via `repl-eval`:
+- **Solution:** Use `load-system` to load it:
   ```json
-  {"code": "(ql:quickload :my-system)", "package": "CL-USER"}
+  {"name": "load-system", "arguments": {"system": "my-system"}}
   ```
-- **Inspect ASDF system metadata/dependencies:** Use `repl-eval` (the dedicated ASDF tools are currently disabled):
-- **Fallback:** If you need raw ASDF state, use `repl-eval`:
+- **Inspect ASDF system metadata/dependencies:** Use `repl-eval`:
   ```json
   {"code": "(asdf:registered-systems)", "package": "CL-USER"}
   ```
@@ -467,13 +472,13 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 
 **Alternative: Use `repl-eval`** when you need more control or custom test invocation:
 ```json
-{"code": "(ql:quickload :my-system/tests)", "package": "CL-USER"}
+{"name": "load-system", "arguments": {"system": "my-system/tests"}}
 {"code": "(rove:run :my-system/tests)", "package": "CL-USER"}
 ```
 
 **Note:** Single test execution with `run-tests` requires the test package to be loaded. Either:
 - Run system-level tests first (which loads the package), or
-- Load explicitly: `(ql:quickload :my-system/tests)` via `repl-eval`
+- Load explicitly via `load-system`: `{"system": "my-system/tests"}`
 
 ### Scenario: Adding New Feature
 
@@ -494,7 +499,7 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 
 3. **Update .asd:** Add to system dependencies (use `lisp-edit-form` on the `.asd` file)
 
-4. **Load and test:** `(ql:quickload :my-system)` then iterate with `repl-eval`
+4. **Load and test:** Use `load-system` to load the system, then iterate with `repl-eval`
 
 5. **Expand:** Use `lisp-edit-form` to add more functions
 
@@ -548,7 +553,7 @@ When primary tools fail or are insufficient:
 
 ### Symbol Not Found After Loading
 - **Symptom:** `code-find` or `code-describe` returns "symbol not found"
-- **Diagnosis:** System might not be loaded despite `(ql:quickload ...)`
+- **Diagnosis:** System might not be loaded despite calling `load-system`
 - **Solution:** Use `lisp-read-file` with `name_pattern` as filesystem-level search:
   ```json
   {"path": "src/", "name_pattern": "^my-symbol$"}
@@ -575,7 +580,7 @@ When primary tools fail or are insufficient:
 - Typo in symbol name
 
 **Solutions:**
-1. **Load the system:** `(ql:quickload :my-system)` via `repl-eval`
+1. **Load the system:** Use `load-system` with `{"system": "my-system"}`
 2. **Use package-qualified symbols:** `my-package:my-symbol` instead of `my-symbol`
 3. **Check package exports:** `(do-external-symbols (s :my-package) (print s))` via `repl-eval`
 4. **Fallback to filesystem search:** Use `lisp-read-file` with `name_pattern`
@@ -647,7 +652,7 @@ When exploring, batch independent operations:
 - **Don't re-read:** Cache file contents mentally within a task
 
 ### REPL Efficiency
-- **Load once:** `(ql:quickload ...)` at session start, not repeatedly
+- **Load once:** Use `load-system` at session start, not repeatedly
 - **Batch evals:** Combine related expressions in one `repl-eval` call
 - **Compile late:** Only compile when implementation stabilizes
 
@@ -664,7 +669,7 @@ When exploring, batch independent operations:
 
 **Session start:**
 1. `fs-set-project-root` with `"."`
-2. `(ql:quickload :system)` if needed
+2. `load-system` to load your system if needed
 
 **Development loop:**
 1. `repl-eval` — experiment until correct
@@ -672,7 +677,7 @@ When exploring, batch independent operations:
 3. `repl-eval` — verify
 
 **When stuck:**
-- Symbol not found → `(ql:quickload ...)` or use `clgrep-search`
+- Symbol not found → `load-system` to load the system, or use `clgrep-search`
 - Form not matched → check `form_type` and `form_name` with `lisp-read-file`
 - Package issues → use package-qualified symbols: `pkg:symbol`
 - Unsure about CL semantics → `clhs-lookup` with symbol or section number

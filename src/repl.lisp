@@ -168,6 +168,9 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
               nil))))
 
 (defun %repl-eval-with-timeout (thunk timeout-seconds)
+  "Execute THUNK with a polling-based timeout (50ms granularity).
+If the worker completes during the final polling interval, returns
+the result as success -- completed work is never discarded as a timeout."
   (if (and timeout-seconds (plusp timeout-seconds))
       (let* ((result-box nil)
              (worker (bordeaux-threads:make-thread
@@ -178,15 +181,16 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
               when (not (bordeaux-threads:thread-alive-p worker))
               do (return-from %repl-eval-with-timeout (values-list result-box))
               do (sleep 0.05d0))
-        ;; timed out
-        ;; Avoid destroying a thread that already exited while we were checking.
-        (when (bordeaux-threads:thread-alive-p worker)
-          (bordeaux-threads:destroy-thread worker))
-        (values (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
-                :timeout
-                ""
-                ""
-                nil))
+        ;; Worker may have completed during the last sleep window.
+        ;; Re-check before declaring timeout.
+        (cond
+          ((not (bordeaux-threads:thread-alive-p worker))
+           (values-list result-box))
+          (t
+           (ignore-errors (bordeaux-threads:destroy-thread worker))
+           (values
+            (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
+            :timeout "" "" nil))))
       (funcall thunk)))
 
 (defun repl-eval (input &key (package *default-eval-package*)
@@ -229,11 +233,15 @@ Options:
 
 (define-tool "repl-eval" :description
  "Evaluate Common Lisp forms and return the last value as printed text.
-Use this for testing, inspection, debugging, or loading systems (ql:quickload).
+Use this for testing, inspection, debugging, or exploring runtime state.
 Provide an existing package (e.g., CL-USER) and set print_level/print_length when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
 To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
 to save changes to files.
+
+IMPORTANT: For loading ASDF systems, prefer the dedicated 'load-system' tool.
+It handles staleness (force-reload), output suppression, and timeouts automatically.
+Only use repl-eval with ql:quickload if you need non-standard load options.
 
 When the result is a non-primitive object (not a number, string, symbol, or character),
 the response includes:
