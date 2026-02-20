@@ -393,3 +393,64 @@
           ;; ID must round-trip: yason encodes \b and \f as JSON escapes
           (ok (string= id-with-ctrl (gethash "id" obj))
               "ID must match original including \\b and \\f"))))))
+
+(deftest encode-json-level3-fallback-produces-valid-error
+  (testing "level-3 hardcoded error response when both level-1 and level-2 fail"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (sanitize-fn-sym (find-symbol "%SANITIZE-FOR-ENCODING"
+                                         :cl-mcp/src/protocol))
+           (orig-fn (fdefinition sanitize-fn-sym))
+           (ht (make-hash-table :test 'equal)))
+      (setf (gethash "jsonrpc" ht) "2.0")
+      (setf (gethash "id" ht) 99)
+      ;; Symbol value fails yason:encode at level-1 (not a JSON type).
+      ;; %sanitize-for-encoding is replaced below, so level-2 also fails.
+      (setf (gethash "result" ht) :not-json-encodable)
+      ;; Temporarily replace %sanitize-for-encoding to force level-2 failure,
+      ;; causing %encode-json to fall through to level-3 hardcoded response.
+      (unwind-protect
+          (progn
+            (setf (fdefinition sanitize-fn-sym)
+                  (lambda (obj &optional depth)
+                    (declare (ignore obj depth))
+                    (error "forced sanitize failure for testing")))
+            (let ((json (funcall encode-fn ht)))
+              (ok (stringp json) "should return a string")
+              (let ((obj (parse json)))
+                (ok obj "should parse as valid JSON")
+                (ok (eql 99 (gethash "id" obj))
+                    "should preserve the integer request id")
+                (ok (gethash "error" obj) "should have error object")
+                (ok (= -32603 (gethash "code" (gethash "error" obj)))
+                    "should have internal error code -32603")
+                (ok (search "encoding failed"
+                            (gethash "message" (gethash "error" obj)))
+                    "should have encoding failure message"))))
+        (setf (fdefinition sanitize-fn-sym) orig-fn)))))
+
+(deftest encode-json-level3-preserves-string-id
+  (testing "level-3 hardcoded response preserves string ID with control chars"
+    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+           (sanitize-fn-sym (find-symbol "%SANITIZE-FOR-ENCODING"
+                                         :cl-mcp/src/protocol))
+           (orig-fn (fdefinition sanitize-fn-sym))
+           (ht (make-hash-table :test 'equal))
+           (id-with-ctrl (format nil "req~Cbs~Cff" #\Backspace #\Page)))
+      (setf (gethash "jsonrpc" ht) "2.0")
+      (setf (gethash "id" ht) id-with-ctrl)
+      (setf (gethash "result" ht) :not-json-encodable)
+      (unwind-protect
+          (progn
+            (setf (fdefinition sanitize-fn-sym)
+                  (lambda (obj &optional depth)
+                    (declare (ignore obj depth))
+                    (error "forced sanitize failure for testing")))
+            (let ((json (funcall encode-fn ht)))
+              (ok (stringp json) "should return a string")
+              (let ((obj (parse json)))
+                (ok obj "should parse as valid JSON")
+                ;; ID with \b and \f must survive level-3 escaper
+                (ok (string= id-with-ctrl (gethash "id" obj))
+                    "should preserve string ID including \\b and \\f")
+                (ok (gethash "error" obj) "should have error object"))))
+        (setf (fdefinition sanitize-fn-sym) orig-fn)))))
