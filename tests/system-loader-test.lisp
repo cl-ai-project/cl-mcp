@@ -3,7 +3,9 @@
 (defpackage #:cl-mcp/tests/system-loader-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/system-loader
-                #:load-system))
+                #:load-system)
+  (:import-from #:cl-mcp/src/system-loader-core
+                #:%load-with-timeout))
 
 (in-package #:cl-mcp/tests/system-loader-test)
 
@@ -36,7 +38,7 @@
     ;; Use %load-with-timeout directly with a thunk that sleeps well beyond
     ;; the polling window to guarantee the worker is still alive at deadline.
     (multiple-value-bind (result-list timed-out-p errored-p)
-        (cl-mcp/src/system-loader::%load-with-timeout
+        (%load-with-timeout
          (lambda () (sleep 10) :never-reached)
          0.05)
       (ok timed-out-p "should report timeout")
@@ -76,7 +78,7 @@
     ;; (about 100ms effective). The worker sleeps 60ms, so it exceeds the
     ;; nominal timeout but still completes before the rounded polling deadline.
     (multiple-value-bind (result-list timed-out-p errored-p)
-        (cl-mcp/src/system-loader::%load-with-timeout
+        (%load-with-timeout
          (lambda () (sleep 0.06) :done)
          0.0501)
       (ok (not timed-out-p) "completed work should not be reported as timeout")
