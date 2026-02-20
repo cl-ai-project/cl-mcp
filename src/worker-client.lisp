@@ -329,13 +329,31 @@ the handshake fails."
 ;;; Public API — RPC
 ;;; ---------------------------------------------------------------------------
 
+(defun %mark-worker-crashed (worker reason)
+  "Mark WORKER as crashed, set reset notification flag, close its
+stream to prevent further use, and log the event.  Returns nothing."
+  (setf (worker-state worker) :crashed)
+  (setf (worker-needs-reset-notification worker) t)
+  ;; Close the stream/socket to prevent stale-response corruption.
+  ;; The next RPC attempt will see :crashed state before trying I/O.
+  (ignore-errors
+    (when (worker-socket worker)
+      (usocket:socket-close (worker-socket worker))
+      (setf (worker-socket worker) nil
+            (worker-stream worker) nil)))
+  (log-event :warn "worker.crashed"
+             "id" (worker-id worker)
+             "pid" (worker-pid worker)
+             "reason" reason))
+
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
 
-Signals WORKER-CRASHED if the worker process has died (EOF on stream).
-The worker's state is set to :crashed and needs-reset-notification is
-flagged."
+Signals WORKER-CRASHED if the worker process has died (EOF on stream),
+timed out (sb-ext:timeout), or encountered a stream/socket error.
+On timeout, the stream is closed to prevent permanent corruption from
+stale responses in the TCP buffer."
   (bt:with-lock-held ((worker-stream-lock worker))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
@@ -343,11 +361,13 @@ flagged."
             (%send-json-rpc (worker-stream worker) id method params)
             (%read-json-rpc-response (worker-stream worker) id timeout))
         (end-of-file ()
-          (setf (worker-state worker) :crashed)
-          (setf (worker-needs-reset-notification worker) t)
-          (log-event :warn "worker.crashed"
-                     "id" (worker-id worker)
-                     "pid" (worker-pid worker))
+          (%mark-worker-crashed worker "eof")
+          (error 'worker-crashed :worker worker))
+        (sb-ext:timeout ()
+          (%mark-worker-crashed worker "timeout")
+          (error 'worker-crashed :worker worker))
+        (stream-error ()
+          (%mark-worker-crashed worker "stream-error")
           (error 'worker-crashed :worker worker))))))
 
 ;;; ---------------------------------------------------------------------------

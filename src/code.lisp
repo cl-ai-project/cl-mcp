@@ -7,7 +7,7 @@
                 #:code-describe-symbol
                 #:code-find-references)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content)
+                #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/proxy
@@ -50,8 +50,11 @@ and is loaded"))
                              "content" (text-content
                                         (format nil "~A defined in ~A at line ~D"
                                                 symbol path line))))
-            (rpc-error id -32004
-                       (format nil "Definition not found for ~A" symbol))))))
+            (result id
+                    (make-ht "isError" t
+                             "content" (text-content
+                                        (format nil "Definition not found for ~A"
+                                                symbol))))))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.

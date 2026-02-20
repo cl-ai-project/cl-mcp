@@ -69,6 +69,7 @@
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-pool-warmup*
+                #:*max-pool-size*
                 #:initialize-pool
                 #:shutdown-pool
                 #:broadcast-root-to-workers)
@@ -133,6 +134,7 @@
            ;; Worker pool
            #:*use-worker-pool*
            #:*worker-pool-warmup*
+           #:*max-pool-size*
            #:initialize-pool
            #:shutdown-pool
            #:broadcast-root-to-workers))
