@@ -71,6 +71,9 @@
 (defvar *pool-running* nil
   "Flag controlling the health monitor loop.  Set to NIL to stop.")
 
+(defvar *replenish-running* nil
+  "Flag preventing concurrent replenish threads.  Set under *pool-lock*.")
+
 ;;; ---------------------------------------------------------------------------
 ;;; Placeholder struct -- coordinates concurrent spawn requests
 ;;; ---------------------------------------------------------------------------
@@ -179,33 +182,40 @@ indefinitely if the spawn thread stalls."
 (defun %replenish-standbys ()
   "Spawn standby workers until the pool has *worker-pool-warmup*
 standbys.  Called in a background thread."
-  (loop
-    (let ((need-more nil))
-      (bt:with-lock-held (*pool-lock*)
-        (when (< (length *standby-workers*) *worker-pool-warmup*)
-          (setf need-more t)))
-      (unless need-more
-        (return))
-      (handler-case
-          (let ((w (spawn-worker)))
-            (bt:with-lock-held (*pool-lock*)
-              (push w *standby-workers*)
-              (push w *all-workers*))
-            (log-event :info "pool.standby.spawned"
-                       "worker_id" (worker-id w)))
-        (error (e)
-          (log-event :warn "pool.standby.spawn.failed"
-                     "error" (princ-to-string e))
-          ;; Avoid tight retry loop on persistent failures
-          (return))))))
+  (unwind-protect
+       (loop
+         (let ((need-more nil))
+           (bt:with-lock-held (*pool-lock*)
+             (when (< (length *standby-workers*) *worker-pool-warmup*)
+               (setf need-more t)))
+           (unless need-more
+             (return))
+           (handler-case
+               (let ((w (spawn-worker)))
+                 (bt:with-lock-held (*pool-lock*)
+                   (push w *standby-workers*)
+                   (push w *all-workers*))
+                 (log-event :info "pool.standby.spawned"
+                            "worker_id" (worker-id w)))
+             (error (e)
+               (log-event :warn "pool.standby.spawn.failed"
+                          "error" (princ-to-string e))
+               ;; Avoid tight retry loop on persistent failures
+               (return)))))
+    ;; Always clear the flag so future replenish requests proceed
+    (bt:with-lock-held (*pool-lock*)
+      (setf *replenish-running* nil))))
 
 (defun %schedule-replenish ()
-  "Spawn a background thread to replenish standby workers if needed."
-  (let ((need-more nil))
+  "Spawn a background thread to replenish standby workers if needed.
+Skips if a replenish thread is already running."
+  (let ((should-start nil))
     (bt:with-lock-held (*pool-lock*)
-      (when (< (length *standby-workers*) *worker-pool-warmup*)
-        (setf need-more t)))
-    (when need-more
+      (when (and (not *replenish-running*)
+                 (< (length *standby-workers*) *worker-pool-warmup*))
+        (setf *replenish-running* t
+              should-start t)))
+    (when should-start
       (bt:make-thread #'%replenish-standbys
                       :name "pool-replenish"))))
 
@@ -357,51 +367,47 @@ the same new session will coordinate via a placeholder so only
 one spawn occurs.
 
 Signals an error if the worker cannot be created."
-  (let ((entry nil)
-        (need-spawn nil)
-        (assigned-from-standby nil))
-    ;; Phase 1: Check state under pool-lock
-    (bt:with-lock-held (*pool-lock*)
+  (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
+        (need-reset nil))
+    (bordeaux-threads:with-lock-held (*pool-lock*)
       (setf entry (gethash session-id *affinity-map*))
       (cond
-        ;; Path 1: Existing live worker bound to this session
-        ((and entry (typep entry 'worker) (eq :bound (worker-state entry)))
-         (return-from get-or-assign-worker entry))
-        ;; Path 1b: Existing dead/crashed worker — remove and reassign
-        ((and entry (typep entry 'worker))
-         (remhash session-id *affinity-map*)
-         (setf *all-workers* (remove entry *all-workers*))
-         (setf entry nil))
-        ;; Path 2: Another thread is already spawning for this session
-        ((and entry (typep entry 'worker-placeholder))
-         nil))
-      ;; Path 3: No entry (or dead entry cleared above) — assign
+       ;; Path 1: Existing bound worker — return immediately
+       ((and entry (typep entry 'worker) (eq :bound (worker-state entry)))
+        (return-from get-or-assign-worker entry))
+       ;; Path 1b: Existing dead/crashed worker — remove and reassign
+       ((and entry (typep entry 'worker))
+        (remhash session-id *affinity-map*)
+        (setf *all-workers* (remove entry *all-workers*))
+        (setf entry nil
+              need-reset t))
+       ;; Path 2: Placeholder — another thread is spawning
+       ((and entry (typep entry 'worker-placeholder))
+        nil))
+      ;; Phase 2: assign standby or spawn
       (when (null entry)
-         (if *standby-workers*
-             ;; Standby available -- assign immediately
-             (let ((w (pop *standby-workers*)))
-               (setf (worker-state w) :bound
-                     (worker-session-id w) session-id
-                     (gethash session-id *affinity-map*) w)
-               (setf assigned-from-standby w))
-             ;; No standby -- we become the spawning thread
-             (let ((ph (make-worker-placeholder
-                        :session-id session-id)))
-               (setf (gethash session-id *affinity-map*) ph
-                     entry ph
-                     need-spawn t)))))
-    ;; Phase 2: Outside pool-lock
+        (if *standby-workers*
+            (let ((w (pop *standby-workers*)))
+              (setf (worker-state w) :bound
+                    (worker-session-id w) session-id
+                    (gethash session-id *affinity-map*) w)
+              (when need-reset
+                (setf (worker-needs-reset-notification w) t))
+              (setf assigned-from-standby w))
+            (let ((ph (make-worker-placeholder :session-id session-id)))
+              (setf (gethash session-id *affinity-map*) ph
+                    entry ph
+                    need-spawn t)))))
     (cond
-      (assigned-from-standby
-       ;; Replenish standbys in background (outside lock)
-       (%schedule-replenish)
-       assigned-from-standby)
-      (need-spawn
-       ;; We are the spawning thread
-       (%spawn-and-bind session-id entry))
-      (t
-       ;; We are a waiting thread
-       (%wait-for-placeholder entry)))))
+     (assigned-from-standby
+      (%schedule-replenish)
+      assigned-from-standby)
+     (need-spawn
+      (let ((w (%spawn-and-bind session-id entry)))
+        (when need-reset
+          (setf (worker-needs-reset-notification w) t))
+        w))
+     (t (%wait-for-placeholder entry)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- release-session

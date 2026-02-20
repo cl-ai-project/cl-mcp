@@ -318,7 +318,8 @@ path resolution context."
                      "project_root" (gethash "project_root" info)
                      "cwd" (gethash "cwd" info)
                      "project_root_source" (gethash "project_root_source" info)
-                     "relative_cwd" (gethash "relative_cwd" info)))))
+                     "relative_cwd" (gethash "relative_cwd" info)
+                     "workers" (gethash "workers" info)))))
 
 (define-tool "fs-set-project-root"
   :description "Set the server's project root directory to the specified path.
