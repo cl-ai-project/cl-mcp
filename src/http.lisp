@@ -5,6 +5,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
+  (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -38,9 +41,12 @@
   "Lock for thread-safe session access.")
 
 (defparameter *session-timeout-seconds*
-  nil
-  "Session expiration time in seconds. NIL disables timeout (default).
-Set to a positive number to enable idle session expiration.")
+  3600
+  "Session expiration time in seconds.  Default is 3600 (1 hour).
+When a session has been idle longer than this, the next access
+evicts it and releases the associated worker process.  Set to NIL
+to disable timeout (not recommended — leaked sessions consume
+100-500MB each via their worker process).")
 
 (defstruct http-session
   "HTTP session containing MCP state and metadata."
@@ -50,34 +56,35 @@ Set to a positive number to enable idle session expiration.")
   (last-access (get-universal-time) :type integer))
 
 (defun generate-session-id ()
-  "Generate a pseudo-random session ID."
-  (format nil "~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)"
-          (random (expt 2 64))
-          (random (expt 2 64))
-          (random (expt 2 64))
-          (random (expt 2 64))))
+  "Generate a cryptographically random session ID using /dev/urandom."
+  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
+    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s)
+      (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
 
 (defun get-session (session-id)
   "Get session by ID, returning NIL if not found or expired.
 When *session-timeout-seconds* is NIL, sessions never expire."
-  (bordeaux-threads:with-lock-held (*sessions-lock*)
-    (let ((session (gethash session-id *sessions*)))
-      (when session
-        (let ((now (get-universal-time)))
-          (cond
-           ;; Timeout disabled - always return session
-           ((null *session-timeout-seconds*)
-            (setf (http-session-last-access session) now)
-            session)
-           ;; Timeout enabled - check expiration
-           ((> (- now (http-session-last-access session))
-               *session-timeout-seconds*)
-            (remhash session-id *sessions*)
-            nil)
-           ;; Not expired - update last access and return
-           (t
-            (setf (http-session-last-access session) now)
-            session)))))))
+  (let ((result nil)
+        (expired-id nil))
+    (bordeaux-threads:with-lock-held (*sessions-lock*)
+      (let ((session (gethash session-id *sessions*)))
+        (when session
+          (let ((now (get-universal-time)))
+            (cond
+              ((null *session-timeout-seconds*)
+               (setf (http-session-last-access session) now)
+               (setf result session))
+              ((> (- now (http-session-last-access session))
+                  *session-timeout-seconds*)
+               (remhash session-id *sessions*)
+               (setf expired-id session-id))
+              (t
+               (setf (http-session-last-access session) now)
+               (setf result session)))))))
+    (when (and expired-id *use-worker-pool*)
+      (ignore-errors (release-session expired-id)))
+    result))
 
 (defun create-session ()
   "Create a new session and return it."
@@ -88,9 +95,73 @@ When *session-timeout-seconds* is NIL, sessions never expire."
     session))
 
 (defun delete-session (session-id)
-  "Delete a session by ID."
+  "Delete a session by ID.  Also releases the worker pool assignment."
   (bordeaux-threads:with-lock-held (*sessions-lock*)
-    (remhash session-id *sessions*)))
+    (remhash session-id *sessions*))
+  (when *use-worker-pool*
+    (release-session session-id)))
+
+;;; ------------------------------------------------------------
+;;; Session Cleanup
+;;; ------------------------------------------------------------
+
+(defvar *cleanup-thread* nil
+  "Background thread for periodic session cleanup.")
+
+(defvar *cleanup-running* nil
+  "Flag controlling the session cleanup loop.")
+
+(defparameter *cleanup-interval-seconds* 300
+  "Interval in seconds between session cleanup sweeps.  Default is
+300 (5 minutes).")
+
+(defun %session-cleanup-loop ()
+  "Periodically sweep expired sessions and release their workers.
+Runs until *cleanup-running* becomes NIL.  Uses short sleep intervals
+for responsive shutdown (at most 1 second delay)."
+  (loop while *cleanup-running*
+        do (loop repeat (ceiling *cleanup-interval-seconds*)
+                 while *cleanup-running*
+                 do (sleep 1))
+           (when *cleanup-running*
+             (handler-case
+                 (let ((expired nil)
+                       (now (get-universal-time)))
+                   (bordeaux-threads:with-lock-held (*sessions-lock*)
+                     (when *session-timeout-seconds*
+                       (maphash
+                        (lambda (id session)
+                          (when (> (- now (http-session-last-access session))
+                                   *session-timeout-seconds*)
+                            (push id expired)))
+                        *sessions*)
+                       (dolist (id expired)
+                         (remhash id *sessions*))))
+                   (when expired
+                     (log-event :info "http.session.cleanup"
+                                "expired_count" (length expired))
+                     (when *use-worker-pool*
+                       (dolist (id expired)
+                         (ignore-errors (release-session id))))))
+               (error (e)
+                 (log-event :error "http.session.cleanup.error"
+                            "error" (princ-to-string e)))))))
+
+(defun %start-session-cleanup ()
+  "Start the background session cleanup thread."
+  (setf *cleanup-running* t
+        *cleanup-thread*
+        (bordeaux-threads:make-thread #'%session-cleanup-loop
+                                      :name "session-cleanup")))
+
+(defun %stop-session-cleanup ()
+  "Stop the background session cleanup thread."
+  (setf *cleanup-running* nil)
+  (when (and *cleanup-thread*
+             (bordeaux-threads:threadp *cleanup-thread*)
+             (bordeaux-threads:thread-alive-p *cleanup-thread*))
+    (ignore-errors (bordeaux-threads:join-thread *cleanup-thread*)))
+  (setf *cleanup-thread* nil))
 
 ;;; ------------------------------------------------------------
 ;;; HTTP Handlers
@@ -143,7 +214,8 @@ When *session-timeout-seconds* is NIL, sessions never expire."
            (state (http-session-state session))
            (line (with-output-to-string (s)
                    (yason:encode body s)))
-           (response (process-json-line line state)))
+           (response (let ((cl-mcp/src/protocol:*current-session-id* (http-session-id session)))
+                       (process-json-line line state))))
       (log-event :info "http.initialize"
                  "session-id" (http-session-id session))
       (set-header :mcp-session-id (http-session-id session))
@@ -156,7 +228,8 @@ When *session-timeout-seconds* is NIL, sessions never expire."
     (let* ((state (http-session-state session))
            (line (with-output-to-string (s)
                    (yason:encode body s)))
-           (response (process-json-line line state)))
+           (response (let ((cl-mcp/src/protocol:*current-session-id* session-id))
+                       (process-json-line line state))))
       (log-event :debug "http.response"
                  "session-id" session-id
                  "has-response" (not (null response)))
@@ -247,14 +320,35 @@ Currently returns 405 as SSE is not yet implemented."
 ;;; Dispatcher
 ;;; ------------------------------------------------------------
 
+(defun %loopback-origin-p (origin)
+  "Return T only if ORIGIN is a loopback address.
+Validates the character after the hostname to prevent substring
+attacks like localhost.evil.com."
+  (flet ((check-prefix (prefix)
+           (let ((len (length prefix)))
+             (and (>= (length origin) len)
+                  (string-equal origin prefix :end1 len)
+                  ;; After prefix: end-of-string, colon (port), or slash (path)
+                  (or (= (length origin) len)
+                      (char= (char origin len) #\:)
+                      (char= (char origin len) #\/))))))
+    (or (check-prefix "http://localhost")
+        (check-prefix "https://localhost")
+        (check-prefix "http://127.0.0.1")
+        (check-prefix "https://127.0.0.1")
+        (check-prefix "http://[::1]")
+        (check-prefix "https://[::1]"))))
+
 (defun mcp-dispatcher (request)
   "Dispatch requests to the MCP endpoint."
   (let ((path (hunchentoot:script-name request))
         (method (hunchentoot:request-method request)))
     (when (string= path "/mcp")
       (lambda ()
-        ;; Set CORS headers for local development
-        (set-header :access-control-allow-origin "*")
+        ;; Set CORS headers — restrict to loopback origins
+        (let ((origin (get-header :origin)))
+          (when (and origin (%loopback-origin-p origin))
+            (set-header :access-control-allow-origin origin)))
         (set-header :access-control-expose-headers "Mcp-Session-Id")
 
         (case method
@@ -302,8 +396,15 @@ Returns the acceptor instance and port number."
                        :access-log-destination nil
                        :message-log-destination nil))
 
+  ;; Initialize pool before accepting connections to avoid race window
+  (when *use-worker-pool*
+    (initialize-pool))
+
   (hunchentoot:start *http-server*)
   (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
+
+  ;; Start periodic session cleanup
+  (%start-session-cleanup)
 
   (log-event :info "http.started"
              "host" host
@@ -319,6 +420,11 @@ Returns the acceptor instance and port number."
     (hunchentoot:stop *http-server*)
     (setf *http-server* nil
           *http-server-port* nil)
+    ;; Stop session cleanup thread
+    (%stop-session-cleanup)
+    ;; Shut down worker pool before clearing sessions
+    (when *use-worker-pool*
+      (shutdown-pool))
     ;; Clear all sessions
     (bordeaux-threads:with-lock-held (*sessions-lock*)
       (clrhash *sessions*))

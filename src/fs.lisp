@@ -25,6 +25,12 @@
                 #:directory
                 #:directory-exists-p
                 #:absolute-pathname-p)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*
+                #:*current-session-id*)
+  (:import-from #:cl-mcp/src/pool
+                #:pool-worker-info
+                #:send-root-to-session-worker)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
   (:export #:fs-resolve-read-path
@@ -199,6 +205,8 @@ Returns a hash-table with keys:
         (when (and cwd (uiop:subpathp cwd root))
           (setf (gethash "relative_cwd" h)
                 (uiop:native-namestring (uiop:enough-pathname cwd root)))))
+      (when *use-worker-pool*
+        (setf (gethash "workers" h) (pool-worker-info)))
       h)))
 
 (defun fs-set-project-root (path)
@@ -208,35 +216,38 @@ Returns a hash-table with updated path information:
   - cwd: the new current working directory
   - previous_root: the previous project root path (or (not set) if was nil)
   - status: confirmation message"
-  (unless (stringp path)
-    (error "path must be a string"))
+  (unless (stringp path) (error "path must be a string"))
   (let* ((prev-root *project-root*)
-         (requested (uiop:ensure-directory-pathname path))
-         (base (ignore-errors (uiop:getcwd)))
-         (temp-root (if (uiop:absolute-pathname-p requested)
-                        requested
-                        (uiop:merge-pathnames* requested base))))
-    (unless (uiop:directory-exists-p temp-root)
+         (requested (uiop/pathname:ensure-directory-pathname path))
+         (base (ignore-errors (uiop/os:getcwd)))
+         (temp-root
+          (if (uiop/pathname:absolute-pathname-p requested)
+              requested
+              (uiop/pathname:merge-pathnames* requested base))))
+    (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
-    ;; Convert to absolute path using truename
     (let ((new-root (truename temp-root)))
-      ;; Update the project root parameter
       (setf *project-root* new-root)
-      ;; Change the current working directory
-      (uiop:chdir new-root)
+      (uiop/os:chdir new-root)
       (setf *default-pathname-defaults*
-            (uiop:ensure-directory-pathname new-root))
-      (log-event :info "fs.set-project-root"
-                 "previous" (if prev-root (namestring prev-root) "(not set)")
-                 "new" (namestring new-root))
-      ;; Return updated path information
+              (uiop/pathname:ensure-directory-pathname new-root))
+      (log-event :info "fs.set-project-root" "previous"
+       (if prev-root
+           (namestring prev-root)
+           "(not set)")
+       "new" (namestring new-root))
+      (when *use-worker-pool*
+        (ignore-errors
+         (send-root-to-session-worker *current-session-id* new-root)))
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "project_root" h) (namestring new-root)
-              (gethash "cwd" h) (namestring (uiop:getcwd))
+              (gethash "cwd" h) (namestring (uiop/os:getcwd))
               (gethash "previous_root" h)
-              (if prev-root (namestring prev-root) "(not set)")
+                (if prev-root
+                    (namestring prev-root)
+                    "(not set)")
               (gethash "status" h)
-              (format nil "Project root set to ~A" (namestring new-root)))
+                (format nil "Project root set to ~A" (namestring new-root)))
         h))))
 
 (define-tool "fs-read-file"
@@ -312,7 +323,8 @@ path resolution context."
                      "project_root" (gethash "project_root" info)
                      "cwd" (gethash "cwd" info)
                      "project_root_source" (gethash "project_root_source" info)
-                     "relative_cwd" (gethash "relative_cwd" info)))))
+                     "relative_cwd" (gethash "relative_cwd" info)
+                     "workers" (gethash "workers" info)))))
 
 (define-tool "fs-set-project-root"
   :description "Set the server's project root directory to the specified path.

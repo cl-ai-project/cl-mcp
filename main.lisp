@@ -65,6 +65,14 @@
                 #:detect-test-framework)
   (:import-from #:cl-mcp/src/system-loader
                 #:load-system)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:*worker-pool-warmup*
+                #:*max-pool-size*
+                #:initialize-pool
+                #:shutdown-pool
+                #:broadcast-root-to-workers)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -122,6 +130,13 @@
            #:*http-server-port*
            #:http-server-running-p
            #:start-http-server
-           #:stop-http-server))
+           #:stop-http-server
+           ;; Worker pool
+           #:*use-worker-pool*
+           #:*worker-pool-warmup*
+           #:*max-pool-size*
+           #:initialize-pool
+           #:shutdown-pool
+           #:broadcast-root-to-workers))
 
 (in-package #:cl-mcp/main)

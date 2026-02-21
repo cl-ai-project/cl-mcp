@@ -11,7 +11,8 @@
                 #:initialized-p
                 #:client-info
                 #:protocol-version
-                #:make-state)
+                #:make-state
+                #:*current-session-id*)
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
@@ -22,6 +23,8 @@
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/pool
+                #:broadcast-root-to-workers)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:yason
@@ -30,6 +33,7 @@
   (:export
    #:+protocol-version+
    #:+supported-protocol-versions+
+   #:*current-session-id*
    #:server-state
    #:initialized-p
    #:client-info
@@ -44,8 +48,8 @@
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions, ordered by preference.")
 
-;; server-state, initialized-p, client-info, protocol-version, make-state
-;; are now imported from cl-mcp/src/state
+;; *current-session-id*, server-state, initialized-p, client-info,
+;; protocol-version, make-state are imported from cl-mcp/src/state
 
 (defun %decode-json (line)
   (yason:parse line))
@@ -189,6 +193,8 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
               (when (uiop/filesystem:directory-exists-p root-dir)
                 (setf *project-root* root-dir)
                 (uiop/os:chdir root-dir)
+                ;; Propagate root to all pool workers (no-op if pool empty)
+                (ignore-errors (broadcast-root-to-workers root-dir))
                 (log-event :info "initialize.sync-root" "rootPath"
                            (namestring root-dir) "source"
                            (if root-path "rootPath" "rootUri"))))

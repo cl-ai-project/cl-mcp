@@ -51,7 +51,9 @@
 
 (defun log-event (level event &rest kvs)
   "Emit a JSON log line to *log-stream* with LEVEL and EVENT.
-Additional key-values KV can be provided as alternating strings and values."
+Additional key-values KV can be provided as alternating strings and values.
+Stream errors are silently ignored to prevent recursive error cascades
+when *log-stream* becomes a broken pipe."
   (when (should-log-p level)
     (let ((obj (make-hash-table :test #'equal)))
       (setf (gethash "ts" obj) (%ts-iso8601))
@@ -59,12 +61,15 @@ Additional key-values KV can be provided as alternating strings and values."
       (setf (gethash "event" obj) event)
       (when *log-context*
         (loop for (k v) on *log-context* by #'cddr
-              when k do (setf (gethash k obj) v)))
+              when k
+              do (setf (gethash k obj) v)))
       (loop for (k v) on kvs by #'cddr
-            when k do (setf (gethash k obj) v))
-      (yason:encode obj *log-stream*)
-      (terpri *log-stream*)
-      (finish-output *log-stream*))))
+            when k
+            do (setf (gethash k obj) v))
+      (ignore-errors
+        (yason:encode obj *log-stream*)
+        (terpri *log-stream*)
+        (finish-output *log-stream*)))))
 
 ;; initialize level from env at load
 (set-log-level-from-env)
