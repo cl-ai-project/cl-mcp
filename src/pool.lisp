@@ -106,6 +106,19 @@ condition variable until the spawn completes or fails."
   (error-message nil)
   (cancelled nil :type boolean))
 
+(defun %effective-pool-size ()
+  "Return the effective pool size: live workers plus in-flight spawns.
+Counts all entries in *all-workers* plus worker-placeholder entries
+in *affinity-map* (representing on-demand spawns not yet complete).
+Must be called with *pool-lock* held."
+  (let ((pending 0))
+    (maphash (lambda (k v)
+               (declare (ignore k))
+               (when (typep v 'worker-placeholder)
+                 (incf pending)))
+             *affinity-map*)
+    (+ (length *all-workers*) pending)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- spawn and bind
 ;;; ---------------------------------------------------------------------------
@@ -116,34 +129,27 @@ On failure, clean up the affinity map entry and notify waiters of
 the failure.  When NEED-RESET is true, sets the worker's
 needs-reset-notification flag BEFORE making the worker visible in
 the affinity map to prevent concurrent threads from missing the flag.
-Returns the worker on success."
+Returns the worker on success.  Signals an error if the spawn was
+cancelled (e.g. release-session during spawn) or failed."
   (let ((new-worker nil))
     (unwind-protect
-         (progn
-           (setf new-worker (spawn-worker))
-           (setf (worker-state new-worker) :bound)
-           (setf (worker-session-id new-worker) session-id)
-           ;; Set reset notification BEFORE registering in affinity map
-           ;; to prevent race where concurrent thread proxies before flag
-           (when need-reset
-             (setf (worker-needs-reset-notification new-worker) t))
-           ;; Register in pool state under pool-lock.
-           ;; Check cancellation: if release-session cancelled the
-           ;; placeholder while we were spawning, kill the worker
-           ;; instead of binding it.
-           (let ((cancelled nil))
-             (bt:with-lock-held (*pool-lock*)
-               (cond
+        (progn
+          (setf new-worker (spawn-worker))
+          (setf (worker-state new-worker) :bound)
+          (setf (worker-session-id new-worker) session-id)
+          (when need-reset
+            (setf (worker-needs-reset-notification new-worker) t))
+          (let ((cancelled nil))
+            (bt:with-lock-held (*pool-lock*)
+              (cond
                 ((worker-placeholder-cancelled placeholder)
-                 ;; Session was released while spawning — orphan prevention
                  (setf cancelled t)
                  (setf (worker-state new-worker) :released))
                 (t
                  (setf (gethash session-id *affinity-map*) new-worker)
                  (push new-worker *all-workers*))))
-             (cond
+            (cond
               (cancelled
-               ;; Notify waiters of cancellation
                (bt:with-lock-held ((worker-placeholder-lock placeholder))
                  (setf (worker-placeholder-state placeholder) :failed
                        (worker-placeholder-error-message placeholder)
@@ -154,9 +160,9 @@ Returns the worker on success."
                           "session" session-id
                           "worker_id" (worker-id new-worker))
                (ignore-errors (kill-worker new-worker))
-               nil)
+               (error "Session ~A was released during worker spawn."
+                      session-id))
               (t
-               ;; Notify ALL waiters under placeholder lock.
                (bt:with-lock-held ((worker-placeholder-lock placeholder))
                  (setf (worker-placeholder-worker placeholder) new-worker
                        (worker-placeholder-state placeholder) :ready)
@@ -167,19 +173,15 @@ Returns the worker on success."
                           "worker_id" (worker-id new-worker))
                (%schedule-replenish)
                new-worker))))
-      ;; Cleanup on failure -- only if worker was not successfully set
       (when (null (worker-placeholder-worker placeholder))
-        ;; Remove placeholder from affinity map
         (bt:with-lock-held (*pool-lock*)
           (remhash session-id *affinity-map*))
-        ;; Notify waiters of failure
         (bt:with-lock-held ((worker-placeholder-lock placeholder))
           (setf (worker-placeholder-state placeholder) :failed
                 (worker-placeholder-error-message placeholder)
                 "Worker process failed to start.")
           (%condition-broadcast
            (worker-placeholder-condvar placeholder)))
-        ;; Kill partially started worker
         (when new-worker
           (ignore-errors (kill-worker new-worker)))))))
 
@@ -222,36 +224,46 @@ indefinitely if the spawn thread stalls."
 
 (defun %replenish-standbys ()
   "Spawn standby workers until the pool has *worker-pool-warmup*
-standbys.  Called in a background thread.  Exits early when
-*pool-running* becomes NIL (shutdown in progress)."
+standbys.  Respects *max-pool-size* to avoid growing the pool
+beyond the configured cap.  Called in a background thread.
+Exits early when *pool-running* becomes NIL (shutdown in progress).
+
+Uses %effective-pool-size (which counts in-flight placeholders
+from concurrent on-demand spawns) to prevent TOCTOU races.
+Both the pre-spawn check and post-spawn addition re-verify
+the effective size under *pool-lock*."
   (unwind-protect
-      (loop
-       (unless *pool-running* (return))
-       (let ((need-more nil))
-         (bordeaux-threads:with-lock-held (*pool-lock*)
-           (when (and *pool-running*
-                      (< (length *standby-workers*) *worker-pool-warmup*))
-             (setf need-more t)))
-         (unless need-more (return))
-         (handler-case
-          (let ((w (spawn-worker)))
-            (bordeaux-threads:with-lock-held (*pool-lock*)
-              (cond
-               (*pool-running*
-                (push w *standby-workers*)
-                (push w *all-workers*))
-               (t
-                ;; Pool shutting down — kill the just-spawned worker
-                ;; to avoid orphans.
-                (ignore-errors (kill-worker w))
-                (return))))
-            (log-event :info "pool.standby.spawned"
-                       "worker_id" (worker-id w)))
-          (error (e)
-                 (log-event :warn "pool.standby.spawn.failed"
-                            "error" (princ-to-string e))
-                 ;; Avoid tight retry loop on persistent failures
-                 (return)))))
+      (loop (unless *pool-running* (return))
+            (let ((need-more nil))
+              (bordeaux-threads:with-lock-held (*pool-lock*)
+                (when (and *pool-running*
+                           (< (length *standby-workers*) *worker-pool-warmup*)
+                           (< (%effective-pool-size) *max-pool-size*))
+                  (setf need-more t)))
+              (unless need-more (return))
+              (handler-case
+                  (let ((w (spawn-worker)))
+                    ;; Re-check cap after spawn (concurrent on-demand
+                    ;; spawns may have filled the pool during our spawn).
+                    (bordeaux-threads:with-lock-held (*pool-lock*)
+                      (cond
+                        ((not *pool-running*)
+                         (ignore-errors (kill-worker w))
+                         (return))
+                        ((>= (%effective-pool-size) *max-pool-size*)
+                         (log-event :info "pool.standby.cap-reached"
+                                    "worker_id" (worker-id w))
+                         (ignore-errors (kill-worker w))
+                         (return))
+                        (t
+                         (push w *standby-workers*)
+                         (push w *all-workers*))))
+                    (log-event :info "pool.standby.spawned"
+                               "worker_id" (worker-id w)))
+                (error (e)
+                  (log-event :warn "pool.standby.spawn.failed"
+                             "error" (princ-to-string e))
+                  (return)))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (setf *replenish-running* nil))))
 
@@ -277,56 +289,64 @@ Skips if a replenish thread is already running."
 session, and set the needs-reset-notification flag.
 Skips workers whose state is not :bound or :standby (e.g. intentionally
 released).  State check is performed under *pool-lock* to prevent
-races with release-session."
-  (let ((session-id nil)
-        (was-bound nil)
-        (was-standby nil))
-    ;; Check and update state under *pool-lock* to prevent race with
-    ;; release-session changing state between check and action.
+races with release-session.
+
+If the session is released or reassigned during the spawn window,
+the replacement worker is killed rather than bound (prevents
+session resurrection)."
+  (let ((session-id nil) (was-bound nil) (was-standby nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (case (worker-state crashed-worker)
         (:bound
          (setf was-bound t
                session-id (worker-session-id crashed-worker))
-         ;; Mark crashed under lock so release-session won't touch it
          (setf (worker-state crashed-worker) :crashed))
         (:standby
          (setf was-standby t)
-         ;; Remove dead standby from the standby list
          (setf *standby-workers* (remove crashed-worker *standby-workers*))
          (setf (worker-state crashed-worker) :crashed))
-        (otherwise
-         ;; Already released, dead, or crashed — skip
-         (return-from %handle-worker-crash))))
+        (otherwise (return-from %handle-worker-crash))))
     (log-event :warn "pool.worker.crashed" "worker_id"
-     (worker-id crashed-worker) "session" session-id
-     "was_standby" was-standby)
+     (worker-id crashed-worker) "session" session-id "was_standby" was-standby)
     (ignore-errors (kill-worker crashed-worker))
     (cond
-     ;; Bound worker: spawn replacement for the same session
      (was-bound
       (handler-case
-       (let ((new-worker (spawn-worker)))
+       (let ((new-worker (spawn-worker))
+             (orphaned nil))
          (setf (worker-state new-worker) :bound)
          (setf (worker-session-id new-worker) session-id)
          (setf (worker-needs-reset-notification new-worker) t)
          (bordeaux-threads:with-lock-held (*pool-lock*)
-           (when session-id
-             (setf (gethash session-id *affinity-map*) new-worker))
-           (setf *all-workers* (remove crashed-worker *all-workers*))
-           (push new-worker *all-workers*))
-         (log-event :info "pool.worker.recovered" "old_worker_id"
-          (worker-id crashed-worker) "new_worker_id" (worker-id new-worker)
-          "session" session-id))
+           (cond
+             ;; Normal: session still maps to the crashed worker — bind
+             ((eql (gethash session-id *affinity-map*) crashed-worker)
+              (setf (gethash session-id *affinity-map*) new-worker)
+              (setf *all-workers* (remove crashed-worker *all-workers*))
+              (push new-worker *all-workers*))
+             ;; Session was released or reassigned during spawn window
+             (t
+              (setf (worker-state new-worker) :released)
+              (setf orphaned t)
+              (setf *all-workers* (remove crashed-worker *all-workers*)))))
+         (cond
+           (orphaned
+            (log-event :info "pool.worker.recovery.session-gone"
+                       "worker_id" (worker-id new-worker)
+                       "session" session-id)
+            (ignore-errors (kill-worker new-worker)))
+           (t
+            (log-event :info "pool.worker.recovered" "old_worker_id"
+             (worker-id crashed-worker) "new_worker_id" (worker-id new-worker)
+             "session" session-id))))
        (error (e)
               (log-event :error "pool.worker.recovery.failed" "worker_id"
                (worker-id crashed-worker) "session" session-id "error"
                (princ-to-string e))
               (bordeaux-threads:with-lock-held (*pool-lock*)
-                (when session-id (remhash session-id *affinity-map*))
-                (setf *all-workers*
-                      (remove crashed-worker *all-workers*))))))
-     ;; Standby worker: just remove and replenish
+                (when (eql (gethash session-id *affinity-map*) crashed-worker)
+                  (remhash session-id *affinity-map*))
+                (setf *all-workers* (remove crashed-worker *all-workers*))))))
      (was-standby
       (bordeaux-threads:with-lock-held (*pool-lock*)
         (setf *all-workers* (remove crashed-worker *all-workers*)))
@@ -460,17 +480,24 @@ Otherwise a new worker is spawned.  Multiple threads requesting
 the same new session will coordinate via a placeholder so only
 one spawn occurs.
 
+Uses %effective-pool-size (which counts in-flight placeholders)
+for the cap check so concurrent on-demand spawns cannot both
+slip through.
+
 Signals an error if the worker cannot be created."
   (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
-        (need-reset nil))
+        (need-reset nil) (old-worker-to-kill nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (setf entry (gethash session-id *affinity-map*))
       (cond
        ;; Path 1: Existing bound worker — return immediately
        ((and entry (typep entry 'worker) (eq :bound (worker-state entry)))
         (return-from get-or-assign-worker entry))
-       ;; Path 1b: Existing dead/crashed worker — remove and reassign
+       ;; Path 1b: Existing dead/crashed worker — remove and reassign.
+       ;; Save reference for kill outside the lock (kill-worker can
+       ;; block for up to 2 seconds on SIGTERM→SIGKILL).
        ((and entry (typep entry 'worker))
+        (setf old-worker-to-kill entry)
         (remhash session-id *affinity-map*)
         (setf *all-workers* (remove entry *all-workers*))
         (setf entry nil
@@ -489,7 +516,7 @@ Signals an error if the worker cannot be created."
                 (setf (worker-needs-reset-notification w) t))
               (setf assigned-from-standby w))
             (progn
-              (when (>= (length *all-workers*) *max-pool-size*)
+              (when (>= (%effective-pool-size) *max-pool-size*)
                 (error "Pool size limit reached (~D workers). ~
                         Release unused sessions before creating new ones."
                        *max-pool-size*))
@@ -497,6 +524,11 @@ Signals an error if the worker cannot be created."
                 (setf (gethash session-id *affinity-map*) ph
                       entry ph
                       need-spawn t))))))
+    ;; Kill orphaned worker outside the lock.  For timeout/stream-error
+    ;; crashes the OS process may still be alive; without this it would
+    ;; leak as an untracked SBCL process.
+    (when old-worker-to-kill
+      (ignore-errors (kill-worker old-worker-to-kill)))
     (cond
      (assigned-from-standby
       (%schedule-replenish)

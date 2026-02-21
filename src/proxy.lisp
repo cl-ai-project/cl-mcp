@@ -133,16 +133,22 @@ the crash notification directly (inline recovery)."
        (handler-case
            (funcall worker-rpc-fn worker method params
                     :timeout *proxy-rpc-timeout*)
-         ;; Worker crashed mid-request — return notification directly
-         ;; instead of propagating an ugly -32603 error
          (error (e)
-           (when (typep e worker-crashed-sym)
-             (log-event :warn "proxy.worker-crashed-mid-request"
-                        "session" session-id
-                        "method" method))
-           ;; For any error (crashed, timeout, etc.), return crash notification
-           (log-event :warn "proxy.rpc-error"
-                      "session" session-id
-                      "method" method
-                      "error" (princ-to-string e))
-           (%crash-notification-result)))))))
+           (cond
+             ;; Worker crashed mid-request — return crash notification
+             ((typep e worker-crashed-sym)
+              (log-event :warn "proxy.worker-crashed-mid-request"
+                         "session" session-id
+                         "method" method
+                         "error" (princ-to-string e))
+              (%crash-notification-result))
+             ;; Non-crash error (JSON-RPC error from worker handler,
+             ;; e.g. "symbol not found", "code is required").
+             ;; Re-signal so define-tool's handler wraps it as a
+             ;; proper MCP error — not a misleading crash message.
+             (t
+              (log-event :debug "proxy.worker-rpc-error"
+                         "session" session-id
+                         "method" method
+                         "error" (princ-to-string e))
+              (error "~A" (princ-to-string e))))))))))

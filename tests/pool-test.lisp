@@ -527,3 +527,208 @@ in the cleanup form regardless of success or failure."
               (when (bordeaux-threads:thread-alive-p th)
                 (ignore-errors
                   (bordeaux-threads:join-thread th))))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression tests — P1: proxy error discrimination, P2: crashed worker kill
+;;; ---------------------------------------------------------------------------
+
+(deftest e2e-proxy-propagates-worker-errors-not-crash-notification
+  (testing "worker-side JSON-RPC errors are re-signaled, not masked as crash"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "error-propagation-test"))
+      (with-pool ()
+        ;; Step 1: Verify the proxy path works for valid requests
+        (let* ((good-params (%make-eval-params "(+ 1 1)"))
+               (good-result (proxy-to-worker "worker/eval" good-params)))
+          (ok (hash-table-p good-result)
+              "valid eval succeeds")
+          (ok (not (gethash "isError" good-result))
+              "valid eval is not an error"))
+        ;; Step 2: Send an invalid request (missing required "code" param)
+        ;; that triggers a JSON-RPC error from the worker handler.
+        ;; Before P1 fix, this returned a crash notification saying
+        ;; "Worker process crashed and was restarted" — completely wrong.
+        (let ((bad-params (make-hash-table :test 'equal)))
+          ;; Intentionally omit "code" key — worker/eval requires it
+          (setf (gethash "package" bad-params) "CL-USER")
+          (handler-case
+              (progn
+                (proxy-to-worker "worker/eval" bad-params)
+                ;; If we get here, proxy returned a result instead of
+                ;; signaling — check it's NOT a crash notification
+                (ok nil "expected an error to be signaled"))
+            (error (e)
+              (let ((msg (princ-to-string e)))
+                ;; The error message should reflect the worker's actual
+                ;; error, NOT contain "crashed and was restarted"
+                (ok (not (search "crashed" msg))
+                    (format nil
+                            "error does NOT mention crash: ~A"
+                            msg))))))
+        ;; Step 3: Worker should still be alive and functional after a
+        ;; non-crash error (no false crash recovery triggered)
+        (let* ((params (%make-eval-params "(* 6 7)"))
+               (result (proxy-to-worker "worker/eval" params)))
+          (ok (hash-table-p result)
+              "worker still responds after non-crash error")
+          (ok (not (gethash "isError" result))
+              "result is not an error or crash notification"))))))
+
+(deftest e2e-crashed-worker-reassignment-kills-old-process
+  (testing "Path 1b kills orphaned OS process when reassigning crashed worker"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      ;; Step 1: Assign a worker to a session
+      (let* ((worker (get-or-assign-worker "orphan-kill-test"))
+             (old-pid (worker-pid worker)))
+        (ok (integerp old-pid)
+            "worker has a valid PID")
+        (ok (eq :bound (worker-state worker))
+            "worker is :bound")
+        ;; Step 2: Force-crash the worker (SIGKILL the OS process)
+        (sb-posix:kill old-pid sb-posix:sigkill)
+        (sleep 0.5)
+        ;; Mark it crashed so Path 1b triggers on next get-or-assign
+        (setf (worker-state worker) :crashed)
+        ;; Step 3: Request the same session again.
+        ;; Path 1b should detect :crashed, save old worker ref,
+        ;; remove from tracking, and kill outside the lock.
+        (let ((new-worker (get-or-assign-worker "orphan-kill-test")))
+          (ok (not (eq worker new-worker))
+              "a new worker was assigned, not the crashed one")
+          (ok (eq :bound (worker-state new-worker))
+              "new worker is :bound")
+          ;; Step 4: Verify the old worker's state is :dead
+          ;; (kill-worker sets state to :dead after SIGTERM/SIGKILL)
+          (ok (eq :dead (worker-state worker))
+              "old worker state is :dead after Path 1b kill")
+          ;; Step 5: Verify the old PID is no longer alive.
+          ;; After kill-worker + SIGKILL, the process should be gone.
+          ;; sb-posix:kill with signal 0 checks if process exists.
+          (let ((still-alive
+                  (ignore-errors
+                    (sb-posix:kill old-pid 0)
+                    t)))
+            (ok (not still-alive)
+                "old OS process is no longer alive (not orphaned)")))))))
+
+(deftest e2e-release-during-crash-recovery-prevents-resurrection
+  (testing "release-session during crash recovery does not resurrect session"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      ;; Step 1: Assign a worker to a session and crash it
+      (let* ((worker (get-or-assign-worker "resurrection-test"))
+             (pid (worker-pid worker)))
+        (ok (eq :bound (worker-state worker))
+            "worker is :bound")
+        (sb-posix:kill pid sb-posix:sigkill)
+        (sleep 0.5)
+        ;; Step 2: Start crash recovery in a background thread.
+        ;; %handle-worker-crash will: grab lock, set :crashed, release
+        ;; lock, kill worker, spawn replacement (~5s), then try to bind.
+        (let ((recovery-thread
+                (bordeaux-threads:make-thread
+                 (lambda ()
+                   (cl-mcp/src/pool::%handle-worker-crash worker))
+                 :name "crash-recovery-thread")))
+          ;; Step 3: Wait briefly for the first lock section to complete
+          ;; (sets state to :crashed, then kill-worker sets :dead),
+          ;; then release the session.
+          ;; The spawn-worker call takes seconds, so we have a wide window.
+          (sleep 1)
+          (ok (not (eq :bound (worker-state worker)))
+              "worker state changed from :bound (recovery started)")
+          (release-session "resurrection-test")
+          ;; Step 4: Wait for recovery thread to finish
+          (bordeaux-threads:join-thread recovery-thread)
+          ;; Step 5: Verify the session was NOT resurrected.
+          ;; With the fix, %handle-worker-crash detects the session was
+          ;; released (affinity-map entry is gone) and kills the
+          ;; replacement worker instead of binding it.
+          (let ((entry (bordeaux-threads:with-lock-held
+                           (cl-mcp/src/pool::*pool-lock*)
+                         (gethash "resurrection-test"
+                                  cl-mcp/src/pool::*affinity-map*))))
+            (ok (null entry)
+                "session is NOT in affinity-map (not resurrected)"))
+          ;; Step 6: Verify no orphaned workers in all-workers.
+          ;; The replacement worker should have been killed, not left
+          ;; in the pool.
+          (let ((pool-workers
+                  (bordeaux-threads:with-lock-held
+                      (cl-mcp/src/pool::*pool-lock*)
+                    (copy-list cl-mcp/src/pool::*all-workers*))))
+            ;; No worker should be bound to the released session
+            (ok (null (find "resurrection-test" pool-workers
+                            :key #'worker-session-id
+                            :test #'string=))
+                "no worker bound to released session in pool")))))))
+
+(deftest replenish-respects-max-pool-size
+  (testing "standby replenishment stops when pool is at max capacity"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Use setf (not let) for *max-pool-size* because
+    ;; %replenish-standbys runs in a SEPARATE thread and
+    ;; thread-local dynamic bindings (from let) are not visible
+    ;; to other threads in SBCL.
+    (let ((saved-max cl-mcp/src/pool::*max-pool-size*))
+      (unwind-protect
+          (progn
+            (setf cl-mcp/src/pool::*max-pool-size* 2)
+            (let ((*worker-pool-warmup* 1))
+              (with-pool ()
+                ;; After init: 1 standby in pool (1 worker total).
+                ;; Assign two sessions → takes standby + spawns on-demand = 2 bound.
+                (get-or-assign-worker "cap-test-A")
+                (get-or-assign-worker "cap-test-B")
+                ;; Now at cap (2 workers). Replenish was triggered by both
+                ;; assignments.  Wait for any background replenish to settle.
+                (sleep 2)
+                ;; Count total workers — should not exceed max-pool-size.
+                (let ((total (bordeaux-threads:with-lock-held
+                                 (cl-mcp/src/pool::*pool-lock*)
+                               (length cl-mcp/src/pool::*all-workers*))))
+                  (ok (<= total 2)
+                      (format nil
+                              "total workers (~D) does not exceed max-pool-size (2)"
+                              total))))))
+        (setf cl-mcp/src/pool::*max-pool-size* saved-max)))))
+
+(deftest cancelled-spawn-signals-error-not-nil
+  (testing "release-session during first spawn signals error, not NIL"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Use warmup=0 so no standbys exist — forces on-demand spawn
+    ;; via %spawn-and-bind (the placeholder path).
+    (let ((*worker-pool-warmup* 0))
+      (with-pool ()
+        ;; Start assignment in background thread (will spawn ~5s)
+        (let* ((result nil)
+               (got-error nil)
+               (assign-thread
+                 (bordeaux-threads:make-thread
+                  (lambda ()
+                    (handler-case
+                        (setf result (get-or-assign-worker "cancel-test"))
+                      (error (e)
+                        (setf got-error (princ-to-string e)))))
+                  :name "assign-thread")))
+          ;; Wait for spawn to start, then release the session
+          ;; to trigger cancellation.
+          (sleep 0.5)
+          (release-session "cancel-test")
+          ;; Wait for the assignment thread to finish
+          (bordeaux-threads:join-thread assign-thread)
+          ;; The assignment should have signaled an error, not returned NIL
+          (ok (or got-error (not (null result)))
+              "cancelled spawn did not return NIL")
+          (when got-error
+            (ok (search "released" got-error)
+                (format nil
+                        "error mentions release: ~A"
+                        got-error))))))))
