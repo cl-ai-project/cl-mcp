@@ -152,37 +152,32 @@ Returns the sb-ext:process object with stdout and stderr as streams."
 (defun %read-handshake (process timeout)
   "Read the JSON handshake line from the worker's stdout.
 Returns three values: tcp-port, swank-port (or NIL), pid.
-Signals WORKER-SPAWN-FAILED on timeout or parse error."
+Skips non-JSON lines (e.g. compiler output on first run without
+FASL cache) by trying each line as JSON and looking for the
+tcp_port key.  Signals WORKER-SPAWN-FAILED on timeout or if
+stdout is closed before a valid handshake is found."
   (let ((stdout (sb-ext:process-output process)))
     (handler-case
-        (let ((line (sb-ext:with-timeout timeout
-                      (read-line stdout nil nil))))
-          (unless line
-            (error 'worker-spawn-failed
-                   :message "Worker closed stdout before handshake"))
-          (let ((json (handler-case
-                          (yason:parse line)
-                        (error (e)
-                          (error 'worker-spawn-failed
-                                 :message (format nil
-                                                  "Invalid handshake JSON: ~A"
-                                                  (princ-to-string e)))))))
-            (unless (hash-table-p json)
-              (error 'worker-spawn-failed
-                     :message "Handshake is not a JSON object"))
-            (let ((tcp-port (gethash "tcp_port" json))
-                  (swank-port (gethash "swank_port" json))
-                  (pid (gethash "pid" json)))
-              (unless (and tcp-port (integerp tcp-port))
-                (error 'worker-spawn-failed
-                       :message "Handshake missing tcp_port"))
-              (values tcp-port
-                      (if (eq swank-port :null) nil swank-port)
-                      pid))))
+        (sb-ext:with-timeout timeout
+          (loop for line = (read-line stdout nil nil)
+                unless line do
+                  (error 'worker-spawn-failed
+                         :message "Worker closed stdout before handshake")
+                do (let ((json (ignore-errors (yason:parse line))))
+                     (when (and (hash-table-p json)
+                                (gethash "tcp_port" json))
+                       (let ((tcp-port (gethash "tcp_port" json))
+                             (swank-port (gethash "swank_port" json))
+                             (pid (gethash "pid" json)))
+                         (unless (integerp tcp-port)
+                           (error 'worker-spawn-failed
+                                  :message "Handshake tcp_port is not an integer"))
+                         (return (values tcp-port
+                                         (if (eq swank-port :null) nil swank-port)
+                                         pid)))))))
       (sb-ext:timeout ()
         (error 'worker-spawn-failed
-               :message (format nil
-                                "Worker handshake timed out after ~Ds"
+               :message (format nil "Worker handshake timed out after ~Ds"
                                 timeout))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -192,8 +187,12 @@ Signals WORKER-SPAWN-FAILED on timeout or parse error."
 (defun %connect-to-worker (host port)
   "Open a TCP connection to the worker at HOST:PORT.
 Returns the usocket object.  The stream is accessible via
-USOCKET:SOCKET-STREAM."
-  (usocket:socket-connect host port :element-type 'character))
+USOCKET:SOCKET-STREAM.  Times out after 10 seconds to avoid
+blocking on OS TCP timeout (60-120s) when the worker listener
+is not yet ready."
+  (usocket:socket-connect host port
+                          :element-type 'character
+                          :timeout 10))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — JSON-RPC
@@ -331,7 +330,8 @@ the handshake fails."
 
 (defun %mark-worker-crashed (worker reason)
   "Mark WORKER as crashed, set reset notification flag, close its
-stream to prevent further use, and log the event.  Returns nothing."
+stream to prevent further use, reap the OS process to prevent
+zombies, and log the event.  Returns nothing."
   (setf (worker-state worker) :crashed)
   (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
@@ -341,6 +341,11 @@ stream to prevent further use, and log the event.  Returns nothing."
       (usocket:socket-close (worker-socket worker))
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
+  ;; Reap the OS process to prevent zombie entries in the process
+  ;; table.  process-close calls waitpid internally.
+  (ignore-errors
+    (when (worker-process-info worker)
+      (sb-ext:process-close (worker-process-info worker))))
   (log-event :warn "worker.crashed"
              "id" (worker-id worker)
              "pid" (worker-pid worker)
@@ -351,10 +356,13 @@ stream to prevent further use, and log the event.  Returns nothing."
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
 
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
-timed out (sb-ext:timeout), or encountered a stream/socket error.
+timed out (sb-ext:timeout), encountered a stream/socket error, or if
+the stream is already NIL (e.g. marked crashed by a concurrent thread).
 On timeout, the stream is closed to prevent permanent corruption from
 stale responses in the TCP buffer."
   (bt:with-lock-held ((worker-stream-lock worker))
+    (unless (worker-stream worker)
+      (error 'worker-crashed :worker worker))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn

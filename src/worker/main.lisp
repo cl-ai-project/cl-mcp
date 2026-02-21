@@ -97,8 +97,9 @@ handlers, optionally starts a Swank server for human observation,
 outputs a JSON handshake line to stdout, and blocks in the accept
 loop waiting for the parent to connect.
 
-This function does not return until the connection is closed or the
-server is stopped."
+When the accept loop exits (parent disconnected or server stopped),
+the process exits cleanly instead of falling through to the
+Roswell REPL."
   (%setup-project-root)
   (let* ((server (make-worker-server :port 0))
          (tcp-port (server-port server)))
@@ -109,4 +110,6 @@ server is stopped."
                  "swank_port" (or swank-port "none")
                  "pid" (%get-pid))
       (%output-handshake tcp-port swank-port)
-      (start-accept-loop server))))
+      (start-accept-loop server)))
+  ;; Exit cleanly instead of falling through to ros run's REPL.
+  (sb-ext:exit :code 0))

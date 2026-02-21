@@ -41,9 +41,12 @@
   "Lock for thread-safe session access.")
 
 (defparameter *session-timeout-seconds*
-  nil
-  "Session expiration time in seconds. NIL disables timeout (default).
-Set to a positive number to enable idle session expiration.")
+  3600
+  "Session expiration time in seconds.  Default is 3600 (1 hour).
+When a session has been idle longer than this, the next access
+evicts it and releases the associated worker process.  Set to NIL
+to disable timeout (not recommended — leaked sessions consume
+100-500MB each via their worker process).")
 
 (defstruct http-session
   "HTTP session containing MCP state and metadata."
