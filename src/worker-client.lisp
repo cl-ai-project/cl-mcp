@@ -112,22 +112,25 @@ indicate stream corruption and require marking the worker crashed."))
 ;;; Internal helpers — environment
 ;;; ---------------------------------------------------------------------------
 
-(defun %build-environment ()
+(defun %build-environment (secret)
   "Build an environment list for the child process.
-Inherits the parent environment and sets MCP_PROJECT_ROOT to the
-current *project-root* value."
+Inherits the parent environment, sets MCP_PROJECT_ROOT to the
+current *project-root* value, and passes the shared secret for
+TCP authentication."
   (let* ((current-env (sb-ext:posix-environ))
-         (filtered (remove-if
-                    (lambda (s)
-                      (and (>= (length s) 17)
-                           (string= "MCP_PROJECT_ROOT=" s
-                                    :end2 17)))
-                    current-env)))
-    (if *project-root*
-        (cons (format nil "MCP_PROJECT_ROOT=~A"
-                      (namestring *project-root*))
-              filtered)
-        filtered)))
+         (filtered
+           (remove-if
+            (lambda (s)
+              (or (and (>= (length s) 17)
+                       (string= "MCP_PROJECT_ROOT=" s :end2 17))
+                  (and (>= (length s) 18)
+                       (string= "MCP_WORKER_SECRET=" s :end2 18))))
+            current-env)))
+    (let ((env (cons (format nil "MCP_WORKER_SECRET=~A" secret) filtered)))
+      (if *project-root*
+          (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
+                env)
+          env))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — process launch
@@ -151,11 +154,12 @@ the first successful lookup."
                       "ros"))
               (error () "ros")))))
 
-(defun %launch-worker-process ()
+(defun %launch-worker-process (secret)
   "Launch a worker child process via sb-ext:run-program.
-Returns the sb-ext:process object with stdout and stderr as streams."
+Returns the sb-ext:process object with stdout and stderr as streams.
+SECRET is passed to the child environment for TCP authentication."
   (let ((ros-path (%find-ros-path))
-        (env (%build-environment)))
+        (env (%build-environment secret)))
     (sb-ext:run-program ros-path
                         (list "run"
                               "-s" "cl-mcp/src/worker/main"
@@ -290,21 +294,32 @@ stderr, causing worker RPC calls to hang or time out."
                (ignore-errors (close err))))
            :name (format nil "worker-stderr-~A" wid)))))))
 
+(defun %generate-worker-secret ()
+  "Generate a random shared secret for worker TCP authentication.
+Reads 32 bytes from /dev/urandom and returns them as a 64-character
+lowercase hex string."
+  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
+    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s)
+      (format nil "~{~(~2,'0x~)~}" (coerce buf 'list)))))
+
 (defun spawn-worker ()
   "Launch a worker child process and return a WORKER struct.
 The worker is launched via Roswell, reads its JSON handshake to
-discover tcp_port/swank_port/pid, connects to its TCP port, and
-returns the worker in :standby state.
+discover tcp_port/swank_port/pid, connects to its TCP port,
+authenticates with a shared secret, and returns the worker in
+:standby state.
 
-Signals WORKER-SPAWN-FAILED if the process cannot be started or
-the handshake fails."
+Signals WORKER-SPAWN-FAILED if the process cannot be started,
+the handshake fails, or authentication is rejected."
   (let ((id (%next-worker-id))
+        (secret (%generate-worker-secret))
         (process nil)
         (socket nil))
     (handler-case
         (progn
           (log-event :info "worker.spawning" "id" id)
-          (setf process (%launch-worker-process))
+          (setf process (%launch-worker-process secret))
           (multiple-value-bind (tcp-port swank-port pid)
               (%read-handshake process *worker-startup-timeout*)
             (log-event :info "worker.handshake.received"
@@ -313,6 +328,17 @@ the handshake fails."
                        "swank_port" (or swank-port "none")
                        "pid" pid)
             (setf socket (%connect-to-worker "127.0.0.1" tcp-port))
+            ;; Authenticate with shared secret
+            (let ((auth-stream (usocket:socket-stream socket)))
+              (%send-json-rpc auth-stream 0 "worker/authenticate"
+                              (let ((ht (make-hash-table :test 'equal)))
+                                (setf (gethash "secret" ht) secret)
+                                ht))
+              (let ((auth-resp (%read-json-rpc-response auth-stream 0 10)))
+                (unless (and (hash-table-p auth-resp)
+                             (gethash "authenticated" auth-resp))
+                  (error 'worker-spawn-failed
+                         :message "Worker authentication failed"))))
             (let ((worker (make-worker
                            :id id
                            :state :standby

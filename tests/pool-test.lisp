@@ -19,6 +19,8 @@
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-pool-warmup*
+                #:*health-check-interval-seconds*
+                #:*shutdown-replenish-wait-seconds*
                 #:initialize-pool
                 #:shutdown-pool
                 #:get-or-assign-worker
@@ -177,12 +179,17 @@ in the cleanup form regardless of success or failure."
 ;;; ---------------------------------------------------------------------------
 
 (defmacro with-pool (() &body body)
-  "Initialize the pool, execute BODY, and always shut down the pool."
-  `(unwind-protect
-        (progn
-          (initialize-pool)
-          ,@body)
-     (shutdown-pool)))
+  "Initialize the pool, execute BODY, and always shut down the pool.
+Uses tighter timing defaults to keep integration tests fast.
+Tests that validate warmup/replenishment explicitly override these bindings."
+  `(let ((*worker-pool-warmup* 0)
+         (*health-check-interval-seconds* 0.1d0)
+         (*shutdown-replenish-wait-seconds* 0.01d0))
+     (unwind-protect
+          (progn
+            (initialize-pool)
+            ,@body)
+       (shutdown-pool))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Pool manager unit tests — placeholder struct

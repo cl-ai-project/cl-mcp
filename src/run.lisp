@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:process-json-line #:make-state)
+  (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool #:initialize-pool #:shutdown-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
   (:export #:run))
 
@@ -27,17 +29,20 @@ and writes responses to OUT. Returns T when input is exhausted (EOF).
 This is a minimal loop for E2E bring-up; full transport features come later."
   (ecase transport
     (:stdio
-     (let ((state (make-state))
-           (cl-mcp/src/protocol:*current-session-id* "stdio"))
-       (log-event :info "stdio.start")
-       (loop for line = (read-line in nil :eof)
-             until (eq line :eof)
-             do (let ((resp (process-json-line line state)))
-                  (when resp
-                    (write-line resp out)
-                    (force-output out))))
-       (log-event :info "stdio.stop")
-       t))
+     (when *use-worker-pool* (initialize-pool))
+     (unwind-protect
+         (let ((state (make-state))
+               (cl-mcp/src/protocol:*current-session-id* "stdio"))
+           (log-event :info "stdio.start")
+           (loop for line = (read-line in nil :eof)
+                 until (eq line :eof)
+                 do (let ((resp (process-json-line line state)))
+                      (when resp
+                        (write-line resp out)
+                        (force-output out))))
+           (log-event :info "stdio.stop")
+           t)
+       (when *use-worker-pool* (ignore-errors (shutdown-pool)))))
     (:tcp
      (log-event :info "tcp.start" "host" host "port" port)
      (serve-tcp :host host :port port :accept-once accept-once :on-listening on-listening))))

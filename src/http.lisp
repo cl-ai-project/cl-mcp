@@ -56,39 +56,35 @@ to disable timeout (not recommended — leaked sessions consume
   (last-access (get-universal-time) :type integer))
 
 (defun generate-session-id ()
-  "Generate a pseudo-random session ID."
-  (format nil "~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)-~(~36,16,'0R~)"
-          (random (expt 2 64))
-          (random (expt 2 64))
-          (random (expt 2 64))
-          (random (expt 2 64))))
+  "Generate a cryptographically random session ID using /dev/urandom."
+  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
+    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s)
+      (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
 
 (defun get-session (session-id)
   "Get session by ID, returning NIL if not found or expired.
 When *session-timeout-seconds* is NIL, sessions never expire."
-  (bordeaux-threads:with-lock-held (*sessions-lock*)
-    (let ((session (gethash session-id *sessions*)))
-      (when session
-        (let ((now (get-universal-time)))
-          (cond
-           ;; Timeout disabled - always return session
-           ((null *session-timeout-seconds*)
-            (setf (http-session-last-access session) now)
-            session)
-           ;; Timeout enabled - check expiration
-           ((> (- now (http-session-last-access session))
-               *session-timeout-seconds*)
-            (remhash session-id *sessions*)
-            ;; Release the worker pool assignment.  Lock ordering is
-            ;; safe: *sessions-lock* -> *pool-lock* (pool never
-            ;; acquires *sessions-lock*).
-            (when *use-worker-pool*
-              (release-session session-id))
-            nil)
-           ;; Not expired - update last access and return
-           (t
-            (setf (http-session-last-access session) now)
-            session)))))))
+  (let ((result nil)
+        (expired-id nil))
+    (bordeaux-threads:with-lock-held (*sessions-lock*)
+      (let ((session (gethash session-id *sessions*)))
+        (when session
+          (let ((now (get-universal-time)))
+            (cond
+              ((null *session-timeout-seconds*)
+               (setf (http-session-last-access session) now)
+               (setf result session))
+              ((> (- now (http-session-last-access session))
+                  *session-timeout-seconds*)
+               (remhash session-id *sessions*)
+               (setf expired-id session-id))
+              (t
+               (setf (http-session-last-access session) now)
+               (setf result session)))))))
+    (when (and expired-id *use-worker-pool*)
+      (ignore-errors (release-session expired-id)))
+    result))
 
 (defun create-session ()
   "Create a new session and return it."
@@ -121,9 +117,12 @@ When *session-timeout-seconds* is NIL, sessions never expire."
 
 (defun %session-cleanup-loop ()
   "Periodically sweep expired sessions and release their workers.
-Runs until *cleanup-running* becomes NIL."
+Runs until *cleanup-running* becomes NIL.  Uses short sleep intervals
+for responsive shutdown (at most 1 second delay)."
   (loop while *cleanup-running*
-        do (sleep *cleanup-interval-seconds*)
+        do (loop repeat (ceiling *cleanup-interval-seconds*)
+                 while *cleanup-running*
+                 do (sleep 1))
            (when *cleanup-running*
              (handler-case
                  (let ((expired nil)
@@ -321,6 +320,25 @@ Currently returns 405 as SSE is not yet implemented."
 ;;; Dispatcher
 ;;; ------------------------------------------------------------
 
+(defun %loopback-origin-p (origin)
+  "Return T only if ORIGIN is a loopback address.
+Validates the character after the hostname to prevent substring
+attacks like localhost.evil.com."
+  (flet ((check-prefix (prefix)
+           (let ((len (length prefix)))
+             (and (>= (length origin) len)
+                  (string-equal origin prefix :end1 len)
+                  ;; After prefix: end-of-string, colon (port), or slash (path)
+                  (or (= (length origin) len)
+                      (char= (char origin len) #\:)
+                      (char= (char origin len) #\/))))))
+    (or (check-prefix "http://localhost")
+        (check-prefix "https://localhost")
+        (check-prefix "http://127.0.0.1")
+        (check-prefix "https://127.0.0.1")
+        (check-prefix "http://[::1]")
+        (check-prefix "https://[::1]"))))
+
 (defun mcp-dispatcher (request)
   "Dispatch requests to the MCP endpoint."
   (let ((path (hunchentoot:script-name request))
@@ -329,10 +347,7 @@ Currently returns 405 as SSE is not yet implemented."
       (lambda ()
         ;; Set CORS headers — restrict to loopback origins
         (let ((origin (get-header :origin)))
-          (when (and origin
-                     (or (search "://localhost" origin)
-                         (search "://127.0.0.1" origin)
-                         (search "://[::1]" origin)))
+          (when (and origin (%loopback-origin-p origin))
             (set-header :access-control-allow-origin origin)))
         (set-header :access-control-expose-headers "Mcp-Session-Id")
 
@@ -381,11 +396,12 @@ Returns the acceptor instance and port number."
                        :access-log-destination nil
                        :message-log-destination nil))
 
-  (hunchentoot:start *http-server*)
-  (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
-
+  ;; Initialize pool before accepting connections to avoid race window
   (when *use-worker-pool*
     (initialize-pool))
+
+  (hunchentoot:start *http-server*)
+  (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
 
   ;; Start periodic session cleanup
   (%start-session-cleanup)

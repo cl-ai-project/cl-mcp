@@ -22,11 +22,13 @@
 (defstruct (worker-server (:constructor %make-worker-server))
   "A single-connection TCP server for worker processes.
 Listens on an ephemeral port and dispatches JSON-RPC requests
-to registered method handlers."
+to registered method handlers.  Requires authentication with a
+shared secret before processing any tool requests."
   (listen-socket nil :type t)
   (port 0 :type integer)
   (methods (make-hash-table :test 'equal) :type hash-table)
-  (running-p nil :type boolean))
+  (running-p nil :type boolean)
+  (authenticated-p nil :type boolean))
 
 (defun make-worker-server (&key (port 0) (host "127.0.0.1"))
   "Create a worker server bound to HOST:PORT.
@@ -85,7 +87,45 @@ that returns a hash-table to be used as the JSON-RPC result."
 
 (defun %dispatch-request (server id method params)
   "Dispatch a JSON-RPC request to the registered handler.
-Returns a JSON string to send back."
+Returns a JSON string to send back.  Rejects all requests except
+worker/authenticate until the connection is authenticated with
+the shared secret."
+  ;; Auth gate: reject non-authentication requests before handshake.
+  ;; Only enforce when MCP_WORKER_SECRET is configured (pool mode).
+  (unless (or (worker-server-authenticated-p server)
+              (string= method "worker/authenticate")
+              (null (uiop/os:getenv "MCP_WORKER_SECRET")))
+    (return-from %dispatch-request
+      (%encode-response
+       (%make-error id -32600 "Not authenticated"))))
+  ;; Handle authentication as a built-in method
+  (when (string= method "worker/authenticate")
+    (let* ((expected (uiop/os:getenv "MCP_WORKER_SECRET"))
+           (provided (and params (gethash "secret" params))))
+      (cond
+        ((null expected)
+         ;; No secret configured, auto-authenticate
+         (setf (worker-server-authenticated-p server) t)
+         (return-from %dispatch-request
+           (%encode-response
+            (%make-result id
+              (let ((ht (make-hash-table :test 'equal)))
+                (setf (gethash "authenticated" ht) t)
+                ht)))))
+        ((and provided (string= provided expected))
+         (setf (worker-server-authenticated-p server) t)
+         (return-from %dispatch-request
+           (%encode-response
+            (%make-result id
+              (let ((ht (make-hash-table :test 'equal)))
+                (setf (gethash "authenticated" ht) t)
+                ht)))))
+        (t
+         (log-event :warn "worker.auth.failed")
+         (return-from %dispatch-request
+           (%encode-response
+            (%make-error id -32600 "Authentication failed")))))))
+  ;; Normal dispatch for authenticated connections
   (let ((handler (gethash method (worker-server-methods server))))
     (if (null handler)
         (%encode-response
@@ -135,7 +175,9 @@ Returns a JSON string response, or NIL for notifications."
             (%make-error id -32600 "Invalid Request"))))))))
 
 (defun %handle-connection (server stream)
-  "Read JSON-RPC lines from STREAM and write responses until EOF."
+  "Read JSON-RPC lines from STREAM and write responses until EOF.
+Rejects all requests except worker/authenticate until the connection
+is authenticated with the shared secret."
   (loop while (worker-server-running-p server)
         for line = (handler-case
                        (read-line stream nil :eof)
