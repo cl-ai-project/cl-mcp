@@ -12,8 +12,7 @@
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/handlers
                 #:register-all-handlers)
-  (:import-from #:cl-mcp/src/worker/main
-                #:start))
+  (:import-from #:cl-mcp/src/worker/main))
 
 (in-package #:cl-mcp/tests/worker-test)
 

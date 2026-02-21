@@ -10,8 +10,7 @@
                 #:worker-pid #:worker-state
                 #:worker-id #:worker-session-id
                 #:worker-needs-reset-notification
-                #:clear-reset-notification
-                #:worker-spawn-failed)
+                #:clear-reset-notification)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*
                 #:proxy-to-worker)
