@@ -21,6 +21,7 @@
            #:make-worker
            #:spawn-worker
            #:worker-rpc
+           #:worker-rpc-error
            #:worker-tcp-port
            #:worker-swank-port
            #:worker-pid
@@ -28,7 +29,9 @@
            #:worker-session-id
            #:worker-id
            #:worker-needs-reset-notification
+           #:worker-stream-lock
            #:clear-reset-notification
+           #:check-and-clear-reset-notification
            #:kill-worker
            #:worker-crashed
            #:worker-spawn-failed))
@@ -64,6 +67,17 @@
   (:report (lambda (c s)
              (format s "Failed to spawn worker: ~A"
                      (worker-spawn-failed-message c)))))
+
+(define-condition worker-rpc-error (error)
+  ((code :initarg :code :reader worker-rpc-error-code)
+   (message :initarg :message :reader worker-rpc-error-message))
+  (:report (lambda (c s)
+             (format s "JSON-RPC error ~A: ~A"
+                     (worker-rpc-error-code c)
+                     (worker-rpc-error-message c))))
+  (:documentation "Legitimate JSON-RPC error response from a worker handler.
+Distinct from protocol errors (parse failure, ID mismatch) which
+indicate stream corruption and require marking the worker crashed."))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Worker struct
@@ -215,7 +229,10 @@ is not yet ready."
   "Read a JSON-RPC 2.0 response from STREAM matching ID.
 When TIMEOUT is non-NIL, signals SB-EXT:TIMEOUT after that many
 seconds.  Returns the parsed JSON hash-table on success.
-Signals an error if the response contains a JSON-RPC error."
+Signals WORKER-RPC-ERROR for legitimate JSON-RPC error responses
+from the worker handler.  Signals SIMPLE-ERROR for protocol-level
+failures (parse errors, ID mismatches) which indicate stream
+corruption."
   (flet ((do-read ()
            (let ((line (read-line stream nil nil)))
              (unless line
@@ -228,12 +245,12 @@ Signals an error if the response contains a JSON-RPC error."
                  (unless (eql resp-id id)
                    (error "JSON-RPC response ID mismatch: expected ~A, got ~A"
                           id resp-id)))
-               ;; Check for error
+               ;; Check for error — signal typed condition for worker errors
                (let ((err (gethash "error" json)))
                  (when err
-                   (error "JSON-RPC error ~A: ~A"
-                          (gethash "code" err)
-                          (gethash "message" err))))
+                   (error 'worker-rpc-error
+                          :code (gethash "code" err)
+                          :message (gethash "message" err))))
                ;; Return the result
                (gethash "result" json)))))
     (if timeout
@@ -330,8 +347,10 @@ the handshake fails."
 
 (defun %mark-worker-crashed (worker reason)
   "Mark WORKER as crashed, set reset notification flag, close its
-stream to prevent further use, reap the OS process to prevent
-zombies, and log the event.  Returns nothing."
+stream to prevent further use, and log the event.
+Process reaping (waitpid) is deferred to a background thread to
+avoid blocking the caller, which typically holds stream-lock.
+Returns nothing."
   (setf (worker-state worker) :crashed)
   (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
@@ -341,11 +360,16 @@ zombies, and log the event.  Returns nothing."
       (usocket:socket-close (worker-socket worker))
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
-  ;; Reap the OS process to prevent zombie entries in the process
-  ;; table.  process-close calls waitpid internally.
-  (ignore-errors
-    (when (worker-process-info worker)
-      (sb-ext:process-close (worker-process-info worker))))
+  ;; Reap the OS process in a background thread to avoid blocking
+  ;; the caller.  process-close calls waitpid internally, which blocks
+  ;; if the worker process is still alive (e.g. stuck in computation).
+  (let ((process (worker-process-info worker))
+        (wid (worker-id worker)))
+    (when process
+      (bt:make-thread
+       (lambda ()
+         (ignore-errors (sb-ext:process-close process)))
+       :name (format nil "reap-worker-~A" wid))))
   (log-event :warn "worker.crashed"
              "id" (worker-id worker)
              "pid" (worker-pid worker)
@@ -358,8 +382,12 @@ TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
 timed out (sb-ext:timeout), encountered a stream/socket error, or if
 the stream is already NIL (e.g. marked crashed by a concurrent thread).
-On timeout, the stream is closed to prevent permanent corruption from
-stale responses in the TCP buffer."
+Also signals WORKER-CRASHED for protocol errors (JSON parse failure,
+response ID mismatch) which indicate the stream is desynchronized.
+
+Signals WORKER-RPC-ERROR for legitimate JSON-RPC error responses from
+the worker handler (e.g. \"symbol not found\").  These are re-signaled
+without marking the worker as crashed."
   (bt:with-lock-held ((worker-stream-lock worker))
     (unless (worker-stream worker)
       (error 'worker-crashed :worker worker))
@@ -376,6 +404,16 @@ stale responses in the TCP buffer."
           (error 'worker-crashed :worker worker))
         (stream-error ()
           (%mark-worker-crashed worker "stream-error")
+          (error 'worker-crashed :worker worker))
+        (worker-rpc-error (e)
+          ;; Legitimate worker-side error (e.g. "symbol not found").
+          ;; Re-signal without marking the worker as crashed.
+          (error e))
+        (error (e)
+          ;; Protocol error (parse failure, ID mismatch, etc.).
+          ;; Mark worker as crashed since the stream is desynchronized.
+          (%mark-worker-crashed worker
+                                (format nil "protocol-error: ~A" e))
           (error 'worker-crashed :worker worker))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -384,16 +422,26 @@ stale responses in the TCP buffer."
 
 (defun kill-worker (worker)
   "Terminate the worker process and clean up resources.
-Sends SIGTERM first, waits up to 2 seconds, then SIGKILL if still
-alive.  Closes the TCP socket and sets state to :dead.
+Closes the TCP socket under stream-lock for mutual exclusion with
+concurrent worker-rpc calls.  Sends SIGTERM first, waits up to
+2 seconds, then SIGKILL if still alive.  Sets state to :dead.
 
 Robust against already-dead processes."
-  (let ((process (worker-process-info worker))
-        (socket (worker-socket worker)))
+  (let ((process (worker-process-info worker)))
     (log-event :info "worker.killing"
                "id" (worker-id worker)
                "pid" (worker-pid worker))
-    ;; Terminate the process
+    ;; Close TCP socket under stream-lock first, so any concurrent
+    ;; worker-rpc sees the closure as a stream-error rather than
+    ;; racing on the file descriptor.
+    (bt:with-lock-held ((worker-stream-lock worker))
+      (let ((socket (worker-socket worker)))
+        (when socket
+          (ignore-errors (usocket:socket-close socket))
+          (setf (worker-socket worker) nil
+                (worker-stream worker) nil)))
+      (setf (worker-state worker) :dead))
+    ;; Terminate the OS process outside the lock (may block up to ~2.2s)
     (when process
       (handler-case
           (when (sb-ext:process-alive-p process)
@@ -415,13 +463,6 @@ Robust against already-dead processes."
                      "id" (worker-id worker)
                      "error" (princ-to-string e))))
       (ignore-errors (sb-ext:process-close process)))
-    ;; Close TCP socket
-    (when socket
-      (ignore-errors (usocket:socket-close socket))
-      (setf (worker-socket worker) nil)
-      (setf (worker-stream worker) nil))
-    ;; Update state
-    (setf (worker-state worker) :dead)
     (log-event :info "worker.killed"
                "id" (worker-id worker)
                "pid" (worker-pid worker))
@@ -434,3 +475,14 @@ Robust against already-dead processes."
 (defun clear-reset-notification (worker)
   "Clear the needs-reset-notification flag on WORKER."
   (setf (worker-needs-reset-notification worker) nil))
+
+(defun check-and-clear-reset-notification (worker)
+  "Atomically check and clear the needs-reset-notification flag.
+Returns T if the flag was set (and is now cleared), NIL otherwise.
+Uses stream-lock for mutual exclusion with concurrent callers,
+preventing the TOCTOU race where two threads both see the flag
+as set and both return crash notifications."
+  (bt:with-lock-held ((worker-stream-lock worker))
+    (when (worker-needs-reset-notification worker)
+      (setf (worker-needs-reset-notification worker) nil)
+      t)))

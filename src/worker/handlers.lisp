@@ -18,21 +18,19 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests)
-  (:import-from #:cl-mcp/src/object-registry
-                #:inspectable-p
-                #:register-object)
   (:import-from #:cl-mcp/src/inspect
-                #:generate-result-preview
                 #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
-  (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-for-json)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:text-content)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-eval-response
+                #:build-load-system-response
+                #:build-run-tests-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:export #:register-all-handlers))
@@ -87,58 +85,10 @@ result_preview, and error_context."
                    :locals-preview-max-depth locals-preview-max-depth
                    :locals-preview-max-elements locals-preview-max-elements
                    :locals-preview-skip-internal locals-preview-skip-internal)
-      (let ((ht (make-ht "content" (text-content printed)
-                         "stdout" stdout
-                         "stderr" stderr)))
-        ;; Object registry and preview for successful non-primitive results
-        (when (and (null error-context) (inspectable-p raw-value))
-          (if include-result-preview
-              (let ((preview
-                      (generate-result-preview raw-value
-                                               :max-depth (or preview-max-depth 1)
-                                               :max-elements (or preview-max-elements 8))))
-                (setf (gethash "result_object_id" ht) (gethash "id" preview))
-                (setf (gethash "result_preview" ht) preview))
-              (let ((object-id (register-object raw-value)))
-                (when object-id
-                  (setf (gethash "result_object_id" ht) object-id)))))
-        ;; Error context
-        (when error-context
-          (setf (gethash "error_context" ht)
-                (make-ht
-                 "condition_type"
-                 (sanitize-for-json (getf error-context :condition-type))
-                 "message"
-                 (sanitize-for-json (getf error-context :message))
-                 "restarts"
-                 (mapcar
-                  (lambda (r)
-                    (make-ht "name" (sanitize-for-json (getf r :name))
-                             "description"
-                             (sanitize-for-json (getf r :description))))
-                  (getf error-context :restarts))
-                 "frames"
-                 (mapcar
-                  (lambda (f)
-                    (make-ht
-                     "index" (getf f :index)
-                     "function" (sanitize-for-json (getf f :function))
-                     "source_file" (getf f :source-file)
-                     "source_line" (getf f :source-line)
-                     "locals"
-                     (mapcar
-                      (lambda (l)
-                        (let ((lht (make-ht
-                                    "name" (sanitize-for-json (getf l :name))
-                                    "value" (sanitize-for-json (getf l :value)))))
-                          (when (getf l :object-id)
-                            (setf (gethash "object_id" lht) (getf l :object-id)))
-                          (when (getf l :preview)
-                            (setf (gethash "preview" lht) (getf l :preview)))
-                          lht))
-                      (getf f :locals))))
-                  (getf error-context :frames)))))
-        ht))))
+      (build-eval-response printed raw-value stdout stderr error-context
+                           :include-result-preview include-result-preview
+                           :preview-max-depth (or preview-max-depth 1)
+                           :preview-max-elements (or preview-max-elements 8)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/load-system
@@ -155,27 +105,11 @@ result_preview, and error_context."
       (error "system is required"))
     (when (and timeout-seconds (not (plusp timeout-seconds)))
       (error "timeout_seconds must be a positive number"))
-    (let* ((ht (load-system system
-                            :force force
-                            :clear-fasls clear-fasls
-                            :timeout-seconds (or timeout-seconds 120)))
-           (status (gethash "status" ht))
-           (summary
-             (with-output-to-string (s)
-               (cond
-                 ((string= status "loaded")
-                  (format s "System ~A loaded successfully in ~Dms"
-                          system (gethash "duration_ms" ht))
-                  (let ((wc (gethash "warnings" ht 0)))
-                    (when (plusp wc)
-                      (format s " (~D warning~:P)" wc))))
-                 ((string= status "timeout")
-                  (format s "~A" (gethash "message" ht)))
-                 ((string= status "error")
-                  (format s "Error loading ~A: ~A"
-                          system (gethash "message" ht)))))))
-      (setf (gethash "content" ht) (text-content summary))
-      ht)))
+    (let ((ht (load-system system
+                           :force force
+                           :clear-fasls clear-fasls
+                           :timeout-seconds (or timeout-seconds 120))))
+      (build-load-system-response system ht))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/run-tests
@@ -190,48 +124,11 @@ result_preview, and error_context."
          (tests (gethash "tests" params)))
     (unless system
       (error "system is required"))
-    (let* ((test-result (run-tests system
-                                   :framework framework
-                                   :test test
-                                   :tests tests))
-           (passed (gethash "passed" test-result 0))
-           (failed (gethash "failed" test-result 0))
-           (pending (gethash "pending" test-result 0))
-           (framework-name (or (gethash "framework" test-result) "unknown"))
-           (duration (gethash "duration_ms" test-result 0))
-           (failed-tests (gethash "failed_tests" test-result))
-           (failed-tests-vector (if (vectorp failed-tests)
-                                    failed-tests
-                                    (coerce (or failed-tests '()) 'vector)))
-           (summary
-             (with-output-to-string (s)
-               (format s "~A~%"
-                       (if (zerop failed) "✓ PASS" "✗ FAIL"))
-               (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
-                       passed failed (when (plusp pending) pending))
-               (format s "Duration: ~Dms~%" duration)
-               (when (plusp (length failed-tests-vector))
-                 (format s "~%Failures:~%")
-                 (loop for fail across failed-tests-vector
-                       for i from 1
-                       do (format s "  ~D. ~A~%"
-                                  i (gethash "test_name" fail))
-                          (when (gethash "reason" fail)
-                            (format s "     Reason: ~A~%"
-                                    (gethash "reason" fail))))))))
-      (let ((response (make-ht "content" (text-content summary)
-                               "passed" passed
-                               "failed" failed
-                               "pending" pending
-                               "framework" framework-name
-                               "duration_ms" duration
-                               "failed_tests" failed-tests-vector)))
-        (dolist (field '("success" "stdout" "stderr" "passed_tests"))
-          (multiple-value-bind (value presentp)
-              (gethash field test-result)
-            (when presentp
-              (setf (gethash field response) value))))
-        response))))
+    (let ((test-result (run-tests system
+                                  :framework framework
+                                  :test test
+                                  :tests tests)))
+      (build-run-tests-response test-result))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find

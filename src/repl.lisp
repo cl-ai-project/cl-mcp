@@ -9,14 +9,12 @@
   (:import-from #:cl-mcp/src/repl-core
                 #:repl-eval
                 #:*default-eval-package*)
-  (:import-from #:cl-mcp/src/object-registry #:inspectable-p #:register-object)
-  (:import-from #:cl-mcp/src/inspect #:generate-result-preview)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-eval-response)
   (:import-from #:cl-mcp/src/proxy
                 #:proxy-to-worker
                 #:*use-worker-pool*)
@@ -114,53 +112,8 @@ SBCL's default optimization does not preserve locals for inspection."
           locals-preview-max-depth :locals-preview-max-elements
           locals-preview-max-elements :locals-preview-skip-internal
           locals-preview-skip-internal)
-       (let ((ht
-              (make-ht "content" (text-content printed) "stdout" stdout "stderr"
-               stderr)))
-         (when (and (null error-context) (inspectable-p raw-value))
-           (if include-result-preview
-               (let ((preview
-                      (generate-result-preview raw-value :max-depth
-                       (or preview-max-depth 1) :max-elements
-                       (or preview-max-elements 8))))
-                 (setf (gethash "result_object_id" ht) (gethash "id" preview))
-                 (setf (gethash "result_preview" ht) preview))
-               (let ((object-id (register-object raw-value)))
-                 (when object-id
-                   (setf (gethash "result_object_id" ht) object-id)))))
-         (when error-context
-           (setf (gethash "error_context" ht)
-                   (make-ht "condition_type"
-                    (sanitize-for-json (getf error-context :condition-type))
-                    "message"
-                    (sanitize-for-json (getf error-context :message))
-                    "restarts"
-                    (mapcar
-                     (lambda (r)
-                       (make-ht "name" (sanitize-for-json (getf r :name))
-                        "description"
-                        (sanitize-for-json (getf r :description))))
-                     (getf error-context :restarts))
-                    "frames"
-                    (mapcar
-                     (lambda (f)
-                       (make-ht "index" (getf f :index) "function"
-                        (sanitize-for-json (getf f :function))
-                        "source_file" (getf f :source-file)
-                        "source_line" (getf f :source-line) "locals"
-                        (mapcar
-                         (lambda (l)
-                           (let ((ht
-                                  (make-ht "name"
-                                   (sanitize-for-json (getf l :name))
-                                   "value"
-                                   (sanitize-for-json (getf l :value)))))
-                             (when (getf l :object-id)
-                               (setf (gethash "object_id" ht)
-                                       (getf l :object-id)))
-                             (when (getf l :preview)
-                               (setf (gethash "preview" ht) (getf l :preview)))
-                             ht))
-                         (getf f :locals))))
-                     (getf error-context :frames)))))
-         (result id ht)))))
+       (result id
+               (build-eval-response printed raw-value stdout stderr error-context
+                                    :include-result-preview include-result-preview
+                                    :preview-max-depth (or preview-max-depth 1)
+                                    :preview-max-elements (or preview-max-elements 8))))))

@@ -12,10 +12,11 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result
-                #:text-content
                 #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-load-system-response)
   (:import-from #:cl-mcp/src/proxy
                 #:proxy-to-worker
                 #:*use-worker-pool*)
@@ -67,24 +68,8 @@ Examples:
           (error 'arg-validation-error
                  :arg-name "timeout_seconds"
                  :message "timeout_seconds must be a positive number"))
-        (let* ((ht (load-system system
-                              :force force
-                              :clear-fasls clear-fasls
-                              :timeout-seconds (or timeout-seconds 120)))
-             (status (gethash "status" ht))
-             (summary
-               (with-output-to-string (s)
-                 (cond
-                   ((string= status "loaded")
-                    (format s "System ~A loaded successfully in ~Dms"
-                            system (gethash "duration_ms" ht))
-                    (let ((wc (gethash "warnings" ht 0)))
-                      (when (plusp wc)
-                        (format s " (~D warning~:P)" wc))))
-                   ((string= status "timeout")
-                    (format s "~A" (gethash "message" ht)))
-                   ((string= status "error")
-                    (format s "Error loading ~A: ~A"
-                            system (gethash "message" ht)))))))
-          (setf (gethash "content" ht) (text-content summary))
-          (result id ht)))))
+        (let ((ht (load-system system
+                               :force force
+                               :clear-fasls clear-fasls
+                               :timeout-seconds (or timeout-seconds 120))))
+          (result id (build-load-system-response system ht))))))

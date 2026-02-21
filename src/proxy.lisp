@@ -49,8 +49,7 @@ operations like system compilation.")
 
 (defparameter %proxy-bindings%
   '(("CL-MCP/SRC/POOL" . "GET-OR-ASSIGN-WORKER")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-NEEDS-RESET-NOTIFICATION")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "CLEAR-RESET-NOTIFICATION")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "CHECK-AND-CLEAR-RESET-NOTIFICATION")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-RPC")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED"))
   "Package/symbol pairs used by proxy-to-worker at runtime.
@@ -91,64 +90,53 @@ all unresolvable symbols."
 (defun proxy-to-worker (method params)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
-
-METHOD is the worker-side JSON-RPC method name (e.g. \"worker/eval\").
-PARAMS is a hash-table of arguments to forward.
-
-Pool and worker-client symbols are resolved at runtime via late-binding
-so that this module compiles without requiring those systems to be loaded.
-They are only needed when *use-worker-pool* is non-nil.
-
-If the worker was recently restarted after a crash, returns a
-one-time error notification instead of forwarding the call.
-Subsequent calls proceed normally.
-
-If the worker crashes mid-request, catches the condition and returns
-the crash notification directly (inline recovery)."
+Uses atomic check-and-clear for crash notification to prevent
+TOCTOU race with concurrent requests for the same session."
   (let* ((session-id *current-session-id*)
          (get-or-assign (fdefinition (%resolve "CL-MCP/SRC/POOL"
                                                "GET-OR-ASSIGN-WORKER")))
          (worker (funcall get-or-assign session-id))
-         (needs-reset-fn (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                                "WORKER-NEEDS-RESET-NOTIFICATION")))
-         (clear-reset-fn (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                                "CLEAR-RESET-NOTIFICATION")))
-         (worker-rpc-fn (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                               "WORKER-RPC")))
-         (worker-crashed-sym (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                       "WORKER-CRASHED")))
+         (check-and-clear-fn
+           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                  "CHECK-AND-CLEAR-RESET-NOTIFICATION")))
+         (worker-rpc-fn
+           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-RPC")))
+         (worker-crashed-sym
+           (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED")))
     (cond
-      ;; Worker was recently restarted after a crash -- notify once
-      ((funcall needs-reset-fn worker)
-       (funcall clear-reset-fn worker)
+      ;; Atomic check-and-clear: only one concurrent request gets the
+      ;; crash notification; the rest proceed normally.
+      ((funcall check-and-clear-fn worker)
        (log-event :info "proxy.crash-notification"
                   "session" session-id
                   "method" method)
        (%crash-notification-result))
-      ;; Normal path -- forward to worker with timeout
       (t
        (log-event :debug "proxy.forward"
                   "session" session-id
                   "method" method)
-       (handler-case
-           (funcall worker-rpc-fn worker method params
-                    :timeout *proxy-rpc-timeout*)
-         (error (e)
-           (cond
-             ;; Worker crashed mid-request — return crash notification
-             ((typep e worker-crashed-sym)
-              (log-event :warn "proxy.worker-crashed-mid-request"
-                         "session" session-id
-                         "method" method
-                         "error" (princ-to-string e))
-              (%crash-notification-result))
-             ;; Non-crash error (JSON-RPC error from worker handler,
-             ;; e.g. "symbol not found", "code is required").
-             ;; Re-signal so define-tool's handler wraps it as a
-             ;; proper MCP error — not a misleading crash message.
-             (t
-              (log-event :debug "proxy.worker-rpc-error"
-                         "session" session-id
-                         "method" method
-                         "error" (princ-to-string e))
-              (error "~A" (princ-to-string e))))))))))
+       (let* ((user-timeout (and (hash-table-p params)
+                                 (gethash "timeout_seconds" params)))
+              (effective-timeout
+                (if (and user-timeout (numberp user-timeout)
+                         (plusp user-timeout))
+                    (max *proxy-rpc-timeout*
+                         (ceiling (+ user-timeout 30)))
+                    *proxy-rpc-timeout*)))
+         (handler-case
+             (funcall worker-rpc-fn worker method params
+                      :timeout effective-timeout)
+           (error (e)
+             (cond
+               ((typep e worker-crashed-sym)
+                (log-event :warn "proxy.worker-crashed-mid-request"
+                           "session" session-id
+                           "method" method
+                           "error" (princ-to-string e))
+                (%crash-notification-result))
+               (t
+                (log-event :debug "proxy.worker-rpc-error"
+                           "session" session-id
+                           "method" method
+                           "error" (princ-to-string e))
+                (error "~A" (princ-to-string e)))))))))))

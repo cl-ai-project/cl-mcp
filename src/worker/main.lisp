@@ -97,19 +97,23 @@ handlers, optionally starts a Swank server for human observation,
 outputs a JSON handshake line to stdout, and blocks in the accept
 loop waiting for the parent to connect.
 
+After the handshake, stdout is redirected to /dev/null to prevent
+accidental writes from filling the pipe buffer and causing deadlock.
+
 When the accept loop exits (parent disconnected or server stopped),
 the process exits cleanly instead of falling through to the
 Roswell REPL."
   (%setup-project-root)
-  (let* ((server (make-worker-server :port 0))
-         (tcp-port (server-port server)))
+  (let* ((server (make-worker-server :port 0)) (tcp-port (server-port server)))
     (register-all-handlers server)
     (let ((swank-port (%try-start-swank)))
-      (log-event :info "worker.starting"
-                 "tcp_port" tcp-port
-                 "swank_port" (or swank-port "none")
-                 "pid" (%get-pid))
+      (log-event :info "worker.starting" "tcp_port" tcp-port "swank_port"
+       (or swank-port "none") "pid" (%get-pid))
       (%output-handshake tcp-port swank-port)
+      ;; Redirect stdout to /dev/null after handshake to prevent pipe
+      ;; buffer deadlock — parent only reads the single handshake line.
+      (let ((devnull (open #P"/dev/null" :direction :output
+                                         :if-exists :append)))
+        (setf *standard-output* devnull))
       (start-accept-loop server)))
-  ;; Exit cleanly instead of falling through to ros run's REPL.
-  (sb-ext:exit :code 0))
+  (exit :code 0))
