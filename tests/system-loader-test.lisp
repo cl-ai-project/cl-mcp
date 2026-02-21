@@ -73,14 +73,16 @@
 
 (deftest timeout-returns-completed-work
   (testing "worker completing within polling granularity returns success, not timeout"
-    ;; Keep this test stable on slower CI runners.
-    ;; timeout-seconds=0.0501 rounds up to two 50ms polling intervals
-    ;; (about 100ms effective). The worker sleeps 60ms, so it exceeds the
-    ;; nominal timeout but still completes before the rounded polling deadline.
+    ;; Keep this test stable on slower CI runners (especially macOS),
+    ;; where thread startup and timer scheduling jitter can be higher.
+    ;; timeout-seconds=0.2001 rounds up to five 50ms polling intervals
+    ;; (about 250ms effective). The worker sleeps 220ms, so it exceeds the
+    ;; nominal timeout but still completes before the rounded polling deadline
+    ;; with enough slack to avoid flaky false timeouts.
     (multiple-value-bind (result-list timed-out-p errored-p)
         (%load-with-timeout
-         (lambda () (sleep 0.06) :done)
-         0.0501)
+         (lambda () (sleep 0.22) :done)
+         0.2001)
       (ok (not timed-out-p) "completed work should not be reported as timeout")
       (ok (not errored-p))
       (ok (equal result-list '(:done))))))
