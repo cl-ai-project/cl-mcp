@@ -7,9 +7,13 @@
                 #:code-describe-symbol
                 #:code-find-references)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-code-find-response
+                #:build-code-describe-response
+                #:build-code-find-references-response)
   (:import-from #:cl-mcp/src/proxy
                 #:proxy-to-worker
                 #:*use-worker-pool*)
@@ -43,18 +47,7 @@ and is loaded"))
       ;; Fallback: inline execution
       (multiple-value-bind (path line)
           (code-find-definition symbol :package package)
-        (if path
-            (result id
-                    (make-ht "path" path
-                             "line" line
-                             "content" (text-content
-                                        (format nil "~A defined in ~A at line ~D"
-                                                symbol path line))))
-            (result id
-                    (make-ht "isError" t
-                             "content" (text-content
-                                        (format nil "Definition not found for ~A"
-                                                symbol))))))))
+        (result id (build-code-find-response symbol path line)))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
@@ -79,16 +72,7 @@ and is loaded"))
       ;; Fallback: inline execution
       (multiple-value-bind (name type arglist doc path line)
           (code-describe-symbol symbol :package package)
-        (result id
-                (make-ht "name" name
-                         "type" type
-                         "arglist" arglist
-                         "documentation" doc
-                         "path" path
-                         "line" line
-                         "content" (text-content
-                                    (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
-                                            name type arglist doc path line)))))))
+        (result id (build-code-describe-response name type arglist doc path line)))))
 
 (define-tool "code-find-references"
   :description "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
@@ -115,21 +99,5 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
       ;; Fallback: inline execution
       (multiple-value-bind (refs count)
           (code-find-references symbol :package package :project-only project-only)
-        (let* ((summary-lines
-                (map 'list
-                     (lambda (h)
-                       (format nil "~A:~D ~A ~A"
-                               (gethash "path" h)
-                               (gethash "line" h)
-                               (gethash "type" h)
-                               (gethash "context" h)))
-                     refs))
-               (summary (if summary-lines
-                            (format nil "~{~A~%~}" summary-lines)
-                            "")))
-          (result id
-                  (make-ht "refs" refs
-                           "count" count
-                           "symbol" symbol
-                           "project_only" project-only
-                           "content" (text-content summary)))))))
+        (result id
+                (build-code-find-references-response symbol refs count project-only)))))

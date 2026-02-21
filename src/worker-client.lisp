@@ -32,6 +32,7 @@
            #:worker-stream-lock
            #:clear-reset-notification
            #:check-and-clear-reset-notification
+           #:worker-process-info
            #:kill-worker
            #:worker-crashed
            #:worker-spawn-failed))
@@ -132,17 +133,23 @@ current *project-root* value."
 ;;; Internal helpers — process launch
 ;;; ---------------------------------------------------------------------------
 
+(defvar *cached-ros-path* nil
+  "Cached result of %find-ros-path to avoid repeated subprocess forks.")
+
 (defun %find-ros-path ()
   "Locate the ros executable.  Returns the absolute path as a string,
-or \"ros\" if not found (relying on PATH)."
-  (handler-case
-      (let ((path (string-trim '(#\Newline #\Return #\Space)
-                               (uiop:run-program '("which" "ros")
-                                                  :output :string))))
-        (if (and path (plusp (length path)))
-            path
-            "ros"))
-    (error () "ros")))
+or \"ros\" if not found (relying on PATH).  Caches the result after
+the first successful lookup."
+  (or *cached-ros-path*
+      (setf *cached-ros-path*
+            (handler-case
+                (let ((path (string-trim '(#\Newline #\Return #\Space)
+                                         (uiop:run-program '("which" "ros")
+                                                            :output :string))))
+                  (if (and path (plusp (length path)))
+                      path
+                      "ros"))
+              (error () "ros")))))
 
 (defun %launch-worker-process ()
   "Launch a worker child process via sb-ext:run-program.

@@ -30,7 +30,11 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-eval-response
                 #:build-load-system-response
-                #:build-run-tests-response)
+                #:build-run-tests-response
+                #:build-code-find-response
+                #:build-code-describe-response
+                #:build-code-find-references-response
+                #:build-inspect-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:export #:register-all-handlers))
@@ -143,16 +147,7 @@ result_preview, and error_context."
       (error "symbol is required"))
     (multiple-value-bind (path line)
         (code-find-definition symbol :package package)
-      (if path
-          (make-ht "path" path
-                   "line" line
-                   "content" (text-content
-                              (format nil "~A defined in ~A at line ~D"
-                                      symbol path line)))
-          (make-ht "isError" t
-                   "content" (text-content
-                              (format nil "Definition not found for ~A"
-                                      symbol)))))))
+      (build-code-find-response symbol path line))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-describe
@@ -167,15 +162,7 @@ result_preview, and error_context."
       (error "symbol is required"))
     (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol symbol :package package)
-      (make-ht "name" name
-               "type" type
-               "arglist" arglist
-               "documentation" doc
-               "path" path
-               "line" line
-               "content" (text-content
-                          (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
-                                  name type arglist doc path line))))))
+      (build-code-describe-response name type arglist doc path line))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find-references
@@ -191,23 +178,7 @@ result_preview, and error_context."
       (error "symbol is required"))
     (multiple-value-bind (refs count)
         (code-find-references symbol :package package :project-only project-only)
-      (let* ((summary-lines
-               (map 'list
-                    (lambda (h)
-                      (format nil "~A:~D ~A ~A"
-                              (gethash "path" h)
-                              (gethash "line" h)
-                              (gethash "type" h)
-                              (gethash "context" h)))
-                    refs))
-             (summary (if summary-lines
-                          (format nil "~{~A~%~}" summary-lines)
-                          "")))
-        (make-ht "refs" refs
-                 "count" count
-                 "symbol" symbol
-                 "project_only" project-only
-                 "content" (text-content summary))))))
+      (build-code-find-references-response symbol refs count project-only))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/inspect-object
@@ -224,14 +195,7 @@ define-tool \"inspect-object\"."
     (let ((inspection-result (inspect-object-by-id object-id
                                                    :max-depth (or max-depth 1)
                                                    :max-elements (or max-elements 50))))
-      (if (gethash "error" inspection-result)
-          (make-ht "isError" t
-                   "content" (text-content (gethash "message" inspection-result)))
-          (let ((summary (format nil "[~A] ~A"
-                                 (gethash "kind" inspection-result)
-                                 (gethash "summary" inspection-result))))
-            (setf (gethash "content" inspection-result) (text-content summary))
-            inspection-result)))))
+      (build-inspect-response inspection-result))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/set-project-root
@@ -239,13 +203,18 @@ define-tool \"inspect-object\"."
 
 (defun %handle-set-project-root (params)
   "Set the worker's project root directory and change the working
-directory.  Returns a success payload."
+directory.  Resolves symlinks via TRUENAME for canonical paths.
+Returns a success payload."
   (let ((path (gethash "path" params)))
     (unless path
       (error "path is required"))
     (let ((dir-path (uiop/pathname:ensure-directory-pathname path)))
       (unless (uiop/filesystem:directory-exists-p dir-path)
         (error "Directory does not exist: ~A" path))
+      ;; Resolve symlinks for a canonical path
+      (let ((resolved (truename dir-path)))
+        (when resolved
+          (setf dir-path resolved)))
       (setf *project-root* dir-path)
       (uiop/os:chdir dir-path)
       (log-event :info "worker.project-root.set" "path" (namestring dir-path))

@@ -87,56 +87,78 @@ all unresolvable symbols."
           (gethash "isError" ht) t)
     ht))
 
+;;; ---------------------------------------------------------------------------
+;;; Cached late-bound function references
+;;; ---------------------------------------------------------------------------
+
+(defvar %cached-get-or-assign% nil
+  "Cached fdefinition for POOL:GET-OR-ASSIGN-WORKER.")
+(defvar %cached-check-and-clear% nil
+  "Cached fdefinition for WORKER-CLIENT:CHECK-AND-CLEAR-RESET-NOTIFICATION.")
+(defvar %cached-worker-rpc% nil
+  "Cached fdefinition for WORKER-CLIENT:WORKER-RPC.")
+(defvar %cached-worker-crashed-sym% nil
+  "Cached symbol WORKER-CLIENT:WORKER-CRASHED.")
+
+(defun %ensure-cached-bindings ()
+  "Populate the cached function bindings on first use.  Called once
+per image after verify-proxy-bindings has validated the symbols."
+  (unless %cached-get-or-assign%
+    (setf %cached-get-or-assign%
+          (fdefinition (%resolve "CL-MCP/SRC/POOL" "GET-OR-ASSIGN-WORKER"))
+          %cached-check-and-clear%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "CHECK-AND-CLEAR-RESET-NOTIFICATION"))
+          %cached-worker-rpc%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-RPC"))
+          %cached-worker-crashed-sym%
+          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED"))))
+
 (defun proxy-to-worker (method params)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
 Uses atomic check-and-clear for crash notification to prevent
 TOCTOU race with concurrent requests for the same session."
-  (let* ((session-id *current-session-id*)
-         (get-or-assign (fdefinition (%resolve "CL-MCP/SRC/POOL"
-                                               "GET-OR-ASSIGN-WORKER")))
-         (worker (funcall get-or-assign session-id))
-         (check-and-clear-fn
-           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                  "CHECK-AND-CLEAR-RESET-NOTIFICATION")))
-         (worker-rpc-fn
-           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-RPC")))
-         (worker-crashed-sym
-           (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED")))
-    (cond
-      ;; Atomic check-and-clear: only one concurrent request gets the
-      ;; crash notification; the rest proceed normally.
-      ((funcall check-and-clear-fn worker)
-       (log-event :info "proxy.crash-notification"
-                  "session" session-id
-                  "method" method)
-       (%crash-notification-result))
-      (t
-       (log-event :debug "proxy.forward"
-                  "session" session-id
-                  "method" method)
-       (let* ((user-timeout (and (hash-table-p params)
-                                 (gethash "timeout_seconds" params)))
-              (effective-timeout
-                (if (and user-timeout (numberp user-timeout)
-                         (plusp user-timeout))
-                    (max *proxy-rpc-timeout*
-                         (ceiling (+ user-timeout 30)))
-                    *proxy-rpc-timeout*)))
-         (handler-case
-             (funcall worker-rpc-fn worker method params
-                      :timeout effective-timeout)
-           (error (e)
-             (cond
-               ((typep e worker-crashed-sym)
-                (log-event :warn "proxy.worker-crashed-mid-request"
-                           "session" session-id
-                           "method" method
-                           "error" (princ-to-string e))
-                (%crash-notification-result))
-               (t
-                (log-event :debug "proxy.worker-rpc-error"
-                           "session" session-id
-                           "method" method
-                           "error" (princ-to-string e))
-                (error "~A" (princ-to-string e)))))))))))
+  (let ((session-id *current-session-id*))
+    (unless session-id
+      (error "Cannot proxy tool call: no session ID bound."))
+    (%ensure-cached-bindings)
+    (let* ((worker (funcall %cached-get-or-assign% session-id))
+           (worker-crashed-sym %cached-worker-crashed-sym%))
+      (cond
+        ;; Atomic check-and-clear: only one concurrent request gets the
+        ;; crash notification; the rest proceed normally.
+        ((funcall %cached-check-and-clear% worker)
+         (log-event :info "proxy.crash-notification"
+                    "session" session-id
+                    "method" method)
+         (%crash-notification-result))
+        (t
+         (log-event :debug "proxy.forward"
+                    "session" session-id
+                    "method" method)
+         (let* ((user-timeout (and (hash-table-p params)
+                                   (gethash "timeout_seconds" params)))
+                (effective-timeout
+                  (if (and user-timeout (numberp user-timeout)
+                           (plusp user-timeout))
+                      (max *proxy-rpc-timeout*
+                           (ceiling (+ user-timeout 30)))
+                      *proxy-rpc-timeout*)))
+           (handler-case
+               (funcall %cached-worker-rpc% worker method params
+                        :timeout effective-timeout)
+             (error (e)
+               (cond
+                 ((typep e worker-crashed-sym)
+                  (log-event :warn "proxy.worker-crashed-mid-request"
+                             "session" session-id
+                             "method" method
+                             "error" (princ-to-string e))
+                  (%crash-notification-result))
+                 (t
+                  (log-event :debug "proxy.worker-rpc-error"
+                             "session" session-id
+                             "method" method
+                             "error" (princ-to-string e))
+                  (error e)))))))))))

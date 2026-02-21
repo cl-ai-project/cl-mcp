@@ -106,6 +106,65 @@ When *session-timeout-seconds* is NIL, sessions never expire."
     (release-session session-id)))
 
 ;;; ------------------------------------------------------------
+;;; Session Cleanup
+;;; ------------------------------------------------------------
+
+(defvar *cleanup-thread* nil
+  "Background thread for periodic session cleanup.")
+
+(defvar *cleanup-running* nil
+  "Flag controlling the session cleanup loop.")
+
+(defparameter *cleanup-interval-seconds* 300
+  "Interval in seconds between session cleanup sweeps.  Default is
+300 (5 minutes).")
+
+(defun %session-cleanup-loop ()
+  "Periodically sweep expired sessions and release their workers.
+Runs until *cleanup-running* becomes NIL."
+  (loop while *cleanup-running*
+        do (sleep *cleanup-interval-seconds*)
+           (when *cleanup-running*
+             (handler-case
+                 (let ((expired nil)
+                       (now (get-universal-time)))
+                   (bordeaux-threads:with-lock-held (*sessions-lock*)
+                     (when *session-timeout-seconds*
+                       (maphash
+                        (lambda (id session)
+                          (when (> (- now (http-session-last-access session))
+                                   *session-timeout-seconds*)
+                            (push id expired)))
+                        *sessions*)
+                       (dolist (id expired)
+                         (remhash id *sessions*))))
+                   (when expired
+                     (log-event :info "http.session.cleanup"
+                                "expired_count" (length expired))
+                     (when *use-worker-pool*
+                       (dolist (id expired)
+                         (ignore-errors (release-session id))))))
+               (error (e)
+                 (log-event :error "http.session.cleanup.error"
+                            "error" (princ-to-string e)))))))
+
+(defun %start-session-cleanup ()
+  "Start the background session cleanup thread."
+  (setf *cleanup-running* t
+        *cleanup-thread*
+        (bordeaux-threads:make-thread #'%session-cleanup-loop
+                                      :name "session-cleanup")))
+
+(defun %stop-session-cleanup ()
+  "Stop the background session cleanup thread."
+  (setf *cleanup-running* nil)
+  (when (and *cleanup-thread*
+             (bordeaux-threads:threadp *cleanup-thread*)
+             (bordeaux-threads:thread-alive-p *cleanup-thread*))
+    (ignore-errors (bordeaux-threads:join-thread *cleanup-thread*)))
+  (setf *cleanup-thread* nil))
+
+;;; ------------------------------------------------------------
 ;;; HTTP Handlers
 ;;; ------------------------------------------------------------
 
@@ -268,8 +327,13 @@ Currently returns 405 as SSE is not yet implemented."
         (method (hunchentoot:request-method request)))
     (when (string= path "/mcp")
       (lambda ()
-        ;; Set CORS headers for local development
-        (set-header :access-control-allow-origin "*")
+        ;; Set CORS headers — restrict to loopback origins
+        (let ((origin (get-header :origin)))
+          (when (and origin
+                     (or (search "://localhost" origin)
+                         (search "://127.0.0.1" origin)
+                         (search "://[::1]" origin)))
+            (set-header :access-control-allow-origin origin)))
         (set-header :access-control-expose-headers "Mcp-Session-Id")
 
         (case method
@@ -323,6 +387,9 @@ Returns the acceptor instance and port number."
   (when *use-worker-pool*
     (initialize-pool))
 
+  ;; Start periodic session cleanup
+  (%start-session-cleanup)
+
   (log-event :info "http.started"
              "host" host
              "port" *http-server-port*
@@ -337,6 +404,8 @@ Returns the acceptor instance and port number."
     (hunchentoot:stop *http-server*)
     (setf *http-server* nil
           *http-server-port* nil)
+    ;; Stop session cleanup thread
+    (%stop-session-cleanup)
     ;; Shut down worker pool before clearing sessions
     (when *use-worker-pool*
       (shutdown-pool))

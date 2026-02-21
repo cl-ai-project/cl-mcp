@@ -29,8 +29,9 @@
                 #:spawn-worker #:worker-rpc #:kill-worker
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
-                #:worker-tcp-port #:worker-swank-port
-                #:worker-pid #:worker-id)
+                #:worker-tcp-port
+                #:worker-pid #:worker-id
+                #:worker-process-info)
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings)
   (:import-from #:cl-mcp/src/log #:log-event)
@@ -343,7 +344,7 @@ to prevent recovery threads from spawning orphan workers."
              (setf history (remove-if (lambda (ts) (< ts window-start)) history))
              (push now history)
              (setf (gethash session-id *crash-history*) history)
-             (when (> (length history) *crash-breaker-threshold*)
+             (when (>= (length history) *crash-breaker-threshold*)
                (log-event :error "pool.circuit-breaker.tripped"
                           "session" session-id
                           "crashes" (length history)
@@ -410,7 +411,7 @@ to prevent recovery threads from spawning orphan workers."
 (defun %worker-process-alive-p (worker)
   "Check if WORKER's OS process is still alive via sb-ext:process-alive-p.
 Returns T if alive, NIL if dead.  Does not acquire any locks or perform I/O."
-  (let ((process (cl-mcp/src/worker-client::worker-process-info worker)))
+  (let ((process (worker-process-info worker)))
     (and process
          (ignore-errors (sb-ext:process-alive-p process)))))
 
@@ -418,31 +419,37 @@ Returns T if alive, NIL if dead.  Does not acquire any locks or perform I/O."
   "Periodically check all bound and standby workers.  Detect crashed
 ones using OS-level process liveness (sb-ext:process-alive-p) which
 does not acquire any locks or perform I/O, and recover asynchronously.
-Runs until *pool-running* becomes NIL."
+Runs until *pool-running* becomes NIL.  The outer loop body is
+wrapped in handler-case to prevent transient errors from killing
+the monitor thread."
   (loop while *pool-running*
         do (sleep 10)
            (when *pool-running*
-             (let ((workers nil))
-               ;; Snapshot worker list under lock
-               (bt:with-lock-held (*pool-lock*)
-                 (setf workers (copy-list *all-workers*)))
-               ;; Check each bound/standby worker outside lock
-               (dolist (w workers)
-                 (when (member (worker-state w) '(:bound :standby))
-                   (unless (%worker-process-alive-p w)
-                     ;; Queue crash recovery to a separate thread
-                     ;; so one slow recovery doesn't block checking
-                     ;; other workers.
-                     (bt:make-thread
-                      (lambda ()
-                        (handler-case
-                            (%handle-worker-crash w)
-                          (error (e)
-                            (log-event :error "pool.monitor.recovery-error"
-                                       "worker_id" (worker-id w)
-                                       "error" (princ-to-string e)))))
-                      :name (format nil "pool-recover-~A"
-                                    (worker-id w))))))))))
+             (handler-case
+                 (let ((workers nil))
+                   ;; Snapshot worker list under lock
+                   (bt:with-lock-held (*pool-lock*)
+                     (setf workers (copy-list *all-workers*)))
+                   ;; Check each bound/standby worker outside lock
+                   (dolist (w workers)
+                     (when (member (worker-state w) '(:bound :standby))
+                       (unless (%worker-process-alive-p w)
+                         ;; Queue crash recovery to a separate thread
+                         ;; so one slow recovery doesn't block checking
+                         ;; other workers.
+                         (bt:make-thread
+                          (lambda ()
+                            (handler-case
+                                (%handle-worker-crash w)
+                              (error (e)
+                                (log-event :error "pool.monitor.recovery-error"
+                                           "worker_id" (worker-id w)
+                                           "error" (princ-to-string e)))))
+                          :name (format nil "pool-recover-~A"
+                                        (worker-id w)))))))
+               (error (e)
+                 (log-event :error "pool.monitor.loop-error"
+                            "error" (princ-to-string e)))))))
 
 (defun %start-health-monitor ()
   "Start the background health monitor thread."
@@ -455,6 +462,9 @@ Runs until *pool-running* becomes NIL."
 ;;; Public API -- initialize
 ;;; ---------------------------------------------------------------------------
 
+(defvar *init-lock* (bt:make-lock "pool-init-lock")
+  "Serializes concurrent calls to initialize-pool.")
+
 (defun initialize-pool ()
   "Initialize the worker pool, spawning warm standby workers and
 starting the health monitor.  Safe to call multiple times (shuts
@@ -462,39 +472,58 @@ down any existing pool first).  Registers shutdown-pool in
 sb-ext:*exit-hooks* so that workers are cleaned up if the parent
 process exits.
 
-State reset and warmup spawns are protected by *pool-lock* to
-prevent races with stale request handler threads from a previous
-pool incarnation."
-  ;; Verify late-bound proxy symbols are resolvable before starting
-  (verify-proxy-bindings)
-  ;; Shut down existing pool if running
-  (when *pool-running*
-    (shutdown-pool))
-  ;; Reset state and spawn warmup standbys under lock
-  (bt:with-lock-held (*pool-lock*)
-    (setf *affinity-map* (make-hash-table :test 'equal)
-          *standby-workers* nil
-          *all-workers* nil)
-    (clrhash *crash-history*)
-    (dotimes (i *worker-pool-warmup*)
-      (handler-case
-          (let ((w (spawn-worker)))
-            (push w *standby-workers*)
-            (push w *all-workers*)
-            (log-event :info "pool.standby.init"
-                       "worker_id" (worker-id w)
-                       "index" i))
-        (error (e)
-          (log-event :warn "pool.standby.init.failed"
-                     "index" i
-                     "error" (princ-to-string e))))))
-  ;; Start health monitor
-  (%start-health-monitor)
-  ;; Register exit hook to prevent orphan workers on parent exit
-  (pushnew 'shutdown-pool sb-ext:*exit-hooks*)
-  (log-event :info "pool.initialized"
-             "warmup" *worker-pool-warmup*
-             "standbys" (length *standby-workers*)))
+Serialized by *init-lock* to prevent concurrent initialization.
+Warmup spawns occur outside *pool-lock* to avoid holding the global
+lock during potentially slow subprocess launches."
+  (bt:with-lock-held (*init-lock*)
+    ;; Validate configuration
+    (unless (and (integerp *max-pool-size*) (plusp *max-pool-size*))
+      (error "Invalid *max-pool-size*: must be a positive integer, got ~S"
+             *max-pool-size*))
+    (unless (and (integerp *worker-pool-warmup*)
+                 (>= *worker-pool-warmup* 0))
+      (error "Invalid *worker-pool-warmup*: must be a non-negative integer, got ~S"
+             *worker-pool-warmup*))
+    (when (> *worker-pool-warmup* *max-pool-size*)
+      (error "*worker-pool-warmup* (~D) exceeds *max-pool-size* (~D)"
+             *worker-pool-warmup* *max-pool-size*))
+    ;; Verify late-bound proxy symbols are resolvable before starting
+    (verify-proxy-bindings)
+    ;; Shut down existing pool if running
+    (when *pool-running*
+      (shutdown-pool))
+    ;; Reset state under lock
+    (bt:with-lock-held (*pool-lock*)
+      (setf *affinity-map* (make-hash-table :test 'equal)
+            *standby-workers* nil
+            *all-workers* nil)
+      (clrhash *crash-history*))
+    ;; Spawn warmup standbys OUTSIDE *pool-lock* to avoid blocking
+    ;; the global lock during subprocess launches
+    (let ((spawned nil))
+      (dotimes (i *worker-pool-warmup*)
+        (handler-case
+            (let ((w (spawn-worker)))
+              (push w spawned)
+              (log-event :info "pool.standby.init"
+                         "worker_id" (worker-id w)
+                         "index" i))
+          (error (e)
+            (log-event :warn "pool.standby.init.failed"
+                       "index" i
+                       "error" (princ-to-string e)))))
+      ;; Register all spawned workers under lock
+      (bt:with-lock-held (*pool-lock*)
+        (dolist (w spawned)
+          (push w *standby-workers*)
+          (push w *all-workers*))))
+    ;; Start health monitor
+    (%start-health-monitor)
+    ;; Register exit hook to prevent orphan workers on parent exit
+    (pushnew 'shutdown-pool sb-ext:*exit-hooks*)
+    (log-event :info "pool.initialized"
+               "warmup" *worker-pool-warmup*
+               "standbys" (length *standby-workers*))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- shutdown
@@ -643,7 +672,7 @@ impending kill as a crash."
 ;;; ---------------------------------------------------------------------------
 
 (defun broadcast-root-to-workers (path)
-  "Send worker/set-project-root RPC to all live workers.
+  "Send worker/set-project-root RPC to all live workers in parallel.
 Called when the parent's *project-root* changes to keep workers
 synchronized.  No-op when the pool is empty.  Failures on
 individual workers are logged but do not propagate."
@@ -657,17 +686,30 @@ individual workers are logged but do not propagate."
         (log-event :info "pool.broadcast-root"
                    "path" path-string
                    "worker_count" (length workers))
-        (let ((params (make-hash-table :test 'equal)))
-          (setf (gethash "path" params) path-string)
-          (dolist (w workers)
-            (when (member (worker-state w) '(:bound :standby))
-              (handler-case
-                  (worker-rpc w "worker/set-project-root" params
-                              :timeout 5)
-                (error (e)
-                  (log-event :warn "pool.broadcast-root.failed"
-                             "worker_id" (worker-id w)
-                             "error" (princ-to-string e)))))))))))
+        (let ((targets (loop for w in workers
+                             when (member (worker-state w) '(:bound :standby))
+                             collect w)))
+          (when targets
+            (let ((threads
+                    (mapcar
+                     (lambda (w)
+                       (let ((params (make-hash-table :test 'equal)))
+                         (setf (gethash "path" params) path-string)
+                         (bt:make-thread
+                          (lambda ()
+                            (handler-case
+                                (worker-rpc w "worker/set-project-root" params
+                                            :timeout 5)
+                              (error (e)
+                                (log-event :warn "pool.broadcast-root.failed"
+                                           "worker_id" (worker-id w)
+                                           "error" (princ-to-string e)))))
+                          :name (format nil "broadcast-root-~A"
+                                        (worker-id w)))))
+                     targets)))
+              ;; Wait for all broadcast threads to complete
+              (dolist (th threads)
+                (ignore-errors (bt:join-thread th))))))))))
 
 (defun send-root-to-session-worker (session-id path)
   "Send worker/set-project-root RPC to the worker bound to SESSION-ID.
@@ -699,7 +741,9 @@ Failures are logged but do not propagate."
 
 (defun pool-worker-info ()
   "Return a vector of worker info hash-tables suitable for inclusion
-in fs-get-project-info output."
+in fs-get-project-info output.  Includes diagnostic fields (id,
+session, tcp_port, pid, state) but omits swank_port to prevent
+unrestricted REPL access bypassing MCP security policies."
   (let ((result (make-array 0 :adjustable t :fill-pointer 0)))
     (bt:with-lock-held (*pool-lock*)
       (dolist (w *all-workers*)
@@ -707,9 +751,8 @@ in fs-get-project-info output."
           (setf (gethash "id" ht) (worker-id w)
                 (gethash "session" ht) (worker-session-id w)
                 (gethash "tcp_port" ht) (worker-tcp-port w)
-                (gethash "swank_port" ht) (worker-swank-port w)
                 (gethash "pid" ht) (worker-pid w)
                 (gethash "state" ht) (string-downcase
-                                      (symbol-name (worker-state w))))
+                                       (symbol-name (worker-state w))))
           (vector-push-extend ht result))))
     result))

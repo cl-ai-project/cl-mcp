@@ -16,7 +16,11 @@
                 #:sanitize-for-json)
   (:export #:build-eval-response
            #:build-load-system-response
-           #:build-run-tests-response))
+           #:build-run-tests-response
+           #:build-code-find-response
+           #:build-code-describe-response
+           #:build-code-find-references-response
+           #:build-inspect-response))
 
 (in-package #:cl-mcp/src/tools/response-builders)
 
@@ -143,3 +147,65 @@ Returns a new hash-table with content, counts, and failure details."
           (when presentp
             (setf (gethash field response) value))))
       response)))
+
+(defun build-code-find-response (symbol path line)
+  "Build the standard code-find response hash-table.
+PATH is the source file path, LINE the line number.  When PATH is
+NIL the symbol was not found and an isError payload is returned."
+  (if path
+      (make-ht "path" path
+               "line" line
+               "content" (text-content
+                          (format nil "~A defined in ~A at line ~D"
+                                  symbol path line)))
+      (make-ht "isError" t
+               "content" (text-content
+                          (format nil "Definition not found for ~A"
+                                  symbol)))))
+
+(defun build-code-describe-response (name type arglist doc path line)
+  "Build the standard code-describe response hash-table."
+  (make-ht "name" name
+           "type" type
+           "arglist" arglist
+           "documentation" doc
+           "path" path
+           "line" line
+           "content" (text-content
+                      (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                              name type arglist doc path line))))
+
+(defun build-code-find-references-response (symbol refs count project-only)
+  "Build the standard code-find-references response hash-table."
+  (let* ((summary-lines
+           (map 'list
+                (lambda (h)
+                  (format nil "~A:~D ~A ~A"
+                          (gethash "path" h)
+                          (gethash "line" h)
+                          (gethash "type" h)
+                          (gethash "context" h)))
+                refs))
+         (summary (if summary-lines
+                      (format nil "~{~A~%~}" summary-lines)
+                      "")))
+    (make-ht "refs" refs
+             "count" count
+             "symbol" symbol
+             "project_only" project-only
+             "content" (text-content summary))))
+
+(defun build-inspect-response (inspection-result)
+  "Build the standard inspect-object response hash-table.
+INSPECTION-RESULT is the hash-table from inspect-object-by-id.
+Returns a response with content added, or an isError payload."
+  (if (gethash "error" inspection-result)
+      (make-ht "isError" t
+               "content" (text-content
+                          (gethash "message" inspection-result)))
+      (let ((summary (format nil "[~A] ~A"
+                             (gethash "kind" inspection-result)
+                             (gethash "summary" inspection-result))))
+        (setf (gethash "content" inspection-result)
+              (text-content summary))
+        inspection-result)))

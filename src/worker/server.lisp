@@ -146,8 +146,14 @@ Returns a JSON string response, or NIL for notifications."
         when (eq line :eof) do (return)
         do (let ((resp (%process-line server line)))
              (when resp
-               (write-line resp stream)
-               (force-output stream)))))
+               (handler-case
+                   (progn
+                     (write-line resp stream)
+                     (force-output stream))
+                 (stream-error (e)
+                   (log-event :warn "worker.write.error"
+                              "error" (princ-to-string e))
+                   (return)))))))
 
 (defun start-accept-loop (server)
   "Accept a single connection on SERVER and process requests.
@@ -165,6 +171,10 @@ Designed to be run in a dedicated thread."
                                    "error" (princ-to-string e)))
                       nil))))
       (when client
+        ;; Close the listener socket — worker only serves one connection.
+        ;; Prevents the port from remaining open while serving.
+        (ignore-errors (usocket:socket-close listener))
+        (setf (worker-server-listen-socket server) nil)
         (log-event :info "worker.accept.connected"
                    "port" (worker-server-port server))
         (unwind-protect

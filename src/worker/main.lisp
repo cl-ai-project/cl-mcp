@@ -33,8 +33,14 @@
 
 (defun %try-start-swank ()
   "Attempt to load Swank and start a Swank server on an ephemeral port.
-Returns the actual Swank port number on success, or NIL if Swank is
-unavailable or fails to start.  Never signals an error."
+Only starts when MCP_WORKER_SWANK environment variable is set to a
+non-empty value (opt-in).  Returns the actual Swank port number on
+success, or NIL if Swank is disabled, unavailable, or fails to start.
+Never signals an error."
+  (let ((env-val (uiop/os:getenv "MCP_WORKER_SWANK")))
+    (unless (and env-val (plusp (length env-val)))
+      (log-event :debug "worker.swank.skip" "reason" "MCP_WORKER_SWANK not set")
+      (return-from %try-start-swank nil)))
   (handler-case
       (let ((ql-sym (find-symbol "QUICKLOAD" "QL")))
         (unless ql-sym
