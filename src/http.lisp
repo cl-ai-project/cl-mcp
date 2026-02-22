@@ -460,11 +460,11 @@ attacks like localhost.evil.com."
        (hunchentoot:started-p *http-server*)))
 
 (defun start-http-server (&key (host "127.0.0.1") (port 3000)
-                               (token :generate))
+                               (token nil))
   "Start the MCP HTTP server.
 TOKEN controls authentication:
-  :GENERATE (default) - auto-generate a random Bearer token
-  NIL                 - disable authentication entirely
+  NIL (default)       - no authentication (suitable for local development)
+  :GENERATE           - auto-generate a random Bearer token
   \"<string>\"        - use the given string as the Bearer token
 When a token is active, all requests (except OPTIONS) must include
 an Authorization: Bearer <token> header.
