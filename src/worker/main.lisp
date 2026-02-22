@@ -96,6 +96,19 @@ the directory does not exist."
                          "path" env-root)
               nil))))))
 
+(defun %install-signal-handlers ()
+  "Install SIGTERM handler so the worker exits cleanly when the parent
+shuts down the pool.  Without this, SBCL raises a condition for
+SIGTERM which cascades into nested errors when stderr is a broken pipe."
+  #+sbcl
+  (sb-sys:enable-interrupt
+   sb-posix:sigterm
+   (lambda (signo context info)
+     (declare (ignore signo context info))
+     (ignore-errors
+       (log-event :info "worker.sigterm" "pid" (%get-pid)))
+     (sb-ext:exit :code 0 :abort t))))
+
 (defun start ()
   "Entry point for worker child processes.
 Creates the TCP server on an ephemeral port, registers all method
@@ -109,17 +122,31 @@ accidental writes from filling the pipe buffer and causing deadlock.
 When the accept loop exits (parent disconnected or server stopped),
 the process exits cleanly instead of falling through to the
 Roswell REPL."
-  (%setup-project-root)
-  (let* ((server (make-worker-server :port 0)) (tcp-port (server-port server)))
-    (register-all-handlers server)
-    (let ((swank-port (%try-start-swank)))
-      (log-event :info "worker.starting" "tcp_port" tcp-port "swank_port"
-       (or swank-port "none") "pid" (%get-pid))
-      (%output-handshake tcp-port swank-port)
-      ;; Redirect stdout to /dev/null after handshake to prevent pipe
-      ;; buffer deadlock — parent only reads the single handshake line.
-      (let ((devnull (open #P"/dev/null" :direction :output
-                                         :if-exists :append)))
-        (setf *standard-output* devnull))
-      (start-accept-loop server)))
-  (exit :code 0))
+  ;; Disable debugger so unhandled errors exit instead of entering
+  ;; an interactive REPL that would hang or cascade on broken pipes.
+  #+sbcl (sb-ext:disable-debugger)
+  ;; Top-level error handler: catch ALL errors to prevent cascading
+  ;; crashes when stderr is a broken pipe (parent already exited).
+  (handler-case
+      (progn
+        (%install-signal-handlers)
+        (%setup-project-root)
+        (let* ((server (make-worker-server :port 0))
+               (tcp-port (server-port server)))
+          (register-all-handlers server)
+          (let ((swank-port (%try-start-swank)))
+            (log-event :info "worker.starting" "tcp_port" tcp-port
+                       "swank_port" (or swank-port "none")
+                       "pid" (%get-pid))
+            (%output-handshake tcp-port swank-port)
+            ;; Redirect stdout to /dev/null after handshake to prevent
+            ;; pipe buffer deadlock — parent only reads the handshake.
+            (let ((devnull (open #P"/dev/null" :direction :output
+                                               :if-exists :append)))
+              (setf *standard-output* devnull))
+            (start-accept-loop server))))
+    (error (e)
+      (ignore-errors
+        (log-event :error "worker.fatal" "error" (princ-to-string e)
+                   "pid" (%get-pid)))))
+  (sb-ext:exit :code 0 :abort t))
