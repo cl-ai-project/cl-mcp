@@ -18,8 +18,7 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-load-system-response)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker
-                #:*use-worker-pool*)
+                #:with-proxy-dispatch)
   (:export #:load-system))
 
 (in-package #:cl-mcp/src/system-loader)
@@ -50,26 +49,18 @@ Examples:
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds (default: 120)"))
   :body
-  (if *use-worker-pool*
-      (progn
-        (when (and timeout-seconds (not (plusp timeout-seconds)))
-          (error 'arg-validation-error
-                 :arg-name "timeout_seconds"
-                 :message "timeout_seconds must be a positive number"))
-        (result id
-                (proxy-to-worker "worker/load-system"
-                                 (make-ht "system" system
-                                          "force" force
-                                          "clear_fasls" clear-fasls
-                                          "timeout_seconds" timeout-seconds))))
-      ;; Fallback: inline execution
-      (progn
-        (when (and timeout-seconds (not (plusp timeout-seconds)))
-          (error 'arg-validation-error
-                 :arg-name "timeout_seconds"
-                 :message "timeout_seconds must be a positive number"))
-        (let ((ht (load-system system
-                               :force force
-                               :clear-fasls clear-fasls
-                               :timeout-seconds (or timeout-seconds 120))))
-          (result id (build-load-system-response system ht))))))
+  (progn
+    (when (and timeout-seconds (not (plusp timeout-seconds)))
+      (error 'arg-validation-error
+             :arg-name "timeout_seconds"
+             :message "timeout_seconds must be a positive number"))
+    (with-proxy-dispatch (id "worker/load-system"
+                             (make-ht "system" system
+                                      "force" force
+                                      "clear_fasls" clear-fasls
+                                      "timeout_seconds" timeout-seconds))
+      (let ((ht (load-system system
+                             :force force
+                             :clear-fasls clear-fasls
+                             :timeout-seconds (or timeout-seconds 120))))
+        (result id (build-load-system-response system ht))))))

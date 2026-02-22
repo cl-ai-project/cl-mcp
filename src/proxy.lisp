@@ -16,9 +16,10 @@
   (:import-from #:cl-mcp/src/state
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:text-content)
+                #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:proxy-to-worker
+           #:with-proxy-dispatch
            #:*use-worker-pool*
            #:*proxy-rpc-timeout*
            #:verify-proxy-bindings
@@ -36,6 +37,15 @@ the full pool/worker-client dependency chain at compile time.")
 Prevents requests from hanging indefinitely when a worker handler
 is stuck.  300 seconds (5 minutes) accommodates long-running
 operations like system compilation.")
+
+(defmacro with-proxy-dispatch ((id method params-form) &body inline-body)
+  "When *use-worker-pool* is non-nil, proxy the tool call to a worker
+process and wrap the result for JSON-RPC.  Otherwise execute INLINE-BODY.
+METHOD is a string like \"worker/eval\".  PARAMS-FORM builds the
+arguments hash-table.  ID is the JSON-RPC request id."
+  `(if *use-worker-pool*
+       (result ,id (proxy-to-worker ,method ,params-form))
+       (progn ,@inline-body)))
 
 (defun %resolve (pkg-name sym-name)
   "Resolve a symbol at runtime from a package that may not be loaded yet."

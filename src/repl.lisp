@@ -16,8 +16,7 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-eval-response)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker
-                #:*use-worker-pool*)
+                #:with-proxy-dispatch)
   (:export #:repl-eval #:*default-eval-package*))
 
 (in-package #:cl-mcp/src/repl)
@@ -86,34 +85,32 @@ SBCL's default optimization does not preserve locals for inspection."
    "locals_preview_skip_internal" :default t :description
    "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
  :body
- (if *use-worker-pool*
+ (with-proxy-dispatch (id "worker/eval"
+                         (make-ht "code" code
+                                  "package" package
+                                  "print_level" print-level
+                                  "print_length" print-length
+                                  "timeout_seconds" timeout-seconds
+                                  "max_output_length" max-output-length
+                                  "safe_read" safe-read
+                                  "include_result_preview" include-result-preview
+                                  "preview_max_depth" preview-max-depth
+                                  "preview_max_elements" preview-max-elements
+                                  "locals_preview_frames" locals-preview-frames
+                                  "locals_preview_max_depth" locals-preview-max-depth
+                                  "locals_preview_max_elements" locals-preview-max-elements
+                                  "locals_preview_skip_internal" locals-preview-skip-internal))
+   ;; Fallback: inline execution (default when *use-worker-pool* is nil)
+   (multiple-value-bind (printed raw-value stdout stderr error-context)
+       (repl-eval code :package (or package *package*) :print-level print-level
+        :print-length print-length :timeout-seconds timeout-seconds
+        :max-output-length max-output-length :safe-read safe-read
+        :locals-preview-frames locals-preview-frames :locals-preview-max-depth
+        locals-preview-max-depth :locals-preview-max-elements
+        locals-preview-max-elements :locals-preview-skip-internal
+        locals-preview-skip-internal)
      (result id
-             (proxy-to-worker "worker/eval"
-                              (make-ht "code" code
-                                       "package" package
-                                       "print_level" print-level
-                                       "print_length" print-length
-                                       "timeout_seconds" timeout-seconds
-                                       "max_output_length" max-output-length
-                                       "safe_read" safe-read
-                                       "include_result_preview" include-result-preview
-                                       "preview_max_depth" preview-max-depth
-                                       "preview_max_elements" preview-max-elements
-                                       "locals_preview_frames" locals-preview-frames
-                                       "locals_preview_max_depth" locals-preview-max-depth
-                                       "locals_preview_max_elements" locals-preview-max-elements
-                                       "locals_preview_skip_internal" locals-preview-skip-internal)))
-     ;; Fallback: inline execution (default when *use-worker-pool* is nil)
-     (multiple-value-bind (printed raw-value stdout stderr error-context)
-         (repl-eval code :package (or package *package*) :print-level print-level
-          :print-length print-length :timeout-seconds timeout-seconds
-          :max-output-length max-output-length :safe-read safe-read
-          :locals-preview-frames locals-preview-frames :locals-preview-max-depth
-          locals-preview-max-depth :locals-preview-max-elements
-          locals-preview-max-elements :locals-preview-skip-internal
-          locals-preview-skip-internal)
-       (result id
-               (build-eval-response printed raw-value stdout stderr error-context
-                                    :include-result-preview include-result-preview
-                                    :preview-max-depth (or preview-max-depth 1)
-                                    :preview-max-elements (or preview-max-elements 8))))))
+             (build-eval-response printed raw-value stdout stderr error-context
+                                  :include-result-preview include-result-preview
+                                  :preview-max-depth (or preview-max-depth 1)
+                                  :preview-max-elements (or preview-max-elements 8))))))

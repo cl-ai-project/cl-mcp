@@ -15,8 +15,7 @@
                 #:build-code-describe-response
                 #:build-code-find-references-response)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker
-                #:*use-worker-pool*)
+                #:with-proxy-dispatch)
   (:export
    #:code-find-definition
    #:code-describe-symbol
@@ -39,15 +38,11 @@ Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
   :body
-  (if *use-worker-pool*
-      (result id
-              (proxy-to-worker "worker/code-find"
-                               (make-ht "symbol" symbol
-                                        "package" package)))
-      ;; Fallback: inline execution
-      (multiple-value-bind (path line)
-          (code-find-definition symbol :package package)
-        (result id (build-code-find-response symbol path line)))))
+  (with-proxy-dispatch (id "worker/code-find"
+                          (make-ht "symbol" symbol "package" package))
+    (multiple-value-bind (path line)
+        (code-find-definition symbol :package package)
+      (result id (build-code-find-response symbol path line)))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
@@ -64,15 +59,11 @@ Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
 and is loaded"))
   :body
-  (if *use-worker-pool*
-      (result id
-              (proxy-to-worker "worker/code-describe"
-                               (make-ht "symbol" symbol
-                                        "package" package)))
-      ;; Fallback: inline execution
-      (multiple-value-bind (name type arglist doc path line)
-          (code-describe-symbol symbol :package package)
-        (result id (build-code-describe-response name type arglist doc path line)))))
+  (with-proxy-dispatch (id "worker/code-describe"
+                          (make-ht "symbol" symbol "package" package))
+    (multiple-value-bind (name type arglist doc path line)
+        (code-describe-symbol symbol :package package)
+      (result id (build-code-describe-response name type arglist doc path line)))))
 
 (define-tool "code-find-references"
   :description "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
@@ -90,14 +81,11 @@ For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' 
          (project-only :type :boolean :json-name "project_only" :default t
                        :description "When true (default), only include references under the project root"))
   :body
-  (if *use-worker-pool*
+  (with-proxy-dispatch (id "worker/code-find-references"
+                          (make-ht "symbol" symbol
+                                   "package" package
+                                   "project_only" project-only))
+    (multiple-value-bind (refs count)
+        (code-find-references symbol :package package :project-only project-only)
       (result id
-              (proxy-to-worker "worker/code-find-references"
-                               (make-ht "symbol" symbol
-                                        "package" package
-                                        "project_only" project-only)))
-      ;; Fallback: inline execution
-      (multiple-value-bind (refs count)
-          (code-find-references symbol :package package :project-only project-only)
-        (result id
-                (build-code-find-references-response symbol refs count project-only)))))
+              (build-code-find-references-response symbol refs count project-only)))))

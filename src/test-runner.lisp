@@ -12,8 +12,7 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-run-tests-response)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker
-                #:*use-worker-pool*)
+                #:with-proxy-dispatch)
   (:export #:run-tests
            #:detect-test-framework))
 
@@ -53,16 +52,13 @@ Examples:
          (tests :type :array :required nil
                 :description "Run only these specific tests (array of 'package::test-name')"))
   :body
-  (if *use-worker-pool*
-      (result id
-              (proxy-to-worker "worker/run-tests"
-                               (make-ht "system" system
-                                        "framework" framework
-                                        "test" test
-                                        "tests" tests)))
-      ;; Fallback: inline execution
-      (let ((test-result (run-tests system
-                                    :framework framework
-                                    :test test
-                                    :tests tests)))
-        (result id (build-run-tests-response test-result)))))
+  (with-proxy-dispatch (id "worker/run-tests"
+                          (make-ht "system" system
+                                   "framework" framework
+                                   "test" test
+                                   "tests" tests))
+    (let ((test-result (run-tests system
+                                  :framework framework
+                                  :test test
+                                  :tests tests)))
+      (result id (build-run-tests-response test-result)))))

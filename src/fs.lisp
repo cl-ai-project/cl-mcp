@@ -4,7 +4,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:*project-root-lock*)
+  (:import-from #:bordeaux-threads #:with-lock-held)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content #:rpc-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -94,15 +96,26 @@ Returns the content string."
       text)))
 
 (defun %write-string-to-file (pn content)
+  "Write CONTENT to PN atomically via write-to-temp-then-rename.
+On failure the original file is preserved."
   (uiop/filesystem::ensure-directories-exist pn)
-  (with-open-file (out pn
-                       :direction :output
-                       :if-exists :supersede
-                       :if-does-not-exist :create
-                       :element-type 'character)
-    (write-string content out)
-    (finish-output out))
-  t)
+  (let ((tmp (make-pathname :name (format nil ".~A.tmp" (pathname-name pn))
+                            :type (pathname-type pn)
+                            :defaults pn)))
+    (unwind-protect
+         (progn
+           (with-open-file (out tmp
+                                :direction :output
+                                :if-exists :supersede
+                                :if-does-not-exist :create
+                                :element-type 'character)
+             (write-string content out)
+             (finish-output out))
+           (rename-file tmp pn)
+           t)
+      ;; Clean up temp file on failure
+      (when (probe-file tmp)
+        (ignore-errors (delete-file tmp))))))
 
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
@@ -217,6 +230,8 @@ Returns a hash-table with updated path information:
   - previous_root: the previous project root path (or (not set) if was nil)
   - status: confirmation message"
   (unless (stringp path) (error "path must be a string"))
+  (when (string= (string-trim '(#\Space #\Tab) path) "")
+    (error "path must not be empty"))
   (let* ((prev-root *project-root*)
          (requested (uiop/pathname:ensure-directory-pathname path))
          (base (ignore-errors (uiop/os:getcwd)))
@@ -227,10 +242,16 @@ Returns a hash-table with updated path information:
     (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
     (let ((new-root (truename temp-root)))
-      (setf *project-root* new-root)
-      (uiop/os:chdir new-root)
-      (setf *default-pathname-defaults*
-              (uiop/pathname:ensure-directory-pathname new-root))
+      ;; C2: Reject overly broad roots that would disable the security sandbox
+      (let ((root-str (namestring new-root)))
+        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
+          (error "Refusing to set project root to ~A — too broad" root-str)))
+      ;; C3: Atomic multi-step mutation under lock
+      (bt:with-lock-held (*project-root-lock*)
+        (setf *project-root* new-root)
+        (uiop/os:chdir new-root)
+        (setf *default-pathname-defaults*
+                (uiop/pathname:ensure-directory-pathname new-root)))
       (log-event :info "fs.set-project-root" "previous"
        (if prev-root
            (namestring prev-root)

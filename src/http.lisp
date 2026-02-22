@@ -14,6 +14,7 @@
   (:export
    #:*http-server*
    #:*http-server-port*
+   #:*http-auth-token*
    #:http-server-running-p
    #:start-http-server
    #:stop-http-server))
@@ -29,6 +30,12 @@
 
 (defparameter *http-server-port* nil
   "Port number of the currently running HTTP server.")
+
+(defparameter *http-auth-token* nil
+  "Bearer token for HTTP authentication.
+When non-NIL, all requests (except OPTIONS) must include an
+Authorization: Bearer <token> header matching this value.
+Set automatically by START-HTTP-SERVER.")
 
 ;;; ------------------------------------------------------------
 ;;; Session Management
@@ -53,7 +60,9 @@ to disable timeout (not recommended — leaked sessions consume
   (id "" :type string)
   (state nil)
   (created-at (get-universal-time) :type integer)
-  (last-access (get-universal-time) :type integer))
+  (last-access (get-universal-time) :type integer)
+  (active-requests 0 :type integer)
+  (active-requests-lock (bordeaux-threads:make-lock "active-requests")))
 
 (defun generate-session-id ()
   "Generate a cryptographically random session ID using /dev/urandom."
@@ -62,9 +71,42 @@ to disable timeout (not recommended — leaked sessions consume
       (read-sequence buf s)
       (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
 
+(defun %generate-auth-token ()
+  "Generate a cryptographically random auth token using /dev/urandom."
+  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
+    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s)
+      (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
+
+(defun %check-auth ()
+  "Validate the Authorization: Bearer header against *http-auth-token*.
+Returns T if auth passes (token matches or auth is disabled).
+When auth fails, sets 401 status with WWW-Authenticate header and
+returns NIL."
+  (when (null *http-auth-token*)
+    (return-from %check-auth t))
+  (let* ((auth-header (get-header :authorization))
+         (prefix "Bearer ")
+         (prefix-len (length prefix)))
+    (cond
+      ((null auth-header)
+       (setf (hunchentoot:return-code*) 401)
+       (set-header :www-authenticate "Bearer")
+       nil)
+      ((and (> (length auth-header) prefix-len)
+            (string= auth-header prefix :end1 prefix-len)
+            (string= (subseq auth-header prefix-len) *http-auth-token*))
+       t)
+      (t
+       (setf (hunchentoot:return-code*) 401)
+       (set-header :www-authenticate "Bearer")
+       nil))))
+
 (defun get-session (session-id)
   "Get session by ID, returning NIL if not found or expired.
-When *session-timeout-seconds* is NIL, sessions never expire."
+When *session-timeout-seconds* is NIL, sessions never expire.
+Expired sessions with active requests are NOT removed from the table;
+they will be cleaned up once all in-flight requests complete."
   (let ((result nil)
         (expired-id nil))
     (bordeaux-threads:with-lock-held (*sessions-lock*)
@@ -77,8 +119,14 @@ When *session-timeout-seconds* is NIL, sessions never expire."
                (setf result session))
               ((> (- now (http-session-last-access session))
                   *session-timeout-seconds*)
-               (remhash session-id *sessions*)
-               (setf expired-id session-id))
+               ;; Expired — but do not remove if requests are in flight
+               (let ((active
+                       (bordeaux-threads:with-lock-held
+                           ((http-session-active-requests-lock session))
+                         (http-session-active-requests session))))
+                 (when (zerop active)
+                   (remhash session-id *sessions*)
+                   (setf expired-id session-id))))
               (t
                (setf (http-session-last-access session) now)
                (setf result session)))))))
@@ -118,7 +166,8 @@ When *session-timeout-seconds* is NIL, sessions never expire."
 (defun %session-cleanup-loop ()
   "Periodically sweep expired sessions and release their workers.
 Runs until *cleanup-running* becomes NIL.  Uses short sleep intervals
-for responsive shutdown (at most 1 second delay)."
+for responsive shutdown (at most 1 second delay).
+Sessions with active in-flight requests are skipped even when expired."
   (loop while *cleanup-running*
         do (loop repeat (ceiling *cleanup-interval-seconds*)
                  while *cleanup-running*
@@ -126,6 +175,7 @@ for responsive shutdown (at most 1 second delay)."
            (when *cleanup-running*
              (handler-case
                  (let ((expired nil)
+                       (skipped 0)
                        (now (get-universal-time)))
                    (bordeaux-threads:with-lock-held (*sessions-lock*)
                      (when *session-timeout-seconds*
@@ -133,7 +183,13 @@ for responsive shutdown (at most 1 second delay)."
                         (lambda (id session)
                           (when (> (- now (http-session-last-access session))
                                    *session-timeout-seconds*)
-                            (push id expired)))
+                            (let ((active
+                                    (bordeaux-threads:with-lock-held
+                                        ((http-session-active-requests-lock session))
+                                      (http-session-active-requests session))))
+                              (if (zerop active)
+                                  (push id expired)
+                                  (incf skipped)))))
                         *sessions*)
                        (dolist (id expired)
                          (remhash id *sessions*))))
@@ -142,7 +198,10 @@ for responsive shutdown (at most 1 second delay)."
                                 "expired_count" (length expired))
                      (when *use-worker-pool*
                        (dolist (id expired)
-                         (ignore-errors (release-session id))))))
+                         (ignore-errors (release-session id)))))
+                   (when (plusp skipped)
+                     (log-event :debug "http.session.cleanup.skipped"
+                                "skipped_count" skipped)))
                (error (e)
                  (log-event :error "http.session.cleanup.error"
                             "error" (princ-to-string e)))))))
@@ -225,20 +284,32 @@ for responsive shutdown (at most 1 second delay)."
   (let ((session (get-session session-id)))
     (unless session
       (return-from %handle-mcp-post-session (values nil :invalid)))
-    (let* ((state (http-session-state session))
-           (line (with-output-to-string (s)
-                   (yason:encode body s)))
-           (response (let ((cl-mcp/src/protocol:*current-session-id* session-id))
-                       (process-json-line line state))))
-      (log-event :debug "http.response"
-                 "session-id" session-id
-                 "has-response" (not (null response)))
-      (if response
-          (values response :response)
-          (values nil :notification)))))
+    ;; Increment active-requests to prevent cleanup during processing
+    (bordeaux-threads:with-lock-held ((http-session-active-requests-lock session))
+      (incf (http-session-active-requests session)))
+    (unwind-protect
+         (let* ((state (http-session-state session))
+                (line (with-output-to-string (s)
+                        (yason:encode body s)))
+                (response (let ((cl-mcp/src/protocol:*current-session-id* session-id))
+                            (process-json-line line state))))
+           (log-event :debug "http.response"
+                      "session-id" session-id
+                      "has-response" (not (null response)))
+           (if response
+               (values response :response)
+               (values nil :notification)))
+      ;; Always decrement, even on error
+      (bordeaux-threads:with-lock-held ((http-session-active-requests-lock session))
+        (decf (http-session-active-requests session))))))
 
 (defun handle-mcp-post ()
   "Handle POST requests to the MCP endpoint."
+  ;; Auth check
+  (unless (%check-auth)
+    (return-from handle-mcp-post
+      (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
+
   (let ((accept (get-header :accept))
         (session-id (get-header :mcp-session-id))
         (body (parse-json-body)))
@@ -290,6 +361,10 @@ for responsive shutdown (at most 1 second delay)."
 (defun handle-mcp-get ()
   "Handle GET requests to the MCP endpoint (SSE stream).
 Currently returns 405 as SSE is not yet implemented."
+  ;; Auth check
+  (unless (%check-auth)
+    (return-from handle-mcp-get
+      (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
   (log-event :debug "http.get.sse-not-supported")
   (json-response (%http-error-json -32601
                                    "SSE not yet supported. Use POST for request/response.")
@@ -297,6 +372,10 @@ Currently returns 405 as SSE is not yet implemented."
 
 (defun handle-mcp-delete ()
   "Handle DELETE requests to terminate a session."
+  ;; Auth check
+  (unless (%check-auth)
+    (return-from handle-mcp-delete
+      (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
   (let ((session-id (get-header :mcp-session-id)))
     (cond
       (session-id
@@ -311,7 +390,7 @@ Currently returns 405 as SSE is not yet implemented."
 (defun handle-mcp-options ()
   "Handle OPTIONS requests for CORS preflight."
   (set-header :access-control-allow-methods "GET, POST, DELETE, OPTIONS")
-  (set-header :access-control-allow-headers "Content-Type, Accept, Mcp-Session-Id")
+  (set-header :access-control-allow-headers "Content-Type, Accept, Authorization, Mcp-Session-Id")
   (set-header :access-control-max-age "86400")
   (setf (hunchentoot:return-code*) 204)
   "")
@@ -380,12 +459,31 @@ attacks like localhost.evil.com."
   (and *http-server*
        (hunchentoot:started-p *http-server*)))
 
-(defun start-http-server (&key (host "127.0.0.1") (port 3000))
+(defun start-http-server (&key (host "127.0.0.1") (port 3000)
+                               (token :generate))
   "Start the MCP HTTP server.
+TOKEN controls authentication:
+  :GENERATE (default) - auto-generate a random Bearer token
+  NIL                 - disable authentication entirely
+  \"<string>\"        - use the given string as the Bearer token
+When a token is active, all requests (except OPTIONS) must include
+an Authorization: Bearer <token> header.
 Returns the acceptor instance and port number."
   (when (http-server-running-p)
     (log-event :info "http.already-running" "port" *http-server-port*)
     (return-from start-http-server (values *http-server* *http-server-port*)))
+
+  ;; Configure authentication
+  (setf *http-auth-token*
+        (cond
+          ((eq token :generate) (%generate-auth-token))
+          ((stringp token) token)
+          (t nil)))
+
+  (when *http-auth-token*
+    (format *error-output* "~&MCP Auth Token: ~A~%" *http-auth-token*)
+    (force-output *error-output*)
+    (log-event :info "http.auth.enabled"))
 
   (log-event :info "http.starting" "host" host "port" port)
 
@@ -419,7 +517,8 @@ Returns the acceptor instance and port number."
     (log-event :info "http.stopping" "port" *http-server-port*)
     (hunchentoot:stop *http-server*)
     (setf *http-server* nil
-          *http-server-port* nil)
+          *http-server-port* nil
+          *http-auth-token* nil)
     ;; Stop session cleanup thread
     (%stop-session-cleanup)
     ;; Shut down worker pool before clearing sessions

@@ -17,7 +17,9 @@
                 #:get-all-tool-descriptors
                 #:get-tool-handler)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
+                #:make-ht
+                #:result
+                #:rpc-error)
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
@@ -151,30 +153,8 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
                     id-json)))))))
 
-(defun %result (id payload)
-  (make-ht "jsonrpc" "2.0" "id" id "result" payload))
-
-(defun %error (id code message &optional data)
-  (let* ((err (make-ht "code" code "message" message))
-         (obj (make-ht "jsonrpc" "2.0" "id" id "error" err)))
-    (when data (setf (gethash "data" err) data))
-    obj))
-
-(defun %text-content (text)
-  "Return a one-element content vector with TEXT as a text part."
-  (vector (make-ht "type" "text" "text" text)))
-
-(defun %tool-error (state id message)
-  "Return a tool input validation error in the appropriate format.
-For protocol version 2025-11-25 and later, returns as Tool Execution Error.
-For older versions, returns as JSON-RPC Protocol Error (-32602)."
-  (if (and state
-           (protocol-version state)
-           (string>= (protocol-version state) "2025-11-25"))
-      ;; New format: Tool Execution Error with isError flag
-      (%result id (make-ht "content" (%text-content message) "isError" t))
-      ;; Old format: JSON-RPC Protocol Error
-      (%error id -32602 message)))
+;;; Response builders are imported from cl-mcp/src/tools/helpers:
+;;;   result, rpc-error, text-content, tool-error
 
 (defun handle-initialize (state id params)
   ;; Sync rootPath from client if provided
@@ -212,12 +192,12 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
                 (t nil)))
          (caps (make-ht "tools" (make-ht "listChanged" t))))
     (if (null chosen)
-        (%error id -32602
+        (rpc-error id -32602
                 (format nil "Unsupported protocolVersion ~A" client-ver)
                 (make-ht "supportedVersions" +supported-protocol-versions+))
         (progn
           (setf (protocol-version state) chosen)
-          (%result id
+          (result id
                    (make-ht "protocolVersion" chosen "serverInfo"
                              (make-ht "name" "cl-mcp" "version" (version))
                              "capabilities" caps))))))
@@ -230,7 +210,7 @@ For older versions, returns as JSON-RPC Protocol Error (-32602)."
 
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
-  (%result id (make-ht "tools" (get-all-tool-descriptors))))
+  (result id (make-ht "tools" (get-all-tool-descriptors))))
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -271,7 +251,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     (let ((handler (and local (get-tool-handler local))))
       (if handler
           (funcall handler state id args)
-          (%error id -32601 (format nil "Tool ~A not found" name))))))
+          (rpc-error id -32601 (format nil "Tool ~A not found" name))))))
 
 (defun handle-request (state id method params)
   (cond
@@ -280,8 +260,8 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     ((string= method "tools/call")
      (or (handle-asdf-tools-call id params)
          (handle-tools-call state id params)))
-    ((string= method "ping") (%result id (make-ht)))
-    (t (%error id -32601 (format nil "Method ~A not found" method)))))
+    ((string= method "ping") (result id (make-ht)))
+    (t (rpc-error id -32601 (format nil "Method ~A not found" method)))))
 
 (defun process-json-line (line &optional (state (make-state)))
   "Process one JSON-RPC line and return a JSON line to send, or NIL for notifications."
@@ -297,18 +277,18 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                                 "line" trimmed
                                 "error" (princ-to-string e)))
                    (return-from process-json-line
-                     (%encode-json (%error nil -32700 "Parse error")))))))
+                     (%encode-json (rpc-error nil -32700 "Parse error")))))))
       (unless (hash-table-p msg)
         (log-event :warn "rpc.invalid" "reason" "message not object")
         (return-from process-json-line
-          (%encode-json (%error nil -32600 "Invalid Request"))))
+          (%encode-json (rpc-error nil -32600 "Invalid Request"))))
       (let ((jsonrpc (gethash "jsonrpc" msg))
             (id (gethash "id" msg))
             (method (gethash "method" msg))
             (params (gethash "params" msg)))
         (log-event :debug "rpc.dispatch" "id" id "method" method)
         (unless (and (stringp jsonrpc) (string= jsonrpc "2.0"))
-          (let ((resp (%encode-json (%error id -32600 "Invalid Request"))))
+          (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
             (log-event :warn "rpc.invalid" "reason" "bad jsonrpc version")
             (return-from process-json-line resp)))
         (handler-case
@@ -323,7 +303,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                (log-event :debug "rpc.notify" "method" method)
                nil)
               (t
-               (let ((resp (%encode-json (%error id -32600 "Invalid Request"))))
+               (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
                  (log-event :warn "rpc.invalid" "reason" "missing method")
                  resp)))
           (error (e)
@@ -332,4 +312,4 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                          "id" id
                          "method" method
                          "error" (princ-to-string e)))
-            (%encode-json (%error id -32603 "Internal error"))))))))
+            (%encode-json (rpc-error id -32603 "Internal error"))))))))

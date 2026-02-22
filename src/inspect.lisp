@@ -13,8 +13,7 @@
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker
-                #:*use-worker-pool*)
+                #:with-proxy-dispatch)
   (:export #:inspect-object-by-id
            #:generate-result-preview))
 
@@ -391,23 +390,21 @@ Use this to drill down into complex data structures like CLOS instances, structu
          (max-elements :type :integer :json-name "max_elements"
                        :description "Maximum elements for lists/arrays/hash-tables (default=50)"))
   :body
-  (if *use-worker-pool*
-      (result id
-              (proxy-to-worker "worker/inspect-object"
-                               (make-ht "id" object-id
-                                        "max_depth" max-depth
-                                        "max_elements" max-elements)))
-      (let ((inspection-result (inspect-object-by-id object-id
-                                                      :max-depth (or max-depth 1)
-                                                      :max-elements (or max-elements 50))))
-        (if (gethash "error" inspection-result)
-            (result id
-                    (make-ht "isError" t
-                             "content" (text-content
-                                        (gethash "message" inspection-result))))
-            (let ((summary (format nil "[~A] ~A"
-                                   (gethash "kind" inspection-result)
-                                   (gethash "summary" inspection-result))))
-              (setf (gethash "content" inspection-result)
-                    (text-content summary))
-              (result id inspection-result))))))
+  (with-proxy-dispatch (id "worker/inspect-object"
+                          (make-ht "id" object-id
+                                   "max_depth" max-depth
+                                   "max_elements" max-elements))
+    (let ((inspection-result (inspect-object-by-id object-id
+                                                    :max-depth (or max-depth 1)
+                                                    :max-elements (or max-elements 50))))
+      (if (gethash "error" inspection-result)
+          (result id
+                  (make-ht "isError" t
+                           "content" (text-content
+                                      (gethash "message" inspection-result))))
+          (let ((summary (format nil "[~A] ~A"
+                                 (gethash "kind" inspection-result)
+                                 (gethash "summary" inspection-result))))
+            (setf (gethash "content" inspection-result)
+                  (text-content summary))
+            (result id inspection-result))))))

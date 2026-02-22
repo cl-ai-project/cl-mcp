@@ -8,6 +8,7 @@
 (defpackage #:cl-mcp/src/worker/server
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
   (:import-from #:usocket)
   (:import-from #:yason)
   (:export #:worker-server
@@ -141,7 +142,7 @@ the shared secret."
             (%encode-response
              (%make-error id -32603
                           (format nil "Internal error: ~A"
-                                  (princ-to-string e)))))))))
+                                  (sanitize-error-message e)))))))))
 
 (defun %process-line (server line)
   "Parse a JSON-RPC line and dispatch to the appropriate handler.

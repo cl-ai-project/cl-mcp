@@ -51,6 +51,7 @@
   (:import-from #:cl-mcp/src/http
                 #:*http-server*
                 #:*http-server-port*
+                #:*http-auth-token*
                 #:http-server-running-p
                 #:start-http-server
                 #:stop-http-server)
@@ -128,6 +129,7 @@
            ;; HTTP server (Streamable HTTP transport)
            #:*http-server*
            #:*http-server-port*
+           #:*http-auth-token*
            #:http-server-running-p
            #:start-http-server
            #:stop-http-server

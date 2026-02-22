@@ -77,37 +77,41 @@
     (decf (scan-state-block-depth state))
     t))
 
-(defun %scan-handle-normal (state ch next idx base-offset)
+(defun %scan-handle-normal (state ch next idx base-offset text)
+  "Handle a character in normal (non-string, non-comment) context.
+Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
+indicating how many additional characters past CH were consumed."
   (cond
-    ((char= ch #\;)
-     (setf (scan-state-line-comment state) t)
-     (values nil nil))
-    ((char= ch #\")
-     (setf (scan-state-in-string state) t)
-     (values nil nil))
-    ((and (char= ch #\#) next (char= next #\|))
-     (incf (scan-state-block-depth state))
-     (values nil t))
-    ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
-     (setf (scan-state-stack state)
-           (%scan-parens-push-open (scan-state-stack state)
-                                   (scan-state-line state)
-                                   (scan-state-col state)
-                                   base-offset
-                                   ch
-                                   idx))
-     (values nil nil))
-    ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
-     (multiple-value-bind (new-stack err)
-         (%scan-parens-pop-open (scan-state-stack state)
-                                (scan-state-line state)
-                                (scan-state-col state)
-                                base-offset
-                                ch
-                                idx)
-       (setf (scan-state-stack state) new-stack)
-       (values err nil)))
-    (t (values nil nil))))
+   ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
+   ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
+   ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
+   ;; delimiter characters like #\( are not treated as open-parens.
+   ((and (char= ch #\#) next (char= next #\\))
+    (let ((skip 1))  ; at minimum skip the backslash
+      (let ((char-pos (+ idx 2)))
+        (when (< char-pos (length text))
+          (incf skip)  ; skip the character after backslash
+          ;; Named character literals: consume remaining alpha chars
+          (when (alpha-char-p (char text char-pos))
+            (loop for k from (1+ char-pos) below (length text)
+                  while (alpha-char-p (char text k))
+                  do (incf skip)))))
+      (values nil skip)))
+   ((and (char= ch #\#) next (char= next #\|))
+    (incf (scan-state-block-depth state)) (values nil 1))
+   ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
+    (setf (scan-state-stack state)
+            (%scan-parens-push-open (scan-state-stack state)
+             (scan-state-line state) (scan-state-col state) base-offset ch
+             idx))
+    (values nil nil))
+   ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
+    (multiple-value-bind (new-stack err)
+        (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
+         (scan-state-col state) base-offset ch idx)
+      (setf (scan-state-stack state) new-stack)
+      (values err nil)))
+   (t (values nil nil))))
 
 (defun %scan-advance-position (state ch)
   (cond
@@ -136,12 +140,13 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                  (incf (scan-state-col state))))
               (t
                (multiple-value-bind (err consumed)
-                   (%scan-handle-normal state ch next idx base-offset)
+                   (%scan-handle-normal state ch next idx base-offset text)
                  (when err
                    (return-from %scan-parens err))
                  (when consumed
-                   (incf idx)
-                   (incf (scan-state-col state))))))
+                   (let ((n (if (integerp consumed) consumed 1)))
+                     (incf idx n)
+                     (incf (scan-state-col state) n))))))
             (%scan-advance-position state ch))
     (when (scan-state-stack state)
       (destructuring-bind (ch l c off) (pop (scan-state-stack state))

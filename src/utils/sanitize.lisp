@@ -2,7 +2,8 @@
 
 (defpackage #:cl-mcp/src/utils/sanitize
   (:use #:cl)
-  (:export #:sanitize-for-json))
+  (:export #:sanitize-for-json
+           #:sanitize-error-message))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -98,3 +99,24 @@ princ-to-string then sanitized."
                 ;; Pass through everything else
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))
+
+(defun sanitize-error-message (msg)
+  "Sanitize an error message for external consumption.
+Strips SBCL internal object representations (#<...>), multi-line
+Stream: sections, and truncates to a reasonable length.  Returns a
+clean string suitable for JSON-RPC error responses."
+  (when (null msg) (return-from sanitize-error-message ""))
+  (unless (stringp msg)
+    (setf msg (princ-to-string msg)))
+  ;; Remove #<...> object representations (SBCL stream objects, etc.)
+  (setf msg (cl-ppcre:regex-replace-all "#<[^>]*>" msg ""))
+  ;; Remove multi-line "Stream:" sections that SBCL appends
+  (setf msg (cl-ppcre:regex-replace-all "(?s)\\s*Stream:.*" msg ""))
+  ;; Collapse multiple spaces into one
+  (setf msg (cl-ppcre:regex-replace-all "\\s+" msg " "))
+  ;; Trim whitespace
+  (setf msg (string-trim '(#\Space #\Tab #\Newline #\Return) msg))
+  ;; Truncate to reasonable length
+  (when (> (length msg) 500)
+    (setf msg (concatenate 'string (subseq msg 0 497) "...")))
+  msg)
