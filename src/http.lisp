@@ -263,7 +263,7 @@ Sessions with active in-flight requests are skipped even when expired."
           (gethash "message" error-obj) message)
     (setf (gethash "jsonrpc" outer) "2.0"
           (gethash "error" outer) error-obj
-          (gethash "id" outer) :null)
+          (gethash "id" outer) 'null)
     (with-output-to-string (s)
       (yason:encode outer s))))
 

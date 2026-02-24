@@ -2,6 +2,8 @@
 
 (defpackage #:cl-mcp/src/utils/sanitize
   (:use #:cl)
+  (:import-from #:cl-ppcre
+                #:regex-replace-all)
   (:export #:sanitize-for-json
            #:sanitize-error-message))
 
