@@ -405,6 +405,131 @@ Cleans up server and socket on exit."
               "result has isError for nonexistent object"))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Error context & inspect integration tests
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-eval-error-context-has-frames
+  (testing "error_context contains frames with index, function, and locals"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params)
+              "(labels ((foo () (bar)) (bar () (error \"deep-stack-error\"))) (foo))"
+              (gethash "package" params) "CL-USER")
+        (let* ((response (%send-and-receive stream 500 "worker/eval" params))
+               (result (%result-of response))
+               (ctx (gethash "error_context" result)))
+          (ok ctx "result has error_context")
+          (ok (search "deep-stack-error" (gethash "message" ctx))
+              "error message contains original text")
+          (let ((frames (gethash "frames" ctx)))
+            (ok (vectorp frames) "frames is a vector")
+            ;; On SBCL frames should be non-empty; on other impls may be empty
+            (when (> (length frames) 0)
+              (let ((frame (aref frames 0)))
+                (ok (integerp (gethash "index" frame))
+                    "frame has integer index")
+                (ok (stringp (gethash "function" frame))
+                    "frame has string function")
+                (ok (vectorp (gethash "locals" frame))
+                    "frame has locals vector")))))))))
+
+(deftest worker-eval-then-inspect-round-trip
+  (testing "eval returns result_object_id, inspect-object resolves it"
+    (with-handler-server (stream)
+      ;; Step 1: eval (list 1 2 3) to get a result_object_id
+      (let ((eval-params (make-hash-table :test 'equal)))
+        (setf (gethash "code" eval-params) "(list 1 2 3)"
+              (gethash "package" eval-params) "CL-USER")
+        (let* ((eval-resp (%send-and-receive stream 510 "worker/eval" eval-params))
+               (eval-result (%result-of eval-resp))
+               (obj-id (gethash "result_object_id" eval-result)))
+          (ok (integerp obj-id) "eval returned an integer result_object_id")
+          ;; Step 2: inspect the object by ID on the same connection
+          (let ((inspect-params (make-hash-table :test 'equal)))
+            (setf (gethash "id" inspect-params) obj-id)
+            (let* ((inspect-resp (%send-and-receive
+                                  stream 511 "worker/inspect-object"
+                                  inspect-params))
+                   (inspect-result (%result-of inspect-resp)))
+              (ok (not (gethash "isError" inspect-result))
+                  "inspect-object did not return isError")
+              (ok (equal "list" (gethash "kind" inspect-result))
+                  "inspected kind is list")
+              (let ((elements (gethash "elements" inspect-result)))
+                (ok (vectorp elements) "elements is a vector")
+                (ok (= 3 (length elements))
+                    "elements has 3 entries")))))))))
+
+(deftest worker-eval-locals-preview-frames
+  (testing "locals_preview_frames adds preview to frame locals"
+    (with-handler-server (stream)
+      ;; Use locals_preview_skip_internal=false so infrastructure frames
+      ;; (which have non-primitive locals like condition objects) also
+      ;; get previews.  SBCL does not reliably preserve locals for
+      ;; functions defined/called via eval, so relying on user-frame
+      ;; locals is fragile.  This still validates the full preview
+      ;; pipeline end-to-end through JSON.
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(error \"locals-preview-test\")"
+              (gethash "package" params) "CL-USER"
+              (gethash "locals_preview_frames" params) 5
+              (gethash "locals_preview_skip_internal" params) nil)
+        (let* ((response (%send-and-receive stream 520 "worker/eval" params))
+               (result (%result-of response))
+               (ctx (gethash "error_context" result)))
+          (ok ctx "result has error_context")
+          (let ((frames (gethash "frames" ctx)))
+            (ok (vectorp frames) "frames is a vector")
+            ;; Look for a frame that has locals with a preview key
+            (when (> (length frames) 0)
+              (let ((found-preview nil))
+                (dotimes (i (length frames))
+                  (let ((locals (gethash "locals" (aref frames i))))
+                    (when (and (vectorp locals) (> (length locals) 0))
+                      (dotimes (j (length locals))
+                        (let ((local-var (aref locals j)))
+                          (when (gethash "preview" local-var)
+                            (setf found-preview t)
+                            (ok (hash-table-p (gethash "preview" local-var))
+                                "local preview is a hash-table")
+                            (ok (gethash "kind" (gethash "preview" local-var))
+                                "local preview has kind")))))))
+                ;; Infrastructure frames have non-primitive locals (e.g.
+                ;; condition objects) that receive previews.
+                (ok found-preview
+                    "at least one local variable has a preview")))))))))
+
+(deftest worker-eval-inspect-hash-table
+  (testing "eval a hash-table, then inspect it to verify structure"
+    (with-handler-server (stream)
+      ;; Step 1: eval to create a hash-table
+      (let ((eval-params (make-hash-table :test 'equal)))
+        (setf (gethash "code" eval-params)
+              "(let ((ht (make-hash-table :test 'equal))) (setf (gethash \"k\" ht) 42) ht)"
+              (gethash "package" eval-params) "CL-USER")
+        (let* ((eval-resp (%send-and-receive stream 530 "worker/eval" eval-params))
+               (eval-result (%result-of eval-resp))
+               (obj-id (gethash "result_object_id" eval-result)))
+          (ok (integerp obj-id) "eval returned an integer result_object_id")
+          ;; Step 2: inspect the hash-table
+          (let ((inspect-params (make-hash-table :test 'equal)))
+            (setf (gethash "id" inspect-params) obj-id)
+            (let* ((inspect-resp (%send-and-receive
+                                  stream 531 "worker/inspect-object"
+                                  inspect-params))
+                   (inspect-result (%result-of inspect-resp)))
+              (ok (not (gethash "isError" inspect-result))
+                  "inspect-object did not return isError")
+              (ok (equal "hash-table" (gethash "kind" inspect-result))
+                  "inspected kind is hash-table")
+              (ok (gethash "test" inspect-result)
+                  "inspect result has test field")
+              (let ((entries (gethash "entries" inspect-result)))
+                (ok (vectorp entries) "entries is a vector")
+                (ok (= 1 (length entries))
+                    "entries has 1 entry")))))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Worker entry point tests (src/worker/main.lisp)
 ;;; ---------------------------------------------------------------------------
 

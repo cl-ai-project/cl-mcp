@@ -359,6 +359,105 @@ Tests that validate warmup/replenishment explicitly override these bindings."
           (ok (not (gethash "isError" result))
               "proxy result is not an error"))))))
 
+(deftest e2e-error-context-through-worker
+  (testing "error_context survives JSON round-trip through worker process"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "e2e-error-ctx-session"))
+      (with-pool ()
+        (let* ((params (%make-eval-params
+                        "(labels ((foo () (bar)) (bar () (error \"e2e-stack-test\"))) (foo))"))
+               (result (proxy-to-worker "worker/eval" params)))
+          (ok (hash-table-p result) "result is a hash-table")
+          (let ((ctx (gethash "error_context" result)))
+            (ok ctx "result has error_context")
+            (ok (stringp (gethash "condition_type" ctx))
+                "condition_type is a string")
+            (ok (search "e2e-stack-test" (gethash "message" ctx))
+                "message contains original error text")
+            (ok (vectorp (gethash "restarts" ctx))
+                "restarts is a vector")
+            (let ((frames (gethash "frames" ctx)))
+              (ok (vectorp frames) "frames is a vector")
+              ;; On SBCL, frames should be non-empty
+              (when (> (length frames) 0)
+                (let ((frame (aref frames 0)))
+                  (ok (integerp (gethash "index" frame))
+                      "frame has integer index")
+                  (ok (stringp (gethash "function" frame))
+                      "frame has string function")
+                  (ok (vectorp (gethash "locals" frame))
+                      "frame has locals vector"))))))))))
+
+(deftest e2e-eval-then-inspect-through-worker
+  (testing "eval → inspect round-trip works through worker with session affinity"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "e2e-inspect-session"))
+      (with-pool ()
+        ;; Step 1: eval (list 10 20 30) to get result_object_id
+        (let* ((eval-params (%make-eval-params "(list 10 20 30)"))
+               (eval-result (proxy-to-worker "worker/eval" eval-params))
+               (obj-id (gethash "result_object_id" eval-result)))
+          (ok (integerp obj-id)
+              "eval returned an integer result_object_id")
+          ;; Step 2: inspect-object through proxy (same session → same worker)
+          (let ((inspect-params (make-hash-table :test 'equal)))
+            (setf (gethash "id" inspect-params) obj-id)
+            (let ((inspect-result
+                    (proxy-to-worker "worker/inspect-object" inspect-params)))
+              (ok (hash-table-p inspect-result)
+                  "inspect returns a hash-table")
+              (ok (not (gethash "isError" inspect-result))
+                  "inspect-object did not return isError")
+              (ok (equal "list" (gethash "kind" inspect-result))
+                  "inspected kind is list")
+              (let ((elements (gethash "elements" inspect-result)))
+                (ok (vectorp elements) "elements is a vector")
+                (ok (= 3 (length elements))
+                    "elements has 3 entries")))))))))
+
+(deftest e2e-locals-preview-through-worker
+  (testing "locals_preview_frames survives JSON round-trip through worker"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "e2e-locals-preview-session"))
+      (with-pool ()
+        ;; Use locals_preview_skip_internal=false so infrastructure frames
+        ;; (which reliably have non-primitive locals) get previews.
+        ;; This validates the full preview pipeline through JSON round-trip.
+        (let ((params (make-hash-table :test 'equal)))
+          (setf (gethash "code" params) "(error \"e2e-locals-test\")"
+                (gethash "package" params) "CL-USER"
+                (gethash "locals_preview_frames" params) 5
+                (gethash "locals_preview_skip_internal" params) nil)
+          (let ((result (proxy-to-worker "worker/eval" params)))
+            (ok (hash-table-p result) "result is a hash-table")
+            (let ((ctx (gethash "error_context" result)))
+              (ok ctx "result has error_context")
+              (let ((frames (gethash "frames" ctx)))
+                (ok (vectorp frames) "frames is a vector")
+                (when (> (length frames) 0)
+                  (let ((found-preview nil))
+                    (dotimes (i (length frames))
+                      (let ((locals (gethash "locals" (aref frames i))))
+                        (when (and (vectorp locals) (> (length locals) 0))
+                          (dotimes (j (length locals))
+                            (let ((local-var (aref locals j)))
+                              (when (gethash "preview" local-var)
+                                (setf found-preview t)
+                                (ok (hash-table-p
+                                     (gethash "preview" local-var))
+                                    "local preview is a hash-table")
+                                (ok (gethash "kind"
+                                             (gethash "preview" local-var))
+                                    "local preview has kind")))))))
+                    (ok found-preview
+                        "at least one local variable has a preview")))))))))))
+
 (deftest e2e-crash-recovery
   (testing "crashed worker is replaced and notifies agent once"
     (unless (spawn-available-p)
