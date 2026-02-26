@@ -24,7 +24,12 @@
                 #:shutdown-pool
                 #:get-or-assign-worker
                 #:release-session
-                #:pool-worker-info))
+                #:pool-worker-info
+                #:broadcast-root-to-workers
+                #:pool-shutting-down
+                #:pool-capacity-exceeded)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker-crashed))
 
 (in-package #:cl-mcp/tests/pool-test)
 
@@ -837,3 +842,173 @@ Tests that validate warmup/replenishment explicitly override these bindings."
                 (format nil
                         "error mentions release: ~A"
                         got-error))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Circuit breaker test (Issue #2, Critical)
+;;; ---------------------------------------------------------------------------
+
+(deftest circuit-breaker-trips-after-threshold
+  (testing "circuit breaker removes session after threshold crashes"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((cl-mcp/src/pool::*crash-breaker-threshold* 1))
+      (with-pool ()
+        (let* ((worker (get-or-assign-worker "breaker-session"))
+               (pid (worker-pid worker)))
+          (ok (integerp pid) "worker has valid pid")
+          ;; Kill the worker process
+          (sb-posix:kill pid sb-posix:sigkill)
+          (sleep 0.5)
+          ;; Trigger crash handler — threshold is 1, so this trips the breaker
+          (cl-mcp/src/pool::%handle-worker-crash worker)
+          ;; Session should be removed from affinity map
+          (bordeaux-threads:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+            (ok (null (gethash "breaker-session"
+                               cl-mcp/src/pool::*affinity-map*))
+                "session removed from affinity map after breaker trip")))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Health monitor test (Issue #3, Critical)
+;;; ---------------------------------------------------------------------------
+
+(deftest health-monitor-detects-crashed-worker
+  (testing "health monitor detects SIGKILL'd worker and recovers"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Use a short health check interval for fast detection
+    (let ((*health-check-interval-seconds* 0.5d0))
+      (with-pool ()
+        (let* ((worker (get-or-assign-worker "health-session"))
+               (old-id (worker-id worker))
+               (pid (worker-pid worker)))
+          (ok (integerp pid) "worker has valid pid")
+          ;; Kill the worker
+          (sb-posix:kill pid sb-posix:sigkill)
+          ;; Wait for health monitor to detect and recover
+          ;; health-check at 0.5s + spawn time (~3-5s) + buffer
+          (sleep 8)
+          ;; A new worker should be assigned with a different ID
+          (let ((new-worker (get-or-assign-worker "health-session")))
+            (ok new-worker "new worker assigned after recovery")
+            (ok (not (string= old-id (worker-id new-worker)))
+                "new worker has different ID")))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Pool capacity and shutdown tests (Issue #4, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest pool-capacity-exceeded-signals
+  (testing "exceeding max pool size signals pool-capacity-exceeded"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((cl-mcp/src/pool::*max-pool-size* 1))
+      (with-pool ()
+        ;; First session uses up the single slot
+        (let ((w1 (get-or-assign-worker "capacity-session-1")))
+          (ok w1 "first worker assigned")
+          ;; Second session should exceed capacity
+          (ok (signals (pool-capacity-exceeded)
+                (get-or-assign-worker "capacity-session-2"))
+              "pool-capacity-exceeded signaled for second session"))))))
+
+(deftest pool-shutting-down-signals
+  (testing "get-or-assign-worker after shutdown signals pool-shutting-down"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      ;; Shut down the pool
+      (shutdown-pool)
+      ;; Now attempting to assign should signal
+      (ok (signals (pool-shutting-down)
+            (get-or-assign-worker "post-shutdown"))
+          "pool-shutting-down signaled after shutdown"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Broadcast root test (Issue #5, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest broadcast-root-to-workers-updates-all
+  (testing "broadcast-root-to-workers updates all bound workers"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let ((w1 (get-or-assign-worker "bcast-session-1"))
+            (w2 (get-or-assign-worker "bcast-session-2")))
+        (ok w1 "first worker assigned")
+        (ok w2 "second worker assigned")
+        ;; Broadcast /tmp as the new root
+        (broadcast-root-to-workers "/tmp")
+        ;; Verify each worker got the update by evaluating *project-root*
+        (let ((params (make-hash-table :test 'equal)))
+          (setf (gethash "code" params)
+                "(namestring cl-mcp/src/project-root:*project-root*)"
+                (gethash "package" params) "CL-USER")
+          (dolist (w (list w1 w2))
+            (let* ((result (cl-mcp/src/worker-client:worker-rpc
+                            w "worker/eval" params :timeout 5))
+                   (content (gethash "content" result))
+                   (text (when (and (vectorp content)
+                                    (plusp (length content)))
+                           (gethash "text" (aref content 0)))))
+              (ok (and (stringp text) (search "/tmp" text))
+                  (format nil "worker ~A root contains /tmp"
+                          (worker-id w))))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Nil session ID test (Issue #7, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest proxy-nil-session-id-signals-error
+  (testing "proxy-to-worker with nil session ID signals error"
+    (let ((*use-worker-pool* t)
+          (*current-session-id* nil))
+      (ok (signals (error)
+            (proxy-to-worker "worker/eval"
+                             (make-hash-table :test 'equal)))
+          "error signaled for nil session ID"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Worker RPC timeout test (Issue #8, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-rpc-timeout-marks-crashed
+  (testing "worker-rpc timeout marks worker as crashed"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-spawned-worker (w)
+      ;; Send a long sleep with a very short timeout
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(sleep 100)"
+              (gethash "package" params) "CL-USER")
+        (ok (signals (worker-crashed)
+              (cl-mcp/src/worker-client:worker-rpc
+               w "worker/eval" params :timeout 1))
+            "worker-crashed signaled on timeout")
+        (ok (eq :crashed (worker-state w))
+            "worker state is :crashed after timeout")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Pool worker info session ID truncation test (Issue #11, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest pool-worker-info-truncates-session-ids
+  (testing "pool-worker-info truncates long session IDs"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      ;; Use a session ID longer than 8 characters
+      (let* ((long-sid "abcdefghijklmnopqrstuvwxyz-1234567890")
+             (worker (get-or-assign-worker long-sid)))
+        (ok worker "worker assigned with long session ID")
+        (let* ((info-vec (pool-worker-info))
+               (found nil))
+          (dotimes (i (length info-vec))
+            (let* ((ht (aref info-vec i))
+                   (sid (gethash "session" ht)))
+              (when (string= (gethash "id" ht) (worker-id worker))
+                (setf found sid))))
+          (ok found "found worker in info")
+          (ok (<= (length found) 11)
+              (format nil "truncated session is <= 11 chars: ~S" found))
+          (ok (search "..." found)
+              "truncated session ends with ..."))))))

@@ -174,32 +174,35 @@ SECRET is passed to the child environment for TCP authentication."
 ;;; Internal helpers — handshake
 ;;; ---------------------------------------------------------------------------
 
+(defun %parse-handshake-from-stream (stdout)
+  "Read lines from STDOUT until a valid handshake JSON line is found.
+Skips non-JSON lines.  Returns (values tcp-port swank-port pid)."
+  (loop for line = (read-line stdout nil nil)
+        unless line do
+          (error 'worker-spawn-failed
+                 :message "Worker closed stdout before handshake")
+        do (let ((json (ignore-errors (yason:parse line))))
+             (when (and (hash-table-p json) (gethash "tcp_port" json))
+               (let ((tcp-port (gethash "tcp_port" json))
+                     (swank-port (gethash "swank_port" json))
+                     (pid (gethash "pid" json)))
+                 (unless (integerp tcp-port)
+                   (error 'worker-spawn-failed
+                          :message "Handshake tcp_port is not an integer"))
+                 (return (values tcp-port
+                                 (if (eq swank-port :null) nil swank-port)
+                                 pid)))))))
+
 (defun %read-handshake (process timeout)
   "Read the JSON handshake line from the worker's stdout.
 Returns three values: tcp-port, swank-port (or NIL), pid.
-Skips non-JSON lines (e.g. compiler output on first run without
-FASL cache) by trying each line as JSON and looking for the
-tcp_port key.  Signals WORKER-SPAWN-FAILED on timeout or if
-stdout is closed before a valid handshake is found."
+Delegates to %PARSE-HANDSHAKE-FROM-STREAM with a timeout wrapper.
+Signals WORKER-SPAWN-FAILED on timeout or if stdout is closed
+before a valid handshake is found."
   (let ((stdout (sb-ext:process-output process)))
     (handler-case
         (sb-ext:with-timeout timeout
-          (loop for line = (read-line stdout nil nil)
-                unless line do
-                  (error 'worker-spawn-failed
-                         :message "Worker closed stdout before handshake")
-                do (let ((json (ignore-errors (yason:parse line))))
-                     (when (and (hash-table-p json)
-                                (gethash "tcp_port" json))
-                       (let ((tcp-port (gethash "tcp_port" json))
-                             (swank-port (gethash "swank_port" json))
-                             (pid (gethash "pid" json)))
-                         (unless (integerp tcp-port)
-                           (error 'worker-spawn-failed
-                                  :message "Handshake tcp_port is not an integer"))
-                         (return (values tcp-port
-                                         (if (eq swank-port :null) nil swank-port)
-                                         pid)))))))
+          (%parse-handshake-from-stream stdout))
       (sb-ext:timeout ()
         (error 'worker-spawn-failed
                :message (format nil "Worker handshake timed out after ~Ds"

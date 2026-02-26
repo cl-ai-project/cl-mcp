@@ -12,9 +12,17 @@
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/handlers
                 #:register-all-handlers)
-  (:import-from #:cl-mcp/src/worker/main))
+  (:import-from #:cl-mcp/src/worker/main)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker-spawn-failed))
 
 (in-package #:cl-mcp/tests/worker-test)
+
+(defun %restore-env (name value)
+  "Set environment variable NAME to VALUE, or unset it when VALUE is NIL."
+  (if value
+      (setf (uiop/os:getenv name) value)
+      (sb-posix:unsetenv name)))
 
 (defun socket-available-p ()
   "Return T if we can bind a TCP socket on localhost."
@@ -637,3 +645,182 @@ Cleans up server and socket on exit."
           (if prev-env
               (setf (uiop/os:getenv "MCP_PROJECT_ROOT") prev-env)
               (setf (uiop/os:getenv "MCP_PROJECT_ROOT") "")))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Authentication gate tests (Issue #1, Critical)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-auth-rejects-unauthenticated
+  (testing "with MCP_WORKER_SECRET set, non-auth requests are rejected"
+    (let ((prev (let ((v (uiop/os:getenv "MCP_WORKER_SECRET")))
+                  (when (and v (plusp (length v))) v))))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_WORKER_SECRET") "test-secret-42")
+             (with-handler-server (stream)
+               (let* ((params (make-hash-table :test 'equal)))
+                 (setf (gethash "code" params) "(+ 1 2)"
+                       (gethash "package" params) "CL-USER")
+                 (let* ((response (%send-and-receive
+                                   stream 200 "worker/eval" params))
+                        (err (gethash "error" response)))
+                   (ok err "response has error")
+                   (ok (equal (gethash "code" err) -32600)
+                       "error code is -32600")
+                   (ok (search "Not authenticated"
+                               (gethash "message" err))
+                       "error message mentions authentication")))))
+        (%restore-env "MCP_WORKER_SECRET" prev)))))
+
+(deftest worker-auth-rejects-wrong-secret
+  (testing "worker/authenticate with wrong secret returns error"
+    (let ((prev (let ((v (uiop/os:getenv "MCP_WORKER_SECRET")))
+                  (when (and v (plusp (length v))) v))))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_WORKER_SECRET") "correct-secret")
+             (with-handler-server (stream)
+               (let* ((params (make-hash-table :test 'equal)))
+                 (setf (gethash "secret" params) "wrong-secret")
+                 (let* ((response (%send-and-receive
+                                   stream 201 "worker/authenticate"
+                                   params))
+                        (err (gethash "error" response)))
+                   (ok err "response has error")
+                   (ok (equal (gethash "code" err) -32600)
+                       "error code is -32600")
+                   (ok (search "Authentication failed"
+                               (gethash "message" err))
+                       "error message says authentication failed")))))
+        (%restore-env "MCP_WORKER_SECRET" prev)))))
+
+(deftest worker-auth-accepts-correct-secret
+  (testing "worker/authenticate with correct secret then eval succeeds"
+    (let ((prev (let ((v (uiop/os:getenv "MCP_WORKER_SECRET")))
+                  (when (and v (plusp (length v))) v))))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_WORKER_SECRET") "the-secret")
+             (with-handler-server (stream)
+               ;; Step 1: authenticate
+               (let* ((auth-params (make-hash-table :test 'equal)))
+                 (setf (gethash "secret" auth-params) "the-secret")
+                 (let* ((auth-resp (%send-and-receive
+                                    stream 202 "worker/authenticate"
+                                    auth-params))
+                        (auth-result (%result-of auth-resp)))
+                   (ok auth-result "auth response has result")
+                   (ok (gethash "authenticated" auth-result)
+                       "authenticated is true")))
+               ;; Step 2: now eval should work
+               (let* ((eval-params (make-hash-table :test 'equal)))
+                 (setf (gethash "code" eval-params) "(+ 10 20)"
+                       (gethash "package" eval-params) "CL-USER")
+                 (let* ((eval-resp (%send-and-receive
+                                    stream 203 "worker/eval" eval-params))
+                        (eval-result (%result-of eval-resp)))
+                   (ok eval-result "eval response has result")
+                   (ok (gethash "content" eval-result)
+                       "eval result has content")))))
+        (%restore-env "MCP_WORKER_SECRET" prev)))))
+
+(deftest worker-auth-auto-when-no-secret
+  (testing "without MCP_WORKER_SECRET, requests work without auth"
+    (let ((prev (let ((v (uiop/os:getenv "MCP_WORKER_SECRET")))
+                  (when (and v (plusp (length v))) v))))
+      (unwind-protect
+           (progn
+             (sb-posix:unsetenv "MCP_WORKER_SECRET")
+             (with-handler-server (stream)
+               (let* ((params (make-hash-table :test 'equal)))
+                 (setf (gethash "code" params) "(+ 3 4)"
+                       (gethash "package" params) "CL-USER")
+                 (let* ((response (%send-and-receive
+                                   stream 204 "worker/eval" params))
+                        (result (%result-of response)))
+                   (ok result "response has result without auth")
+                   (ok (gethash "content" result)
+                       "result has content")))))
+        (%restore-env "MCP_WORKER_SECRET" prev)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Missing handler coverage tests (Issue #6, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-load-system-returns-result
+  (testing "worker/load-system with a known system returns content"
+    (with-handler-server (stream)
+      (let* ((params (make-hash-table :test 'equal)))
+        (setf (gethash "system" params) "cl-mcp")
+        (let* ((response (%send-and-receive
+                          stream 300 "worker/load-system" params))
+               (result (%result-of response)))
+          (ok result "response has result")
+          (ok (gethash "content" result)
+              "result has content field"))))))
+
+(deftest worker-run-tests-requires-system
+  (testing "worker/run-tests without system param returns error"
+    (with-handler-server (stream)
+      (let* ((params (make-hash-table :test 'equal))
+             (response (%send-and-receive
+                        stream 301 "worker/run-tests" params))
+             (err (gethash "error" response)))
+        (ok err "response has error when system is missing")))))
+
+(deftest worker-code-find-references-returns-result
+  (testing "worker/code-find-references with cl:car returns result"
+    (with-handler-server (stream)
+      (let* ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "cl:car")
+        (let* ((response (%send-and-receive
+                          stream 302 "worker/code-find-references" params))
+               (result (%result-of response)))
+          (ok result "response has result for code-find-references"))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Handshake parser noise tolerance tests (Issue #9, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest handshake-parser-skips-noise-lines
+  (testing "%parse-handshake-from-stream skips non-JSON noise"
+    (let* ((input (format nil "~{~A~%~}"
+                          '("WARNING: loading system"
+                            "some compiler output"
+                            "{\"tcp_port\": 9999, \"swank_port\": null, \"pid\": 42}")))
+           (stream (make-string-input-stream input)))
+      (multiple-value-bind (tcp-port swank-port pid)
+          (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)
+        (ok (equal tcp-port 9999) "tcp-port is 9999")
+        (ok (null swank-port) "swank-port is nil for null")
+        (ok (equal pid 42) "pid is 42")))))
+
+(deftest handshake-parser-signals-on-eof
+  (testing "%parse-handshake-from-stream signals on premature EOF"
+    (let* ((input (format nil "~{~A~%~}"
+                          '("not json at all"
+                            "still not json")))
+           (stream (make-string-input-stream input))
+           (got-error nil))
+      (handler-case
+          (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)
+        (worker-spawn-failed () (setf got-error t)))
+      (ok got-error
+          "signals worker-spawn-failed on EOF without handshake"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Root rejection test (Issue #12, Major)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-set-project-root-rejects-filesystem-root
+  (testing "worker/set-project-root rejects / as root"
+    (with-handler-server (stream)
+      (let* ((params (make-hash-table :test 'equal)))
+        (setf (gethash "path" params) "/")
+        (let* ((response (%send-and-receive
+                          stream 400 "worker/set-project-root" params))
+               (err (gethash "error" response)))
+          (ok err "response has error for filesystem root")
+          (ok (search "filesystem root"
+                      (gethash "message" err))
+              "error mentions filesystem root"))))))

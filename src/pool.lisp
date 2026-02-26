@@ -840,7 +840,12 @@ unrestricted REPL access bypassing MCP security policies."
       (dolist (w *all-workers*)
         (let ((ht (make-hash-table :test 'equal)))
           (setf (gethash "id" ht) (worker-id w)
-                (gethash "session" ht) (worker-session-id w)
+                (gethash "session" ht) (let ((sid (worker-session-id w)))
+                                         (if (and (stringp sid)
+                                                  (> (length sid) 8))
+                                             (concatenate 'string
+                                                          (subseq sid 0 8) "...")
+                                             sid))
                 (gethash "tcp_port" ht) (worker-tcp-port w)
                 (gethash "pid" ht) (worker-pid w)
                 (gethash "state" ht) (string-downcase

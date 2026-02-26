@@ -208,6 +208,8 @@ Returns a success payload."
   (let ((path (gethash "path" params)))
     (unless path
       (error "path is required"))
+    (when (member path '("/" "//" "///") :test #'string=)
+      (error "Cannot set project root to filesystem root"))
     (let ((dir-path (uiop/pathname:ensure-directory-pathname path)))
       (unless (uiop/filesystem:directory-exists-p dir-path)
         (error "Directory does not exist: ~A" path))
