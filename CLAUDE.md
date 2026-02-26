@@ -72,6 +72,9 @@ export MCP_PROJECT_ROOT=/path/to/project
 
 # Logging level
 export MCP_LOG_LEVEL=debug  # debug|info|warn|error
+
+# Disable worker pool (run tools inline in parent process)
+export MCP_NO_WORKER_POOL=1
 ```
 
 ## Architecture Overview

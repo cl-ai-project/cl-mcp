@@ -70,7 +70,7 @@ TCP port, optional Swank port, and PID.  The JSON object has keys:
   pid        - integer, the worker's OS process ID"
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "tcp_port" ht) tcp-port
-          (gethash "swank_port" ht) (or swank-port 'null)
+          (gethash "swank_port" ht) (or swank-port :null)
           (gethash "pid" ht) (%get-pid))
     (yason:encode ht stream)
     (terpri stream)

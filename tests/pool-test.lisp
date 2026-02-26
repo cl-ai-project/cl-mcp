@@ -342,14 +342,13 @@ Tests that validate warmup/replenishment explicitly override these bindings."
 
 (deftest e2e-fallback-mode-works
   (testing "with *use-worker-pool* nil, tool handlers skip proxy"
-    ;; When *use-worker-pool* is nil, tool handlers execute inline
-    ;; and never call proxy-to-worker.  This test verifies the flag
-    ;; semantics and that inline CL evaluation needs no pool.
-    (ok (null *use-worker-pool*)
-        "*use-worker-pool* defaults to nil")
+    ;; *use-worker-pool* defaults to t (multi-process mode) unless
+    ;; MCP_NO_WORKER_POOL is set.  This test verifies the fallback
+    ;; (inline) path still works when the flag is explicitly disabled.
     ;; Direct CL evaluation works without any pool infrastructure.
-    (ok (= 30 (+ 10 20))
-        "inline evaluation works without pool")
+    (let ((*use-worker-pool* nil))
+      (ok (= 30 (+ 10 20))
+          "inline evaluation works without pool"))
     ;; Verify pool-dependent proxy also works when pool IS initialized
     ;; (contrast with the inline path above).
     (unless (spawn-available-p)
@@ -962,9 +961,8 @@ Tests that validate warmup/replenishment explicitly override these bindings."
   (testing "proxy-to-worker with nil session ID signals error"
     (let ((*use-worker-pool* t)
           (*current-session-id* nil))
-      (ok (signals (error)
-            (proxy-to-worker "worker/eval"
-                             (make-hash-table :test 'equal)))
+      (ok (signals (proxy-to-worker "worker/eval"
+                                    (make-hash-table :test 'equal)))
           "error signaled for nil session ID"))))
 
 ;;; ---------------------------------------------------------------------------

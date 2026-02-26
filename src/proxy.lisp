@@ -27,10 +27,15 @@
 
 (in-package #:cl-mcp/src/proxy)
 
-(defvar *use-worker-pool* nil
+(defvar *use-worker-pool* t
   "When non-nil, delegate eval/introspect operations to worker processes.
 Defined here in proxy so tool files can import it without pulling in
-the full pool/worker-client dependency chain at compile time.")
+the full pool/worker-client dependency chain at compile time.
+Set MCP_NO_WORKER_POOL=1 to disable.")
+
+(let ((env-val (uiop/os:getenv "MCP_NO_WORKER_POOL")))
+  (when (and env-val (plusp (length env-val)))
+    (setf *use-worker-pool* nil)))
 
 (defvar *proxy-rpc-timeout* 300
   "Default timeout (seconds) for proxy-to-worker RPC calls.
