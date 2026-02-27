@@ -15,6 +15,8 @@
            ;; Argument extraction helpers
            #:arg-validation-error
            #:validation-message
+           #:tool-operation-error
+           #:operation-error-message
            #:extract-arg
            #:extract-boolean-arg))
 
@@ -73,6 +75,14 @@ PROTOCOL-VERSION should be a string like \"2025-11-25\" or NIL."
              (format s "~A" (validation-message c))))
   (:documentation "Signaled when tool argument validation fails.
 Use VALIDATION-MESSAGE to get the user-facing error message."))
+
+(define-condition tool-operation-error (error)
+  ((message :initarg :message :reader operation-error-message))
+  (:report (lambda (c s)
+             (format s "~A" (operation-error-message c))))
+  (:documentation "Signaled when a tool operation fails due to invalid state or inputs.
+Unlike internal errors, these are expected failures reported to the client
+via isError:true (MCP 2025-03-26+) rather than JSON-RPC error codes."))
 
 (defun %check-type-match (value type arg-name)
   "Check if VALUE matches TYPE. Signal ARG-VALIDATION-ERROR if not.

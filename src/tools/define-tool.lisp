@@ -12,6 +12,8 @@
                 #:tool-error
                 #:arg-validation-error
                 #:validation-message
+                #:tool-operation-error
+                #:operation-error-message
                 #:extract-arg
                 #:extract-boolean-arg)
   (:import-from #:cl-mcp/src/tools/registry #:register-tool)
@@ -167,6 +169,10 @@ Example:
                ,body)
            (arg-validation-error (e)
              (tool-error ,id-sym (validation-message e)
+                         :protocol-version (protocol-version ,state-sym)))
+           (tool-operation-error (e)
+             (tool-error ,id-sym
+                         (sanitize-for-json (operation-error-message e))
                          :protocol-version (protocol-version ,state-sym)))
            (error (e)
              (rpc-error ,id-sym -32603

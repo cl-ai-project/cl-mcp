@@ -27,7 +27,8 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content
+                #:tool-operation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:uiop
@@ -51,12 +52,16 @@
 
 (in-package #:cl-mcp/src/paredit)
 
+(defun %op-error (fmt &rest args)
+  "Signal a TOOL-OPERATION-ERROR with a formatted message."
+  (error 'tool-operation-error :message (apply #'format nil fmt args)))
+
 (defun %normalize-paths (file-path)
   "Resolve FILE-PATH and return (values absolute-path relative-namestring)."
   (let ((resolved (fs-resolve-read-path file-path))
         (root (ensure-directory-pathname *project-root*)))
     (unless (subpathp resolved root)
-      (error "Path ~A is outside project root ~A" file-path root))
+      (%op-error "Path ~A is outside project root ~A" file-path root))
     (let* ((relative (enough-pathname resolved root))
            (rel-namestring (native-namestring relative)))
       (values resolved rel-namestring))))
@@ -139,9 +144,9 @@
       (cond
         ((null matches) nil)
         ((and index (< index (length matches))) (nth index matches))
-        (index (error "Index [~D] out of range, ~D match~:P found" index (length matches)))
+        (index (%op-error "Index [~D] out of range, ~D match~:P found" index (length matches)))
         ((= (length matches) 1) (first matches))
-        (t (error "Multiple matches for ~A ~A (~D found). Use [N] index to disambiguate."
+        (t (%op-error "Multiple matches for ~A ~A (~D found). Use [N] index to disambiguate."
                   form-type form-name (length matches)))))))
 
 (defun %whitespace-normalize (text)
@@ -164,10 +169,10 @@
   (let ((current root))
     (dolist (idx path current)
       (unless (%node-list-p current)
-        (error "Cannot navigate into atom at path index ~D" idx))
+        (%op-error "Cannot navigate into atom at path index ~D" idx))
       (let ((children (%expr-children current)))
         (when (>= idx (length children))
-          (error "Path index ~D out of range (~D children)" idx (length children)))
+          (%op-error "Path index ~D out of range (~D children)" idx (length children)))
         (setf current (nth idx children))))))
 
 (defun %resolve-by-text (root target-text source-text &key line)
@@ -186,20 +191,20 @@
     (let ((matches (or (nreverse exact) (nreverse prefix))))
       (cond
         ((null matches)
-         (error "No matching node for target: ~A" target-text))
+         (%op-error "No matching node for target: ~A" target-text))
         ((= (length matches) 1)
          (first matches))
         (line
          (first (sort matches #'< :key (lambda (n) (abs (- (cst-node-start-line n) line))))))
         (t
-         (error "Multiple matches (~D) for target. Add line hint or use path to disambiguate."
+         (%op-error "Multiple matches (~D) for target. Add line hint or use path to disambiguate."
                 (length matches)))))))
 
 (defun %resolve-target (nodes text &key form-type form-name target path line)
   "Unified target resolution. Returns (values target-node root-node)."
   (let ((root (if (and form-type form-name)
                   (or (%find-top-level-form nodes form-type form-name)
-                      (error "Top-level form ~A ~A not found" form-type form-name))
+                      (%op-error "Top-level form ~A ~A not found" form-type form-name))
                   (if (= 1 (length nodes))
                       (first nodes)
                       (make-cst-node :kind :expr :value nil :children nodes
@@ -232,7 +237,7 @@
 
 (defun %transform-wrap (text root target &key (count 1) wrapper head)
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot wrap: target has no parent"))
+    (unless parent (%op-error "Cannot wrap: target has no parent"))
     (multiple-value-bind (_bef _found aft) (%find-siblings parent target)
       (declare (ignore _bef _found))
       (let* ((wrap-nodes (cons target (subseq aft 0 (min (1- count) (length aft)))))
@@ -253,10 +258,10 @@
           (concatenate 'string (subseq text 0 rstart) wrapped (subseq text rend)))))))
 
 (defun %transform-unwrap (text root target &key (keep "all"))
-  (unless (%node-list-p target) (error "Cannot unwrap: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot unwrap: target is not a list"))
   (let* ((children (%expr-children target))
          (keep-children (if (string= keep "body") (rest children) children)))
-    (when (null keep-children) (error "Cannot unwrap: no children to keep"))
+    (when (null keep-children) (%op-error "Cannot unwrap: no children to keep"))
     (let ((replacement (format nil "~{~A~^ ~}"
                                (mapcar (lambda (n) (%node-source text n)) keep-children))))
       (concatenate 'string
@@ -266,19 +271,19 @@
 
 (defun %transform-raise (text root target)
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot raise: target has no parent"))
+    (unless parent (%op-error "Cannot raise: target has no parent"))
     (concatenate 'string
                  (subseq text 0 (cst-node-start parent))
                  (%node-source text target)
                  (subseq text (cst-node-end parent)))))
 
 (defun %transform-slurp-forward (text root target &key (count 1))
-  (unless (%node-list-p target) (error "Cannot slurp: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot slurp: target is not a list"))
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot slurp: target has no parent"))
+    (unless parent (%op-error "Cannot slurp: target has no parent"))
     (multiple-value-bind (_bef _found aft) (%find-siblings parent target)
       (declare (ignore _bef _found))
-      (when (null aft) (error "Cannot slurp forward: no sibling after target"))
+      (when (null aft) (%op-error "Cannot slurp forward: no sibling after target"))
       (let* ((slurp-nodes (subseq aft 0 (min count (length aft))))
              (last-slurped (car (last slurp-nodes)))
              (close-pos (1- (cst-node-end target)))
@@ -292,12 +297,12 @@
                      (subseq text slurp-end))))))
 
 (defun %transform-slurp-backward (text root target &key (count 1))
-  (unless (%node-list-p target) (error "Cannot slurp: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot slurp: target is not a list"))
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot slurp: target has no parent"))
+    (unless parent (%op-error "Cannot slurp: target has no parent"))
     (multiple-value-bind (bef _found _aft) (%find-siblings parent target)
       (declare (ignore _found _aft))
-      (when (null bef) (error "Cannot slurp backward: no sibling before target"))
+      (when (null bef) (%op-error "Cannot slurp backward: no sibling before target"))
       (let* ((slurp-nodes (last bef (min count (length bef))))
              (first-slurped (first slurp-nodes))
              (slurp-start (cst-node-start first-slurped))
@@ -313,10 +318,10 @@
 
 (defun %transform-barf-forward (text root target &key (count 1))
   (declare (ignore root))
-  (unless (%node-list-p target) (error "Cannot barf: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot barf: target is not a list"))
   (let* ((children (%expr-children target))
          (n (length children)))
-    (when (<= n count) (error "Cannot barf ~D children: list only has ~D" count n))
+    (when (<= n count) (%op-error "Cannot barf ~D children: list only has ~D" count n))
     (let* ((last-kept (nth (- n count 1) children))
            (first-barfed (nth (- n count) children))
            (close-pos (1- (cst-node-end target)))
@@ -330,10 +335,10 @@
 
 (defun %transform-barf-backward (text root target &key (count 1))
   (declare (ignore root))
-  (unless (%node-list-p target) (error "Cannot barf: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot barf: target is not a list"))
   (let* ((children (%expr-children target))
          (n (length children)))
-    (when (<= n count) (error "Cannot barf ~D children: list only has ~D" count n))
+    (when (<= n count) (%op-error "Cannot barf ~D children: list only has ~D" count n))
     (let* ((first-kept (nth count children))
            (open-pos (cst-node-start target))
            (open-char (char text open-pos))
@@ -348,7 +353,7 @@
 
 (defun %transform-kill (text root target &key (count 1))
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot kill: target has no parent"))
+    (unless parent (%op-error "Cannot kill: target has no parent"))
     (multiple-value-bind (bef _found aft) (%find-siblings parent target)
       (declare (ignore _found))
       (let* ((kill-nodes (cons target (subseq aft 0 (min (1- count) (length aft)))))
@@ -385,10 +390,10 @@
 
 (defun %transform-transpose (text root target)
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot transpose: target has no parent"))
+    (unless parent (%op-error "Cannot transpose: target has no parent"))
     (multiple-value-bind (_bef _found aft) (%find-siblings parent target)
       (declare (ignore _bef _found))
-      (when (null aft) (error "Cannot transpose: no next sibling"))
+      (when (null aft) (%op-error "Cannot transpose: no next sibling"))
       (let* ((next (first aft))
              (a-start (cst-node-start target)) (a-end (cst-node-end target))
              (b-start (cst-node-start next)) (b-end (cst-node-end next))
@@ -400,8 +405,8 @@
 
 (defun %transform-split (text root target &key clone-head)
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot split: target has no parent"))
-    (unless (%node-list-p parent) (error "Cannot split: parent is not a list"))
+    (unless parent (%op-error "Cannot split: target has no parent"))
+    (unless (%node-list-p parent) (%op-error "Cannot split: parent is not a list"))
     (let* ((children (%expr-children parent))
            (p-start (cst-node-start parent))
            (p-end (cst-node-end parent))
@@ -428,14 +433,14 @@
                        (subseq text p-end)))))))
 
 (defun %transform-join (text root target &key drop-head)
-  (unless (%node-list-p target) (error "Cannot join: target is not a list"))
+  (unless (%node-list-p target) (%op-error "Cannot join: target is not a list"))
   (let ((parent (%find-parent root target)))
-    (unless parent (error "Cannot join: target has no parent"))
+    (unless parent (%op-error "Cannot join: target has no parent"))
     (multiple-value-bind (_bef _found aft) (%find-siblings parent target)
       (declare (ignore _bef _found))
-      (when (null aft) (error "Cannot join: no next sibling"))
+      (when (null aft) (%op-error "Cannot join: no next sibling"))
       (let ((next (first aft)))
-        (unless (%node-list-p next) (error "Cannot join: next sibling is not a list"))
+        (unless (%node-list-p next) (%op-error "Cannot join: next sibling is not a list"))
         (let* ((close-pos (1- (cst-node-end target)))
                (close-char (char text close-pos))
                (next-children (%expr-children next))
