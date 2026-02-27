@@ -145,7 +145,7 @@ Roswell REPL."
                                                :if-exists :append)))
               (setf *standard-output* devnull))
             (start-accept-loop server))))
-    (error (e)
+    (serious-condition (e)
       (ignore-errors
         (log-event :error "worker.fatal" "error" (princ-to-string e)
                    "pid" (%get-pid)))))

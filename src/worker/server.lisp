@@ -135,7 +135,7 @@ the shared secret."
         (handler-case
             (let ((result (funcall handler params)))
               (%encode-response (%make-result id result)))
-          (error (e)
+          (serious-condition (e)
             (log-event :warn "worker.handler.error"
                        "method" method
                        "error" (princ-to-string e))

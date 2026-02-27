@@ -534,11 +534,18 @@ the monitor thread."
                             "error" (princ-to-string e)))))))
 
 (defun %start-health-monitor ()
-  "Start the background health monitor thread."
+  "Start the background health monitor thread.
+Captures the current value of *health-check-interval-seconds* so the
+caller's dynamic binding (e.g. from with-pool in tests) is honoured
+by the spawned thread."
   (setf *pool-running* t)
-  (setf *health-thread*
-        (bt:make-thread #'%health-monitor-loop
-                        :name "pool-health-monitor")))
+  (let ((interval *health-check-interval-seconds*))
+    (setf *health-thread*
+          (bt:make-thread
+           (lambda ()
+             (let ((*health-check-interval-seconds* interval))
+               (%health-monitor-loop)))
+           :name "pool-health-monitor"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- initialize
@@ -669,7 +676,8 @@ slip through.
 Signals an error if the pool is shutting down or if the worker
 cannot be created."
   (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
-        (need-reset nil) (old-worker-to-kill nil))
+        (need-reset nil) (old-worker-to-kill nil)
+        (circuit-breaker-tripped nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (unless *pool-running*
         (error 'pool-shutting-down))
@@ -685,8 +693,25 @@ cannot be created."
         (setf old-worker-to-kill entry)
         (remhash session-id *affinity-map*)
         (setf *all-workers* (remove entry *all-workers*))
+        ;; Circuit breaker: record crash and check threshold.
+        ;; Only for crashed workers (not :dead from normal kill).
+        (when (eq :crashed (worker-state entry))
+          (let* ((now (get-universal-time))
+                 (window-start (- now *crash-breaker-window*))
+                 (history (gethash session-id *crash-history*)))
+            (setf history
+                  (remove-if (lambda (ts) (< ts window-start)) history))
+            (push now history)
+            (setf (gethash session-id *crash-history*) history)
+            (when (>= (length history) *crash-breaker-threshold*)
+              (setf circuit-breaker-tripped t))))
+        ;; Avoid double crash notification: when %mark-worker-crashed
+        ;; (called by worker-rpc on EOF) set needs-reset-notification
+        ;; on the old worker, the proxy's worker-crashed handler
+        ;; already returned a notification to the client.
         (setf entry nil
-              need-reset t))
+              need-reset (not (worker-needs-reset-notification
+                               old-worker-to-kill))))
        ;; Path 2: Placeholder — another thread is spawning
        ((and entry (typep entry 'worker-placeholder))
         nil))
@@ -712,6 +737,16 @@ cannot be created."
     ;; leak as an untracked SBCL process.
     (when old-worker-to-kill
       (ignore-errors (kill-worker old-worker-to-kill)))
+    ;; Circuit breaker: halt recovery after too many crashes.
+    ;; Checked outside the lock so the old worker is already cleaned up.
+    (when circuit-breaker-tripped
+      (log-event :error "pool.circuit-breaker.tripped"
+                 "session" session-id
+                 "threshold" *crash-breaker-threshold*
+                 "window_seconds" *crash-breaker-window*)
+      (error "Circuit breaker tripped for session ~A: ~
+              worker crashed ~D times within ~Ds. Recovery halted."
+             session-id *crash-breaker-threshold* *crash-breaker-window*))
     (cond
      (assigned-from-standby
       (%schedule-replenish)

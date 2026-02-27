@@ -97,7 +97,8 @@ indicate stream corruption and require marking the worker crashed."))
   (pid nil)
   (needs-reset-notification nil :type boolean)
   (session-id nil)
-  (request-counter 0 :type integer))
+  (request-counter 0 :type integer)
+  (stderr-thread nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — ID generation
@@ -124,9 +125,14 @@ TCP authentication."
               (or (and (>= (length s) 17)
                        (string= "MCP_PROJECT_ROOT=" s :end2 17))
                   (and (>= (length s) 18)
-                       (string= "MCP_WORKER_SECRET=" s :end2 18))))
+                       (string= "MCP_WORKER_SECRET=" s :end2 18))
+                  (and (>= (length s) 20)
+                       (string= "MCP_NO_WORKER_POOL=" s :end2 20))))
             current-env)))
-    (let ((env (cons (format nil "MCP_WORKER_SECRET=~A" secret) filtered)))
+    ;; Workers always run inline — never proxy to sub-workers.
+    (let ((env (list* (format nil "MCP_WORKER_SECRET=~A" secret)
+                      "MCP_NO_WORKER_POOL=1"
+                      filtered)))
       (if *project-root*
           (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
                 env)
@@ -281,21 +287,24 @@ corruption."
 Without this, the child's log output (written to *error-output*)
 accumulates in an unread OS pipe buffer.  Once that buffer fills
 (typically 64 KB on Linux), the child blocks on every write to
-stderr, causing worker RPC calls to hang or time out."
+stderr, causing worker RPC calls to hang or time out.
+Stores the thread in the worker's stderr-thread slot so kill-worker
+can clean it up."
   (let ((process (worker-process-info worker))
         (wid (worker-id worker)))
     (when process
       (let ((err (sb-ext:process-error process)))
         (when err
-          (bordeaux-threads:make-thread
-           (lambda ()
-             (unwind-protect
-                 (ignore-errors
-                  (let ((buf (make-string 4096)))
-                    (loop for n = (read-sequence buf err)
-                          while (plusp n))))
-               (ignore-errors (close err))))
-           :name (format nil "worker-stderr-~A" wid)))))))
+          (setf (worker-stderr-thread worker)
+                (bordeaux-threads:make-thread
+                 (lambda ()
+                   (unwind-protect
+                       (ignore-errors
+                        (let ((buf (make-string 4096)))
+                          (loop for n = (read-sequence buf err)
+                                while (plusp n))))
+                     (ignore-errors (close err))))
+                 :name (format nil "worker-stderr-~A" wid))))))))
 
 (defun %generate-worker-secret ()
   "Generate a random shared secret for worker TCP authentication.
@@ -462,6 +471,9 @@ Closes the TCP socket under stream-lock for mutual exclusion with
 concurrent worker-rpc calls.  Sends SIGTERM first, waits up to
 2 seconds, then SIGKILL if still alive.  Sets state to :dead.
 
+Also destroys the stderr drain thread to prevent leaked file
+descriptors from blocking subsequent subprocess launches.
+
 Robust against already-dead processes."
   (let ((process (worker-process-info worker)))
     (log-event :info "worker.killing"
@@ -498,6 +510,14 @@ Robust against already-dead processes."
           (log-event :warn "worker.kill.error"
                      "id" (worker-id worker)
                      "error" (princ-to-string e))))
+      ;; Destroy the stderr drain thread BEFORE process-close.
+      ;; The drain thread may be blocking on read-sequence; destroying
+      ;; it first prevents a leaked FD that would block subsequent
+      ;; subprocess launches (uiop:run-program hangs in process-wait).
+      (let ((th (worker-stderr-thread worker)))
+        (when (and th (bt:thread-alive-p th))
+          (ignore-errors (bt:destroy-thread th))
+          (setf (worker-stderr-thread worker) nil)))
       (ignore-errors (sb-ext:process-close process)))
     (log-event :info "worker.killed"
                "id" (worker-id worker)

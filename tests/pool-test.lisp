@@ -182,12 +182,14 @@ in the cleanup form regardless of success or failure."
 ;;; Pool manager helpers
 ;;; ---------------------------------------------------------------------------
 
-(defmacro with-pool (() &body body)
+(defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)
   "Initialize the pool, execute BODY, and always shut down the pool.
 Uses tighter timing defaults to keep integration tests fast.
-Tests that validate warmup/replenishment explicitly override these bindings."
+HEALTH-CHECK-INTERVAL defaults to 60s so the health monitor does not
+race with tests that manually crash workers.  Pass a short interval
+\(e.g. 0.1d0) when testing health-monitor-driven crash detection."
   `(let ((*worker-pool-warmup* 0)
-         (*health-check-interval-seconds* 0.1d0)
+         (*health-check-interval-seconds* ,health-check-interval)
          (*shutdown-replenish-wait-seconds* 0.01d0))
      (unwind-protect
           (progn
@@ -874,23 +876,23 @@ Tests that validate warmup/replenishment explicitly override these bindings."
   (testing "health monitor detects SIGKILL'd worker and recovers"
     (unless (spawn-available-p)
       (skip "ros not available"))
-    ;; Use a short health check interval for fast detection
-    (let ((*health-check-interval-seconds* 0.5d0))
-      (with-pool ()
-        (let* ((worker (get-or-assign-worker "health-session"))
-               (old-id (worker-id worker))
-               (pid (worker-pid worker)))
-          (ok (integerp pid) "worker has valid pid")
-          ;; Kill the worker
-          (sb-posix:kill pid sb-posix:sigkill)
-          ;; Wait for health monitor to detect and recover
-          ;; health-check at 0.5s + spawn time (~3-5s) + buffer
-          (sleep 8)
-          ;; A new worker should be assigned with a different ID
-          (let ((new-worker (get-or-assign-worker "health-session")))
-            (ok new-worker "new worker assigned after recovery")
-            (ok (not (string= old-id (worker-id new-worker)))
-                "new worker has different ID")))))))
+    ;; Use a short health check interval so the monitor detects
+    ;; the SIGKILL'd worker quickly.
+    (with-pool (:health-check-interval 0.5d0)
+      (let* ((worker (get-or-assign-worker "health-session"))
+             (old-id (worker-id worker))
+             (pid (worker-pid worker)))
+        (ok (integerp pid) "worker has valid pid")
+        ;; Kill the worker
+        (sb-posix:kill pid sb-posix:sigkill)
+        ;; Wait for health monitor to detect and recover
+        ;; health-check at 0.1s + spawn time (~2s) + buffer
+        (sleep 5)
+        ;; A new worker should be assigned with a different ID
+        (let ((new-worker (get-or-assign-worker "health-session")))
+          (ok new-worker "new worker assigned after recovery")
+          (ok (not (eql old-id (worker-id new-worker)))
+              "new worker has different ID"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Pool capacity and shutdown tests (Issue #4, Major)
@@ -906,8 +908,8 @@ Tests that validate warmup/replenishment explicitly override these bindings."
         (let ((w1 (get-or-assign-worker "capacity-session-1")))
           (ok w1 "first worker assigned")
           ;; Second session should exceed capacity
-          (ok (signals (pool-capacity-exceeded)
-                (get-or-assign-worker "capacity-session-2"))
+          (ok (signals (get-or-assign-worker "capacity-session-2")
+                       'pool-capacity-exceeded)
               "pool-capacity-exceeded signaled for second session"))))))
 
 (deftest pool-shutting-down-signals
@@ -918,8 +920,8 @@ Tests that validate warmup/replenishment explicitly override these bindings."
       ;; Shut down the pool
       (shutdown-pool)
       ;; Now attempting to assign should signal
-      (ok (signals (pool-shutting-down)
-            (get-or-assign-worker "post-shutdown"))
+      (ok (signals (get-or-assign-worker "post-shutdown")
+                   'pool-shutting-down)
           "pool-shutting-down signaled after shutdown"))))
 
 ;;; ---------------------------------------------------------------------------
@@ -976,11 +978,11 @@ Tests that validate warmup/replenishment explicitly override these bindings."
     (with-spawned-worker (w)
       ;; Send a long sleep with a very short timeout
       (let ((params (make-hash-table :test 'equal)))
-        (setf (gethash "code" params) "(sleep 100)"
+        (setf (gethash "code" params) "(sleep 30)"
               (gethash "package" params) "CL-USER")
-        (ok (signals (worker-crashed)
-              (cl-mcp/src/worker-client:worker-rpc
-               w "worker/eval" params :timeout 1))
+        (ok (signals (cl-mcp/src/worker-client:worker-rpc
+                      w "worker/eval" params :timeout 1)
+                     'worker-crashed)
             "worker-crashed signaled on timeout")
         (ok (eq :crashed (worker-state w))
             "worker state is :crashed after timeout")))))
@@ -1003,7 +1005,7 @@ Tests that validate warmup/replenishment explicitly override these bindings."
           (dotimes (i (length info-vec))
             (let* ((ht (aref info-vec i))
                    (sid (gethash "session" ht)))
-              (when (string= (gethash "id" ht) (worker-id worker))
+              (when (eql (gethash "id" ht) (worker-id worker))
                 (setf found sid))))
           (ok found "found worker in info")
           (ok (<= (length found) 11)
