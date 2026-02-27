@@ -1,13 +1,11 @@
 ;;;; tests/paredit-test.lisp
-;;;;
-;;;; Tests for paredit structural editing tools.
-;;;; Tests the internal transform functions directly (no file I/O).
 
 (defpackage #:cl-mcp/tests/paredit-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node
+                #:make-cst-node
                 #:cst-node-kind
                 #:cst-node-value
                 #:cst-node-children
@@ -15,9 +13,6 @@
                 #:cst-node-end))
 
 (in-package #:cl-mcp/tests/paredit-test)
-
-;;; We test the internal %transform-* functions by calling them through
-;;; the package. Since they're not exported, we use the full symbol path.
 
 (defun parse-single (text)
   "Parse TEXT and return the single top-level form node."
@@ -43,10 +38,6 @@
          (target (find-by-path root target-path)))
     (apply transform-fn text root target args)))
 
-;;;; ====================================================================
-;;;; Addressing Tests
-;;;; ====================================================================
-
 (deftest parse-simple-form
   (testing "parse a single defun and verify children"
     (let* ((text "(defun foo (x) (+ x 1))")
@@ -61,22 +52,21 @@
   (testing "path navigation reaches correct child"
     (let* ((text "(defun foo (x) (+ x 1))")
            (root (parse-single text)))
-      ;; [0] = foo symbol
-      (let ((name-node (find-by-path root '(0))))
+      ;; [0] = defun symbol
+      (let ((head-node (find-by-path root '(0))))
+        (ok (eq (cst-node-value head-node) 'defun)))
+      ;; [1] = foo symbol
+      (let ((name-node (find-by-path root '(1))))
         (ok (eq (cst-node-value name-node) 'foo)))
-      ;; [1] = (x) lambda list
-      (let ((ll (find-by-path root '(1))))
+      ;; [2] = (x) lambda list
+      (let ((ll (find-by-path root '(2))))
         (ok (consp (cst-node-value ll))))
-      ;; [2] = (+ x 1) body
-      (let ((body (find-by-path root '(2))))
+      ;; [3] = (+ x 1) body
+      (let ((body (find-by-path root '(3))))
         (ok (consp (cst-node-value body))))
-      ;; [2, 0] = + symbol
-      (let ((plus (find-by-path root '(2 0))))
+      ;; [3, 0] = + symbol
+      (let ((plus (find-by-path root '(3 0))))
         (ok (eq (cst-node-value plus) '+))))))
-
-;;;; ====================================================================
-;;;; Wrap / Unwrap Tests
-;;;; ====================================================================
 
 (deftest transform-wrap-simple
   (testing "wrap a single sexp in parens"
@@ -123,10 +113,6 @@
                     :keep "body")))
       (ok (string= result "(a x y d)")))))
 
-;;;; ====================================================================
-;;;; Slurp / Barf Tests
-;;;; ====================================================================
-
 (deftest transform-slurp-forward
   (testing "slurp pulls next sibling into list"
     (let* ((text "(a (b) c)")
@@ -163,10 +149,6 @@
                     :count 1)))
       (ok (string= result "(a b (c) d)")))))
 
-;;;; ====================================================================
-;;;; Raise / Kill / Transpose Tests
-;;;; ====================================================================
-
 (deftest transform-raise
   (testing "raise replaces parent with child"
     (let* ((text "(a (if t x nil) b)")
@@ -192,10 +174,6 @@
                     text '(1)
                     (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "(list beta alpha)")))))
-
-;;;; ====================================================================
-;;;; Split / Join Tests
-;;;; ====================================================================
 
 (deftest transform-split
   (testing "split a list into two"
@@ -234,10 +212,6 @@
                     :drop-head t)))
       (ok (string= result "((progn a b))")))))
 
-;;;; ====================================================================
-;;;; Query Tests
-;;;; ====================================================================
-
 (deftest show-structure-basic
   (testing "show-structure returns tree with paths"
     (let* ((text "(defun foo (x) (+ x 1))")
@@ -255,7 +229,7 @@
   (testing "get-enclosing returns parent info"
     (let* ((text "(defun foo (x) (+ x 1))")
            (root (parse-single text))
-           (target (find-by-path root '(2 1))) ; x inside (+ x 1)
+           (target (find-by-path root '(3 1))) ; x inside (+ x 1)
            (info (funcall (symbol-function
                            (find-symbol "%GET-ENCLOSING" :cl-mcp/src/paredit))
                           root target text :levels 1)))

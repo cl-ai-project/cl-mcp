@@ -1,15 +1,4 @@
 ;;;; src/paredit.lisp
-;;;;
-;;;; Paredit-style structural S-expression editing tools.
-;;;;
-;;;; These tools let LLMs edit Lisp code without producing or counting
-;;;; parentheses. Each operation is structurally safe by construction —
-;;;; it manipulates the CST tree, not raw text.
-;;;;
-;;;; Tools: sexp-wrap, sexp-unwrap, sexp-raise, sexp-slurp-forward,
-;;;;        sexp-slurp-backward, sexp-barf-forward, sexp-barf-backward,
-;;;;        sexp-kill, sexp-transpose, sexp-split, sexp-join,
-;;;;        sexp-show-structure, sexp-get-enclosing.
 
 (defpackage #:cl-mcp/src/paredit
   (:use #:cl)
@@ -20,6 +9,7 @@
                 #:encode)
   (:import-from #:cl-mcp/src/cst
                 #:cst-node
+                #:make-cst-node
                 #:cst-node-kind
                 #:cst-node-value
                 #:cst-node-children
@@ -37,12 +27,9 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content
-                #:arg-validation-error #:validation-message)
+                #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-for-json)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -64,10 +51,6 @@
 
 (in-package #:cl-mcp/src/paredit)
 
-;;;; ====================================================================
-;;;; Section 1: File I/O Helpers (same pattern as lisp-edit-form.lisp)
-;;;; ====================================================================
-
 (defun %normalize-paths (file-path)
   "Resolve FILE-PATH and return (values absolute-path relative-namestring)."
   (let ((resolved (fs-resolve-read-path file-path))
@@ -77,10 +60,6 @@
     (let* ((relative (enough-pathname resolved root))
            (rel-namestring (native-namestring relative)))
       (values resolved rel-namestring))))
-
-;;;; ====================================================================
-;;;; Section 2: CST Node Utilities
-;;;; ====================================================================
 
 (defun %node-list-p (node)
   (and (typep node 'cst-node)
@@ -109,10 +88,6 @@
       (when (and children (%node-atom-p (first children))
                  (symbolp (cst-node-value (first children))))
         (string-downcase (symbol-name (cst-node-value (first children))))))))
-
-;;;; ====================================================================
-;;;; Section 3: Addressing — Top-Level Form Resolution
-;;;; ====================================================================
 
 (defun %normalize-string (thing)
   (string-downcase (princ-to-string thing)))
@@ -168,10 +143,6 @@
         ((= (length matches) 1) (first matches))
         (t (error "Multiple matches for ~A ~A (~D found). Use [N] index to disambiguate."
                   form-type form-name (length matches)))))))
-
-;;;; ====================================================================
-;;;; Section 4: Addressing — Sub-Form Resolution
-;;;; ====================================================================
 
 (defun %whitespace-normalize (text)
   (string-trim '(#\Space #\Tab #\Newline #\Return)
@@ -238,10 +209,6 @@
       (target (values (%resolve-by-text root target text :line line) root))
       (t      (values root root)))))
 
-;;;; ====================================================================
-;;;; Section 5: Parent / Sibling Queries
-;;;; ====================================================================
-
 (defun %find-parent (root target)
   "Find the parent of TARGET within ROOT. NIL if TARGET is ROOT."
   (labels ((search-in (node)
@@ -263,12 +230,6 @@
             (t (push child before))))
     (values (nreverse before) found (nreverse after))))
 
-;;;; ====================================================================
-;;;; Section 6: Structural Transforms
-;;;; ====================================================================
-
-;;; --- wrap ---
-
 (defun %transform-wrap (text root target &key (count 1) wrapper head)
   (let ((parent (%find-parent root target)))
     (unless parent (error "Cannot wrap: target has no parent"))
@@ -278,18 +239,18 @@
              (rstart (cst-node-start (first wrap-nodes)))
              (rend (cst-node-end (car (last wrap-nodes))))
              (region (subseq text rstart rend))
-             (open (if (or (null wrapper) (string= wrapper "round")) "(" "["))
-             (close (if (or (null wrapper) (string= wrapper "round")) ")" "]")))
-        (when (string= wrapper "square") (setf open "[" close "]"))
-        (when (string= wrapper "curly") (setf open "{" close "}"))
-        (unless (member wrapper '(nil "round" "square" "curly") :test #'equal)
-          (setf open "(" close ")"))
+             (open (cond ((or (null wrapper) (string= wrapper "round")) "(")
+                        ((string= wrapper "square") "[")
+                        ((string= wrapper "curly") "{")
+                        (t "(")))
+             (close (cond ((or (null wrapper) (string= wrapper "round")) ")")
+                          ((string= wrapper "square") "]")
+                          ((string= wrapper "curly") "}")
+                          (t ")"))))
         (let ((wrapped (if head
                            (format nil "~A~A ~A~A" open head region close)
                            (format nil "~A~A~A" open region close))))
           (concatenate 'string (subseq text 0 rstart) wrapped (subseq text rend)))))))
-
-;;; --- unwrap (splice) ---
 
 (defun %transform-unwrap (text root target &key (keep "all"))
   (unless (%node-list-p target) (error "Cannot unwrap: target is not a list"))
@@ -303,8 +264,6 @@
                    replacement
                    (subseq text (cst-node-end target))))))
 
-;;; --- raise ---
-
 (defun %transform-raise (text root target)
   (let ((parent (%find-parent root target)))
     (unless parent (error "Cannot raise: target has no parent"))
@@ -312,8 +271,6 @@
                  (subseq text 0 (cst-node-start parent))
                  (%node-source text target)
                  (subseq text (cst-node-end parent)))))
-
-;;; --- slurp forward ---
 
 (defun %transform-slurp-forward (text root target &key (count 1))
   (unless (%node-list-p target) (error "Cannot slurp: target is not a list"))
@@ -333,8 +290,6 @@
                      (subseq text 0 close-pos)
                      " " slurped (string close-char)
                      (subseq text slurp-end))))))
-
-;;; --- slurp backward ---
 
 (defun %transform-slurp-backward (text root target &key (count 1))
   (unless (%node-list-p target) (error "Cannot slurp: target is not a list"))
@@ -356,8 +311,6 @@
                      (subseq text (1+ open-pos) (cst-node-end target))
                      (subseq text (cst-node-end target)))))))
 
-;;; --- barf forward ---
-
 (defun %transform-barf-forward (text root target &key (count 1))
   (declare (ignore root))
   (unless (%node-list-p target) (error "Cannot barf: target is not a list"))
@@ -374,8 +327,6 @@
                    (subseq text 0 (cst-node-end last-kept))
                    (string close-char) " " barfed
                    (subseq text (1+ close-pos))))))
-
-;;; --- barf backward ---
 
 (defun %transform-barf-backward (text root target &key (count 1))
   (declare (ignore root))
@@ -395,30 +346,42 @@
                    (subseq text (cst-node-start first-kept) (cst-node-end target))
                    (subseq text (cst-node-end target))))))
 
-;;; --- kill ---
-
 (defun %transform-kill (text root target &key (count 1))
   (let ((parent (%find-parent root target)))
     (unless parent (error "Cannot kill: target has no parent"))
-    (multiple-value-bind (_bef _found aft) (%find-siblings parent target)
-      (declare (ignore _bef _found))
+    (multiple-value-bind (bef _found aft) (%find-siblings parent target)
+      (declare (ignore _found))
       (let* ((kill-nodes (cons target (subseq aft 0 (min (1- count) (length aft)))))
              (kill-start (cst-node-start (first kill-nodes)))
              (kill-end (cst-node-end (car (last kill-nodes))))
-             ;; Trim surrounding whitespace
-             (clean-start (loop for i from (1- kill-start) downto 0
-                                for ch = (char text i)
-                                while (member ch '(#\Space #\Tab))
-                                finally (return (1+ i))))
-             (clean-end (let ((len (length text)))
-                          (loop for i from kill-end below len
-                                for ch = (char text i)
-                                while (member ch '(#\Space #\Tab))
-                                finally (return (if (and (< i len) (char= (char text i) #\Newline))
-                                                    (1+ i) i))))))
-        (concatenate 'string (subseq text 0 clean-start) (subseq text clean-end))))))
-
-;;; --- transpose ---
+             (remaining-aft (nthcdr (min (1- count) (length aft)) aft))
+             (has-before (not (null bef)))
+             (has-after (not (null remaining-aft))))
+        (cond
+          ((and has-before has-after)
+           ;; Siblings on both sides: eat whitespace before kill region;
+           ;; whitespace after kill-end provides the separator
+           (let ((clean-start (loop for i from (1- kill-start) downto 0
+                                    for ch = (char text i)
+                                    while (member ch '(#\Space #\Tab))
+                                    finally (return (1+ i)))))
+             (concatenate 'string
+                          (subseq text 0 clean-start) (subseq text kill-end))))
+          (has-before
+           ;; Last child(ren): eat whitespace before
+           (let ((clean-start (loop for i from (1- kill-start) downto 0
+                                    for ch = (char text i)
+                                    while (member ch '(#\Space #\Tab #\Newline #\Return))
+                                    finally (return (1+ i)))))
+             (concatenate 'string (subseq text 0 clean-start) (subseq text kill-end))))
+          (t
+           ;; First child(ren): eat whitespace after
+           (let* ((len (length text))
+                  (clean-end (loop for i from kill-end below len
+                                   for ch = (char text i)
+                                   while (member ch '(#\Space #\Tab #\Newline #\Return))
+                                   finally (return i))))
+             (concatenate 'string (subseq text 0 kill-start) (subseq text clean-end)))))))))
 
 (defun %transform-transpose (text root target)
   (let ((parent (%find-parent root target)))
@@ -434,8 +397,6 @@
              (between (subseq text a-end b-start)))
         (concatenate 'string
                      (subseq text 0 a-start) b-text between a-text (subseq text b-end))))))
-
-;;; --- split ---
 
 (defun %transform-split (text root target &key clone-head)
   (let ((parent (%find-parent root target)))
@@ -466,8 +427,6 @@
                        (string open-char) right-str (string close-char)
                        (subseq text p-end)))))))
 
-;;; --- join ---
-
 (defun %transform-join (text root target &key drop-head)
   (unless (%node-list-p target) (error "Cannot join: target is not a list"))
   (let ((parent (%find-parent root target)))
@@ -489,10 +448,6 @@
                        merge-text
                        (string close-char)
                        (subseq text (cst-node-end next))))))))
-
-;;;; ====================================================================
-;;;; Section 7: Query Functions
-;;;; ====================================================================
 
 (defun %node-kind-string (node)
   (cond
@@ -553,13 +508,10 @@
                "sibling_count" (length children)
                "line" (cst-node-start-line enclosing)))))
 
-;;;; ====================================================================
-;;;; Section 8: Common Tool Wrapper
-;;;; ====================================================================
-
 (defun %apply-paredit (file-path form-type form-name target-text path line dry-run
-                       transform-fn &rest transform-args)
-  "Read file, parse, resolve target, apply TRANSFORM-FN, write back."
+                       operation-name transform-fn &rest transform-args)
+  "Read file, parse, resolve target, apply TRANSFORM-FN, write back.
+OPERATION-NAME is a string like \"sexp-wrap\" used for logging."
   (multiple-value-bind (abs rel) (%normalize-paths file-path)
     (let* ((text (fs-read-file abs))
            (nodes (parse-top-level-forms text)))
@@ -571,7 +523,7 @@
         (let ((new-text (apply transform-fn text root-node target-node transform-args)))
           (log-event :debug "paredit"
                      "path" (namestring abs)
-                     "operation" (string-downcase (symbol-name (first transform-args)))
+                     "operation" operation-name
                      "bytes" (length new-text)
                      "dry_run" dry-run)
           (if dry-run
@@ -580,28 +532,21 @@
                        "preview" new-text)
               (progn
                 (fs-write-file rel new-text)
-                (make-ht "path" file-path
-                         "bytes" (length new-text)
-                         "changed_region"
-                         (make-ht "start_line" (cst-node-start-line target-node)
-                                  "text" (%truncate
-                                          (let* ((ns (parse-top-level-forms new-text))
-                                                 (nt (ignore-errors
-                                                      (%resolve-target
-                                                       ns new-text
-                                                       :form-type form-type
-                                                       :form-name form-name))))
-                                            (if nt (%node-source new-text nt) new-text))
-                                          500))))))))))
-
-;;;; ====================================================================
-;;;; Section 9: Tool Definitions
-;;;; ====================================================================
-
-;;; Shared arg specs used across all tools.
-;;; NOTE: define-tool converts kebab-case symbols to snake_case JSON names automatically.
-
-;; --- sexp-wrap ---
+                (let* ((ns (parse-top-level-forms new-text))
+                       (nt (ignore-errors
+                             (%resolve-target
+                              ns new-text
+                              :form-type form-type
+                              :form-name form-name)))
+                       (region-text (if nt (%node-source new-text nt) new-text)))
+                  (make-ht "path" file-path
+                           "bytes" (length new-text)
+                           "changed_region"
+                           (make-ht "start_line" (cst-node-start-line target-node)
+                                    "end_line" (if nt
+                                                   (cst-node-end-line nt)
+                                                   (cst-node-end-line target-node))
+                                    "text" (%truncate region-text 500)))))))))))
 
 (define-tool "sexp-wrap"
   :description "Wrap one or more consecutive sibling S-expressions in new delimiters.
@@ -632,7 +577,7 @@ Requires at least one of 'target' or 'path' to identify the first sexp to wrap."
                   :description "Preview without writing to disk"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-wrap
+                                     "sexp-wrap" #'%transform-wrap
                                      :count (or count 1)
                                      :wrapper wrapper
                                      :head head)))
@@ -648,8 +593,6 @@ Requires at least one of 'target' or 'path' to identify the first sexp to wrap."
                             "operation" "sexp-wrap"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-unwrap (splice) ---
 
 (define-tool "sexp-unwrap"
   :description "Remove the enclosing delimiters of a list, promoting its children into the parent (splice).
@@ -667,7 +610,7 @@ Example: unwrapping (progn (a) (b)) with keep=\"body\" yields (a) (b)."
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-unwrap
+                                     "sexp-unwrap" #'%transform-unwrap
                                      :keep (or keep "all"))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-unwrap") "preview" result-data))
@@ -676,8 +619,6 @@ Example: unwrapping (progn (a) (b)) with keep=\"body\" yields (a) (b)."
                             "path" file-path "operation" "sexp-unwrap"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-raise ---
 
 (define-tool "sexp-raise"
   :description "Replace the parent list with a single child S-expression.
@@ -692,7 +633,7 @@ Example: raising (do-thing) inside (if test (do-thing) nil) replaces the whole i
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-raise)))
+                                     "sexp-raise" #'%transform-raise)))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-raise") "preview" result-data))
         (result id (make-ht "content" (text-content
@@ -700,8 +641,6 @@ Example: raising (do-thing) inside (if test (do-thing) nil) replaces the whole i
                             "path" file-path "operation" "sexp-raise"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-slurp-forward ---
 
 (define-tool "sexp-slurp-forward"
   :description "Expand a list by pulling the next sibling(s) into it (move closing delimiter rightward).
@@ -717,7 +656,7 @@ Example: (let ((x 1))) (use-x) becomes (let ((x 1)) (use-x)) when slurping on th
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-slurp-forward
+                                     "sexp-slurp-forward" #'%transform-slurp-forward
                                      :count (or count 1))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-slurp-forward")
@@ -727,8 +666,6 @@ Example: (let ((x 1))) (use-x) becomes (let ((x 1)) (use-x)) when slurping on th
                             "path" file-path "operation" "sexp-slurp-forward"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-slurp-backward ---
 
 (define-tool "sexp-slurp-backward"
   :description "Expand a list by pulling the previous sibling(s) into it (move opening delimiter leftward).
@@ -744,7 +681,7 @@ Example: (compute) (list result) becomes (list (compute) result) when slurping b
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-slurp-backward
+                                     "sexp-slurp-backward" #'%transform-slurp-backward
                                      :count (or count 1))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-slurp-backward")
@@ -754,8 +691,6 @@ Example: (compute) (list result) becomes (list (compute) result) when slurping b
                             "path" file-path "operation" "sexp-slurp-backward"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-barf-forward ---
 
 (define-tool "sexp-barf-forward"
   :description "Shrink a list by pushing its last child(ren) out as following sibling(s).
@@ -771,7 +706,7 @@ Example: (let ((x 1)) (compute) (cleanup)) becomes (let ((x 1)) (compute)) (clea
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-barf-forward
+                                     "sexp-barf-forward" #'%transform-barf-forward
                                      :count (or count 1))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-barf-forward")
@@ -781,8 +716,6 @@ Example: (let ((x 1)) (compute) (cleanup)) becomes (let ((x 1)) (compute)) (clea
                             "path" file-path "operation" "sexp-barf-forward"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-barf-backward ---
 
 (define-tool "sexp-barf-backward"
   :description "Shrink a list by pushing its first child(ren) out as preceding sibling(s).
@@ -798,7 +731,7 @@ Example: (list a b c) with count=1 becomes a (list b c)."
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-barf-backward
+                                     "sexp-barf-backward" #'%transform-barf-backward
                                      :count (or count 1))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-barf-backward")
@@ -808,8 +741,6 @@ Example: (list a b c) with count=1 becomes a (list b c)."
                             "path" file-path "operation" "sexp-barf-backward"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-kill ---
 
 (define-tool "sexp-kill"
   :description "Delete one or more complete S-expressions. Structurally safe — always removes whole sexps.
@@ -824,7 +755,7 @@ Cleans up surrounding whitespace. Use count to kill multiple consecutive sibling
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-kill
+                                     "sexp-kill" #'%transform-kill
                                      :count (or count 1))))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-kill") "preview" result-data))
@@ -833,8 +764,6 @@ Cleans up surrounding whitespace. Use count to kill multiple consecutive sibling
                             "path" file-path "operation" "sexp-kill"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-transpose ---
 
 (define-tool "sexp-transpose"
   :description "Swap two adjacent sibling S-expressions. The target and its next sibling are swapped.
@@ -848,7 +777,7 @@ Example: (list alpha beta) with target=\"alpha\" becomes (list beta alpha)."
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-transpose)))
+                                     "sexp-transpose" #'%transform-transpose)))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-transpose")
                             "preview" result-data))
@@ -857,8 +786,6 @@ Example: (list alpha beta) with target=\"alpha\" becomes (list beta alpha)."
                             "path" file-path "operation" "sexp-transpose"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-split ---
 
 (define-tool "sexp-split"
   :description "Split a list into two at the targeted child. Children before the target stay in the first list;
@@ -876,7 +803,7 @@ Example: (progn (a) (b) (c)) split at (b) with clone_head becomes (progn (a)) (p
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-split
+                                     "sexp-split" #'%transform-split
                                      :clone-head clone-head)))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-split") "preview" result-data))
@@ -885,8 +812,6 @@ Example: (progn (a) (b) (c)) split at (b) with clone_head becomes (progn (a)) (p
                             "path" file-path "operation" "sexp-split"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-join ---
 
 (define-tool "sexp-join"
   :description "Join two adjacent sibling lists into one. The second list's children are appended to the first.
@@ -903,7 +828,7 @@ Example: (progn (a)) (progn (b)) with drop_head becomes (progn (a) (b))."
          (dry-run :type :boolean :description "Preview without writing"))
   :body
   (let ((result-data (%apply-paredit file-path form-type form-name target path line dry-run
-                                     #'%transform-join
+                                     "sexp-join" #'%transform-join
                                      :drop-head drop-head)))
     (if dry-run
         (result id (make-ht "content" (text-content "Dry-run sexp-join") "preview" result-data))
@@ -912,8 +837,6 @@ Example: (progn (a)) (progn (b)) with drop_head becomes (progn (a) (b))."
                             "path" file-path "operation" "sexp-join"
                             "bytes" (gethash "bytes" result-data)
                             "changed_region" (gethash "changed_region" result-data))))))
-
-;; --- sexp-show-structure ---
 
 (define-tool "sexp-show-structure"
   :description "Show the S-expression tree structure of a form. Returns a tree with paths, text snippets,
@@ -948,8 +871,6 @@ Essential for understanding code structure before performing structural edits."
           (result id (make-ht "content" (text-content
                                          (with-output-to-string (s)
                                            (encode structure s))))))))))
-
-;; --- sexp-get-enclosing ---
 
 (define-tool "sexp-get-enclosing"
   :description "Return information about the enclosing form of a targeted node.

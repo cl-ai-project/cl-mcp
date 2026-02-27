@@ -65,6 +65,20 @@
                 #:detect-test-framework)
   (:import-from #:cl-mcp/src/system-loader
                 #:load-system)
+  (:import-from #:cl-mcp/src/paredit
+                #:sexp-wrap
+                #:sexp-unwrap
+                #:sexp-raise
+                #:sexp-slurp-forward
+                #:sexp-slurp-backward
+                #:sexp-barf-forward
+                #:sexp-barf-backward
+                #:sexp-kill
+                #:sexp-transpose
+                #:sexp-split
+                #:sexp-join
+                #:sexp-show-structure
+                #:sexp-get-enclosing)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -93,6 +107,20 @@
            #:detect-test-framework
            ;; System loader
            #:load-system
+           ;; Paredit structural editing
+           #:sexp-wrap
+           #:sexp-unwrap
+           #:sexp-raise
+           #:sexp-slurp-forward
+           #:sexp-slurp-backward
+           #:sexp-barf-forward
+           #:sexp-barf-backward
+           #:sexp-kill
+           #:sexp-transpose
+           #:sexp-split
+           #:sexp-join
+           #:sexp-show-structure
+           #:sexp-get-enclosing
            ;; Parinfer
            #:apply-indent-mode
            ;; Logging controls

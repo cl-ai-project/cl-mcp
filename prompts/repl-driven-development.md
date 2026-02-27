@@ -19,6 +19,8 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Load system | `load-system` | `system`, `force` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit code | `lisp-edit-form` | `form_type`, `form_name` |
+| Structural edit | `sexp-wrap`, `sexp-kill`, etc. | `target`, `path` |
+| Show structure | `sexp-show-structure` | `form_type`, `form_name` |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
@@ -114,8 +116,10 @@ What do you need to do?
 │   └─ Inspect result ─────→ inspect-object (use result_object_id)
 │
 ├─ EDIT
-│   ├─ Existing .lisp ─────→ lisp-edit-form (ALWAYS)
-│   └─ New file ───────────→ fs-write-file (minimal), then lisp-edit-form
+│   ├─ Whole form replace ──→ lisp-edit-form (ALWAYS for top-level forms)
+│   ├─ Sub-form edits ──────→ sexp-* paredit tools (wrap, slurp, barf, kill, raise)
+│   ├─ Discover structure ──→ sexp-show-structure (before sexp-* edits)
+│   └─ New file ────────────→ fs-write-file (minimal), then lisp-edit-form
 │
 └─ REFERENCE
     └─ CL language spec ───→ clhs-lookup (symbol or section number)
@@ -186,6 +190,45 @@ When creating a new file with `fs-write-file`, follow this safe workflow:
                "form_type": "defun",
                "form_name": "first-stub",
                "content": "(defun first-stub ()\n  (real-impl))"}}
+```
+
+### 1b. Structural Editing (Paredit Tools)
+
+**For sub-form edits, use `sexp-*` paredit tools instead of regenerating entire forms.**
+
+These tools manipulate the CST tree directly — they cannot produce unbalanced output. Use them when you need to modify *within* a form rather than replacing the whole thing.
+
+**Workflow:**
+1. `sexp-show-structure` — discover the tree structure, paths, and target text
+2. Apply the appropriate `sexp-*` operation using `target` (source text) or `path` (child indices)
+3. `lisp-check-parens` — verify balance (optional, all operations are structurally safe)
+
+**Available operations:**
+
+| Tool | Effect | When to use |
+|------|--------|-------------|
+| `sexp-wrap` | Wrap sexps in new delimiters | Add `handler-case`, `when`, `let` around code |
+| `sexp-unwrap` | Remove enclosing delimiters (splice) | Remove unnecessary wrapper |
+| `sexp-raise` | Replace parent with child | Simplify `(if test x nil)` → `x` |
+| `sexp-slurp-forward` | Pull next sibling into list | Grow a `let` body |
+| `sexp-slurp-backward` | Pull previous sibling into list | Absorb preceding form |
+| `sexp-barf-forward` | Push last child out of list | Shrink a form |
+| `sexp-barf-backward` | Push first child out of list | Eject leading form |
+| `sexp-kill` | Delete complete sexp(s) | Remove dead code |
+| `sexp-transpose` | Swap adjacent siblings | Reorder arguments |
+| `sexp-split` | Split list into two | Break up a `progn` |
+| `sexp-join` | Join two adjacent lists | Merge split forms |
+
+**Addressing:** All tools accept `target` (source text match) and/or `path` (child index list like `[2, 0, 1]`). Use `form_type`/`form_name` to scope to a specific top-level form. Add `line` for disambiguation.
+
+**Example:** Wrap a function body in `handler-case`:
+```json
+{"name": "sexp-wrap",
+ "arguments": {"file_path": "src/api.lisp",
+               "form_type": "defun",
+               "form_name": "handle-request",
+               "target": "(process-request req)",
+               "head": "handler-case"}}
 ```
 
 ### 2. Reading Code

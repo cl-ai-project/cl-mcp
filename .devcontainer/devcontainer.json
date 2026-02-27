@@ -1,0 +1,26 @@
+{
+  "name": "cl-mcp",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/egao1980/features/roswell:1": {
+      "version": "latest",
+      "installLisp": "sbcl-bin",
+      "useLisp": "sbcl-bin",
+      "installTools": true,
+      "toolsToInstall": "qlot",
+      "installUltralisp": true
+    }
+  },
+  "forwardPorts": [3000],
+  "postCreateCommand": "ros install rove",
+  "containerEnv": {
+    "MCP_PROJECT_ROOT": "/workspaces/cl-mcp"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "qingpeng.common-lisp"
+      ]
+    }
+  }
+}
