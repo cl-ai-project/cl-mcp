@@ -73,7 +73,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper nil :head nil)))
       (ok (string= result "(a (b) c)")))))
 
@@ -82,7 +82,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper nil :head "progn")))
       (ok (string= result "(a (progn b) c)")))))
 
@@ -91,7 +91,7 @@
     (let* ((text "(a b c d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 2 :wrapper nil :head nil)))
       (ok (string= result "(a (b c) d)")))))
 
@@ -100,7 +100,7 @@
     (let* ((text "(a (b c) d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "all")))
       (ok (string= result "(a b c d)")))))
 
@@ -109,7 +109,7 @@
     (let* ((text "(a (progn x y) d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "body")))
       (ok (string= result "(a x y d)")))))
 
@@ -118,7 +118,7 @@
     (let* ((text "(a (b) c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a (b c))")))))
 
@@ -127,7 +127,7 @@
     (let* ((text "(a (b) c d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
                     :count 2)))
       (ok (string= result "(a (b c d))")))))
 
@@ -136,7 +136,7 @@
     (let* ((text "(a b (c))")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a (b c))")))))
 
@@ -145,7 +145,7 @@
     (let* ((text "(w x y (z))")
            (result (resolve-and-transform
                     text '(3)
-                    (symbol-function (find-symbol "%TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
                     :count 2)))
       (ok (string= result "(w (x y z))")))))
 
@@ -154,7 +154,7 @@
     (let* ((text "(a (b c) d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a (b) c d)")))))
 
@@ -163,7 +163,7 @@
     (let* ((text "(a (b c d e) f)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
                     :count 2)))
       (ok (string= result "(a (b c) d e f)")))))
 
@@ -172,7 +172,7 @@
     (let* ((text "(a (b c) d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a b (c) d)")))))
 
@@ -181,7 +181,7 @@
     (let* ((text "(a (b c d e) f)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
                     :count 2)))
       (ok (string= result "(a b c (d e) f)")))))
 
@@ -191,7 +191,7 @@
            ;; raise x (path [1, 2]) — x inside (if t x nil)
            (result (resolve-and-transform
                     text '(1 2)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "(a x b)")))))
 
 (deftest transform-kill
@@ -199,25 +199,25 @@
     (let* ((text "(a b c d)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a b d)")))))
 
 (deftest transform-kill-first
-  (testing "kill removes first child and normalizes leading whitespace (inspired by Emacs paredit-kill tests)"
+  (testing "kill removes first child and normalizes leading whitespace"
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(b c)")))))
 
 (deftest transform-kill-last
-  (testing "kill removes last child and trims trailing whitespace (inspired by Emacs paredit-kill tests)"
+  (testing "kill removes last child and trims trailing whitespace"
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(a b)")))))
 
@@ -226,7 +226,7 @@
     (let* ((text "(a b c d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
                     :count 2)))
       (ok (string= result "(a d)")))))
 
@@ -235,7 +235,7 @@
     (let* ((text "(list alpha beta)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "(list beta alpha)")))))
 
 (deftest transform-split
@@ -244,7 +244,7 @@
            ;; split at b (child index 2 of progn form)
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head nil)))
       (ok (string= result "(progn a) (b c)")))))
 
@@ -253,7 +253,7 @@
     (let* ((text "(progn a b c)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head t)))
       (ok (string= result "(progn a) (progn b c)")))))
 
@@ -262,7 +262,7 @@
     (let* ((text "((a b) (c d))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head nil)))
       (ok (string= result "((a b c d))")))))
 
@@ -271,7 +271,7 @@
     (let* ((text "((progn a) (progn b))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head t)))
       (ok (string= result "((progn a b))")))))
 
@@ -287,7 +287,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper "square" :head nil)))
       (ok (string= result "(a [b] c)")))))
 
@@ -296,7 +296,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper "curly" :head nil)))
       (ok (string= result "(a {b} c)")))))
 
@@ -305,7 +305,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 5 :wrapper nil :head nil)))
       (ok (string= result "(a (b c))")))))
 
@@ -314,7 +314,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper nil :head nil)))
       (ok (string= result "(a b (c))")))))
 
@@ -323,7 +323,7 @@
     (let* ((text "(a (b c) d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 1 :wrapper nil :head nil)))
       (ok (string= result "(a ((b c)) d)")))))
 
@@ -332,7 +332,7 @@
     (let* ((text "(a b c d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 2 :wrapper nil :head "when")))
       (ok (string= result "(a (when b c) d)")))))
 
@@ -343,7 +343,7 @@
     (let* ((text "(a (b) c)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "all")))
       (ok (string= result "(a b c)")))))
 
@@ -352,7 +352,7 @@
     (let* ((text "(f (g (h x)))")
            (result (resolve-and-transform
                     text '(1 1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "all")))
       (ok (string= result "(f (g h x))")))))
 
@@ -361,7 +361,7 @@
     (let* ((text "(outer (let ((x 1)) body1 body2))")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "body")))
       (ok (string= result "(outer ((x 1)) body1 body2)")))))
 
@@ -370,7 +370,7 @@
     (let* ((text "(a (b (c d) (e f)) g)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "all")))
       (ok (string= result "(a b (c d) (e f) g)")))))
 
@@ -381,7 +381,7 @@
     (let* ((text "(a (b (c d)) e)")
            (result (resolve-and-transform
                     text '(1 1)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "(a (c d) e)")))))
 
 (deftest raise-first-child
@@ -389,7 +389,7 @@
     (let* ((text "(a (if test then else) b)")
            (result (resolve-and-transform
                     text '(1 0)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "(a if b)")))))
 
 (deftest raise-from-deep-nesting
@@ -397,7 +397,7 @@
     (let* ((text "(let ((x 5)) (let ((y 3)) (foo bar baz)))")
            (result (resolve-and-transform
                     text '(2 2 1)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "(let ((x 5)) (let ((y 3)) bar))")))))
 
 (deftest raise-replaces-entire-parent
@@ -405,7 +405,7 @@
     (let* ((text "((when t (do-something) (do-other)))")
            (result (resolve-and-transform
                     text '(0 2)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "((do-something))")))))
 
 ;;; --- Transpose edge cases ---
@@ -415,7 +415,7 @@
     (let* ((text "((a b) (c d))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "((c d) (a b))")))))
 
 (deftest transpose-mixed-atom-and-list
@@ -423,7 +423,7 @@
     (let* ((text "(foo x (bar baz))")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "(foo (bar baz) x)")))))
 
 (deftest transpose-preserves-surrounding
@@ -431,7 +431,7 @@
     (let* ((text "(a b c d e)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "(a b d c e)")))))
 
 ;;; --- Split edge cases ---
@@ -441,7 +441,7 @@
     (let* ((text "(a b c d)")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head nil)))
       (ok (string= result "(a) (b c d)")))))
 
@@ -450,7 +450,7 @@
     (let* ((text "(a b c)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head nil)))
       (ok (string= result "(a b) (c)")))))
 
@@ -459,7 +459,7 @@
     (let* ((text "(outer (a b c d))")
            (result (resolve-and-transform
                     text '(1 2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head nil)))
       (ok (string= result "(outer (a b) (c d))")))))
 
@@ -468,7 +468,7 @@
     (let* ((text "(let bindings body1 body2)")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head t)))
       (ok (string= result "(let bindings) (let body1 body2)")))))
 
@@ -479,7 +479,7 @@
     (let* ((text "((x) (y))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head nil)))
       (ok (string= result "((x y))")))))
 
@@ -488,7 +488,7 @@
     (let* ((text "((a (b c)) ((d e) f))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head nil)))
       (ok (string= result "((a (b c) (d e) f))")))))
 
@@ -497,7 +497,7 @@
     (let* ((text "((cond (a b)) (cond (c d)))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head t)))
       (ok (string= result "((cond (a b) (c d)))")))))
 
@@ -506,7 +506,7 @@
     (let* ((text "((a) (b))")
            (result (resolve-and-transform
                     text '(0)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head nil)))
       (ok (string= result "((a b))")))))
 
@@ -523,7 +523,7 @@
          (lambda ()
            (resolve-and-transform
             "(a (b c))" '(1)
-            (symbol-function (find-symbol "%TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
             :count 1))))))
 
 (deftest slurp-forward-atom-errors
@@ -532,7 +532,7 @@
          (lambda ()
            (resolve-and-transform
             "(a b c)" '(1)
-            (symbol-function (find-symbol "%TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
             :count 1))))))
 
 (deftest slurp-backward-no-sibling-errors
@@ -541,7 +541,7 @@
          (lambda ()
            (resolve-and-transform
             "((a b) c)" '(0)
-            (symbol-function (find-symbol "%TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-SLURP-BACKWARD" :cl-mcp/src/paredit))
             :count 1))))))
 
 (deftest barf-forward-insufficient-children-errors
@@ -550,7 +550,7 @@
          (lambda ()
            (resolve-and-transform
             "(a (b) c)" '(1)
-            (symbol-function (find-symbol "%TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
             :count 1))))))
 
 (deftest barf-backward-insufficient-children-errors
@@ -559,7 +559,7 @@
          (lambda ()
            (resolve-and-transform
             "(a (b) c)" '(1)
-            (symbol-function (find-symbol "%TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-BARF-BACKWARD" :cl-mcp/src/paredit))
             :count 1))))))
 
 (deftest raise-on-root-errors
@@ -568,7 +568,7 @@
          (lambda ()
            (resolve-and-transform
             "(a b c)" '()
-            (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit))))))))
+            (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit))))))))
 
 (deftest unwrap-atom-errors
   (testing "unwrap an atom signals error"
@@ -576,7 +576,7 @@
          (lambda ()
            (resolve-and-transform
             "(a b c)" '(1)
-            (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
             :keep "all"))))))
 
 (deftest transpose-no-next-errors
@@ -585,7 +585,7 @@
          (lambda ()
            (resolve-and-transform
             "(a b c)" '(2)
-            (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit))))))))
+            (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit))))))))
 
 (deftest join-no-next-errors
   (testing "join with no next sibling signals error (from Emacs join error cases)"
@@ -593,7 +593,7 @@
          (lambda ()
            (resolve-and-transform
             "((a b))" '(0)
-            (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
             :drop-head nil))))))
 
 (deftest join-next-not-list-errors
@@ -602,7 +602,7 @@
          (lambda ()
            (resolve-and-transform
             "((a b) c)" '(0)
-            (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
             :drop-head nil))))))
 
 (deftest kill-on-root-errors
@@ -611,7 +611,7 @@
          (lambda ()
            (resolve-and-transform
             "(a b c)" '()
-            (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+            (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
             :count 1))))))
 
 ;;; --- Realistic Lisp form transformations ---
@@ -621,7 +621,7 @@
     (let* ((text "(let ((x 1)) (print x) (cleanup))")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SLURP-FORWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(let ((x 1)) (print x (cleanup)))")))))
 
@@ -630,7 +630,7 @@
     (let* ((text "(defun foo () (do-risky) (do-more))")
            (result (resolve-and-transform
                     text '(3)
-                    (symbol-function (find-symbol "%TRANSFORM-WRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-WRAP" :cl-mcp/src/paredit))
                     :count 2 :wrapper nil :head "handler-case")))
       (ok (string= result "(defun foo () (handler-case (do-risky) (do-more)))")))))
 
@@ -639,7 +639,7 @@
     (let* ((text "(progn (when t (important-thing)) other)")
            (result (resolve-and-transform
                     text '(1 2)
-                    (symbol-function (find-symbol "%TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-RAISE" :cl-mcp/src/paredit)))))
       (ok (string= result "(progn (important-thing) other)")))))
 
 (deftest barf-last-from-progn
@@ -647,7 +647,7 @@
     (let* ((text "(handler-case (progn (setup) (run) (teardown)) (error (e) (log e)))")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-BARF-FORWARD" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(handler-case (progn (setup) (run)) (teardown) (error (e) (log e)))")))))
 
@@ -656,7 +656,7 @@
     (let* ((text "(cond (a 1) (b 2) (t 3))")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-KILL" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-KILL" :cl-mcp/src/paredit))
                     :count 1)))
       (ok (string= result "(cond (a 1) (t 3))")))))
 
@@ -665,7 +665,7 @@
     (let* ((text "(cond (a 1) (b 2) (t 3))")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
+                    (symbol-function (find-symbol "TRANSFORM-TRANSPOSE" :cl-mcp/src/paredit)))))
       (ok (string= result "(cond (b 2) (a 1) (t 3))")))))
 
 (deftest split-defun-body
@@ -673,7 +673,7 @@
     (let* ((text "(progn (setup) (run) (cleanup))")
            (result (resolve-and-transform
                     text '(2)
-                    (symbol-function (find-symbol "%TRANSFORM-SPLIT" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-SPLIT" :cl-mcp/src/paredit))
                     :clone-head t)))
       (ok (string= result "(progn (setup)) (progn (run) (cleanup))")))))
 
@@ -682,7 +682,7 @@
     (let* ((text "(outer (progn a b) (progn c d))")
            (result (resolve-and-transform
                     text '(1)
-                    (symbol-function (find-symbol "%TRANSFORM-JOIN" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-JOIN" :cl-mcp/src/paredit))
                     :drop-head t)))
       (ok (string= result "(outer (progn a b c d))")))))
 
@@ -691,7 +691,7 @@
     (let* ((text "(defun foo () (progn (bar)))")
            (result (resolve-and-transform
                     text '(3)
-                    (symbol-function (find-symbol "%TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
+                    (symbol-function (find-symbol "TRANSFORM-UNWRAP" :cl-mcp/src/paredit))
                     :keep "body")))
       (ok (string= result "(defun foo () (bar))")))))
 
@@ -700,7 +700,7 @@
     (let* ((text "(defun foo (x) (+ x 1))")
            (root (parse-single text))
            (structure (funcall (symbol-function
-                                (find-symbol "%SHOW-STRUCTURE" :cl-mcp/src/paredit))
+                                (find-symbol "SHOW-STRUCTURE" :cl-mcp/src/paredit))
                                root text :depth 2)))
       (ok (hash-table-p structure))
       (ok (stringp (gethash "form" structure)))
@@ -714,7 +714,7 @@
            (root (parse-single text))
            (target (find-by-path root '(3 1))) ; x inside (+ x 1)
            (info (funcall (symbol-function
-                           (find-symbol "%GET-ENCLOSING" :cl-mcp/src/paredit))
+                           (find-symbol "GET-ENCLOSING" :cl-mcp/src/paredit))
                           root target text :levels 1)))
       (ok (hash-table-p info))
       (ok (string= (gethash "head" info) "+"))
