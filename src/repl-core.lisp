@@ -14,12 +14,16 @@
   (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
-  (:export #:repl-eval #:*default-eval-package*))
+  (:export #:repl-eval #:*default-eval-package* #:*default-max-output-length*))
 
 (in-package #:cl-mcp/src/repl-core)
 
 (defparameter *default-eval-package* (find-package :cl-user)
   "Default package in which `repl-eval` evaluates forms.")
+
+(defvar *default-max-output-length* 100000
+  "Default maximum characters for repl-eval output when not specified by caller.
+Prevents unbounded output from consuming excessive memory or bandwidth.")
 
 (declaim (inline %read-all))
 
@@ -217,13 +221,15 @@ Options:
 - LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
 - LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
 - LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
-  (let ((thunk (lambda ()
+  (let* ((effective-max-output-length
+           (or max-output-length *default-max-output-length*))
+         (thunk (lambda ()
                  (%do-repl-eval input
                                 package
                                 safe-read
                                 print-level
                                 print-length
-                                max-output-length
+                                effective-max-output-length
                                 :locals-preview-frames locals-preview-frames
                                 :locals-preview-max-depth locals-preview-max-depth
                                 :locals-preview-max-elements locals-preview-max-elements

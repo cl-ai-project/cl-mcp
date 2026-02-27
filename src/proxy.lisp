@@ -18,6 +18,8 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message)
   (:export #:proxy-to-worker
            #:with-proxy-dispatch
            #:*use-worker-pool*
@@ -66,7 +68,8 @@ arguments hash-table.  ID is the JSON-RPC request id."
   '(("CL-MCP/SRC/POOL" . "GET-OR-ASSIGN-WORKER")
     ("CL-MCP/SRC/WORKER-CLIENT" . "CHECK-AND-CLEAR-RESET-NOTIFICATION")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-RPC")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED"))
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON"))
   "Package/symbol pairs used by proxy-to-worker at runtime.
 Verified at pool initialization to detect stale strings early.")
 
@@ -114,6 +117,8 @@ all unresolvable symbols."
   "Cached fdefinition for WORKER-CLIENT:WORKER-RPC.")
 (defvar %cached-worker-crashed-sym% nil
   "Cached symbol WORKER-CLIENT:WORKER-CRASHED.")
+(defvar %cached-worker-crashed-reason% nil
+  "Cached fdefinition for WORKER-CLIENT:WORKER-CRASHED-REASON.")
 
 (defun %ensure-cached-bindings ()
   "Populate the cached function bindings on first use.  Called once
@@ -127,7 +132,10 @@ per image after verify-proxy-bindings has validated the symbols."
           %cached-worker-rpc%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-RPC"))
           %cached-worker-crashed-sym%
-          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED"))))
+          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED")
+          %cached-worker-crashed-reason%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "WORKER-CRASHED-REASON")))))
 
 (defun proxy-to-worker (method params)
   "Proxy a tool call to the session's dedicated worker process.
@@ -138,7 +146,19 @@ TOCTOU race with concurrent requests for the same session."
     (unless session-id
       (error "Cannot proxy tool call: no session ID bound."))
     (%ensure-cached-bindings)
-    (let* ((worker (funcall %cached-get-or-assign% session-id))
+    (let* ((worker (handler-case
+                       (funcall %cached-get-or-assign% session-id)
+                     (error (e)
+                       (log-event :warn "proxy.pool-error"
+                                  "session" session-id
+                                  "method" method
+                                  "error" (princ-to-string e))
+                       (return-from proxy-to-worker
+                         (make-ht "content" (text-content
+                                             (format nil "Pool error: ~A"
+                                                     (sanitize-error-message
+                                                      (princ-to-string e))))
+                                  "isError" t)))))
            (worker-crashed-sym %cached-worker-crashed-sym%))
       (cond
         ;; Atomic check-and-clear: only one concurrent request gets the
@@ -166,14 +186,37 @@ TOCTOU race with concurrent requests for the same session."
              (error (e)
                (cond
                  ((typep e worker-crashed-sym)
-                  (log-event :warn "proxy.worker-crashed-mid-request"
-                             "session" session-id
-                             "method" method
-                             "error" (princ-to-string e))
-                  (%crash-notification-result))
+                  (let ((reason (ignore-errors
+                                  (funcall %cached-worker-crashed-reason% e))))
+                    (cond
+                      ((and reason (string= reason "timeout"))
+                       (log-event :warn "proxy.worker-timeout"
+                                  "session" session-id
+                                  "method" method)
+                       (make-ht "content" (text-content
+                                           (concatenate 'string
+                                             "Worker RPC timed out. "
+                                             "The operation took too long and the worker "
+                                             "was terminated. All Lisp state has been reset. "
+                                             "Please run load-system again to restore "
+                                             "your environment."))
+                                "isError" t))
+                      (t
+                       (log-event :warn "proxy.worker-crashed-mid-request"
+                                  "session" session-id
+                                  "method" method
+                                  "error" (princ-to-string e))
+                       (%crash-notification-result)))))
                  (t
                   (log-event :debug "proxy.worker-rpc-error"
                              "session" session-id
                              "method" method
                              "error" (princ-to-string e))
-                  (error e)))))))))))
+                  ;; Return a tool-error result directly instead of re-signaling.
+                  ;; This prevents define-tool's error handler from wrapping the
+                  ;; message a third time ("Internal error during tool: ...").
+                  (make-ht "content" (text-content
+                                      (format nil "Worker error: ~A"
+                                              (sanitize-error-message
+                                               (princ-to-string e))))
+                           "isError" t)))))))))))

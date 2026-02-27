@@ -35,6 +35,7 @@
            #:worker-process-info
            #:kill-worker
            #:worker-crashed
+           #:worker-crashed-reason
            #:worker-spawn-failed))
 
 (in-package #:cl-mcp/src/worker-client)
@@ -57,11 +58,17 @@
 ;;; ---------------------------------------------------------------------------
 
 (define-condition worker-crashed (error)
-  ((worker :initarg :worker :reader worker-crashed-worker))
+  ((worker :initarg :worker :reader worker-crashed-worker)
+   (reason :initarg :reason :reader worker-crashed-reason
+           :initform "unknown"))
   (:report (lambda (c s)
-             (format s "Worker ~A (PID ~A) crashed"
+             (format s "Worker ~A (PID ~A) ~A"
                      (worker-id (worker-crashed-worker c))
-                     (worker-pid (worker-crashed-worker c))))))
+                     (worker-pid (worker-crashed-worker c))
+                     (let ((r (worker-crashed-reason c)))
+                       (if (string= r "timeout")
+                           "timed out"
+                           (format nil "crashed (~A)" r)))))))
 
 (define-condition worker-spawn-failed (error)
   ((message :initarg :message :reader worker-spawn-failed-message))
@@ -405,6 +412,13 @@ Returns nothing."
       (usocket:socket-close (worker-socket worker))
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
+  ;; Destroy the stderr drain thread before reaping, matching
+  ;; kill-worker's cleanup order.  The drain thread may be blocking
+  ;; on read-sequence; destroying it first prevents leaked FDs.
+  (let ((th (worker-stderr-thread worker)))
+    (when (and th (bt:thread-alive-p th))
+      (ignore-errors (bt:destroy-thread th))
+      (setf (worker-stderr-thread worker) nil)))
   ;; Reap the OS process in a background thread to avoid blocking
   ;; the caller.  process-close calls waitpid internally, which blocks
   ;; if the worker process is still alive (e.g. stuck in computation).
@@ -413,6 +427,9 @@ Returns nothing."
     (when process
       (bt:make-thread
        (lambda ()
+         ;; Wait for the process to terminate before closing, so
+         ;; process-close doesn't block on a still-running child.
+         (ignore-errors (sb-ext:process-wait process nil nil))
          (ignore-errors (sb-ext:process-close process)))
        :name (format nil "reap-worker-~A" wid))))
   (log-event :warn "worker.crashed"
@@ -435,7 +452,7 @@ the worker handler (e.g. \"symbol not found\").  These are re-signaled
 without marking the worker as crashed."
   (bt:with-lock-held ((worker-stream-lock worker))
     (unless (worker-stream worker)
-      (error 'worker-crashed :worker worker))
+      (error 'worker-crashed :worker worker :reason "already-dead"))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn
@@ -443,13 +460,13 @@ without marking the worker as crashed."
             (%read-json-rpc-response (worker-stream worker) id timeout))
         (end-of-file ()
           (%mark-worker-crashed worker "eof")
-          (error 'worker-crashed :worker worker))
+          (error 'worker-crashed :worker worker :reason "eof"))
         (sb-ext:timeout ()
           (%mark-worker-crashed worker "timeout")
-          (error 'worker-crashed :worker worker))
+          (error 'worker-crashed :worker worker :reason "timeout"))
         (stream-error ()
           (%mark-worker-crashed worker "stream-error")
-          (error 'worker-crashed :worker worker))
+          (error 'worker-crashed :worker worker :reason "stream-error"))
         (worker-rpc-error (e)
           ;; Legitimate worker-side error (e.g. "symbol not found").
           ;; Re-signal without marking the worker as crashed.
@@ -459,7 +476,8 @@ without marking the worker as crashed."
           ;; Mark worker as crashed since the stream is desynchronized.
           (%mark-worker-crashed worker
                                 (format nil "protocol-error: ~A" e))
-          (error 'worker-crashed :worker worker))))))
+          (error 'worker-crashed :worker worker
+                 :reason (format nil "protocol-error: ~A" e)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API — kill

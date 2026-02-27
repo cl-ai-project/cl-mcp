@@ -98,6 +98,10 @@ princ-to-string then sanitized."
                 ((< code 32) (incf i))
                 ;; Strip DEL (127)
                 ((= code 127) (incf i))
+                ;; Supplemental plane chars (above U+FFFF) crash yason:encode
+                ;; on some streams — replace with U+FFFD REPLACEMENT CHARACTER
+                ((> code #xFFFF)
+                 (vector-push-extend (code-char #xFFFD) result) (incf i))
                 ;; Pass through everything else
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))

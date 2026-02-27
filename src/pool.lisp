@@ -528,7 +528,15 @@ the monitor thread."
                                   (format nil "pool-recover-~A"
                                           (worker-id w))))
                            (bordeaux-threads:with-lock-held (*pool-lock*)
-                             (push thread *recovery-threads*)))))))
+                             (push thread *recovery-threads*))))))
+                   ;; Reap zombie workers: crashed workers whose OS process
+                   ;; is still tracked but no longer alive.
+                   (dolist (w workers)
+                     (when (eq (worker-state w) :crashed)
+                       (let ((process (worker-process-info w)))
+                         (when process
+                           (ignore-errors
+                             (sb-ext:process-close process)))))))
                (error (e)
                  (log-event :error "pool.monitor.loop-error"
                             "error" (princ-to-string e)))))))
@@ -716,7 +724,9 @@ cannot be created."
        ((and entry (typep entry 'worker-placeholder))
         nil))
       ;; Phase 2: assign standby or spawn
-      (when (null entry)
+      ;; Skip when circuit breaker tripped — the error is raised after
+      ;; the lock, but we must not leave a placeholder that nobody resolves.
+      (when (and (null entry) (not circuit-breaker-tripped))
         (if *standby-workers*
             (let ((w (pop *standby-workers*)))
               (setf (worker-state w) :bound
@@ -779,11 +789,13 @@ impending kill as a crash."
           (setf worker-to-kill entry)
           (setf (worker-state worker-to-kill) :released)
           (remhash session-id *affinity-map*)
+          (remhash session-id *crash-history*)
           (setf *all-workers* (remove worker-to-kill *all-workers*)))
          ;; Placeholder — mark cancelled so spawn thread cleans up
          ((and entry (typep entry 'worker-placeholder))
           (setf (worker-placeholder-cancelled entry) t)
           (remhash session-id *affinity-map*)
+          (remhash session-id *crash-history*)
           (log-event :info "pool.session.cancelled-spawn"
                      "session" session-id)))))
     (when worker-to-kill

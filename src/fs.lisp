@@ -325,7 +325,16 @@ ASDF system"))
   :body
   (let ((entries (fs-list-directory path)))
     (result id
-            (make-ht "content" (text-content (format nil "~D entries" (length entries)))
+            (make-ht "content" (text-content
+                                (with-output-to-string (s)
+                                  (format s "~D entries in ~A~%" (length entries) path)
+                                  (loop for e across entries
+                                      do (if (hash-table-p e)
+                                             (format s "~A ~A~%"
+                                                     (if (equal (gethash "type" e) "directory")
+                                                         "[dir] " "[file]")
+                                                     (gethash "name" e))
+                                             (format s "~A~%" e)))))
                      "entries" entries
                      "path" path))))
 
@@ -335,10 +344,13 @@ path resolution context."
   :args ()
   :body
   (let* ((info (fs-get-project-info))
-         (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
+         (workers (gethash "workers" info))
+         (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A~@[~%Workers: ~A active~]"
                           (gethash "project_root" info)
                           (or (gethash "cwd" info) "(none)")
-                          (gethash "project_root_source" info))))
+                          (gethash "project_root_source" info)
+                          (when (and workers (arrayp workers) (plusp (length workers)))
+                            (length workers)))))
     (result id
             (make-ht "content" (text-content summary)
                      "project_root" (gethash "project_root" info)

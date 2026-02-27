@@ -659,25 +659,25 @@ race with tests that manually crash workers.  Pass a short interval
               "valid eval is not an error"))
         ;; Step 2: Send an invalid request (missing required "code" param)
         ;; that triggers a JSON-RPC error from the worker handler.
-        ;; Before P1 fix, this returned a crash notification saying
-        ;; "Worker process crashed and was restarted" — completely wrong.
+        ;; Before the fix, this would either crash-notify or triple-wrap
+        ;; the error.  Now proxy returns a tool-error hash-table directly.
         (let ((bad-params (make-hash-table :test 'equal)))
           ;; Intentionally omit "code" key — worker/eval requires it
           (setf (gethash "package" bad-params) "CL-USER")
-          (handler-case
-              (progn
-                (proxy-to-worker "worker/eval" bad-params)
-                ;; If we get here, proxy returned a result instead of
-                ;; signaling — check it's NOT a crash notification
-                (ok nil "expected an error to be signaled"))
-            (error (e)
-              (let ((msg (princ-to-string e)))
-                ;; The error message should reflect the worker's actual
-                ;; error, NOT contain "crashed and was restarted"
-                (ok (not (search "crashed" msg))
-                    (format nil
-                            "error does NOT mention crash: ~A"
-                            msg))))))
+          (let ((result (proxy-to-worker "worker/eval" bad-params)))
+            (ok (hash-table-p result)
+                "worker error returns a hash-table result")
+            (ok (gethash "isError" result)
+                "result is marked as an error")
+            ;; The error message should NOT mention "crashed and was restarted"
+            (let* ((content (gethash "content" result))
+                   (text (if (and content (arrayp content) (plusp (length content)))
+                             (gethash "text" (aref content 0))
+                             "")))
+              (ok (not (search "crashed" text))
+                  (format nil
+                          "error does NOT mention crash: ~A"
+                          text)))))
         ;; Step 3: Worker should still be alive and functional after a
         ;; non-crash error (no false crash recovery triggered)
         (let* ((params (%make-eval-params "(* 6 7)"))
