@@ -42,7 +42,7 @@ ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
 rove cl-mcp.asd
 
 # Core tests only (sandbox-safe, excludes TCP)
-rove tests/core-test.lisp tests/protocol-test.lisp tests/tools-test.lisp tests/repl-test.lisp tests/fs-test.lisp tests/code-test.lisp tests/logging-test.lisp
+rove tests/core-test.lisp tests/protocol-test.lisp tests/tools-test.lisp tests/repl-test.lisp tests/fs-test.lisp tests/code-test.lisp tests/logging-test.lisp tests/paredit-test.lisp
 
 # Individual test suite
 rove tests/integration-test.lisp
@@ -98,6 +98,7 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 5. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement using Eclector
 6. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
 7. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
+8. **Paredit** (`src/paredit.lisp`): Structural S-expression editing (wrap, unwrap, slurp, barf, raise, kill, transpose, split, join)
 
 ### Security Model
 
@@ -119,6 +120,7 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 
 **Structured Editing Philosophy**:
 - `lisp-edit-form` (CST-based) for existing Lisp code → preserves structure and comments
+- `sexp-*` paredit tools for sub-form structural edits (wrap, slurp, barf, etc.) → never produce unbalanced output
 - `fs-write-file` only for NEW files or non-Lisp content
 - Parinfer integration auto-repairs missing closing parens
 
@@ -139,6 +141,11 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 2. For `defmethod`, include specializers in `form_name`: `"print-object (my-class t)"`
 3. Operations: `replace`, `insert_before`, `insert_after`
 4. Content should be the complete form including `(defun ...)` wrapper
+5. **For sub-form edits**, prefer `sexp-*` paredit tools over regenerating full forms:
+   - `sexp-wrap` to add surrounding form (e.g., wrap body in `handler-case`)
+   - `sexp-kill` to remove forms, `sexp-raise` to replace parent with child
+   - `sexp-slurp-forward`/`sexp-barf-forward` to adjust list boundaries
+   - Use `sexp-show-structure` first to discover paths/targets
 
 ### When Reading Code
 1. **Prefer `lisp-read-file` over `fs-read-file`** for `.lisp`/`.asd` files

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "docker",
+      "args": [
+        "exec", "-i",
+        "-w", "/workspaces/cl-mcp",
+        "-e", "MCP_PROJECT_ROOT=/workspaces/cl-mcp",
+        "cl-mcp-dev",
+        "ros", "run",
+        "-e", "(let ((*standard-output* (make-broadcast-stream)) (*trace-output* (make-broadcast-stream))) (asdf:load-asd (merge-pathnames #P\"cl-mcp.asd\" (uiop:getcwd))) (ql:quickload :cl-mcp))",
+        "-e", "(cl-mcp:run)"
+      ]
+    }
+  }
+}

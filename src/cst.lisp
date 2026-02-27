@@ -7,6 +7,7 @@
                 #:make-expression-result
                 #:make-skipped-input-result)
   (:export #:cst-node
+           #:make-cst-node
            #:cst-node-kind
            #:cst-node-value
            #:cst-node-children
