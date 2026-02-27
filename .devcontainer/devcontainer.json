@@ -7,19 +7,19 @@
       "installLisp": "sbcl-bin",
       "useLisp": "sbcl-bin",
       "installTools": true,
-      "toolsToInstall": "qlot",
+      "toolsToInstall": "qlot rove",
       "installUltralisp": true
     }
   },
   "forwardPorts": [3000],
-  "postCreateCommand": "ros install rove",
   "containerEnv": {
     "MCP_PROJECT_ROOT": "/workspaces/cl-mcp"
   },
+  "postCreateCommand": "mkdir -p ~/.roswell/local-projects && ln -sfn /workspaces/cl-mcp ~/.roswell/local-projects/cl-mcp",
   "customizations": {
     "vscode": {
       "extensions": [
-        "qingpeng.common-lisp"
+        "rheller.alive"
       ]
     }
   }
