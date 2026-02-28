@@ -772,7 +772,8 @@ Cleans up server and socket on exit."
   (testing "worker/code-find-references with cl:car returns result"
     (with-handler-server (stream)
       (let* ((params (make-hash-table :test 'equal)))
-        (setf (gethash "symbol" params) "cl:car")
+        (setf (gethash "symbol" params) "cl:car"
+              (gethash "project_only" params) nil)
         (let* ((response (%send-and-receive
                           stream 302 "worker/code-find-references" params))
                (result (%result-of response)))
