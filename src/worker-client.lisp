@@ -272,12 +272,18 @@ before a valid handshake is found."
 (defun %connect-to-worker (host port)
   "Open a TCP connection to the worker at HOST:PORT.
 Returns the usocket object.  The stream is accessible via
-USOCKET:SOCKET-STREAM.  Times out after 10 seconds to avoid
-blocking on OS TCP timeout (60-120s) when the worker listener
-is not yet ready."
+USOCKET:SOCKET-STREAM.  Uses a 10-second connection timeout to
+avoid blocking on OS TCP timeout (60-120s) when the worker listener
+is not yet ready.
+
+IMPORTANT: We use :connection-timeout (not :timeout) because
+usocket's :timeout also sets SO_RCVTIMEO on the underlying socket
+via socket-make-stream.  A 10s read timeout would cause
+SB-SYS:IO-TIMEOUT on any worker operation that takes >10 seconds
+(e.g. repl-eval of (sleep 15)), falsely killing the worker."
   (usocket:socket-connect host port
                           :element-type 'character
-                          :timeout 10))
+                          :connection-timeout 10))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — JSON-RPC
