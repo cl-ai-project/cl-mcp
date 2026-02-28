@@ -3,9 +3,16 @@
 (defpackage #:cl-mcp/tests/integration-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/integration-test)
+
+(defun %pjl (line &rest args)
+  "Call process-json-line with worker pool disabled for inline testing."
+  (let ((*use-worker-pool* nil))
+    (apply #'process-json-line line args)))
 
 (deftest repl-eval-debug-flow
   (testing "agent fixes wrong arity using code-find and fs-read-file"
@@ -15,7 +22,7 @@
                   "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\","
                   "\"params\":{\"name\":\"repl-eval\","
                   "\"arguments\":{\"code\":\"(cl-mcp:version :extra)\"}}}"))
-           (resp1 (process-json-line req1))
+           (resp1 (%pjl req1))
            (obj1 (parse resp1))
            (result1 (gethash "result" obj1))
            (content1 (and result1 (gethash "content" result1)))
@@ -31,7 +38,7 @@
                   "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\","
                   "\"params\":{\"name\":\"code-find\","
                   "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
-           (resp2 (process-json-line req2))
+           (resp2 (%pjl req2))
            (obj2 (parse resp2))
            (result2 (gethash "result" obj2)))
       (ok (string= (gethash "jsonrpc" obj2) "2.0"))
@@ -43,7 +50,7 @@
                   "{\"jsonrpc\":\"2.0\",\"id\":102,\"method\":\"tools/call\","
                   "\"params\":{\"name\":\"fs-read-file\","
                   "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":400}}}"))
-           (resp3 (process-json-line req3))
+           (resp3 (%pjl req3))
            (obj3 (parse resp3))
            (result3 (gethash "result" obj3))
            (content3 (gethash "content" result3))
@@ -58,7 +65,7 @@
                   "{\"jsonrpc\":\"2.0\",\"id\":103,\"method\":\"tools/call\","
                   "\"params\":{\"name\":\"repl-eval\","
                   "\"arguments\":{\"code\":\"(cl-mcp:version)\"}}}"))
-           (resp4 (process-json-line req4))
+           (resp4 (%pjl req4))
            (obj4 (parse resp4))
            (result4 (gethash "result" obj4))
            (content4 (and result4 (gethash "content" result4)))
@@ -89,11 +96,11 @@
                      path)))
       (unwind-protect
            (progn
-             (let* ((resp-w (process-json-line req-write))
+             (let* ((resp-w (%pjl req-write))
                     (obj-w (parse resp-w))
                     (res-w (gethash "result" obj-w)))
                (ok (gethash "success" res-w)))
-             (let* ((resp-r (process-json-line req-read))
+             (let* ((resp-r (%pjl req-read))
                     (obj-r (parse resp-r))
                     (res-r (gethash "result" obj-r))
                     (content (gethash "content" res-r))
@@ -111,7 +118,7 @@
                       "{\"jsonrpc\":\"2.0\",\"id\":120,\"method\":\"tools/call\","
                       "\"params\":{\"name\":\"fs-list-directory\","
                       "\"arguments\":{\"path\":\".\"}}}"))
-           (resp-list (process-json-line req-list))
+           (resp-list (%pjl req-list))
            (obj-list (parse resp-list))
            (entries (gethash "entries" (gethash "result" obj-list)))
            (src-dir (find-if (lambda (e) (string= (gethash "name" e) "src"))
@@ -124,7 +131,7 @@
                       "\"arguments\":{\"path\":\"src/core.lisp\",\"limit\":120}}}")))
       (ok (arrayp entries))
       (ok src-dir)
-      (let* ((resp (process-json-line req-read))
+      (let* ((resp (%pjl req-read))
              (obj (parse resp))
              (res (gethash "result" obj))
              (content (gethash "content" res))
@@ -141,7 +148,7 @@
                 "{\"jsonrpc\":\"2.0\",\"id\":130,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"lisp_mcp.code-describe\","
                 "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")))
-      (let* ((resp (process-json-line req))
+      (let* ((resp (%pjl req))
              (obj (parse resp))
              (res (gethash "result" obj)))
         (ok (string= (gethash "jsonrpc" obj) "2.0"))
@@ -157,7 +164,7 @@
                 "{\"jsonrpc\":\"2.0\",\"id\":140,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"repl-eval\","
                 "\"arguments\":{\"code\":\"(list 1 2 3 4)\",\"print_length\":2}}}")))
-      (let* ((resp (process-json-line req))
+      (let* ((resp (%pjl req))
              (obj (parse resp))
              (res (gethash "result" obj))
              (content (gethash "content" res))
@@ -175,7 +182,7 @@
                 "{\"jsonrpc\":\"2.0\",\"id\":150,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"fs-read-file\","
                 "\"arguments\":{\"path\":\"/etc/hosts\"}}}")))
-      (let* ((resp (process-json-line req))
+      (let* ((resp (%pjl req))
              (obj (parse resp))
              (err (gethash "error" obj)))
         (ok err)

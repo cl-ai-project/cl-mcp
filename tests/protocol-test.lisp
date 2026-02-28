@@ -8,6 +8,8 @@
                 #:make-state)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -208,7 +210,8 @@
                          "\"params\":{\"name\":\"repl-eval\","
                          "\"arguments\":{\"code\":~S}}}")
                         code))
-           (resp (process-json-line req))
+           (resp (let ((*use-worker-pool* nil))
+                   (process-json-line req)))
            (obj (parse resp)))
       (ok obj "response should parse as valid JSON")
       (ok (null (gethash "error" obj)) "should not be an error response")
