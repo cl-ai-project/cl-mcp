@@ -172,21 +172,23 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
                 (let ((root-str (namestring (truename root-dir))))
-                  ;; Reject overly broad roots (same policy as fs.lisp)
-                  (when (member root-str '("/" "/tmp/" "/home/")
-                                :test #'string=)
-                    (log-event :warn "initialize.sync-root.rejected"
-                               "path" root-str
-                               "reason" "too broad")
-                    (return-from handle-initialize nil))
-                  (setf *project-root* root-dir)
-                  (uiop/os:chdir root-dir)
-                  ;; Propagate root to this session's worker only
-                  (ignore-errors
-                    (send-root-to-session-worker *current-session-id* root-dir))
-                  (log-event :info "initialize.sync-root" "rootPath"
-                             (namestring root-dir) "source"
-                             (if root-path "rootPath" "rootUri")))))
+                  (cond
+                    ;; Reject overly broad roots (same policy as fs.lisp)
+                    ;; Skip root application but continue initialization normally
+                    ((member root-str '("/" "/tmp/" "/home/")
+                             :test #'string=)
+                     (log-event :warn "initialize.sync-root.rejected"
+                                "path" root-str
+                                "reason" "too broad"))
+                    (t
+                     (setf *project-root* root-dir)
+                     (uiop/os:chdir root-dir)
+                     ;; Propagate root to this session's worker only
+                     (ignore-errors
+                       (send-root-to-session-worker *current-session-id* root-dir))
+                     (log-event :info "initialize.sync-root" "rootPath"
+                                (namestring root-dir) "source"
+                                (if root-path "rootPath" "rootUri")))))))
           (error (e)
             (ignore-errors
               (log-event :warn "initialize.sync-root-failed" "path" root

@@ -67,6 +67,26 @@
       (ok (= (gethash "code" err) -32602))
       (ok (gethash "data" err)))))
 
+(deftest initialize-broad-root-returns-valid-response
+  (testing "initialize with overly broad rootPath skips root but returns valid JSON-RPC"
+    (let* ((line (concatenate
+                  'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\","
+                  "\"params\":{\"protocolVersion\":\"2025-06-18\","
+                  "\"rootPath\":\"/tmp\"}}"))
+           (resp (process-json-line line)))
+      (ok (stringp resp) "response must be a string, not nil")
+      (let ((obj (parse resp)))
+        (ok (string= (gethash "jsonrpc" obj) "2.0"))
+        (ok (eql (gethash "id" obj) 5))
+        ;; Must be a valid result, not an error
+        (ok (gethash "result" obj) "must have result key")
+        (ok (null (gethash "error" obj)) "must not be an error response")
+        (let ((result (gethash "result" obj)))
+          (ok (gethash "serverInfo" result) "must have serverInfo")
+          (ok (gethash "protocolVersion" result)
+              "must have negotiated protocolVersion"))))))
+
 (deftest ping-returns-empty
   (testing "ping returns empty result object"
     (let* ((resp (process-json-line "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"ping\"}"))
