@@ -121,18 +121,25 @@ result_preview, and error_context."
 
 (defun %handle-run-tests (params)
   "Run tests for a system.  Returns the same structure as define-tool
-\"run-tests\"."
+\"run-tests\".  Honors timeout_seconds to limit test execution time."
   (let* ((system (gethash "system" params))
          (framework (gethash "framework" params))
          (test (gethash "test" params))
-         (tests (gethash "tests" params)))
+         (tests (gethash "tests" params))
+         (timeout (let ((v (gethash "timeout_seconds" params)))
+                    (and v (numberp v) (plusp v) v))))
     (unless system
       (error "system is required"))
-    (let ((test-result (run-tests system
-                                  :framework framework
-                                  :test test
-                                  :tests tests)))
-      (build-run-tests-response test-result))))
+    (flet ((do-run ()
+             (run-tests system
+                        :framework framework
+                        :test test
+                        :tests tests)))
+      (let ((test-result (if timeout
+                             (sb-ext:with-timeout timeout
+                               (do-run))
+                             (do-run))))
+        (build-run-tests-response test-result)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find

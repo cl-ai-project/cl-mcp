@@ -193,14 +193,18 @@ is authenticated with the shared secret."
                        (sb-ext:with-timeout *worker-read-timeout*
                          (%read-line-limited stream :eof +max-json-line-bytes+))
                      (sb-ext:timeout ()
-                       (log-event :warn "worker.read.timeout"
+                       (log-event :debug "worker.read.idle"
                                   "seconds" *worker-read-timeout*)
-                       :eof)
+                       ;; Idle timeout — keep waiting rather than closing.
+                       ;; The parent manages worker lifecycle via kill-worker
+                       ;; or shutdown-pool, so we just loop.
+                       :idle)
                      (error (e)
                        (log-event :warn "worker.read.error"
                                   "error" (princ-to-string e))
                        :eof))
         when (eq line :eof) do (return)
+        when (eq line :idle) do (progn)  ; continue loop
         do (let ((resp (%process-line server line)))
              (when resp
                (handler-case
