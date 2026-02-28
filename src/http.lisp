@@ -494,11 +494,17 @@ Returns the acceptor instance and port number."
                        :access-log-destination nil
                        :message-log-destination nil))
 
-  ;; Initialize pool before accepting connections to avoid race window
+  ;; Initialize pool before accepting connections to avoid race window.
+  ;; Wrap in unwind-protect so a failed hunchentoot:start cleans up
+  ;; the pool instead of leaving orphan worker processes.
   (when *use-worker-pool*
     (initialize-pool))
 
-  (hunchentoot:start *http-server*)
+  (handler-bind ((error (lambda (c)
+                          (declare (ignore c))
+                          (when *use-worker-pool*
+                            (ignore-errors (shutdown-pool))))))
+    (hunchentoot:start *http-server*))
   (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
 
   ;; Start periodic session cleanup

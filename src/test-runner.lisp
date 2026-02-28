@@ -50,13 +50,16 @@ Examples:
          (test :type :string :required nil
                :description "Run only this specific test (fully qualified: 'package::test-name')")
          (tests :type :array :required nil
-                :description "Run only these specific tests (array of 'package::test-name')"))
+                :description "Run only these specific tests (array of 'package::test-name')")
+         (timeout_seconds :type :number :required nil
+                          :description "Maximum seconds to wait for the test run to complete (default: 300). Increase for large test suites."))
   :body
   (with-proxy-dispatch (id "worker/run-tests"
                           (make-ht "system" system
                                    "framework" framework
                                    "test" test
-                                   "tests" tests))
+                                   "tests" tests
+                                   "timeout_seconds" timeout_seconds))
     (let ((test-result (run-tests system
                                   :framework framework
                                   :test test

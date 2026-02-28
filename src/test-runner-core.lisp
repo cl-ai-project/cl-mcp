@@ -381,6 +381,12 @@ If TESTS is provided, run those specific tests (array/list of fully qualified na
 Returns a hash table with structured results."
   (when (and test tests)
     (error "Specify either TEST or TESTS, not both"))
+  ;; Load the test system before framework detection so that framework
+  ;; packages (e.g. :rove) are available for detect-test-framework.
+  ;; Without this, a freshly started process without Rove pre-loaded
+  ;; would fall back to the ASDF text-capture path that cannot report
+  ;; individual test counts (always returns passed=0, failed=0).
+  (%ensure-system-loaded system-name)
   (let* ((fw (%resolve-framework system-name framework))
          (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
