@@ -25,6 +25,7 @@
            #:*use-worker-pool*
            #:*proxy-rpc-timeout*
            #:verify-proxy-bindings
+           #:%invalidate-proxy-cache
            #:*current-session-id*))
 
 (in-package #:cl-mcp/src/proxy)
@@ -137,13 +138,23 @@ per image after verify-proxy-bindings has validated the symbols."
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
                                  "WORKER-CRASHED-REASON")))))
 
+(defun %invalidate-proxy-cache ()
+  "Reset all cached late-bound function references to NIL.
+Called by initialize-pool to ensure stale bindings from a previous
+image or pool lifecycle are cleared before re-verification."
+  (setf %cached-get-or-assign% nil
+        %cached-check-and-clear% nil
+        %cached-worker-rpc% nil
+        %cached-worker-crashed-sym% nil
+        %cached-worker-crashed-reason% nil))
+
 (defun proxy-to-worker (method params)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
 Uses atomic check-and-clear for crash notification to prevent
 TOCTOU race with concurrent requests for the same session."
   (let ((session-id *current-session-id*))
-    (unless session-id
+    (unless (and (stringp session-id) (plusp (length session-id)))
       (error "Cannot proxy tool call: no session ID bound."))
     (%ensure-cached-bindings)
     (let* ((worker (handler-case

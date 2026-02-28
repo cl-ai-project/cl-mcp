@@ -9,6 +9,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/worker-client
+                #:%read-line-limited
+                #:+max-json-line-bytes+)
   (:import-from #:usocket)
   (:import-from #:yason)
   (:export #:worker-server
@@ -16,9 +19,15 @@
            #:server-port
            #:start-accept-loop
            #:stop-server
-           #:register-method))
+           #:register-method
+           #:*worker-read-timeout*))
 
 (in-package #:cl-mcp/src/worker/server)
+
+(defvar *worker-read-timeout* 300
+  "Seconds to wait for a JSON-RPC line from the parent before
+treating the connection as dead.  Prevents zombie workers from
+lingering when the parent disappears without closing the socket.")
 
 (defstruct (worker-server (:constructor %make-worker-server))
   "A single-connection TCP server for worker processes.
@@ -181,7 +190,12 @@ Rejects all requests except worker/authenticate until the connection
 is authenticated with the shared secret."
   (loop while (worker-server-running-p server)
         for line = (handler-case
-                       (read-line stream nil :eof)
+                       (sb-ext:with-timeout *worker-read-timeout*
+                         (%read-line-limited stream :eof +max-json-line-bytes+))
+                     (sb-ext:timeout ()
+                       (log-event :warn "worker.read.timeout"
+                                  "seconds" *worker-read-timeout*)
+                       :eof)
                      (error (e)
                        (log-event :warn "worker.read.error"
                                   "error" (princ-to-string e))

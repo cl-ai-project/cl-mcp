@@ -73,7 +73,8 @@
                 #:*max-pool-size*
                 #:initialize-pool
                 #:shutdown-pool
-                #:broadcast-root-to-workers)
+                #:broadcast-root-to-workers
+                #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -139,6 +140,7 @@
            #:*max-pool-size*
            #:initialize-pool
            #:shutdown-pool
-           #:broadcast-root-to-workers))
+           #:broadcast-root-to-workers
+           #:send-root-to-session-worker))
 
 (in-package #:cl-mcp/main)

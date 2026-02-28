@@ -26,7 +26,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/pool
-                #:broadcast-root-to-workers)
+                #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:yason
@@ -171,13 +171,22 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                (setf *project-root* root-dir)
-                (uiop/os:chdir root-dir)
-                ;; Propagate root to all pool workers (no-op if pool empty)
-                (ignore-errors (broadcast-root-to-workers root-dir))
-                (log-event :info "initialize.sync-root" "rootPath"
-                           (namestring root-dir) "source"
-                           (if root-path "rootPath" "rootUri"))))
+                (let ((root-str (namestring (truename root-dir))))
+                  ;; Reject overly broad roots (same policy as fs.lisp)
+                  (when (member root-str '("/" "/tmp/" "/home/")
+                                :test #'string=)
+                    (log-event :warn "initialize.sync-root.rejected"
+                               "path" root-str
+                               "reason" "too broad")
+                    (return-from handle-initialize nil))
+                  (setf *project-root* root-dir)
+                  (uiop/os:chdir root-dir)
+                  ;; Propagate root to this session's worker only
+                  (ignore-errors
+                    (send-root-to-session-worker *current-session-id* root-dir))
+                  (log-event :info "initialize.sync-root" "rootPath"
+                             (namestring root-dir) "source"
+                             (if root-path "rootPath" "rootUri")))))
           (error (e)
             (ignore-errors
               (log-event :warn "initialize.sync-root-failed" "path" root

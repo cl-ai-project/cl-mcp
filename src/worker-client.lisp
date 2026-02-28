@@ -36,13 +36,19 @@
            #:kill-worker
            #:worker-crashed
            #:worker-crashed-reason
-           #:worker-spawn-failed))
+           #:worker-spawn-failed
+           #:+max-json-line-bytes+
+           #:%read-line-limited))
 
 (in-package #:cl-mcp/src/worker-client)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Configuration
 ;;; ---------------------------------------------------------------------------
+
+(defconstant +worker-protocol-version+ 1
+  "Expected worker protocol version.  Logs a warning on mismatch
+but does not hard-fail for forward compatibility.")
 
 (defparameter *worker-startup-timeout* 30
   "Maximum seconds to wait for a worker handshake after launch.")
@@ -86,6 +92,37 @@
   (:documentation "Legitimate JSON-RPC error response from a worker handler.
 Distinct from protocol errors (parse failure, ID mismatch) which
 indicate stream corruption and require marking the worker crashed."))
+
+;;; ---------------------------------------------------------------------------
+;;; Message size limit
+;;; ---------------------------------------------------------------------------
+
+(defconstant +max-json-line-bytes+ (* 16 1024 1024)
+  "Maximum bytes for a single JSON-RPC line (16 MB).
+Guards against memory exhaustion from malformed or malicious input.")
+
+(defun %read-line-limited (stream eof-value limit)
+  "Read a line from STREAM up to LIMIT characters.
+Returns the line as a string, or EOF-VALUE on end-of-file.
+Signals an error if the line exceeds LIMIT characters.
+Handles both LF and CRLF line endings."
+  (let ((buf (make-array 256 :element-type 'character
+                             :adjustable t :fill-pointer 0))
+        (count 0))
+    (loop (let ((ch (read-char stream nil nil)))
+            (cond
+              ((null ch)
+               (return (if (zerop count) eof-value buf)))
+              ((char= ch #\Newline)
+               (return buf))
+              ((char= ch #\Return)
+               ;; Skip CR in CRLF
+               nil)
+              (t
+               (incf count)
+               (when (> count limit)
+                 (error "JSON-RPC line exceeds ~D byte limit" limit))
+               (vector-push-extend ch buf)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Worker struct
@@ -190,7 +227,7 @@ SECRET is passed to the child environment for TCP authentication."
 (defun %parse-handshake-from-stream (stdout)
   "Read lines from STDOUT until a valid handshake JSON line is found.
 Skips non-JSON lines.  Returns (values tcp-port swank-port pid)."
-  (loop for line = (read-line stdout nil nil)
+  (loop for line = (%read-line-limited stdout nil +max-json-line-bytes+)
         unless line do
           (error 'worker-spawn-failed
                  :message "Worker closed stdout before handshake")
@@ -202,6 +239,13 @@ Skips non-JSON lines.  Returns (values tcp-port swank-port pid)."
                  (unless (integerp tcp-port)
                    (error 'worker-spawn-failed
                           :message "Handshake tcp_port is not an integer"))
+                 ;; Check protocol version (warn on mismatch, don't hard-fail)
+                 (let ((version (gethash "protocol_version" json)))
+                   (when (and version (integerp version)
+                              (/= version +worker-protocol-version+))
+                     (log-event :warn "worker.handshake.version-mismatch"
+                                "expected" +worker-protocol-version+
+                                "got" version)))
                  (return (values tcp-port
                                  (if (eq swank-port :null) nil swank-port)
                                  pid)))))))
@@ -261,7 +305,7 @@ from the worker handler.  Signals SIMPLE-ERROR for protocol-level
 failures (parse errors, ID mismatches) which indicate stream
 corruption."
   (flet ((do-read ()
-           (let ((line (read-line stream nil nil)))
+           (let ((line (%read-line-limited stream nil +max-json-line-bytes+)))
              (unless line
                (error 'end-of-file :stream stream))
              (let ((json (yason:parse line)))
@@ -427,8 +471,18 @@ Returns nothing."
     (when process
       (bt:make-thread
        (lambda ()
-         ;; Wait for the process to terminate before closing, so
-         ;; process-close doesn't block on a still-running child.
+         ;; SIGTERM first, then wait up to 2s, then SIGKILL if needed
+         ;; (matches kill-worker's graceful shutdown pattern)
+         (ignore-errors
+           (when (sb-ext:process-alive-p process)
+             (sb-ext:process-kill process 15)
+             (loop repeat 20
+                   while (sb-ext:process-alive-p process)
+                   do (sleep 0.1))
+             (when (sb-ext:process-alive-p process)
+               (log-event :warn "worker.reaper.sigkill" "id" wid)
+               (sb-ext:process-kill process 9)
+               (sleep 0.2))))
          (ignore-errors (sb-ext:process-wait process nil nil))
          (ignore-errors (sb-ext:process-close process)))
        :name (format nil "reap-worker-~A" wid))))

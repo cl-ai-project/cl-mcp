@@ -33,7 +33,8 @@
                 #:worker-pid #:worker-id
                 #:worker-process-info)
   (:import-from #:cl-mcp/src/proxy
-                #:verify-proxy-bindings)
+                #:verify-proxy-bindings
+                #:%invalidate-proxy-cache)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
@@ -395,8 +396,8 @@ to prevent recovery threads from spawning orphan workers."
       (return-from %handle-worker-crash))
     (cond
       (was-bound
-       (let ((now (get-universal-time))
-             (window-start (- (get-universal-time) *crash-breaker-window*)))
+       (let* ((now (get-universal-time))
+              (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
              (setf history
@@ -584,6 +585,8 @@ lock during potentially slow subprocess launches."
     (when (> *worker-pool-warmup* *max-pool-size*)
       (error "*worker-pool-warmup* (~D) exceeds *max-pool-size* (~D)"
              *worker-pool-warmup* *max-pool-size*))
+    ;; Clear stale cached bindings before re-verifying
+    (%invalidate-proxy-cache)
     ;; Verify late-bound proxy symbols are resolvable before starting
     (verify-proxy-bindings)
     ;; Shut down existing pool if running

@@ -24,6 +24,9 @@
 
 (in-package #:cl-mcp/src/worker/main)
 
+(defconstant +worker-protocol-version+ 1
+  "Worker protocol version for handshake compatibility checking.")
+
 (defun %get-pid ()
   "Return the current process ID as an integer."
   #+sbcl (sb-posix:getpid)
@@ -71,7 +74,8 @@ TCP port, optional Swank port, and PID.  The JSON object has keys:
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "tcp_port" ht) tcp-port
           (gethash "swank_port" ht) (or swank-port :null)
-          (gethash "pid" ht) (%get-pid))
+          (gethash "pid" ht) (%get-pid)
+          (gethash "protocol_version" ht) +worker-protocol-version+)
     (yason:encode ht stream)
     (terpri stream)
     (force-output stream)))
