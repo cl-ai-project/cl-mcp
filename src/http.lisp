@@ -460,11 +460,16 @@ attacks like localhost.evil.com."
        (hunchentoot:started-p *http-server*)))
 
 (defun start-http-server (&key (host "127.0.0.1") (port 3000)
-                               (token :generate))
+                               ;; NOTE: Default is NIL (no auth) by design.
+                               ;; cl-mcp is a LOCAL development tool that
+                               ;; binds to 127.0.0.1. Network-facing auth
+                               ;; is out of scope. Do NOT change this
+                               ;; default to :GENERATE or a token string.
+                               (token nil))
   "Start the MCP HTTP server.
 TOKEN controls authentication:
-  :GENERATE (default) - auto-generate a random Bearer token
-  NIL                 - no authentication (suitable for local development)
+  NIL (default)       - no authentication (local development tool)
+  :GENERATE           - auto-generate a random Bearer token
   \"<string>\"        - use the given string as the Bearer token
 When a token is active, all requests (except OPTIONS) must include
 an Authorization: Bearer <token> header.
