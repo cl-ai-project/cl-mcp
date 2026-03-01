@@ -6,7 +6,8 @@
   (:import-from #:cl-mcp/src/log
                 #:*log-level* #:*log-stream* #:*log-context*
                 #:*log-file-stream* #:should-log-p #:log-event
-                #:setup-log-file))
+                #:setup-log-file)
+  (:import-from #:cl-mcp/src/worker-client))
 
 (in-package #:cl-mcp/tests/logging-test)
 
@@ -80,4 +81,46 @@
         (setf *log-stream* old-stream)
         (setf *log-file-stream* old-file-stream)
         (setf (uiop/os:getenv "MCP_LOG_FILE") "")))))
+
+(deftest log-file-name-includes-pid
+  (testing "setup-log-file includes PID in the generated filename"
+    (let ((tmp-dir (namestring (uiop:ensure-pathname
+                                (uiop:temporary-directory)
+                                :truenamize t)))
+          (old-stream *log-stream*)
+          (old-file-stream *log-file-stream*))
+      (unwind-protect
+           (let ((template (format nil "~Acl-mcp-pid-test.log" tmp-dir)))
+             (setf (uiop/os:getenv "MCP_LOG_FILE") template)
+             (setf *log-stream* *error-output*)
+             (setf *log-file-stream* nil)
+             (setup-log-file)
+             (ok (not (null *log-file-stream*)) "file stream opened")
+             (let* ((path (pathname *log-file-stream*))
+                    (name (pathname-name path))
+                    (pid-str (format nil "~D" (sb-posix:getpid))))
+               (ok (search pid-str name)
+                   (format nil "filename ~A contains PID ~A" name pid-str))
+               ;; Cleanup
+               (close *log-file-stream*)
+               (ignore-errors (delete-file path))))
+        (setf *log-stream* old-stream)
+        (setf *log-file-stream* old-file-stream)
+        (setf (uiop/os:getenv "MCP_LOG_FILE") "")))))
+
+(deftest worker-env-excludes-mcp-log-file
+  (testing "%build-environment strips MCP_LOG_FILE from child env"
+    (let ((old-val (uiop/os:getenv "MCP_LOG_FILE")))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_LOG_FILE") "/tmp/test.log")
+             (let ((env (cl-mcp/src/worker-client::%build-environment
+                         "secret" 99)))
+               (ok (not (find-if (lambda (s)
+                                   (and (stringp s)
+                                        (>= (length s) 13)
+                                        (string= "MCP_LOG_FILE=" s :end2 13)))
+                                 env))
+                   "MCP_LOG_FILE not in worker environment")))
+        (setf (uiop/os:getenv "MCP_LOG_FILE") (or old-val ""))))))
 
