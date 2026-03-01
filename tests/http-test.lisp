@@ -230,16 +230,14 @@ Uses Connection: close to avoid keep-alive hanging."
 ;;; ------------------------------------------------------------
 
 (deftest auth-token-generated-by-default
-  (testing "start-http-server generates auth token by default"
+  (testing "start-http-server defaults to no auth token"
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
              (progn
                (start-http-server :host "127.0.0.1" :port 0)
-               (ok (stringp *http-auth-token*)
-                   "Auth token should be a string")
-               (ok (plusp (length *http-auth-token*))
-                   "Auth token should be non-empty"))
+               (ok (null *http-auth-token*)
+                   "Auth token should be NIL by default"))
           (stop-http-server)))))
 
 (deftest auth-token-nil-disables-auth

@@ -60,8 +60,11 @@ Examples:
                                    "test" test
                                    "tests" tests
                                    "timeout_seconds" timeout_seconds))
-    (let ((test-result (run-tests system
-                                  :framework framework
-                                  :test test
-                                  :tests tests)))
-      (result id (build-run-tests-response test-result)))))
+    (let ((effective-timeout (or timeout_seconds 300)))
+      (let ((test-result
+              (sb-ext:with-timeout effective-timeout
+                (run-tests system
+                           :framework framework
+                           :test test
+                           :tests tests))))
+        (result id (build-run-tests-response test-result))))))
