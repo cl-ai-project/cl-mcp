@@ -462,12 +462,16 @@ Returns nothing."
       (usocket:socket-close (worker-socket worker))
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
-  ;; Destroy the stderr drain thread before reaping, matching
-  ;; kill-worker's cleanup order.  The drain thread may be blocking
-  ;; on read-sequence; destroying it first prevents leaked FDs.
+  ;; Wait for the stderr drain thread to finish forwarding remaining
+  ;; log output (including worker.fatal crash messages).  The worker
+  ;; process is dead so the pipe's write end is closed, causing
+  ;; read-line to return NIL and the thread to exit naturally.
+  ;; Timeout of 1 second prevents blocking if something goes wrong.
   (let ((th (worker-stderr-thread worker)))
     (when (and th (bt:thread-alive-p th))
-      (ignore-errors (bt:destroy-thread th))
+      (ignore-errors (bt:join-thread th :timeout 1))
+      (when (bt:thread-alive-p th)
+        (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
   ;; Reap the OS process in a background thread to avoid blocking
   ;; the caller.  process-close calls waitpid internally, which blocks
@@ -588,13 +592,15 @@ Robust against already-dead processes."
           (log-event :warn "worker.kill.error"
                      "id" (worker-id worker)
                      "error" (princ-to-string e))))
-      ;; Destroy the stderr drain thread BEFORE process-close.
-      ;; The drain thread may be blocking on read-sequence; destroying
-      ;; it first prevents a leaked FD that would block subsequent
-      ;; subprocess launches (uiop:run-program hangs in process-wait).
+      ;; Wait for stderr drain thread to finish forwarding remaining
+      ;; log output before destroying it.  After SIGTERM/SIGKILL the
+      ;; worker's pipe write-end is closed, so read-line returns NIL
+      ;; and the thread exits naturally within the timeout.
       (let ((th (worker-stderr-thread worker)))
         (when (and th (bt:thread-alive-p th))
-          (ignore-errors (bt:destroy-thread th))
+          (ignore-errors (bt:join-thread th :timeout 1))
+          (when (bt:thread-alive-p th)
+            (ignore-errors (bt:destroy-thread th)))
           (setf (worker-stderr-thread worker) nil)))
       (ignore-errors (sb-ext:process-close process)))
     (log-event :info "worker.killed"
