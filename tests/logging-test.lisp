@@ -99,8 +99,11 @@
              (let* ((path (pathname *log-file-stream*))
                     (name (pathname-name path))
                     (pid-str (format nil "~D" (sb-posix:getpid))))
-               (ok (search pid-str name)
-                   (format nil "filename ~A contains PID ~A" name pid-str))
+               (let ((suffix (format nil "-~A" pid-str)))
+                 (ok (and (>= (length name) (length suffix))
+                          (string= suffix name
+                                   :start2 (- (length name) (length suffix))))
+                     (format nil "filename ~A ends with -~A" name pid-str)))
                ;; Cleanup
                (close *log-file-stream*)
                (ignore-errors (delete-file path))))
