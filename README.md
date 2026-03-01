@@ -480,15 +480,43 @@ allows writing there or configure SBCL’s cache directory accordingly.
 - `agents/` — agent persona guidelines (common-lisp-expert.md)
 - `cl-mcp.asd` — main and test systems (delegates `test-op` to Rove)
 
-## Security Notes
-- Reader and runtime evaluation are both enabled. Treat this as a trusted,
-  local-development tool; untrusted input can execute arbitrary code in the
-  host Lisp image.
-- File access:
-  - Reads: project root, or `asdf:system-source-directory` of registered systems.
-  - Writes: project root only; absolute paths are rejected.
-- If exposure beyond trusted usage is planned, add allowlists, resource/time
-  limits, and output caps.
+## Security Model
+
+**cl-mcp is a trusted, local-only development tool.** It is designed to run
+on localhost, serving a single developer or AI agent that has the same level
+of trust as the user who started it. It is **not** suitable for multi-tenant,
+network-facing, or online service deployments.
+
+### Why local-only?
+
+`repl-eval` executes arbitrary Common Lisp code in the host image. Any user
+who can reach the MCP endpoint can read/write any file, spawn processes, and
+modify the running Lisp image. No amount of application-level access control
+can secure this; true multi-tenant isolation would require OS-level mechanisms
+(containers, separate processes, Unix users) and is out of scope.
+
+### Convenience guardrails (not security boundaries)
+
+The following mechanisms exist to prevent **accidental** mistakes, not to
+enforce security. They are all trivially bypassable via `repl-eval`:
+
+- **Project root enforcement** — File tools restrict reads/writes to the
+  project root (and ASDF system source directories for reads). This prevents
+  accidentally writing to `/etc` or reading unrelated files, but
+  `(with-open-file ...)` in the REPL has no such restriction.
+- **Broad rootPath rejection** — `initialize` and `fs-set-project-root`
+  reject overly broad roots like `"/"`. This is a safety default, not a
+  security gate.
+- **HTTP auth token** — `start-http-server` accepts an optional `:token`
+  parameter (default: `nil`, no auth). When enabled, it gates HTTP access
+  with a Bearer token. This can prevent accidental cross-process access on
+  localhost but is not a substitute for network-level security.
+- **safe_read** — Disables the `#.` reader macro to prevent read-time code
+  execution. Useful when parsing untrusted Lisp syntax, but `eval` itself
+  is always permitted.
+- **Session management** — HTTP sessions track connection state and manage
+  worker process lifetimes. They are a resource management mechanism, not
+  a security isolation boundary. All sessions share the same Lisp image.
 
 ## Troubleshooting
 - Bridge exits after a few seconds of inactivity: ensure you’re using the

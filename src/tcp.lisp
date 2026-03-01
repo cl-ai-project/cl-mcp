@@ -6,6 +6,10 @@
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:usocket)
   (:export
@@ -137,7 +141,9 @@ successfully started, or NIL if the start attempt failed."
 (defun %process-stream (stream socket conn-id remote)
   (let ((state (make-state))
         (log-context (list "conn" conn-id "remote" remote)))
-    (let ((cl-mcp/src/log:*log-context* log-context))
+    (let ((cl-mcp/src/log:*log-context* log-context)
+          (cl-mcp/src/protocol:*current-session-id*
+            (format nil "tcp-~A" conn-id)))
       (loop
         ;; Use timeout as a heartbeat to check for the stop flag
         for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)
@@ -193,6 +199,9 @@ successfully started, or NIL if the start attempt failed."
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))
+      (when *use-worker-pool*
+        (ignore-errors
+         (release-session (format nil "tcp-~A" conn-id))))
       (log-event :info "tcp.conn.closed"
                  "conn" conn-id
                  "fd" (fd-count)))))
@@ -230,15 +239,21 @@ successfully started, or NIL if the start attempt failed."
 (defun serve-tcp (&key (host "127.0.0.1") (port 0) (accept-once t) on-listening)
   "Serve MCP over TCP. If PORT is 0, an ephemeral port is chosen.
 Calls ON-LISTENING with the actual port when ready. If ACCEPT-ONCE is T,
-accepts a single connection and returns T after the client closes."
-  (let ((listener nil))
+accepts a single connection and returns T after the client closes.
+Initializes the worker pool if *use-worker-pool* is true."
+  (let ((listener nil)
+        (pool-initialized nil))
     (setf *tcp-stop-flag* nil)
+    (when *use-worker-pool*
+      (initialize-pool)
+      (setf pool-initialized t))
     ;; Early exit if socket creation is not permitted (e.g., sandboxed CI).
     (handler-case
         (setf listener (usocket:socket-listen host port
                                               :reuse-address t
                                               :element-type 'character))
       (error (e)
+        (when pool-initialized (ignore-errors (shutdown-pool)))
         (log-event :warn "tcp.listen.error" "error" (princ-to-string e))
         (return-from serve-tcp nil)))
     (unwind-protect
@@ -248,4 +263,5 @@ accepts a single connection and returns T after the client closes."
              (when on-listening (funcall on-listening actual)))
            (%tcp-accept-loop listener accept-once))
       (when listener (ignore-errors (usocket:socket-close listener)))
-      (setf *tcp-listener* nil))))
+      (setf *tcp-listener* nil)
+      (when pool-initialized (ignore-errors (shutdown-pool))))))

@@ -4,20 +4,29 @@
   (:use #:cl)
   (:import-from #:uiop #:getenv)
   (:import-from #:yason #:encode #:*parse-json-arrays-as-vectors*)
+  (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:export
    #:log-event
    #:set-log-level-from-env
+   #:setup-log-file
    #:should-log-p
    #:*log-level*
    #:*log-stream*
-   #:*log-context*))
+   #:*log-file-stream*
+   #:*log-context*
+   #:*log-lock*))
 
 (in-package #:cl-mcp/src/log)
 
 (defparameter *log-level* :debug)
 (defparameter *log-stream* *error-output*)
+(defparameter *log-file-stream* nil
+  "File stream opened by setup-log-file, kept for cleanup.")
 (defparameter *log-context* nil
   "Optional list of alternating key/value pairs appended to every log line.")
+(defvar *log-lock* (make-lock "log-lock")
+  "Lock protecting writes to *log-stream* so that concurrent threads
+do not interleave partial JSON lines.")
 
 (defun %level->int (level)
   (ecase level
@@ -51,7 +60,9 @@
 
 (defun log-event (level event &rest kvs)
   "Emit a JSON log line to *log-stream* with LEVEL and EVENT.
-Additional key-values KV can be provided as alternating strings and values."
+Additional key-values KV can be provided as alternating strings and values.
+Stream errors are silently ignored to prevent recursive error cascades
+when *log-stream* becomes a broken pipe."
   (when (should-log-p level)
     (let ((obj (make-hash-table :test #'equal)))
       (setf (gethash "ts" obj) (%ts-iso8601))
@@ -59,15 +70,57 @@ Additional key-values KV can be provided as alternating strings and values."
       (setf (gethash "event" obj) event)
       (when *log-context*
         (loop for (k v) on *log-context* by #'cddr
-              when k do (setf (gethash k obj) v)))
+              when k
+              do (setf (gethash k obj) v)))
       (loop for (k v) on kvs by #'cddr
-            when k do (setf (gethash k obj) v))
-      (yason:encode obj *log-stream*)
-      (terpri *log-stream*)
-      (finish-output *log-stream*))))
+            when k
+            do (setf (gethash k obj) v))
+      (ignore-errors
+        (with-lock-held (*log-lock*)
+          (yason:encode obj *log-stream*)
+          (terpri *log-stream*))
+        (finish-output *log-stream*)))))
+
+(defun %ts-filename ()
+  "Return a timestamp string safe for filenames (no colons)."
+  (multiple-value-bind (sec min hour day mon year)
+      (decode-universal-time (get-universal-time) 0)
+    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D-~2,'0D-~2,'0D"
+            year mon day hour min sec)))
+
+(defun setup-log-file ()
+  "If MCP_LOG_FILE is set, open a timestamped log file and set *log-stream*
+to a broadcast stream writing to both stderr and the file.
+Example: MCP_LOG_FILE=/tmp/cl-mcp.log creates /tmp/cl-mcp-2026-03-01T09-15-30-12345.log
+where 12345 is the process ID."
+  (let ((path-template (uiop:getenv "MCP_LOG_FILE")))
+    (when (and path-template (plusp (length path-template)))
+      (let* ((path (pathname path-template))
+             (stem (pathname-name path))
+             (ts (%ts-filename))
+             (pid #+sbcl (sb-posix:getpid) #-sbcl 0)
+             (actual (make-pathname :defaults path
+                                    :name (format nil "~A-~A-~D" stem ts pid))))
+        (handler-case
+            (let ((file-stream (open actual :direction :output
+                                           :if-exists :append
+                                           :if-does-not-exist :create
+                                           :external-format :utf-8)))
+              (setf *log-file-stream* file-stream)
+              (setf *log-stream*
+                    (make-broadcast-stream *error-output* file-stream))
+              (format *error-output* "Log file: ~A~%" (namestring actual))
+              (finish-output *error-output*))
+          (error (e)
+            (format *error-output* "WARNING: Failed to open log file ~A: ~A~%"
+                    (namestring actual) e)
+            (finish-output *error-output*)))))))
 
 ;; initialize level from env at load
 (set-log-level-from-env)
+
+;; setup file logging from env at load
+(setup-log-file)
 
 ;; Ensure JSON arrays are decoded as vectors so downstream consumers (tests and
 ;; tools) see ARRAYP results from `yason:parse`.

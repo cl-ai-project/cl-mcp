@@ -72,6 +72,9 @@ export MCP_PROJECT_ROOT=/path/to/project
 
 # Logging level
 export MCP_LOG_LEVEL=debug  # debug|info|warn|error
+
+# Disable worker pool (run tools inline in parent process)
+export MCP_NO_WORKER_POOL=1
 ```
 
 ## Architecture Overview
@@ -101,14 +104,17 @@ export MCP_LOG_LEVEL=debug  # debug|info|warn|error
 
 ### Security Model
 
-**File Access Policy**:
+**cl-mcp is a trusted, local-only development tool.** `repl-eval` executes
+arbitrary code, so all application-level access controls are convenience
+guardrails against accidental misuse, not security boundaries.
+
+**File access guardrails** (bypassable via `repl-eval`):
 - Reads: Allowed under project root OR within `asdf:system-source-directory` of registered systems
 - Writes: Restricted to project root only; absolute paths rejected
-- No shell access or arbitrary path traversal
 
-**Evaluation Safety**:
-- Reader and runtime eval are ENABLED (trusted local development tool)
-- Optional `safe_read` parameter to disable `#.` reader macro
+**Evaluation**:
+- Reader and runtime eval are ENABLED
+- Optional `safe_read` parameter to disable `#.` reader macro (read-time eval only)
 - Timeout support to prevent infinite loops
 
 ### Key Design Patterns

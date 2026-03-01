@@ -8,7 +8,8 @@
    #:initialized-p
    #:client-info
    #:protocol-version
-   #:make-state))
+   #:make-state
+   #:*current-session-id*))
 
 (in-package #:cl-mcp/src/state)
 
@@ -21,3 +22,11 @@
 (defun make-state ()
   "Create a fresh server-state instance."
   (make-instance 'server-state))
+
+(defvar *current-session-id* nil
+  "Bound by each transport to the current session identifier string.
+Used by the proxy layer to route tool calls to the correct worker
+process.  Each transport binds this around request processing:
+  - HTTP: per-request from Mcp-Session-Id header
+  - TCP: per-connection from a unique connection ID
+  - Stdio: fixed string \"stdio\" (single session)")

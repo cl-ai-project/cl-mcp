@@ -1,235 +1,25 @@
 ;;;; src/repl.lisp
+;;;;
+;;;; MCP tool definition for repl-eval. The pure evaluation logic lives
+;;;; in repl-core.lisp; this file provides the tool wrapper that builds
+;;;; the JSON response with object registry and preview generation.
 
 (defpackage #:cl-mcp/src/repl
   (:use #:cl)
-  (:import-from #:uiop #:print-backtrace)
-  (:import-from #:bordeaux-threads
-                #:thread-alive-p
-                #:make-thread
-                #:destroy-thread)
-  (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
-  (:import-from #:cl-mcp/src/object-registry #:inspectable-p #:register-object)
-  (:import-from #:cl-mcp/src/inspect #:generate-result-preview)
+  (:import-from #:cl-mcp/src/repl-core
+                #:repl-eval
+                #:*default-eval-package*)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-eval-response)
+  (:import-from #:cl-mcp/src/proxy
+                #:with-proxy-dispatch)
   (:export #:repl-eval #:*default-eval-package*))
 
 (in-package #:cl-mcp/src/repl)
-
-(defparameter *default-eval-package* (find-package :cl-user)
-  "Default package in which `repl-eval` evaluates forms.")
-
-(declaim (inline %read-all))
-(defun %read-all (string allow-read-eval)
-  "Read all top-level forms from STRING and return them as a list."
-  (let ((*readtable* (copy-readtable))
-        (*read-eval* allow-read-eval))
-    (with-input-from-string (in string)
-      (loop for form = (read in nil :eof)
-            until (eq form :eof)
-            collect form))))
-
-(declaim (ftype (function (string
-                           &key (:package (or package symbol string))
-                                (:print-level (or null (integer 0)))
-                                (:print-length (or null (integer 0)))
-                                (:timeout-seconds (or null (real 0)))
-                                (:max-output-length (or null (integer 0)))
-                                (:safe-read (member t nil))
-                                (:locals-preview-frames (or null (integer 0)))
-                                (:locals-preview-max-depth (or null (integer 0)))
-                                (:locals-preview-max-elements (or null (integer 0)))
-                                (:locals-preview-skip-internal (member t nil)))
-                           (values string t string string (or null list) &optional))
-                 repl-eval))
-
-(defun %sanitize-control-chars (string)
-  "Remove control characters that are invalid in JSON strings.
-Delegates to sanitize-for-json which also strips DEL (127)."
-  (sanitize-for-json string))
-
-(defun %truncate-output (string max-output-length)
-  (let ((sanitized (%sanitize-control-chars string)))
-    (if (and max-output-length
-             (integerp max-output-length)
-             (> (length sanitized) max-output-length))
-        (concatenate 'string (subseq sanitized 0 max-output-length)
-                     "...(truncated)")
-        sanitized)))
-
-(defun %resolve-eval-package (package)
-  (let ((pkg (etypecase package
-               (package package)
-               (symbol (find-package package))
-               (string (find-package package)))))
-    (unless pkg
-      (error "Package ~S does not exist" package))
-    pkg))
-
-(defun %call-with-compiler-streams (stdout stderr thunk)
-  (declare (ignore stdout))
-  #+sbcl
-  (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
-        (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
-        (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
-        (syms '())
-        (vals '()))
-    ;; Route compiler errors/warnings and notes to STDERR.
-    ;; Disable compiler trace output entirely, since it can include noisy diagnostics.
-    (when err-sym
-      (push err-sym syms)
-      (push stderr vals))
-    (when note-sym
-      (push note-sym syms)
-      (push stderr vals))
-    (when trace-sym
-      (push trace-sym syms)
-      (push nil vals))
-    (if syms
-        (progv (nreverse syms) (nreverse vals)
-          ;; Ensure warnings are emitted within this dynamic extent.
-          (sb-ext::with-compilation-unit (:override t
-                                          :source-namestring "repl-eval")
-            (funcall thunk)))
-        (sb-ext::with-compilation-unit (:override t
-                                        :source-namestring "repl-eval")
-          (funcall thunk))))
-  #-sbcl
-  (funcall thunk))
-
-(defun %eval-forms (forms package stdout stderr safe-read)
-  (let ((last-value nil))
-    (let ((*package* package)
-          (*read-eval* (not safe-read))
-          (*print-readably* nil))
-      (let ((*standard-output* stdout)
-            (*error-output* stderr)
-            (*compile-verbose* nil)
-            (*compile-print* nil))
-        (%call-with-compiler-streams
-         stdout
-         stderr
-         (lambda ()
-           (dolist (form forms)
-             (setf last-value (eval form)))))))
-    last-value))
-
-(defun %do-repl-eval (input package safe-read print-level print-length max-output-length
-                      &key locals-preview-frames locals-preview-max-depth
-                           locals-preview-max-elements locals-preview-skip-internal)
-  "Evaluate INPUT and return (values printed raw-value stdout stderr error-context).
-ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
-  (let ((last-value nil)
-        (error-context nil)
-        (stdout (make-string-output-stream))
-        (stderr (make-string-output-stream)))
-    (handler-bind ((warning (lambda (w)
-                              (format stderr "~&Warning: ~A~%" w)
-                              (when (find-restart 'muffle-warning)
-                                (invoke-restart 'muffle-warning))))
-                   (error (lambda (e)
-                            ;; Capture structured error context
-                            (setf error-context
-                                  (capture-error-context e
-                                                         :max-frames 20
-                                                         :print-level (or print-level 3)
-                                                         :print-length (or print-length 10)
-                                                         :locals-preview-frames (or locals-preview-frames 0)
-                                                         :preview-max-depth (or locals-preview-max-depth 1)
-                                                         :preview-max-elements (or locals-preview-max-elements 5)
-                                                         :locals-preview-skip-internal locals-preview-skip-internal))
-                            ;; Also keep text representation for backward compatibility
-                            (setf last-value
-                                  (with-output-to-string (out)
-                                    (let ((*print-readably* nil))
-                                      (format out "~A~%" e)
-                                      (uiop:print-backtrace :stream out
-                                                            :condition e))))
-                            (return-from %do-repl-eval
-                              (values (%truncate-output last-value max-output-length)
-                                      last-value
-                                      (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                      (%truncate-output (get-output-stream-string stderr) max-output-length)
-                                      error-context)))))
-      (let ((pkg (%resolve-eval-package package)))
-        (let ((forms (%read-all input (not safe-read))))
-          (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
-    (let ((*print-level* print-level)
-          (*print-length* print-length)
-          (*print-readably* nil))
-      (values (%truncate-output (prin1-to-string last-value) max-output-length)
-              last-value
-              (%truncate-output (get-output-stream-string stdout) max-output-length)
-              (%truncate-output (get-output-stream-string stderr) max-output-length)
-              nil))))
-
-(defun %repl-eval-with-timeout (thunk timeout-seconds)
-  "Execute THUNK with a polling-based timeout (50ms granularity).
-If the worker completes during the final polling interval, returns
-the result as success -- completed work is never discarded as a timeout."
-  (if (and timeout-seconds (plusp timeout-seconds))
-      (let* ((result-box nil)
-             (worker (bordeaux-threads:make-thread
-                      (lambda ()
-                        (setf result-box (multiple-value-list (funcall thunk))))
-                      :name "mcp-repl-eval")))
-        (loop repeat (ceiling (/ timeout-seconds 0.05d0))
-              when (not (bordeaux-threads:thread-alive-p worker))
-              do (return-from %repl-eval-with-timeout (values-list result-box))
-              do (sleep 0.05d0))
-        ;; Worker may have completed during the last sleep window.
-        ;; Re-check before declaring timeout.
-        (cond
-          ((not (bordeaux-threads:thread-alive-p worker))
-           (values-list result-box))
-          (t
-           (ignore-errors (bordeaux-threads:destroy-thread worker))
-           (values
-            (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
-            :timeout "" "" nil))))
-      (funcall thunk)))
-
-(defun repl-eval (input &key (package *default-eval-package*)
-                             (print-level nil) (print-length nil)
-                             (timeout-seconds nil)
-                             (max-output-length nil)
-                             (safe-read nil)
-                             (locals-preview-frames nil)
-                             (locals-preview-max-depth nil)
-                             (locals-preview-max-elements nil)
-                             (locals-preview-skip-internal t))
-  "Evaluate INPUT (a string of one or more s-expressions) in PACKAGE.
-
-Forms are read as provided and evaluated sequentially; the last value is
-returned as a printed string per `prin1-to-string`. The second return value is
-the raw last value for callers that want it. The third and fourth values capture
-stdout and stderr produced during evaluation. The fifth value is a structured
-error context plist when an error occurred, NIL otherwise.
-
-Options:
-- TIMEOUT-SECONDS: abort evaluation after this many seconds, returning a timeout string.
-- MAX-OUTPUT-LENGTH: truncate printed value/stdout/stderr to at most this many chars.
-- SAFE-READ: when T, disables `*read-eval*` to block reader evaluation (#.).
-- LOCALS-PREVIEW-FRAMES: number of top frames to include local variable previews (default: 0).
-- LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
-- LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
-- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
-  (let ((thunk (lambda ()
-                 (%do-repl-eval input
-                                package
-                                safe-read
-                                print-level
-                                print-length
-                                max-output-length
-                                :locals-preview-frames locals-preview-frames
-                                :locals-preview-max-depth locals-preview-max-depth
-                                :locals-preview-max-elements locals-preview-max-elements
-                                :locals-preview-skip-internal locals-preview-skip-internal))))
-    (%repl-eval-with-timeout thunk timeout-seconds)))
 
 (define-tool "repl-eval" :description
  "Evaluate Common Lisp forms and return the last value as printed text.
@@ -295,61 +85,32 @@ SBCL's default optimization does not preserve locals for inspection."
    "locals_preview_skip_internal" :default t :description
    "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
  :body
- (multiple-value-bind (printed raw-value stdout stderr error-context)
-     (repl-eval code :package (or package *package*) :print-level print-level
-      :print-length print-length :timeout-seconds timeout-seconds
-      :max-output-length max-output-length :safe-read safe-read
-      :locals-preview-frames locals-preview-frames :locals-preview-max-depth
-      locals-preview-max-depth :locals-preview-max-elements
-      locals-preview-max-elements :locals-preview-skip-internal
-      locals-preview-skip-internal)
-   (let ((ht
-          (make-ht "content" (text-content printed) "stdout" stdout "stderr"
-           stderr)))
-     (when (and (null error-context) (inspectable-p raw-value))
-       (if include-result-preview
-           (let ((preview
-                  (generate-result-preview raw-value :max-depth
-                   (or preview-max-depth 1) :max-elements
-                   (or preview-max-elements 8))))
-             (setf (gethash "result_object_id" ht) (gethash "id" preview))
-             (setf (gethash "result_preview" ht) preview))
-           (let ((object-id (register-object raw-value)))
-             (when object-id
-               (setf (gethash "result_object_id" ht) object-id)))))
-     (when error-context
-       (setf (gethash "error_context" ht)
-               (make-ht "condition_type"
-                (sanitize-for-json (getf error-context :condition-type))
-                "message"
-                (sanitize-for-json (getf error-context :message))
-                "restarts"
-                (mapcar
-                 (lambda (r)
-                   (make-ht "name" (sanitize-for-json (getf r :name))
-                    "description"
-                    (sanitize-for-json (getf r :description))))
-                 (getf error-context :restarts))
-                "frames"
-                (mapcar
-                 (lambda (f)
-                   (make-ht "index" (getf f :index) "function"
-                    (sanitize-for-json (getf f :function))
-                    "source_file" (getf f :source-file)
-                    "source_line" (getf f :source-line) "locals"
-                    (mapcar
-                     (lambda (l)
-                       (let ((ht
-                              (make-ht "name"
-                               (sanitize-for-json (getf l :name))
-                               "value"
-                               (sanitize-for-json (getf l :value)))))
-                         (when (getf l :object-id)
-                           (setf (gethash "object_id" ht)
-                                   (getf l :object-id)))
-                         (when (getf l :preview)
-                           (setf (gethash "preview" ht) (getf l :preview)))
-                         ht))
-                     (getf f :locals))))
-                 (getf error-context :frames)))))
-     (result id ht))))
+ (with-proxy-dispatch (id "worker/eval"
+                         (make-ht "code" code
+                                  "package" package
+                                  "print_level" print-level
+                                  "print_length" print-length
+                                  "timeout_seconds" timeout-seconds
+                                  "max_output_length" max-output-length
+                                  "safe_read" safe-read
+                                  "include_result_preview" include-result-preview
+                                  "preview_max_depth" preview-max-depth
+                                  "preview_max_elements" preview-max-elements
+                                  "locals_preview_frames" locals-preview-frames
+                                  "locals_preview_max_depth" locals-preview-max-depth
+                                  "locals_preview_max_elements" locals-preview-max-elements
+                                  "locals_preview_skip_internal" locals-preview-skip-internal))
+   ;; Fallback: inline execution (default when *use-worker-pool* is nil)
+   (multiple-value-bind (printed raw-value stdout stderr error-context)
+       (repl-eval code :package (or package *package*) :print-level print-level
+        :print-length print-length :timeout-seconds timeout-seconds
+        :max-output-length max-output-length :safe-read safe-read
+        :locals-preview-frames locals-preview-frames :locals-preview-max-depth
+        locals-preview-max-depth :locals-preview-max-elements
+        locals-preview-max-elements :locals-preview-skip-internal
+        locals-preview-skip-internal)
+     (result id
+             (build-eval-response printed raw-value stdout stderr error-context
+                                  :include-result-preview include-result-preview
+                                  :preview-max-depth (or preview-max-depth 1)
+                                  :preview-max-elements (or preview-max-elements 8))))))
