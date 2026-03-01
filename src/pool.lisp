@@ -35,6 +35,8 @@
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings
                 #:%invalidate-proxy-cache)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
@@ -760,13 +762,21 @@ cannot be created."
       (error "Circuit breaker tripped for session ~A: ~
               worker crashed ~D times within ~Ds. Recovery halted."
              session-id *crash-breaker-threshold* *crash-breaker-window*))
-    (cond
-     (assigned-from-standby
-      (%schedule-replenish)
-      assigned-from-standby)
-     (need-spawn
-      (%spawn-and-bind session-id entry :need-reset need-reset))
-     (t (%wait-for-placeholder entry)))))
+    (let ((worker (cond
+                    (assigned-from-standby
+                     (%schedule-replenish)
+                     assigned-from-standby)
+                    (need-spawn
+                     (%spawn-and-bind session-id entry :need-reset need-reset))
+                    (t (%wait-for-placeholder entry)))))
+      ;; Sync the parent's *project-root* to a newly assigned worker.
+      ;; At initialize time the worker doesn't exist yet, so the root
+      ;; sent by handle-initialize is a no-op.  This ensures the worker
+      ;; picks up the correct root on first actual use.
+      (when (and (or assigned-from-standby need-spawn) *project-root*)
+        (ignore-errors
+          (send-root-to-session-worker session-id *project-root*)))
+      worker)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- release-session
