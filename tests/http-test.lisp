@@ -167,9 +167,9 @@ Uses Connection: close to avoid keep-alive hanging."
   (bordeaux-threads:with-lock-held (*sessions-lock*)
     (clrhash *sessions*)))
 
-(deftest session-timeout-default-is-one-hour
-  (testing "*session-timeout-seconds* defaults to 3600 (1 hour)"
-    (ok (eql *session-timeout-seconds* 3600))))
+(deftest session-timeout-default-is-24-hours
+  (testing "*session-timeout-seconds* defaults to 86400 (24 hours)"
+    (ok (eql *session-timeout-seconds* 86400))))
 
 (deftest session-no-expiry-when-timeout-disabled
   (testing "Sessions do not expire when *session-timeout-seconds* is NIL"

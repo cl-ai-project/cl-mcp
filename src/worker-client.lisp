@@ -14,7 +14,7 @@
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
-  (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/log #:log-event #:*log-stream*)
   (:import-from #:usocket)
   (:import-from #:yason)
   (:export #:worker
@@ -157,26 +157,28 @@ Handles both LF and CRLF line endings."
 ;;; Internal helpers — environment
 ;;; ---------------------------------------------------------------------------
 
-(defun %build-environment (secret)
+(defun %build-environment (secret id)
   "Build an environment list for the child process.
 Inherits the parent environment, sets MCP_PROJECT_ROOT to the
-current *project-root* value, and passes the shared secret for
-TCP authentication."
+current *project-root* value, passes the shared secret for
+TCP authentication, and sets MCP_WORKER_ID for log context."
   (let* ((current-env (sb-ext:posix-environ))
          (filtered
-           (remove-if
-            (lambda (s)
-              (or (and (>= (length s) 17)
-                       (string= "MCP_PROJECT_ROOT=" s :end2 17))
-                  (and (>= (length s) 18)
-                       (string= "MCP_WORKER_SECRET=" s :end2 18))
-                  (and (>= (length s) 20)
-                       (string= "MCP_NO_WORKER_POOL=" s :end2 20))))
-            current-env)))
-    ;; Workers always run inline — never proxy to sub-workers.
-    (let ((env (list* (format nil "MCP_WORKER_SECRET=~A" secret)
-                      "MCP_NO_WORKER_POOL=1"
-                      filtered)))
+          (remove-if
+           (lambda (s)
+             (or
+              (and (>= (length s) 17) (string= "MCP_PROJECT_ROOT=" s :end2 17))
+              (and (>= (length s) 18)
+                   (string= "MCP_WORKER_SECRET=" s :end2 18))
+              (and (>= (length s) 20)
+                   (string= "MCP_NO_WORKER_POOL=" s :end2 20))
+              (and (>= (length s) 15)
+                   (string= "MCP_WORKER_ID=" s :end2 14))))
+           current-env)))
+    (let ((env
+           (list* (format nil "MCP_WORKER_SECRET=~A" secret)
+                  (format nil "MCP_WORKER_ID=~A" id)
+                  "MCP_NO_WORKER_POOL=1" filtered)))
       (if *project-root*
           (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
                 env)
@@ -204,21 +206,17 @@ the first successful lookup."
                       "ros"))
               (error () "ros")))))
 
-(defun %launch-worker-process (secret)
+(defun %launch-worker-process (secret id)
   "Launch a worker child process via sb-ext:run-program.
 Returns the sb-ext:process object with stdout and stderr as streams.
-SECRET is passed to the child environment for TCP authentication."
-  (let ((ros-path (%find-ros-path))
-        (env (%build-environment secret)))
+SECRET is passed to the child environment for TCP authentication.
+ID is the worker's numeric identifier, passed via MCP_WORKER_ID."
+  (let ((ros-path (%find-ros-path)) (env (%build-environment secret id)))
     (sb-ext:run-program ros-path
-                        (list "run"
-                              "-s" "cl-mcp/src/worker/main"
-                              "-e" "(cl-mcp/src/worker/main:start)")
-                        :output :stream
-                        :error :stream
-                        :wait nil
-                        :search t
-                        :environment env)))
+                 (list "run" "-s" "cl-mcp/src/worker/main" "-e"
+                       "(cl-mcp/src/worker/main:start)")
+                 :output :stream :error :stream :wait nil :search t
+                 :environment env)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — handshake
@@ -340,28 +338,30 @@ corruption."
 ;;; ---------------------------------------------------------------------------
 
 (defun %start-stderr-drain (worker)
-  "Start a daemon thread that drains the worker's stderr pipe.
-Without this, the child's log output (written to *error-output*)
-accumulates in an unread OS pipe buffer.  Once that buffer fills
-(typically 64 KB on Linux), the child blocks on every write to
-stderr, causing worker RPC calls to hang or time out.
+  "Start a daemon thread that reads the worker's stderr line by line
+and forwards each line to the parent's *log-stream*.
+Without this, the child's log output accumulates in an unread OS pipe
+buffer.  Once that buffer fills (typically 64 KB on Linux), the child
+blocks on every write to stderr, causing worker RPC calls to hang.
 Stores the thread in the worker's stderr-thread slot so kill-worker
 can clean it up."
-  (let ((process (worker-process-info worker))
-        (wid (worker-id worker)))
+  (let ((process (worker-process-info worker)) (wid (worker-id worker)))
     (when process
       (let ((err (sb-ext:process-error process)))
         (when err
           (setf (worker-stderr-thread worker)
-                (bordeaux-threads:make-thread
-                 (lambda ()
-                   (unwind-protect
-                       (ignore-errors
-                        (let ((buf (make-string 4096)))
-                          (loop for n = (read-sequence buf err)
-                                while (plusp n))))
-                     (ignore-errors (close err))))
-                 :name (format nil "worker-stderr-~A" wid))))))))
+                  (bordeaux-threads:make-thread
+                   (lambda ()
+                     (unwind-protect
+                         (ignore-errors
+                          (loop for line = (read-line err nil nil)
+                                while line
+                                do (ignore-errors
+                                    (write-string line *log-stream*)
+                                    (terpri *log-stream*)
+                                    (finish-output *log-stream*))))
+                       (ignore-errors (close err))))
+                   :name (format nil "worker-stderr-~A" wid))))))))
 
 (defun %generate-worker-secret ()
   "Generate a random shared secret for worker TCP authentication.
@@ -388,7 +388,7 @@ the handshake fails, or authentication is rejected."
     (handler-case
         (progn
           (log-event :info "worker.spawning" "id" id)
-          (setf process (%launch-worker-process secret))
+          (setf process (%launch-worker-process secret id))
           (multiple-value-bind (tcp-port swank-port pid)
               (%read-handshake process *worker-startup-timeout*)
             (log-event :info "worker.handshake.received"

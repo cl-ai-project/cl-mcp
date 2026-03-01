@@ -48,8 +48,8 @@ Set automatically by START-HTTP-SERVER.")
   "Lock for thread-safe session access.")
 
 (defparameter *session-timeout-seconds*
-  3600
-  "Session expiration time in seconds.  Default is 3600 (1 hour).
+  86400
+  "Session expiration time in seconds.  Default is 86400 (24 hours).
 When a session has been idle longer than this, the next access
 evicts it and releases the associated worker process.  Set to NIL
 to disable timeout (not recommended — leaked sessions consume

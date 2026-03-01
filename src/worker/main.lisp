@@ -19,7 +19,8 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log
-                #:log-event)
+                #:log-event
+                #:*log-context*)
   (:export #:start))
 
 (in-package #:cl-mcp/src/worker/main)
@@ -134,6 +135,9 @@ Roswell REPL."
   (handler-case
       (progn
         (%install-signal-handlers)
+        (let ((wid (uiop/os:getenv "MCP_WORKER_ID")))
+          (when (and wid (plusp (length wid)))
+            (setf *log-context* (list "worker_id" wid))))
         (%setup-project-root)
         (let* ((server (make-worker-server :port 0))
                (tcp-port (server-port server)))
