@@ -4,6 +4,7 @@
   (:use #:cl)
   (:import-from #:uiop #:getenv)
   (:import-from #:yason #:encode #:*parse-json-arrays-as-vectors*)
+  (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:export
    #:log-event
    #:set-log-level-from-env
@@ -12,7 +13,8 @@
    #:*log-level*
    #:*log-stream*
    #:*log-file-stream*
-   #:*log-context*))
+   #:*log-context*
+   #:*log-lock*))
 
 (in-package #:cl-mcp/src/log)
 
@@ -22,6 +24,9 @@
   "File stream opened by setup-log-file, kept for cleanup.")
 (defparameter *log-context* nil
   "Optional list of alternating key/value pairs appended to every log line.")
+(defvar *log-lock* (make-lock "log-lock")
+  "Lock protecting writes to *log-stream* so that concurrent threads
+do not interleave partial JSON lines.")
 
 (defun %level->int (level)
   (ecase level
@@ -71,8 +76,9 @@ when *log-stream* becomes a broken pipe."
             when k
             do (setf (gethash k obj) v))
       (ignore-errors
-        (yason:encode obj *log-stream*)
-        (terpri *log-stream*)
+        (with-lock-held (*log-lock*)
+          (yason:encode obj *log-stream*)
+          (terpri *log-stream*))
         (finish-output *log-stream*)))))
 
 (defun %ts-filename ()

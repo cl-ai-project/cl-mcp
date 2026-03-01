@@ -14,7 +14,7 @@
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
-  (:import-from #:cl-mcp/src/log #:log-event #:*log-stream*)
+  (:import-from #:cl-mcp/src/log #:log-event #:*log-stream* #:*log-lock*)
   (:import-from #:usocket)
   (:import-from #:yason)
   (:export #:worker
@@ -357,8 +357,9 @@ can clean it up."
                           (loop for line = (read-line err nil nil)
                                 while line
                                 do (ignore-errors
-                                    (write-string line *log-stream*)
-                                    (terpri *log-stream*)
+                                    (bt:with-lock-held (*log-lock*)
+                                      (write-string line *log-stream*)
+                                      (terpri *log-stream*))
                                     (finish-output *log-stream*))))
                        (ignore-errors (close err))))
                    :name (format nil "worker-stderr-~A" wid))))))))
