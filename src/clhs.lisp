@@ -25,13 +25,25 @@
 (defun %ensure-clhs-loaded ()
   "Ensure the :clhs library is loaded. Signals an error on failure."
   (unless (find-package :clhs)
-    (handler-case
-        (progn
-          (log-event :info "clhs" "action" "loading :clhs library via Quicklisp")
-          (funcall (find-symbol "QUICKLOAD" :ql) :clhs :silent t))
-      (error (c)
-        (error "Failed to load :clhs library via Quicklisp. ~
-                Ensure Quicklisp is installed and configured. Error: ~A" c)))))
+    (cond
+      ((find-package :ql)
+       (handler-case
+           (progn
+             (log-event :info "clhs" "action" "loading :clhs library via Quicklisp")
+             (funcall (find-symbol "QUICKLOAD" :ql) :clhs :silent t))
+         (error (c)
+           (error "Failed to load :clhs library via Quicklisp: ~A" c))))
+      ((asdf:find-system :clhs nil)
+       (handler-case
+           (progn
+             (log-event :info "clhs" "action" "loading :clhs library via ASDF")
+             (asdf:load-system :clhs))
+         (error (c)
+           (error "Failed to load :clhs library via ASDF: ~A" c))))
+      (t
+       (error "The :clhs library is not available. ~
+               Install it via Quicklisp (ql:quickload :clhs) or ~
+               make it findable by ASDF.")))))
 
 (defun %load-symbol-map ()
   "Load the symbol map from HyperSpec Data/Map_Sym.txt.
