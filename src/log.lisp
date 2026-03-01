@@ -7,15 +7,19 @@
   (:export
    #:log-event
    #:set-log-level-from-env
+   #:setup-log-file
    #:should-log-p
    #:*log-level*
    #:*log-stream*
+   #:*log-file-stream*
    #:*log-context*))
 
 (in-package #:cl-mcp/src/log)
 
 (defparameter *log-level* :debug)
 (defparameter *log-stream* *error-output*)
+(defparameter *log-file-stream* nil
+  "File stream opened by setup-log-file, kept for cleanup.")
 (defparameter *log-context* nil
   "Optional list of alternating key/value pairs appended to every log line.")
 
@@ -71,8 +75,44 @@ when *log-stream* becomes a broken pipe."
         (terpri *log-stream*)
         (finish-output *log-stream*)))))
 
+(defun %ts-filename ()
+  "Return a timestamp string safe for filenames (no colons)."
+  (multiple-value-bind (sec min hour day mon year)
+      (decode-universal-time (get-universal-time) 0)
+    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D-~2,'0D-~2,'0D"
+            year mon day hour min sec)))
+
+(defun setup-log-file ()
+  "If MCP_LOG_FILE is set, open a timestamped log file and set *log-stream*
+to a broadcast stream writing to both stderr and the file.
+Example: MCP_LOG_FILE=/tmp/cl-mcp.log creates /tmp/cl-mcp-2026-03-01T09-15-30.log"
+  (let ((path-template (uiop:getenv "MCP_LOG_FILE")))
+    (when (and path-template (plusp (length path-template)))
+      (let* ((path (pathname path-template))
+             (stem (pathname-name path))
+             (ts (%ts-filename))
+             (actual (make-pathname :defaults path
+                                    :name (format nil "~A-~A" stem ts))))
+        (handler-case
+            (let ((file-stream (open actual :direction :output
+                                           :if-exists :append
+                                           :if-does-not-exist :create
+                                           :external-format :utf-8)))
+              (setf *log-file-stream* file-stream)
+              (setf *log-stream*
+                    (make-broadcast-stream *error-output* file-stream))
+              (format *error-output* "Log file: ~A~%" (namestring actual))
+              (finish-output *error-output*))
+          (error (e)
+            (format *error-output* "WARNING: Failed to open log file ~A: ~A~%"
+                    (namestring actual) e)
+            (finish-output *error-output*)))))))
+
 ;; initialize level from env at load
 (set-log-level-from-env)
+
+;; setup file logging from env at load
+(setup-log-file)
 
 ;; Ensure JSON arrays are decoded as vectors so downstream consumers (tests and
 ;; tools) see ARRAYP results from `yason:parse`.
