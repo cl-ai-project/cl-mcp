@@ -387,9 +387,19 @@ to prevent recovery threads from spawning orphan workers."
            (setf was-bound t))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
         (otherwise (return-from %handle-worker-crash))))
-    (log-event :warn "pool.worker.crashed" "worker_id"
-               (worker-id crashed-worker) "session" session-id
-               "was_standby" was-standby)
+    (let (exit-code exit-status)
+      (ignore-errors
+        (let* ((proc (worker-process-info crashed-worker))
+               (status (and proc (sb-ext:process-status proc))))
+          (when status
+            (setf exit-status (string-downcase (symbol-name status))))
+          (when (member status '(:exited :signaled))
+            (setf exit-code (sb-ext:process-exit-code proc)))))
+      (log-event :warn "pool.worker.crashed" "worker_id"
+                 (worker-id crashed-worker) "session" session-id
+                 "was_standby" was-standby
+                 "exit_status" (or exit-status "unknown")
+                 "exit_code" (or exit-code "unknown")))
     (ignore-errors (kill-worker crashed-worker))
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.

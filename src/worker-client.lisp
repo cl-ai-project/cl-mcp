@@ -474,12 +474,22 @@ Returns nothing."
       (when (bt:thread-alive-p th)
         (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
-  ;; Reap the OS process in a background thread to avoid blocking
-  ;; the caller.  process-close calls waitpid internally, which blocks
-  ;; if the worker process is still alive (e.g. stuck in computation).
+  ;; Collect the exit code before reaping.  process-status is
+  ;; non-blocking; if the process already exited (typical for crashes)
+  ;; the exit code is immediately available.
   (let ((process (worker-process-info worker))
-        (wid (worker-id worker)))
+        (wid (worker-id worker))
+        (exit-code nil)
+        (exit-status nil))
     (when process
+      (ignore-errors
+        (let ((status (sb-ext:process-status process)))
+          (setf exit-status (string-downcase (symbol-name status)))
+          (when (member status '(:exited :signaled))
+            (setf exit-code (sb-ext:process-exit-code process)))))
+      ;; Reap the OS process in a background thread to avoid blocking
+      ;; the caller.  process-close calls waitpid internally, which
+      ;; blocks if the worker process is still alive.
       (bt:make-thread
        (lambda ()
          ;; SIGTERM first, then wait up to 2s, then SIGKILL if needed
@@ -496,11 +506,13 @@ Returns nothing."
                (sleep 0.2))))
          (ignore-errors (sb-ext:process-wait process nil nil))
          (ignore-errors (sb-ext:process-close process)))
-       :name (format nil "reap-worker-~A" wid))))
-  (log-event :warn "worker.crashed"
-             "id" (worker-id worker)
-             "pid" (worker-pid worker)
-             "reason" reason))
+       :name (format nil "reap-worker-~A" wid)))
+    (log-event :warn "worker.crashed"
+               "id" (worker-id worker)
+               "pid" (worker-pid worker)
+               "exit_status" (or exit-status "unknown")
+               "exit_code" (or exit-code "unknown")
+               "reason" reason)))
 
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
