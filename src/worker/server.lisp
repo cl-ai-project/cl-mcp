@@ -204,7 +204,7 @@ is authenticated with the shared secret."
                                   "error" (princ-to-string e))
                        :eof))
         when (eq line :eof) do (return)
-        when (eq line :idle) do (progn)  ; continue loop
+        when (stringp line)
         do (let ((resp (%process-line server line)))
              (when resp
                (handler-case
