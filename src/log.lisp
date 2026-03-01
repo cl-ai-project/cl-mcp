@@ -91,14 +91,16 @@ when *log-stream* becomes a broken pipe."
 (defun setup-log-file ()
   "If MCP_LOG_FILE is set, open a timestamped log file and set *log-stream*
 to a broadcast stream writing to both stderr and the file.
-Example: MCP_LOG_FILE=/tmp/cl-mcp.log creates /tmp/cl-mcp-2026-03-01T09-15-30.log"
+Example: MCP_LOG_FILE=/tmp/cl-mcp.log creates /tmp/cl-mcp-2026-03-01T09-15-30-12345.log
+where 12345 is the process ID."
   (let ((path-template (uiop:getenv "MCP_LOG_FILE")))
     (when (and path-template (plusp (length path-template)))
       (let* ((path (pathname path-template))
              (stem (pathname-name path))
              (ts (%ts-filename))
+             (pid #+sbcl (sb-posix:getpid) #-sbcl 0)
              (actual (make-pathname :defaults path
-                                    :name (format nil "~A-~A" stem ts))))
+                                    :name (format nil "~A-~A-~D" stem ts pid))))
         (handler-case
             (let ((file-stream (open actual :direction :output
                                            :if-exists :append
