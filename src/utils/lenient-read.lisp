@@ -40,8 +40,7 @@ but differ in scope (e.g., reader RETRY vs file-loader RETRY)."
 (defun %handle-eclector-package-missing (condition stubs)
   "Handle Eclector's package-does-not-exist condition.
 Creates a stub package and invokes the USE-PACKAGE restart."
-  (let ((name (slot-value condition
-                          'eclector.reader::%package-name)))
+  (let ((name (eclector.reader::desired-package-name condition)))
     (unless (find-package name)
       (push (make-package name :use nil) (car stubs)))
     (let ((r (%find-restart-by-name "USE-PACKAGE" condition)))
