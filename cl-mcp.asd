@@ -2,7 +2,9 @@
 
 ;; Tell ASDF that eclector.parse-result package is provided by eclector
 (asdf:register-system-packages "eclector"
-                               '(:eclector.parse-result))
+                               '(:eclector.parse-result
+                                 :eclector.reader
+                                 :eclector.base))
 
 (asdf:defsystem "cl-mcp"
   :class :package-inferred-system
