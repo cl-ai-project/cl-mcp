@@ -47,12 +47,15 @@ Creates a stub package and invokes the USE-PACKAGE restart."
       (when r
         (invoke-restart r (find-package name))))))
 
-(defun %handle-eclector-symbol-missing (condition)
+(defun %handle-eclector-symbol-missing (condition stubs)
   "Handle Eclector's symbol-does-not-exist condition.
-Invokes the INTERN restart to create the symbol in the stub package."
-  (let ((r (%find-restart-by-name "INTERN" condition)))
-    (when r
-      (invoke-restart r))))
+Only invokes the INTERN restart if the symbol's package is a stub we created.
+For real packages, lets the error propagate so typos are reported normally."
+  (let ((pkg (eclector.reader::desired-symbol-package condition)))
+    (when (and pkg (member pkg (car stubs) :test #'eq))
+      (let ((r (%find-restart-by-name "INTERN" condition)))
+        (when r
+          (invoke-restart r))))))
 
 #+sbcl
 (defun %handle-sbcl-reader-package-error (condition stubs)
@@ -72,15 +75,16 @@ is about a missing package or a missing symbol."
                      "RETRY" "finding" condition)))
              (when r (invoke-restart r))))))
       ;; "Symbol ~S not found in the ~A package."
+      ;; Only handle if the package is a stub we created.
       ((search "not found" ctrl :test #'char-equal)
        (let ((sym-name (first args))
              (pkg-name (second args)))
          (when (and (stringp sym-name) (stringp pkg-name))
            (let ((pkg (find-package pkg-name)))
-             (when pkg
-               (export (intern sym-name pkg) pkg)))
-           (let ((r (%find-restart-by-name "CONTINUE" condition)))
-             (when r (invoke-restart r)))))))))
+             (when (and pkg (member pkg (car stubs) :test #'eq))
+               (export (intern sym-name pkg) pkg)
+               (let ((r (%find-restart-by-name "CONTINUE" condition)))
+                 (when r (invoke-restart r)))))))))))
 
 (defun %cleanup-stub-packages (stubs)
   "Delete all stub packages, first uninterning their symbols.
@@ -124,7 +128,7 @@ Examples:
                   (%handle-eclector-package-missing c stubs-cell)))
               (symbol-does-not-exist
                 (lambda (c)
-                  (%handle-eclector-symbol-missing c)))
+                  (%handle-eclector-symbol-missing c stubs-cell)))
               #+sbcl
               (sb-int:simple-reader-package-error
                 (lambda (c)

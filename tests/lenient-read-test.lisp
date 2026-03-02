@@ -142,3 +142,43 @@
                    "other package references preserved")))
         (when (probe-file tmp-path)
           (delete-file tmp-path))))))
+
+(deftest no-intern-into-real-packages-eclector
+  (testing "Eclector: typo in a real package is not silently interned"
+    ;; If someone writes cl-user:nonexistent-sym, that should error,
+    ;; not silently intern NONEXISTENT-SYM into CL-USER.
+    (let ((unique-name "LENIENT-TEST-NO-INTERN-SYM"))
+      (assert (null (find-symbol unique-name :cl-user))
+              () "precondition: symbol must not exist in CL-USER")
+      ;; The read should signal an error because CL-USER is a real package
+      (handler-case
+          (progn
+            (call-with-lenient-packages
+             (lambda ()
+               (eclector.reader:read-from-string
+                (format nil "(cl-user:~A)" unique-name))))
+            ;; If we get here, the handler swallowed the error (bug)
+            (ok nil "should have signaled an error for typo in real package"))
+        (error ()
+          (ok t "correctly signaled error for typo in real package")))
+      ;; Verify the symbol was NOT interned
+      (ok (null (find-symbol unique-name :cl-user))
+          "symbol was not interned into CL-USER"))))
+
+#+sbcl
+(deftest no-intern-into-real-packages-sbcl
+  (testing "SBCL: typo in a real package is not silently interned/exported"
+    (let ((unique-name "LENIENT-TEST-NO-INTERN-SBCL-SYM"))
+      (assert (null (find-symbol unique-name :cl-user))
+              () "precondition: symbol must not exist in CL-USER")
+      (handler-case
+          (progn
+            (call-with-lenient-packages
+             (lambda ()
+               (read-from-string
+                (format nil "(cl-user:~A)" unique-name))))
+            (ok nil "should have signaled an error for typo in real package"))
+        (error ()
+          (ok t "correctly signaled error for typo in real package")))
+      (ok (null (find-symbol unique-name :cl-user))
+          "symbol was not interned into CL-USER"))))
