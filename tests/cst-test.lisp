@@ -50,3 +50,23 @@
       (ok (search "security" error-message))
       (ok (search "#." error-message))
       (ok (null (search "readtable" error-message))))))
+
+(deftest parse-top-level-forms-unknown-package-succeeds
+  (testing "files with unknown package-qualified symbols parse successfully"
+    (let* ((text (format nil "(defpackage #:demo (:use #:cl))~%~%(in-package #:demo)~%~%(defun process-data (x)~%  (unknown-dep:transform x))~%"))
+           (nodes (parse-top-level-forms text))
+           (expr-nodes (remove-if-not
+                        (lambda (n) (eq (cst-node-kind n) :expr))
+                        nodes)))
+      (ok (= 3 (length expr-nodes))
+          (format nil "Expected 3 expr nodes, got ~A" (length expr-nodes))))))
+
+(deftest parse-top-level-forms-defmethod-unknown-class
+  (testing "defmethod with unknown package-qualified specializer parses successfully"
+    (let* ((text (format nil "(defmethod render ((widget ui-pkg:button))~%  (format nil \"<button>~~A</button>\" (ui-pkg:label widget)))~%"))
+           (nodes (parse-top-level-forms text))
+           (expr-nodes (remove-if-not
+                        (lambda (n) (eq (cst-node-kind n) :expr))
+                        nodes)))
+      (ok (= 1 (length expr-nodes))
+          (format nil "Expected 1 expr node, got ~A" (length expr-nodes))))))
