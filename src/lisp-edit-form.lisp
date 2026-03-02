@@ -26,6 +26,8 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/lenient-read
+                #:call-with-lenient-packages)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
   (:import-from #:uiop
@@ -58,7 +60,12 @@
            (vector "file_path" "form_type" "form_name" "operation" "content")))
 
 (defun %normalize-string (thing)
-  (string-downcase (princ-to-string thing)))
+  "Normalize THING to a lowercase string for form matching.
+Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
+  (string-downcase
+   (if (symbolp thing)
+       (symbol-name thing)
+       (princ-to-string thing))))
 
 (defun %defmethod-candidates (form)
   "Return candidate signature strings for a DEFMETHOD FORM.
@@ -162,19 +169,22 @@ blank line. For EOF boundary use a single newline."
 (defun %validate-and-repair-content (content &optional readtable-designator)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
 using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
-When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
+When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
+Unknown package prefixes are handled leniently via stub packages."
   (let* ((*read-eval* nil)
-         (custom-rt (when readtable-designator
-                      ;; Dynamic lookup of named-readtables package
-                      (let ((pkg (or (find-package :named-readtables)
-                                     (find-package :editor-hints.named-readtables))))
-                        (when pkg
-                          (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
-                            (when (and find-fn (fboundp find-fn))
-                              (funcall find-fn readtable-designator)))))))
-         (*readtable* (if custom-rt
-                          custom-rt
-                          (copy-readtable nil))))
+         (custom-rt
+          (when readtable-designator
+            (let ((pkg
+                   (or (find-package :named-readtables)
+                       (find-package :editor-hints.named-readtables))))
+              (when pkg
+                (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
+                  (when (and find-fn (fboundp find-fn))
+                    (funcall find-fn readtable-designator)))))))
+         (*readtable*
+          (if custom-rt
+              custom-rt
+              (copy-readtable nil))))
     (labels ((whitespace-char-p (ch)
                (member ch '(#\Space #\Tab #\Newline #\Return)))
              (rest-parses-as-complete-forms-p (text start)
@@ -183,58 +193,54 @@ When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing."
                      (loop with cursor = start
                            with saw-form = nil
                            do (setf cursor
-                                    (or (position-if-not #'whitespace-char-p text
-                                                         :start cursor)
+                                    (or (position-if-not #'whitespace-char-p
+                                                         text :start cursor)
                                         len))
                               (when (>= cursor len)
                                 (return saw-form))
                               (multiple-value-bind (next-form next-pos)
-                                  (cl:read-from-string text nil :eof
-                                                       :start cursor
-                                                       :end len)
+                                  (read-from-string text nil :eof
+                                                    :start cursor :end len)
                                 (when (eq next-form :eof)
                                   (return saw-form))
                                 (setf saw-form t
                                       cursor next-pos)))
-                   (error ()
-                     nil))))
+                   (error nil nil))))
              (try-parse (text)
                (handler-case
-                   (multiple-value-bind (form pos)
-                       (cl:read-from-string text nil :eof)
-                     (when (eq form :eof)
-                       (error "content is empty"))
-                     (let* ((len (length text))
-                            (rest-start (or (position-if-not #'whitespace-char-p text
-                                                              :start pos)
-                                            len)))
-                       (when (< rest-start len)
-                         (if (rest-parses-as-complete-forms-p text rest-start)
-                             (error 'multiple-top-level-forms-error)
-                             (error
-                              "content has trailing malformed characters after the first form"))))
-                     text)
-                 (error (e)
-                   (values nil e)))))
+                   (call-with-lenient-packages
+                    (lambda ()
+                      (multiple-value-bind (form pos)
+                          (read-from-string text nil :eof)
+                        (when (eq form :eof) (error "content is empty"))
+                        (let* ((len (length text))
+                               (rest-start
+                                (or (position-if-not #'whitespace-char-p
+                                                     text :start pos)
+                                    len)))
+                          (when (< rest-start len)
+                            (if (rest-parses-as-complete-forms-p text rest-start)
+                                (error 'multiple-top-level-forms-error)
+                                (error
+                                 "content has trailing malformed characters after the first form"))))
+                        text)))
+                 (error (e) (values nil e)))))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
             result
-            ;; First parse failed, try parinfer repair
             (let ((repaired (apply-indent-mode content)))
               (multiple-value-bind (repaired-result repaired-err)
                   (try-parse repaired)
                 (cond
                   (repaired-result
-                   (log-event :info "lisp.edit.form"
-                              "auto-repair" "success"
+                   (log-event :info "lisp.edit.form" "auto-repair" "success"
                               "original-error" (princ-to-string err))
                    repaired-result)
                   ((and (typep err 'multiple-top-level-forms-error)
                         (typep repaired-err 'multiple-top-level-forms-error))
                    (error err))
                   (t
-                   ;; Repair failed, signal the original error
                    (error "content parse error: ~A (repair also failed: ~A)"
                           err repaired-err))))))))))
 
