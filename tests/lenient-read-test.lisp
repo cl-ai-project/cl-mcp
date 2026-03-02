@@ -3,7 +3,11 @@
 (defpackage #:cl-mcp/tests/lenient-read-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/utils/lenient-read
-                #:call-with-lenient-packages))
+                #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
+  (:import-from #:cl-mcp/src/lisp-edit-form
+                #:lisp-edit-form))
 
 (in-package #:cl-mcp/tests/lenient-read-test)
 
@@ -104,3 +108,37 @@
          (error "deliberate error"))))
     (ok (null (find-package "ERR-CLEANUP-PKG"))
         "stub cleaned up after error in body")))
+
+(deftest e2e-lisp-edit-form-with-package-qualified-symbols
+  (testing "lisp-edit-form replace works on file with unknown package symbols"
+    (let* ((project-root (asdf:system-source-directory :cl-mcp))
+           (tmp-path (merge-pathnames "tests/tmp-lenient-e2e.lisp" project-root))
+           (cl-mcp/src/project-root:*project-root* project-root))
+      (unwind-protect
+           (progn
+             (with-open-file (out tmp-path :direction :output
+                                           :if-exists :supersede)
+               (write-string "(in-package :cl-user)
+
+(defun old-func ()
+  (fake-pkg:do-something 42))
+
+(defun other-func ()
+  (another-pkg:process (fake-pkg:make-thing)))
+" out))
+             (let ((result (cl-mcp/src/lisp-edit-form:lisp-edit-form
+                            :file-path (namestring tmp-path)
+                            :form-type "defun"
+                            :form-name "old-func"
+                            :operation "replace"
+                            :content "(defun old-func ()
+  (fake-pkg:do-something-else 99))")))
+               (ok (stringp result) "result is a string")
+               (ok (search "do-something-else" result)
+                   "new content present")
+               (ok (search "other-func" result)
+                   "other function preserved")
+               (ok (search "another-pkg:process" result)
+                   "other package references preserved")))
+        (when (probe-file tmp-path)
+          (delete-file tmp-path))))))
