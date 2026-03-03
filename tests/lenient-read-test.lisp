@@ -7,7 +7,11 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/lisp-edit-form
-                #:lisp-edit-form))
+                #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-kind
+                #:cst-node-value))
 
 (in-package #:cl-mcp/tests/lenient-read-test)
 
@@ -182,3 +186,125 @@
           (ok t "correctly signaled error for typo in real package")))
       (ok (null (find-symbol unique-name :cl-user))
           "symbol was not interned into CL-USER"))))
+
+(deftest parse-top-level-forms-with-local-nicknames
+  (testing "parse-top-level-forms succeeds when file uses package-local-nicknames"
+    ;; Create target package with an exported symbol
+    (let ((target-pkg (make-package "LENIENT-LN-TARGET" :use nil))
+          (user-pkg nil))
+      (export (intern "SOME-FUNC" target-pkg) target-pkg)
+      (unwind-protect
+           (progn
+             ;; Create user package with a local nickname for target
+             (setf user-pkg (make-package "LENIENT-LN-USER" :use '(:cl)))
+             (sb-ext:add-package-local-nickname "LT" target-pkg user-pkg)
+             ;; Parse text that uses the local nickname
+             (let* ((text (format nil "(in-package :lenient-ln-user)~%~%(defun test-func ()~%  (lt:some-func 42))~%"))
+                    (nodes (parse-top-level-forms text))
+                    (expr-nodes (remove-if-not
+                                 (lambda (n) (eq (cst-node-kind n) :expr))
+                                 nodes)))
+               (ok (= 2 (length expr-nodes))
+                   (format nil "Expected 2 expr nodes (in-package + defun), got ~A"
+                           (length expr-nodes)))
+               ;; Second expr should be the defun
+               (let ((defun-node (second expr-nodes)))
+                 (ok (eq 'defun (first (cst-node-value defun-node)))
+                     "second form is a defun"))))
+        (when (find-package "LENIENT-LN-USER")
+          (delete-package "LENIENT-LN-USER"))
+        (when (find-package "LENIENT-LN-TARGET")
+          (delete-package "LENIENT-LN-TARGET"))))))
+
+(deftest e2e-lisp-edit-form-with-local-nicknames
+  (testing "lisp-edit-form works on file whose package uses local-nicknames"
+    (let ((target-pkg (make-package "LENIENT-LN-E2E-TARGET" :use nil))
+          (user-pkg nil)
+          (project-root (asdf:system-source-directory :cl-mcp))
+          (tmp-path nil))
+      (export (intern "MAKE-DUAL" target-pkg) target-pkg)
+      (unwind-protect
+           (progn
+             (setf user-pkg (make-package "LENIENT-LN-E2E-USER" :use '(:cl)))
+             (sb-ext:add-package-local-nickname "AD" target-pkg user-pkg)
+             (setf tmp-path (merge-pathnames "tests/tmp-local-nicknames.lisp"
+                                             project-root))
+             (let ((cl-mcp/src/project-root:*project-root* project-root))
+               (with-open-file (out tmp-path :direction :output
+                                             :if-exists :supersede)
+                 (write-string "(in-package :lenient-ln-e2e-user)
+
+(defun make-thing ()
+  (ad:make-dual 1.0 0.0))
+
+(defun other-thing ()
+  (ad:make-dual 2.0 1.0))
+" out))
+               (let ((result (lisp-edit-form
+                              :file-path (namestring tmp-path)
+                              :form-type "defun"
+                              :form-name "make-thing"
+                              :operation "replace"
+                              :content "(defun make-thing ()
+  (ad:make-dual 99.0 0.0))")))
+                 (ok (stringp result) "result is a string")
+                 (ok (search "99.0" result)
+                     "new content present")
+                 (ok (search "other-thing" result)
+                     "other function preserved"))))
+        (when (and tmp-path (probe-file tmp-path))
+          (delete-file tmp-path))
+        (when (find-package "LENIENT-LN-E2E-USER")
+          (delete-package "LENIENT-LN-E2E-USER"))
+        (when (find-package "LENIENT-LN-E2E-TARGET")
+          (delete-package "LENIENT-LN-E2E-TARGET"))))))
+
+(deftest repeated-single-colon-stub-symbol
+  (testing "Eclector: repeated single-colon access to stub symbol succeeds"
+    (let ((result
+            (call-with-lenient-packages
+             (lambda ()
+               (eclector.reader:read-from-string
+                "(progn (stub-repeat:sym) (stub-repeat:sym) (stub-repeat:other))")))))
+      (ok (consp result) "result is a list")
+      (ok (= 4 (length result))
+          "progn has three sub-forms")
+      ;; Verify stub cleanup
+      (ok (null (find-package "STUB-REPEAT"))
+          "stub package removed after call"))))
+
+#+sbcl
+(deftest repeated-single-colon-stub-symbol-sbcl
+  (testing "SBCL reader: repeated single-colon access to stub symbol succeeds"
+    (let ((result
+            (call-with-lenient-packages
+             (lambda ()
+               (read-from-string
+                "(progn (sbcl-stub-repeat:sym) (sbcl-stub-repeat:sym) (sbcl-stub-repeat:other))")))))
+      (ok (consp result) "result is a list")
+      (ok (= 4 (length result))
+          "progn has three sub-forms")
+      (ok (null (find-package "SBCL-STUB-REPEAT"))
+          "stub package removed after call"))))
+
+(deftest parse-top-level-forms-multi-use-unknown-pkg
+  (testing "parse-top-level-forms: multiple uses of unknown-pkg:symbol"
+    (let* ((text "(in-package #:totally-nonexistent-pkg)
+
+(defun func-a ()
+  (ad:make-dual 42))
+
+(defun func-b ()
+  (ad:make-dual 99)
+  (ad:other-func)
+  (bx:something))")
+           (nodes (parse-top-level-forms text))
+           (expr-nodes (remove-if-not
+                         (lambda (n) (eq (cst-node-kind n) :expr))
+                         nodes)))
+      (ok (= 3 (length expr-nodes))
+          (format nil "Expected 3 expr nodes, got ~A" (length expr-nodes)))
+      (ok (eq 'defun (first (cst-node-value (second expr-nodes))))
+          "second form is a defun")
+      (ok (eq 'defun (first (cst-node-value (third expr-nodes))))
+          "third form is a defun"))))

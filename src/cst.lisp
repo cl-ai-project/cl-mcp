@@ -57,6 +57,18 @@
               (consp (cdr form))
               (second form)))))
 
+(defun %in-package-form-p (form)
+  "Return the package designator string if FORM is an IN-PACKAGE form, NIL otherwise."
+  (and (consp form)
+       (let ((head (car form)))
+         (and (symbolp head)
+              (string= (symbol-name head) "IN-PACKAGE")
+              (consp (cdr form))
+              (let ((designator (second form)))
+                (cond ((stringp designator) designator)
+                      ((symbolp designator) (symbol-name designator))
+                      (t nil)))))))
+
 (defun %try-switch-readtable (designator)
   "Try to get the named readtable for DESIGNATOR.
 Returns the readtable if found, NIL if named-readtables is not loaded
@@ -96,6 +108,12 @@ Returns the complete list of nodes (including previously collected NODES)."
                                       :end end-pos
                                       :start-line (%pos->line start-pos)
                                       :end-line (%pos->line end-pos))))
+            ;; Track in-package to activate local-nicknames
+            (let ((pkg-name (%in-package-form-p form)))
+              (when pkg-name
+                (let ((pkg (find-package pkg-name)))
+                  (when pkg
+                    (setf *package* pkg)))))
             (push node nodes)))))))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -126,8 +144,11 @@ Returns the complete list of nodes (including previously collected NODES)."
 (defun parse-top-level-forms (text &key readtable)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
-stub packages that are cleaned up after parsing."
-  (let ((*line-table* (%build-line-table text)))
+stub packages that are cleaned up after parsing.
+When an IN-PACKAGE form is encountered, *PACKAGE* is updated so that
+package-local-nicknames activate for subsequent forms."
+  (let ((*line-table* (%build-line-table text))
+        (*package* *package*))
     (if readtable
         (let ((custom-rt (%try-switch-readtable readtable)))
           (if custom-rt
@@ -154,6 +175,13 @@ stub packages that are cleaned up after parsing."
                        (push result nodes)
                        (when (and (typep result 'cst-node)
                                   (eq (cst-node-kind result) :expr))
+                         ;; Track in-package to activate local-nicknames
+                         (let ((pkg-name (%in-package-form-p
+                                          (cst-node-value result))))
+                           (when pkg-name
+                             (let ((pkg (find-package pkg-name)))
+                               (when pkg
+                                 (setf *package* pkg)))))
                          (let ((designator
                                 (%in-readtable-form-p (cst-node-value result))))
                            (when designator

@@ -8,7 +8,8 @@
   (:use #:cl)
   (:import-from #:eclector.reader
                 #:package-does-not-exist
-                #:symbol-does-not-exist)
+                #:symbol-does-not-exist
+                #:symbol-is-not-external)
   (:export #:call-with-lenient-packages))
 
 (in-package #:cl-mcp/src/utils/lenient-read)
@@ -49,11 +50,26 @@ Creates a stub package and invokes the USE-PACKAGE restart."
 
 (defun %handle-eclector-symbol-missing (condition stubs)
   "Handle Eclector's symbol-does-not-exist condition.
-Only invokes the INTERN restart if the symbol's package is a stub we created.
-For real packages, lets the error propagate so typos are reported normally."
+Only handles the condition if the symbol's package is a stub we created.
+For real packages, lets the error propagate so typos are reported normally.
+Interns and exports the symbol via USE-VALUE to prevent subsequent
+symbol-is-not-external errors on repeated single-colon access."
   (let ((pkg (eclector.reader::desired-symbol-package condition)))
     (when (and pkg (member pkg (car stubs) :test #'eq))
-      (let ((r (%find-restart-by-name "INTERN" condition)))
+      (let ((sym-name (eclector.reader::desired-symbol-name condition)))
+        (let ((sym (intern sym-name pkg)))
+          (export sym pkg)
+          (let ((r (%find-restart-by-name "USE-VALUE" condition)))
+            (when r
+              (invoke-restart r sym))))))))
+
+(defun %handle-eclector-symbol-not-external (condition stubs)
+  "Handle Eclector's symbol-is-not-external condition.
+Only handles the condition if the symbol's package is a stub we created.
+Invokes the USE-ANYWAY restart to accept the internal symbol as-is."
+  (let ((pkg (eclector.reader::desired-symbol-package condition)))
+    (when (and pkg (member pkg (car stubs) :test #'eq))
+      (let ((r (%find-restart-by-name "USE-ANYWAY" condition)))
         (when r
           (invoke-restart r))))))
 
@@ -61,7 +77,7 @@ For real packages, lets the error propagate so typos are reported normally."
 (defun %handle-sbcl-reader-package-error (condition stubs)
   "Handle SBCL's simple-reader-package-error condition.
 Dispatches on the format control string to determine whether the error
-is about a missing package or a missing symbol."
+is about a missing package, a missing symbol, or a non-external symbol."
   (let* ((ctrl (simple-condition-format-control condition))
          (args (simple-condition-format-arguments condition)))
     (cond
@@ -77,6 +93,17 @@ is about a missing package or a missing symbol."
       ;; "Symbol ~S not found in the ~A package."
       ;; Only handle if the package is a stub we created.
       ((search "not found" ctrl :test #'char-equal)
+       (let ((sym-name (first args))
+             (pkg-name (second args)))
+         (when (and (stringp sym-name) (stringp pkg-name))
+           (let ((pkg (find-package pkg-name)))
+             (when (and pkg (member pkg (car stubs) :test #'eq))
+               (export (intern sym-name pkg) pkg)
+               (let ((r (%find-restart-by-name "CONTINUE" condition)))
+                 (when r (invoke-restart r))))))))
+      ;; "The symbol ~S is not external in the ~A package."
+      ;; Only handle if the package is a stub we created.
+      ((search "not external" ctrl :test #'char-equal)
        (let ((sym-name (first args))
              (pkg-name (second args)))
          (when (and (stringp sym-name) (stringp pkg-name))
@@ -104,10 +131,11 @@ symbol whose package does not exist, this function creates an ephemeral stub
 package so the read can proceed. After THUNK returns (or signals an error),
 all stub packages are cleaned up via UNWIND-PROTECT.
 
-Handles three condition types:
+Handles four condition types:
   1. ECLECTOR.READER:PACKAGE-DOES-NOT-EXIST -- invokes USE-PACKAGE restart
-  2. ECLECTOR.READER:SYMBOL-DOES-NOT-EXIST -- invokes INTERN restart
-  3. SB-INT:SIMPLE-READER-PACKAGE-ERROR (SBCL) -- creates stub, retries
+  2. ECLECTOR.READER:SYMBOL-DOES-NOT-EXIST -- interns+exports via USE-VALUE
+  3. ECLECTOR.READER:SYMBOL-IS-NOT-EXTERNAL -- invokes USE-ANYWAY restart
+  4. SB-INT:SIMPLE-READER-PACKAGE-ERROR (SBCL) -- creates stub, retries
 
 Arguments:
   THUNK -- A function of zero arguments to call under lenient resolution.
@@ -129,6 +157,9 @@ Examples:
               (symbol-does-not-exist
                 (lambda (c)
                   (%handle-eclector-symbol-missing c stubs-cell)))
+              (symbol-is-not-external
+                (lambda (c)
+                  (%handle-eclector-symbol-not-external c stubs-cell)))
               #+sbcl
               (sb-int:simple-reader-package-error
                 (lambda (c)
