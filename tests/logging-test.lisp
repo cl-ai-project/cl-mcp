@@ -127,3 +127,38 @@
                    "MCP_LOG_FILE not in worker environment")))
         (setf (uiop/os:getenv "MCP_LOG_FILE") (or old-val ""))))))
 
+(deftest worker-env-excludes-empty-mcp-log-file
+  (testing "%build-environment strips MCP_LOG_FILE= from child env"
+    (let ((old-val (uiop/os:getenv "MCP_LOG_FILE")))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_LOG_FILE") "")
+             (let ((env (cl-mcp/src/worker-client::%build-environment
+                         "secret" 99)))
+               (ok (not (find-if (lambda (s)
+                                   (and (stringp s)
+                                        (>= (length s) 13)
+                                        (string= "MCP_LOG_FILE=" s :end2 13)))
+                                 env))
+                   "MCP_LOG_FILE= not in worker environment")))
+        (setf (uiop/os:getenv "MCP_LOG_FILE") (or old-val ""))))))
+
+(deftest worker-env-replaces-empty-mcp-worker-id
+  (testing "%build-environment removes inherited MCP_WORKER_ID= and sets one value"
+    (let ((old-val (uiop/os:getenv "MCP_WORKER_ID")))
+      (unwind-protect
+           (progn
+             (setf (uiop/os:getenv "MCP_WORKER_ID") "")
+             (let* ((env (cl-mcp/src/worker-client::%build-environment
+                          "secret" 99))
+                    (matches (remove-if-not
+                              (lambda (s)
+                                (and (stringp s)
+                                     (>= (length s) 14)
+                                     (string= "MCP_WORKER_ID=" s :end2 14)))
+                              env)))
+               (ok (= (length matches) 1)
+                   "exactly one MCP_WORKER_ID entry")
+               (ok (string= (first matches) "MCP_WORKER_ID=99")
+                   "MCP_WORKER_ID entry has expected value")))
+        (setf (uiop/os:getenv "MCP_WORKER_ID") (or old-val ""))))))
