@@ -114,6 +114,40 @@ SIGTERM which cascades into nested errors when stderr is a broken pipe."
        (log-event :info "worker.sigterm" "pid" (%get-pid)))
      (sb-ext:exit :code 0 :abort t))))
 
+#+linux
+(defun %install-parent-death-signal ()
+  "Request SIGTERM when the parent process dies (Linux PR_SET_PDEATHSIG).
+Ensures the worker exits even if the parent is killed with SIGKILL or
+terminated by OOM killer.  After the prctl call, re-checks getppid to
+close the race window where the parent dies between fork and prctl."
+  (let ((parent-pid (sb-posix:getppid)))
+    (handler-case
+        (let ((rc (sb-alien:alien-funcall
+                   (sb-alien:extern-alien
+                    "prctl"
+                    (function sb-alien:int
+                              sb-alien:int sb-alien:unsigned-long))
+                   1    ; PR_SET_PDEATHSIG
+                   15))) ; SIGTERM
+          (cond
+            ((/= rc 0)
+             (log-event :warn "worker.pdeathsig-failed"
+                        "pid" (%get-pid) "rc" rc))
+            ((/= (sb-posix:getppid) parent-pid)
+             ;; Parent died between fork and prctl — exit immediately.
+             (log-event :warn "worker.parent-already-dead"
+                        "pid" (%get-pid)
+                        "original_ppid" parent-pid)
+             (sb-ext:exit :code 0 :abort t))
+            (t
+             (log-event :info "worker.pdeathsig-installed"
+                        "pid" (%get-pid)
+                        "parent_pid" parent-pid))))
+      (error (e)
+        (log-event :warn "worker.pdeathsig-failed"
+                   "pid" (%get-pid)
+                   "error" (princ-to-string e))))))
+
 (defun start ()
   "Entry point for worker child processes.
 Creates the TCP server on an ephemeral port, registers all method
@@ -127,14 +161,11 @@ accidental writes from filling the pipe buffer and causing deadlock.
 When the accept loop exits (parent disconnected or server stopped),
 the process exits cleanly instead of falling through to the
 Roswell REPL."
-  ;; Disable debugger so unhandled errors exit instead of entering
-  ;; an interactive REPL that would hang or cascade on broken pipes.
   #+sbcl (sb-ext:disable-debugger)
-  ;; Top-level error handler: catch ALL errors to prevent cascading
-  ;; crashes when stderr is a broken pipe (parent already exited).
   (handler-case
       (progn
         (%install-signal-handlers)
+        #+linux (%install-parent-death-signal)
         (let ((wid (uiop/os:getenv "MCP_WORKER_ID")))
           (when (and wid (plusp (length wid)))
             (setf *log-context* (list "worker_id" wid))))
@@ -147,8 +178,6 @@ Roswell REPL."
                        "swank_port" (or swank-port "none")
                        "pid" (%get-pid))
             (%output-handshake tcp-port swank-port)
-            ;; Redirect stdout to /dev/null after handshake to prevent
-            ;; pipe buffer deadlock — parent only reads the handshake.
             (let ((devnull (open #P"/dev/null" :direction :output
                                                :if-exists :append)))
               (setf *standard-output* devnull))
