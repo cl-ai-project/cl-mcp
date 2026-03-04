@@ -27,6 +27,8 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/pool
                 #:send-root-to-session-worker)
+  (:import-from #:cl-mcp/src/proxy
+                #:cancel-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:yason
@@ -41,6 +43,7 @@
    #:client-info
    #:protocol-version
    #:make-state
+   #:handle-notification
    #:process-json-line))
 
 (in-package #:cl-mcp/src/protocol)
@@ -213,11 +216,27 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                              (make-ht "name" "cl-mcp" "version" (version))
                              "capabilities" caps))))))
 
-(defun handle-notification (state method params)
-  (declare (ignore state params))
-  (when (string= method "notifications/initialized")
-    (return-from handle-notification nil))
+(defun %handle-cancel-notification (params)
+  "Handle a notifications/cancelled message from the MCP client.
+Extracts requestId from PARAMS and calls cancel-request to kill
+the worker handling that request."
+  (let ((request-id (and (hash-table-p params)
+                         (gethash "requestId" params))))
+    (when request-id
+      (log-event :info "protocol.cancel-notification"
+                 "request_id" request-id)
+      (cancel-request request-id)))
   nil)
+
+(defun handle-notification (state method params)
+  "Handle incoming JSON-RPC notifications (no response expected).
+Dispatches notifications/initialized and notifications/cancelled."
+  (declare (ignore state))
+  (cond
+    ((string= method "notifications/initialized") nil)
+    ((string= method "notifications/cancelled")
+     (%handle-cancel-notification params))
+    (t nil)))
 
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."

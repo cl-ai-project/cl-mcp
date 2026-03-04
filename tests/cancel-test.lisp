@@ -5,10 +5,23 @@
 (defpackage #:cl-mcp/tests/cancel-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/proxy
-                #:*use-worker-pool*
                 #:*active-requests*
                 #:*active-requests-lock*
                 #:cancel-request)
+  (:import-from #:cl-mcp/src/protocol
+                #:handle-notification)
+  (:import-from #:cl-mcp/src/state
+                #:make-state
+                #:*current-session-id*)
+  (:import-from #:cl-mcp/src/pool
+                #:*worker-pool-warmup*
+                #:*health-check-interval-seconds*
+                #:*shutdown-replenish-wait-seconds*
+                #:initialize-pool
+                #:shutdown-pool
+                #:get-or-assign-worker)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker-state #:worker-pid)
   (:import-from #:bordeaux-threads
                 #:with-lock-held))
 
@@ -34,3 +47,69 @@
             (ok (null (gethash "test-req-42" *active-requests*)))))
       (with-lock-held (*active-requests-lock*)
         (remhash "test-req-42" *active-requests*)))))
+
+;;; --- Protocol-level notification tests ---
+
+(deftest handle-cancelled-notification-dispatches
+  (testing "notifications/cancelled calls cancel-request with requestId"
+    (with-lock-held (*active-requests-lock*)
+      (setf (gethash "proto-req-7" *active-requests*) "fake-session"))
+    (unwind-protect
+        (let* ((params (let ((ht (make-hash-table :test 'equal)))
+                         (setf (gethash "requestId" ht) "proto-req-7")
+                         ht))
+               (state (make-state)))
+          (handle-notification state "notifications/cancelled" params)
+          (with-lock-held (*active-requests-lock*)
+            (ok (null (gethash "proto-req-7" *active-requests*)))))
+      (with-lock-held (*active-requests-lock*)
+        (remhash "proto-req-7" *active-requests*)))))
+
+(deftest handle-cancelled-notification-unknown-id-is-noop
+  (testing "notifications/cancelled for unknown requestId is a no-op"
+    (let* ((params (let ((ht (make-hash-table :test 'equal)))
+                     (setf (gethash "requestId" ht) "unknown-req-999")
+                     ht))
+           (state (make-state)))
+      (ok (null (handle-notification state "notifications/cancelled" params))))))
+
+;;; --- Integration helpers ---
+
+(defun spawn-available-p ()
+  "Check if we can spawn worker processes."
+  (ignore-errors
+    (let ((p (sb-ext:run-program "ros" '("version")
+               :search t :output :stream :wait nil)))
+      (prog1 (sb-ext:process-alive-p p)
+        (ignore-errors (sb-ext:process-kill p 15))
+        (ignore-errors (sb-ext:process-close p))))))
+
+(defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)
+  `(let ((*worker-pool-warmup* 0)
+         (*health-check-interval-seconds* ,health-check-interval)
+         (*shutdown-replenish-wait-seconds* 0.01d0))
+     (unwind-protect
+         (progn (initialize-pool) ,@body)
+       (shutdown-pool))))
+
+;;; --- Integration test: full cancel flow ---
+
+(deftest cancel-kills-running-worker-e2e
+  (testing "Full cancel flow: register request, cancel, verify worker killed"
+    (unless (spawn-available-p)
+      (skip "Cannot spawn workers"))
+    (with-pool ()
+      (let* ((session-id "cancel-test-session")
+             (*current-session-id* session-id)
+             (worker (get-or-assign-worker session-id))
+             (worker-pid (worker-pid worker)))
+        (declare (ignore worker-pid))
+        (with-lock-held (*active-requests-lock*)
+          (setf (gethash "e2e-req-1" *active-requests*) session-id))
+        (cancel-request "e2e-req-1")
+        (sleep 0.5)
+        (ok (eq (worker-state worker) :dead)
+            "Worker state should be :dead after cancel")
+        (with-lock-held (*active-requests-lock*)
+          (ok (null (gethash "e2e-req-1" *active-requests*))
+              "Active request entry should be removed"))))))
