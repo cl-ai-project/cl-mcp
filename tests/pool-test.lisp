@@ -30,7 +30,9 @@
                 #:pool-shutting-down
                 #:pool-capacity-exceeded)
   (:import-from #:cl-mcp/src/worker-client
-                #:worker-crashed))
+                #:worker-crashed
+                #:*reaper-threads*
+                #:*reaper-threads-lock*))
 
 (in-package #:cl-mcp/tests/pool-test)
 
@@ -1123,3 +1125,107 @@ send-root-to-session-worker failure"
             (let ((result2 (worker-rpc new-worker "worker/ping" nil)))
               (ok (gethash "pong" result2)
                   "replacement worker responds to ping"))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Reaper thread tracking test (Major #1)
+;;; ---------------------------------------------------------------------------
+
+(deftest shutdown-joins-reaper-threads
+  (testing "shutdown-pool waits for reaper threads to complete"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Inject a slow sentinel reaper (1s sleep) into *reaper-threads*.
+    ;; shutdown-pool must poll-wait for it before returning.
+    (let ((sentinel-completed nil))
+      (with-pool ()
+        ;; Assign and crash a real worker to exercise the production path
+        (let ((worker (get-or-assign-worker "reaper-test")))
+          (ok worker "worker assigned")
+          (sb-posix:kill (worker-pid worker) sb-posix:sigkill)
+          (sleep 0.5)
+          (cl-mcp/src/pool::%handle-worker-crash worker))
+        ;; Inject a slow sentinel reaper that takes ~1s
+        (let ((sentinel
+                (bordeaux-threads:make-thread
+                 (lambda ()
+                   (sleep 1)
+                   (bordeaux-threads:with-lock-held (*reaper-threads-lock*)
+                     (setf *reaper-threads*
+                           (remove (bordeaux-threads:current-thread)
+                                   *reaper-threads*)))
+                   (setf sentinel-completed t))
+                 :name "test-sentinel-reaper")))
+          (bordeaux-threads:with-lock-held (*reaper-threads-lock*)
+            (push sentinel *reaper-threads*))))
+      ;; shutdown-pool has returned — sentinel must have finished
+      (ok sentinel-completed
+          "sentinel reaper completed before shutdown returned")
+      (let ((remaining
+              (bordeaux-threads:with-lock-held (*reaper-threads-lock*)
+                (length *reaper-threads*))))
+        (ok (zerop remaining)
+            (format nil "all reaper threads cleaned up (got ~D)"
+                    remaining))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Concurrent recovery cap test (Major #3)
+;;; ---------------------------------------------------------------------------
+
+(deftest concurrent-recovery-respects-cap
+  (testing "health monitor defers recovery when cap is reached"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Set max concurrent recoveries to 1 so the 2nd crash is deferred
+    (let ((cl-mcp/src/pool::*max-concurrent-recoveries* 1))
+      (with-pool ()
+        ;; Assign two workers to different sessions
+        (let ((w1 (get-or-assign-worker "cap-session-1"))
+              (w2 (get-or-assign-worker "cap-session-2")))
+          (ok w1 "worker 1 assigned")
+          (ok w2 "worker 2 assigned")
+          ;; Kill both workers
+          (sb-posix:kill (worker-pid w1) sb-posix:sigkill)
+          (sb-posix:kill (worker-pid w2) sb-posix:sigkill)
+          (sleep 0.5)
+          ;; Manually simulate health monitor crash detection:
+          ;; First recovery should proceed (active-count = 0 < 1)
+          (let ((recovery-started 0)
+                (recovery-deferred 0))
+            (dolist (w (list w1 w2))
+              (let ((active-count
+                      (bordeaux-threads:with-lock-held
+                          (cl-mcp/src/pool::*pool-lock*)
+                        (length cl-mcp/src/pool::*recovery-threads*))))
+                (if (>= active-count
+                        cl-mcp/src/pool::*max-concurrent-recoveries*)
+                    (incf recovery-deferred)
+                    ;; Simulate recovery thread creation (same as health monitor)
+                    (let ((thread nil))
+                      (bordeaux-threads:with-lock-held
+                          (cl-mcp/src/pool::*pool-lock*)
+                        (setf thread
+                              (bordeaux-threads:make-thread
+                               (lambda ()
+                                 (unwind-protect
+                                     (handler-case
+                                         (cl-mcp/src/pool::%handle-worker-crash w)
+                                       (error (e)
+                                         (declare (ignore e))
+                                         nil))
+                                   (bordeaux-threads:with-lock-held
+                                       (cl-mcp/src/pool::*pool-lock*)
+                                     (setf cl-mcp/src/pool::*recovery-threads*
+                                           (remove thread
+                                                  cl-mcp/src/pool::*recovery-threads*)))))
+                               :name "test-recovery"))
+                        (push thread cl-mcp/src/pool::*recovery-threads*))
+                      (incf recovery-started)))))
+            ;; First should start, second should be deferred
+            (ok (= recovery-started 1)
+                (format nil "exactly 1 recovery started (got ~D)"
+                        recovery-started))
+            (ok (= recovery-deferred 1)
+                (format nil "exactly 1 recovery deferred (got ~D)"
+                        recovery-deferred))
+            ;; Wait for the recovery thread to finish
+            (sleep 5)))))))

@@ -717,12 +717,19 @@ snapshotting and killing workers."
       (when (bordeaux-threads:thread-alive-p th)
         (handler-case (bordeaux-threads:join-thread th)
           (error () nil)))))
-  ;; Wait for in-flight reaper threads (process cleanup from crashes)
+  ;; Wait for in-flight reaper threads (process cleanup from crashes).
+  ;; bordeaux-threads 0.x join-thread does not support :timeout,
+  ;; so poll thread-alive-p with a deadline instead.
   (let ((threads (bordeaux-threads:with-lock-held (*reaper-threads-lock*)
-                   (copy-list *reaper-threads*))))
+                   (copy-list *reaper-threads*)))
+        (deadline (+ (get-internal-real-time)
+                     (* 5 internal-time-units-per-second))))
     (dolist (th threads)
-      (when (bordeaux-threads:thread-alive-p th)
-        (handler-case (bordeaux-threads:join-thread th :timeout 5)
+      (loop while (and (bordeaux-threads:thread-alive-p th)
+                       (< (get-internal-real-time) deadline))
+            do (sleep 0.1))
+      (unless (bordeaux-threads:thread-alive-p th)
+        (handler-case (bordeaux-threads:join-thread th)
           (error () nil)))))
   ;; Snapshot and kill all workers.
   (let ((workers nil))
