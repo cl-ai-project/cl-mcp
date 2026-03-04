@@ -331,7 +331,7 @@ race with tests that manually crash workers.  Pass a short interval
           (*current-session-id* "e2e-eval-session"))
       (with-pool ()
         (let* ((params (%make-eval-params "(+ 10 20)"))
-               (result (proxy-to-worker "worker/eval" params)))
+               (result (proxy-to-worker 1 "worker/eval" params)))
           (ok (hash-table-p result)
               "result is a hash-table")
           (ok (not (gethash "isError" result))
@@ -362,7 +362,7 @@ race with tests that manually crash workers.  Pass a short interval
           (*current-session-id* "fallback-test-session"))
       (with-pool ()
         (let* ((params (%make-eval-params "(list 1 2 3)"))
-               (result (proxy-to-worker "worker/eval" params)))
+               (result (proxy-to-worker 1 "worker/eval" params)))
           (ok (hash-table-p result)
               "proxy path works when pool is initialized")
           (ok (not (gethash "isError" result))
@@ -377,7 +377,7 @@ race with tests that manually crash workers.  Pass a short interval
       (with-pool ()
         (let* ((params (%make-eval-params
                         "(labels ((foo () (bar)) (bar () (error \"e2e-stack-test\"))) (foo))"))
-               (result (proxy-to-worker "worker/eval" params)))
+               (result (proxy-to-worker 1 "worker/eval" params)))
           (ok (hash-table-p result) "result is a hash-table")
           (let ((ctx (gethash "error_context" result)))
             (ok ctx "result has error_context")
@@ -408,7 +408,7 @@ race with tests that manually crash workers.  Pass a short interval
       (with-pool ()
         ;; Step 1: eval (list 10 20 30) to get result_object_id
         (let* ((eval-params (%make-eval-params "(list 10 20 30)"))
-               (eval-result (proxy-to-worker "worker/eval" eval-params))
+               (eval-result (proxy-to-worker 1 "worker/eval" eval-params))
                (obj-id (gethash "result_object_id" eval-result)))
           (ok (integerp obj-id)
               "eval returned an integer result_object_id")
@@ -416,7 +416,7 @@ race with tests that manually crash workers.  Pass a short interval
           (let ((inspect-params (make-hash-table :test 'equal)))
             (setf (gethash "id" inspect-params) obj-id)
             (let ((inspect-result
-                    (proxy-to-worker "worker/inspect-object" inspect-params)))
+                    (proxy-to-worker 1 "worker/inspect-object" inspect-params)))
               (ok (hash-table-p inspect-result)
                   "inspect returns a hash-table")
               (ok (not (gethash "isError" inspect-result))
@@ -443,7 +443,7 @@ race with tests that manually crash workers.  Pass a short interval
                 (gethash "package" params) "CL-USER"
                 (gethash "locals_preview_frames" params) 5
                 (gethash "locals_preview_skip_internal" params) nil)
-          (let ((result (proxy-to-worker "worker/eval" params)))
+          (let ((result (proxy-to-worker 1 "worker/eval" params)))
             (ok (hash-table-p result) "result is a hash-table")
             (let ((ctx (gethash "error_context" result)))
               (ok ctx "result has error_context")
@@ -476,7 +476,7 @@ race with tests that manually crash workers.  Pass a short interval
       (with-pool ()
         ;; Step 1: Assign a worker via proxy
         (let* ((params (%make-eval-params "(+ 1 1)"))
-               (result1 (proxy-to-worker "worker/eval" params)))
+               (result1 (proxy-to-worker 1 "worker/eval" params)))
           (ok (hash-table-p result1)
               "initial eval succeeds")
           ;; Step 2: Get the assigned worker and kill its OS process
@@ -492,7 +492,7 @@ race with tests that manually crash workers.  Pass a short interval
               ;; Step 3: Invoke crash recovery directly
               (cl-mcp/src/pool::%handle-worker-crash worker)
               ;; Step 4: Next proxy call should return reset notification
-              (let ((result2 (proxy-to-worker "worker/eval" params)))
+              (let ((result2 (proxy-to-worker 1 "worker/eval" params)))
                 (ok (hash-table-p result2)
                     "post-crash call returns a hash-table")
                 (ok (gethash "isError" result2)
@@ -506,7 +506,7 @@ race with tests that manually crash workers.  Pass a short interval
                              (search "crashed" text))
                         "error message mentions crash"))))
               ;; Step 5: Subsequent call should work normally
-              (let ((result3 (proxy-to-worker "worker/eval" params)))
+              (let ((result3 (proxy-to-worker 1 "worker/eval" params)))
                 (ok (hash-table-p result3)
                     "third call returns a hash-table")
                 (ok (not (gethash "isError" result3))
@@ -655,7 +655,7 @@ race with tests that manually crash workers.  Pass a short interval
       (with-pool ()
         ;; Step 1: Verify the proxy path works for valid requests
         (let* ((good-params (%make-eval-params "(+ 1 1)"))
-               (good-result (proxy-to-worker "worker/eval" good-params)))
+               (good-result (proxy-to-worker 1 "worker/eval" good-params)))
           (ok (hash-table-p good-result)
               "valid eval succeeds")
           (ok (not (gethash "isError" good-result))
@@ -667,7 +667,7 @@ race with tests that manually crash workers.  Pass a short interval
         (let ((bad-params (make-hash-table :test 'equal)))
           ;; Intentionally omit "code" key — worker/eval requires it
           (setf (gethash "package" bad-params) "CL-USER")
-          (let ((result (proxy-to-worker "worker/eval" bad-params)))
+          (let ((result (proxy-to-worker 1 "worker/eval" bad-params)))
             (ok (hash-table-p result)
                 "worker error returns a hash-table result")
             (ok (gethash "isError" result)
@@ -684,7 +684,7 @@ race with tests that manually crash workers.  Pass a short interval
         ;; Step 3: Worker should still be alive and functional after a
         ;; non-crash error (no false crash recovery triggered)
         (let* ((params (%make-eval-params "(* 6 7)"))
-               (result (proxy-to-worker "worker/eval" params)))
+               (result (proxy-to-worker 1 "worker/eval" params)))
           (ok (hash-table-p result)
               "worker still responds after non-crash error")
           (ok (not (gethash "isError" result))
@@ -966,7 +966,7 @@ race with tests that manually crash workers.  Pass a short interval
   (testing "proxy-to-worker with nil session ID signals error"
     (let ((*use-worker-pool* t)
           (*current-session-id* nil))
-      (ok (signals (proxy-to-worker "worker/eval"
+      (ok (signals (proxy-to-worker 1 "worker/eval"
                                     (make-hash-table :test 'equal)))
           "error signaled for nil session ID"))))
 
