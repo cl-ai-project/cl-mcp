@@ -73,10 +73,14 @@ The parent process reads this single line to discover the worker's
 TCP port, optional Swank port, and PID.  The JSON object has keys:
   tcp_port   - integer, the worker's JSON-RPC TCP port
   swank_port - integer or null, the Swank server port
-  pid        - integer, the worker's OS process ID"
+  pid        - integer, the worker's OS process ID
+
+NOTE: We use NIL (not :NULL) for absent swank_port because YASON
+encodes NIL as JSON null across all versions.  The :NULL keyword
+requires YASON >= 0.8 which may not be available under Qlot."
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "tcp_port" ht) tcp-port
-          (gethash "swank_port" ht) (or swank-port :null)
+          (gethash "swank_port" ht) swank-port
           (gethash "pid" ht) (%get-pid)
           (gethash "protocol_version" ht) +worker-protocol-version+)
     (yason:encode ht stream)

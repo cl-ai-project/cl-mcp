@@ -832,3 +832,45 @@ Cleans up server and socket on exit."
           (ok (search "filesystem root"
                       (gethash "message" err))
               "error mentions filesystem root"))))))
+
+(deftest handshake-output-uses-nil-not-keyword-null
+  (testing "handshake JSON uses nil (not :null) for absent swank_port — works on all YASON versions"
+    (let ((raw (with-output-to-string (s)
+                 (cl-mcp/src/worker/main::%output-handshake 5000 nil s))))
+      ;; Raw JSON must contain "swank_port":null (lowercase)
+      (ok (search "\"swank_port\":null" raw)
+          "raw JSON contains swank_port:null")
+      ;; If YASON encoded :null as a string it would produce ":null" (with quotes).
+      ;; Verify there is no quoted \":null\" string literal in the output.
+      (ok (not (search "\":null\"" raw))
+          "raw JSON does not contain quoted \":null\" string literal"))))
+
+(deftest handshake-parser-accepts-integer-swank-port
+  (testing "%parse-handshake-from-stream returns integer swank_port when present"
+    (let* ((input (format nil "{\"tcp_port\":8080,\"swank_port\":4005,\"pid\":99}~%"))
+           (stream (make-string-input-stream input)))
+      (multiple-value-bind (tcp-port swank-port pid)
+          (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)
+        (ok (= 8080 tcp-port) "tcp-port is 8080")
+        (ok (= 4005 swank-port) "swank-port is 4005")
+        (ok (= 99 pid) "pid is 99")))))
+
+(deftest handshake-parser-returns-nil-for-null-swank-port
+  (testing "%parse-handshake-from-stream returns NIL for null swank_port"
+    (let* ((input (format nil "{\"tcp_port\":8080,\"swank_port\":null,\"pid\":99}~%"))
+           (stream (make-string-input-stream input)))
+      (multiple-value-bind (tcp-port swank-port pid)
+          (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)
+        (ok (= 8080 tcp-port) "tcp-port parsed")
+        (ok (null swank-port) "swank-port is NIL for JSON null")
+        (ok (= 99 pid) "pid parsed")))))
+
+(deftest handshake-parser-returns-nil-for-missing-swank-port
+  (testing "%parse-handshake-from-stream returns NIL when swank_port key is absent"
+    (let* ((input (format nil "{\"tcp_port\":8080,\"pid\":99}~%"))
+           (stream (make-string-input-stream input)))
+      (multiple-value-bind (tcp-port swank-port pid)
+          (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)
+        (ok (= 8080 tcp-port) "tcp-port parsed")
+        (ok (null swank-port) "swank-port is NIL when key absent")
+        (ok (= 99 pid) "pid parsed")))))

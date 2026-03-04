@@ -237,7 +237,10 @@ ID is the worker's numeric identifier, passed via MCP_WORKER_ID."
 
 (defun %parse-handshake-from-stream (stdout)
   "Read lines from STDOUT until a valid handshake JSON line is found.
-Skips non-JSON lines.  Returns (values tcp-port swank-port pid)."
+Skips non-JSON lines.  Returns (values tcp-port swank-port pid).
+Handles swank_port as NIL regardless of how the worker encoded null:
+YASON < 0.8 parses JSON null as NIL, YASON >= 0.8 may return :NULL
+depending on *parse-json-null-as-keyword*."
   (loop for line = (%read-line-limited stdout nil +max-json-line-bytes+)
         unless line do
           (error 'worker-spawn-failed
@@ -258,7 +261,7 @@ Skips non-JSON lines.  Returns (values tcp-port swank-port pid)."
                                 "expected" +worker-protocol-version+
                                 "got" version)))
                  (return (values tcp-port
-                                 (if (eq swank-port :null) nil swank-port)
+                                 (when (integerp swank-port) swank-port)
                                  pid)))))))
 
 (defun %read-handshake (process timeout)

@@ -256,14 +256,16 @@ Sessions with active in-flight requests are skipped even when expired."
           nil)))))
 
 (defun %http-error-json (code message)
-  "Build a JSON-RPC error response string using yason for proper escaping."
+  "Build a JSON-RPC error response string using yason for proper escaping.
+Uses NIL (not :NULL) for the id field because YASON encodes NIL as
+JSON null across all versions.  The :NULL keyword requires YASON >= 0.8."
   (let ((error-obj (make-hash-table :test #'equal))
         (outer (make-hash-table :test #'equal)))
     (setf (gethash "code" error-obj) code
           (gethash "message" error-obj) message)
     (setf (gethash "jsonrpc" outer) "2.0"
           (gethash "error" outer) error-obj
-          (gethash "id" outer) :null)
+          (gethash "id" outer) nil)
     (with-output-to-string (s)
       (yason:encode outer s))))
 

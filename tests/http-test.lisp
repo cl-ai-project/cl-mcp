@@ -466,3 +466,19 @@ Uses Connection: close to avoid keep-alive hanging."
            (ok (= 1 (http-session-active-requests session))
                "Should be 1 after decrement"))
       (clear-all-sessions))))
+
+(deftest http-error-json-uses-nil-not-keyword-null
+  (testing "%%http-error-json encodes id as JSON null (not :null literal)"
+    (let ((json (cl-mcp/src/http::%http-error-json -32600 "Invalid Request")))
+      ;; Must contain "id":null (YASON encodes NIL as bare null)
+      (ok (search "\"id\":null" json)
+          "id field should be JSON null")
+      ;; If YASON encoded :null as a string it would produce \":null\" (quoted).
+      ;; Verify there is no quoted \":null\" string literal in the output.
+      (ok (not (search "\":null\"" json))
+          "Should not contain quoted \":null\" string literal")
+      ;; Verify it's valid JSON-RPC structure
+      (ok (search "\"jsonrpc\":\"2.0\"" json)
+          "Should contain jsonrpc version")
+      (ok (search "\"error\"" json)
+          "Should contain error object"))))
