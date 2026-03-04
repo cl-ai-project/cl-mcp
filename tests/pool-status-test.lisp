@@ -9,8 +9,7 @@
                 #:*health-check-interval-seconds*
                 #:*shutdown-replenish-wait-seconds*
                 #:initialize-pool
-                #:shutdown-pool
-                #:pool-worker-info)
+                #:shutdown-pool)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry
