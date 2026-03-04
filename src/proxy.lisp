@@ -79,10 +79,13 @@ arguments hash-table.  ID is the JSON-RPC request id."
 
 (defparameter %proxy-bindings%
   '(("CL-MCP/SRC/POOL" . "GET-OR-ASSIGN-WORKER")
+    ("CL-MCP/SRC/POOL" . "FIND-SESSION-WORKER")
     ("CL-MCP/SRC/WORKER-CLIENT" . "CHECK-AND-CLEAR-RESET-NOTIFICATION")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-RPC")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON"))
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "KILL-WORKER")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-PROCESS-INFO"))
   "Package/symbol pairs used by proxy-to-worker at runtime.
 Verified at pool initialization to detect stale strings early.")
 
@@ -124,6 +127,8 @@ all unresolvable symbols."
 
 (defvar %cached-get-or-assign% nil
   "Cached fdefinition for POOL:GET-OR-ASSIGN-WORKER.")
+(defvar %cached-find-session-worker% nil
+  "Cached fdefinition for POOL:FIND-SESSION-WORKER.")
 (defvar %cached-check-and-clear% nil
   "Cached fdefinition for WORKER-CLIENT:CHECK-AND-CLEAR-RESET-NOTIFICATION.")
 (defvar %cached-worker-rpc% nil
@@ -132,6 +137,10 @@ all unresolvable symbols."
   "Cached symbol WORKER-CLIENT:WORKER-CRASHED.")
 (defvar %cached-worker-crashed-reason% nil
   "Cached fdefinition for WORKER-CLIENT:WORKER-CRASHED-REASON.")
+(defvar %cached-kill-worker% nil
+  "Cached fdefinition for WORKER-CLIENT:KILL-WORKER.")
+(defvar %cached-worker-process-info% nil
+  "Cached fdefinition for WORKER-CLIENT:WORKER-PROCESS-INFO.")
 
 (defun %ensure-cached-bindings ()
   "Populate the cached function bindings on first use.  Called once
@@ -139,6 +148,8 @@ per image after verify-proxy-bindings has validated the symbols."
   (unless %cached-get-or-assign%
     (setf %cached-get-or-assign%
           (fdefinition (%resolve "CL-MCP/SRC/POOL" "GET-OR-ASSIGN-WORKER"))
+          %cached-find-session-worker%
+          (fdefinition (%resolve "CL-MCP/SRC/POOL" "FIND-SESSION-WORKER"))
           %cached-check-and-clear%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
                                  "CHECK-AND-CLEAR-RESET-NOTIFICATION"))
@@ -148,17 +159,25 @@ per image after verify-proxy-bindings has validated the symbols."
           (%resolve "CL-MCP/SRC/WORKER-CLIENT" "WORKER-CRASHED")
           %cached-worker-crashed-reason%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                 "WORKER-CRASHED-REASON")))))
+                                 "WORKER-CRASHED-REASON"))
+          %cached-kill-worker%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "KILL-WORKER"))
+          %cached-worker-process-info%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "WORKER-PROCESS-INFO")))))
 
 (defun %invalidate-proxy-cache ()
   "Reset all cached late-bound function references to NIL.
 Called by initialize-pool to ensure stale bindings from a previous
 image or pool lifecycle are cleared before re-verification."
   (setf %cached-get-or-assign% nil
+        %cached-find-session-worker% nil
         %cached-check-and-clear% nil
         %cached-worker-rpc% nil
         %cached-worker-crashed-sym% nil
-        %cached-worker-crashed-reason% nil))
+        %cached-worker-crashed-reason% nil
+        %cached-kill-worker% nil
+        %cached-worker-process-info% nil))
 
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.
@@ -254,12 +273,12 @@ TOCTOU race with concurrent requests for the same session."
         (with-lock-held (*active-requests-lock*)
           (remhash request-key *active-requests*))))))
 
-(defun cancel-request (request-id)
+(defun cancel-request (request-id &optional caller-session-id)
   "Cancel a proxied request by killing its worker.
-Looks up REQUEST-ID in the active-requests map, resolves the
-session's worker, and kills it.  The pool's crash recovery
-auto-spawns a replacement.
-Returns T if a matching request was found, NIL otherwise."
+Looks up REQUEST-ID in the active-requests map, validates the
+caller's session matches (if CALLER-SESSION-ID provided), sends
+SIGTERM to break in-flight RPC, then calls kill-worker for cleanup.
+Returns T if found and cancelled, NIL otherwise."
   (let ((request-key (princ-to-string request-id))
         (session-id nil))
     (with-lock-held (*active-requests-lock*)
@@ -270,17 +289,37 @@ Returns T if a matching request was found, NIL otherwise."
       (log-event :debug "proxy.cancel.not-found"
                  "request_id" request-key)
       (return-from cancel-request nil))
+    ;; M2: Cross-session validation
+    (when (and caller-session-id
+               (not (equal caller-session-id session-id)))
+      (log-event :warn "proxy.cancel.session-mismatch"
+                 "request_id" request-key
+                 "caller_session" caller-session-id
+                 "owner_session" session-id)
+      (return-from cancel-request nil))
     (log-event :info "proxy.cancel.killing-worker"
                "request_id" request-key
                "session" session-id)
     (handler-case
         (progn
           (%ensure-cached-bindings)
-          (let ((worker (funcall %cached-get-or-assign% session-id)))
-            (let ((kill-fn (fdefinition
-                            (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                      "KILL-WORKER"))))
-              (funcall kill-fn worker))
+          ;; M1: Read-only lookup, no spawn
+          (let ((worker (funcall %cached-find-session-worker% session-id)))
+            (unless worker
+              (log-event :debug "proxy.cancel.no-worker"
+                         "request_id" request-key
+                         "session" session-id)
+              (return-from cancel-request t))
+            ;; C1: SIGTERM first to break blocked RPC read.
+            ;; worker-rpc holds stream-lock for send+blocking-read.
+            ;; kill-worker also acquires stream-lock -> deadlock.
+            ;; SIGTERM breaks the TCP pipe, causing the blocked read
+            ;; to fail with stream-error, which releases the lock.
+            (let ((process (funcall %cached-worker-process-info% worker)))
+              (when (and process (sb-ext:process-alive-p process))
+                (ignore-errors (sb-ext:process-kill process 15))))
+            ;; Then kill-worker for full cleanup (socket close, state, reap)
+            (funcall %cached-kill-worker% worker)
             (log-event :info "proxy.cancel.worker-killed"
                        "request_id" request-key
                        "session" session-id)))

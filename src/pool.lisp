@@ -37,7 +37,9 @@
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings
-                #:%invalidate-proxy-cache)
+                #:%invalidate-proxy-cache
+                #:*active-requests*
+                #:*active-requests-lock*)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event)
@@ -59,7 +61,8 @@
            #:pool-shutting-down
            #:pool-capacity-exceeded
            #:pool-spawn-cancelled
-           #:*recovery-threads*))
+           #:*recovery-threads*
+           #:find-session-worker))
 
 (in-package #:cl-mcp/src/pool)
 
@@ -654,6 +657,9 @@ lock during potentially slow subprocess launches."
     ;; Shut down existing pool if running
     (when *pool-running*
       (shutdown-pool))
+    ;; Clear stale active-request entries from previous pool lifecycle
+    (bt:with-lock-held (*active-requests-lock*)
+      (clrhash *active-requests*))
     ;; Reset state under lock
     (bt:with-lock-held (*pool-lock*)
       (setf *affinity-map* (make-hash-table :test 'equal)
@@ -698,6 +704,9 @@ monitor and waits for any in-flight replenish thread before
 snapshotting and killing workers."
   (log-event :info "pool.shutting-down")
   (setf *pool-running* nil)
+  ;; Clear stale active-request entries so pool restart starts clean
+  (bt:with-lock-held (*active-requests-lock*)
+    (clrhash *active-requests*))
   ;; Wake health monitor immediately instead of waiting up to its poll interval.
   (bt:with-lock-held (*health-monitor-lock*)
     (%condition-broadcast *health-monitor-condvar*))
@@ -748,6 +757,16 @@ snapshotting and killing workers."
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- get-or-assign-worker
 ;;; ---------------------------------------------------------------------------
+
+(defun find-session-worker (session-id)
+  "Look up the worker bound to SESSION-ID without spawning.
+Returns the worker struct if bound and alive, NIL otherwise.
+Used by cancel-request to avoid spawning a worker just to kill it."
+  (bt:with-lock-held (*pool-lock*)
+    (let ((entry (gethash session-id *affinity-map*)))
+      (when (and entry (typep entry 'worker)
+                 (eq :bound (worker-state entry)))
+        entry))))
 
 (defun get-or-assign-worker (session-id)
   "Return the worker bound to SESSION-ID, assigning one if needed.

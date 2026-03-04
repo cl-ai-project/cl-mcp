@@ -4,37 +4,17 @@
 
 (defpackage #:cl-mcp/tests/pool-status-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/pool
-                #:*worker-pool-warmup*
-                #:*health-check-interval-seconds*
-                #:*shutdown-replenish-wait-seconds*
-                #:initialize-pool
-                #:shutdown-pool)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-tool-handler)
   (:import-from #:cl-mcp/src/state
-                #:make-state))
+                #:make-state)
+  (:import-from #:cl-mcp/tests/test-helpers
+                #:spawn-available-p
+                #:with-pool))
 
 (in-package #:cl-mcp/tests/pool-status-test)
-
-(defun spawn-available-p ()
-  "Check if we can spawn worker processes."
-  (ignore-errors
-    (let ((p (sb-ext:run-program "ros" '("version")
-               :search t :output :stream :wait nil)))
-      (prog1 (sb-ext:process-alive-p p)
-        (ignore-errors (sb-ext:process-kill p 15))
-        (ignore-errors (sb-ext:process-close p))))))
-
-(defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)
-  `(let ((*worker-pool-warmup* 0)
-         (*health-check-interval-seconds* ,health-check-interval)
-         (*shutdown-replenish-wait-seconds* 0.01d0))
-     (unwind-protect
-         (progn (initialize-pool) ,@body)
-       (shutdown-pool))))
 
 (deftest pool-status-tool-registered
   (testing "pool-status tool is registered in the tool registry"

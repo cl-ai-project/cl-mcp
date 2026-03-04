@@ -219,13 +219,14 @@ On second failure, return a hardcoded valid JSON-RPC error response."
 (defun %handle-cancel-notification (params)
   "Handle a notifications/cancelled message from the MCP client.
 Extracts requestId from PARAMS and calls cancel-request to kill
-the worker handling that request."
+the worker handling that request.  Passes *current-session-id*
+so cancel-request can validate cross-session ownership."
   (let ((request-id (and (hash-table-p params)
                          (gethash "requestId" params))))
     (when request-id
       (log-event :info "protocol.cancel-notification"
                  "request_id" request-id)
-      (cancel-request request-id)))
+      (cancel-request request-id *current-session-id*)))
   nil)
 
 (defun handle-notification (state method params)

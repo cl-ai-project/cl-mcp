@@ -14,14 +14,12 @@
                 #:make-state
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/pool
-                #:*worker-pool-warmup*
-                #:*health-check-interval-seconds*
-                #:*shutdown-replenish-wait-seconds*
-                #:initialize-pool
-                #:shutdown-pool
                 #:get-or-assign-worker)
   (:import-from #:cl-mcp/src/worker-client
                 #:worker-state #:worker-pid)
+  (:import-from #:cl-mcp/tests/test-helpers
+                #:spawn-available-p
+                #:with-pool)
   (:import-from #:bordeaux-threads
                 #:with-lock-held))
 
@@ -72,25 +70,6 @@
                      ht))
            (state (make-state)))
       (ok (null (handle-notification state "notifications/cancelled" params))))))
-
-;;; --- Integration helpers ---
-
-(defun spawn-available-p ()
-  "Check if we can spawn worker processes."
-  (ignore-errors
-    (let ((p (sb-ext:run-program "ros" '("version")
-               :search t :output :stream :wait nil)))
-      (prog1 (sb-ext:process-alive-p p)
-        (ignore-errors (sb-ext:process-kill p 15))
-        (ignore-errors (sb-ext:process-close p))))))
-
-(defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)
-  `(let ((*worker-pool-warmup* 0)
-         (*health-check-interval-seconds* ,health-check-interval)
-         (*shutdown-replenish-wait-seconds* 0.01d0))
-     (unwind-protect
-         (progn (initialize-pool) ,@body)
-       (shutdown-pool))))
 
 ;;; --- Integration test: full cancel flow ---
 
