@@ -41,6 +41,10 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/tools/define-tool
+                #:define-tool)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht #:text-content #:result)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
            #:*health-check-interval-seconds*
@@ -1031,3 +1035,33 @@ unrestricted REPL access bypassing MCP security policies."
                                        (symbol-name (worker-state w))))
           (vector-push-extend ht result))))
     result))
+
+(define-tool "pool-status"
+  :description "Return worker pool diagnostic information including per-worker
+details and pool-level summary.  No arguments required.
+Returns pool_running, total_workers, standby_count, bound_count,
+max_pool_size, warmup_target, and a workers array."
+  :args ()
+  :body
+  (let* ((running *pool-running*)
+         (workers (if running (pool-worker-info) (vector)))
+         (standby-count 0)
+         (bound-count 0))
+    (when running
+      (with-lock-held (*pool-lock*)
+        (setf standby-count (length *standby-workers*)
+              bound-count (- (length *all-workers*)
+                             (length *standby-workers*)))))
+    (result id
+            (make-ht "content"
+                     (text-content
+                      (format nil "Pool: ~D workers (~D bound, ~D standby)~@[ [stopped]~]"
+                              (length workers) bound-count standby-count
+                              (not running)))
+                     "pool_running" (if running t nil)
+                     "total_workers" (length workers)
+                     "standby_count" standby-count
+                     "bound_count" bound-count
+                     "max_pool_size" *max-pool-size*
+                     "warmup_target" *worker-pool-warmup*
+                     "workers" workers))))
