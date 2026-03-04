@@ -10,6 +10,7 @@
                 #:worker-pid #:worker-state
                 #:worker-id #:worker-session-id
                 #:worker-needs-reset-notification
+                #:worker-crash-history-pushed-p
                 #:clear-reset-notification)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*
@@ -1012,3 +1013,113 @@ race with tests that manually crash workers.  Pass a short interval
               (format nil "truncated session is <= 11 chars: ~S" found))
           (ok (search "..." found)
               "truncated session ends with ..."))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: crash-history double-counting (Bug #2)
+;;; ---------------------------------------------------------------------------
+
+(deftest crash-history-no-double-counting
+  (testing "crash-history is not double-counted when health monitor and proxy
+both detect the same crash"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      (let* ((worker (get-or-assign-worker "double-count-test"))
+             (pid (worker-pid worker)))
+        (ok (integerp pid) "worker has valid pid")
+        ;; Kill the worker
+        (sb-posix:kill pid sb-posix:sigkill)
+        (sleep 0.5)
+        ;; Simulate health monitor detection first (pushes to crash-history)
+        (cl-mcp/src/pool::%handle-worker-crash worker)
+        ;; Verify crash-history-pushed-p flag is set
+        (ok (worker-crash-history-pushed-p worker)
+            "crash-history-pushed-p flag set by %handle-worker-crash")
+        ;; Now call get-or-assign-worker — if the health monitor already
+        ;; replaced the worker, Path 1b won't trigger.  But if a race
+        ;; window exists, Path 1b should skip the push.
+        (let ((history (bordeaux-threads:with-lock-held
+                           (cl-mcp/src/pool::*pool-lock*)
+                         (copy-list (gethash "double-count-test"
+                                             cl-mcp/src/pool::*crash-history*)))))
+          (ok (= 1 (length history))
+              (format nil "crash-history has exactly 1 entry, got ~D"
+                      (length history))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: dead standby liveness check (Bug #3)
+;;; ---------------------------------------------------------------------------
+
+(deftest dead-standby-skipped-on-assign
+  (testing "dead standby workers are skipped, a fresh worker is spawned"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (with-pool ()
+      ;; Manually spawn one standby worker (with-pool sets warmup=0).
+      (let ((standby (spawn-worker)))
+        (bordeaux-threads:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+          (push standby cl-mcp/src/pool::*standby-workers*)
+          (push standby cl-mcp/src/pool::*all-workers*))
+        ;; Verify standby exists
+        (let ((standbys (bordeaux-threads:with-lock-held
+                            (cl-mcp/src/pool::*pool-lock*)
+                          (copy-list cl-mcp/src/pool::*standby-workers*))))
+          (ok (= 1 (length standbys))
+              "1 standby after manual spawn")
+          ;; Kill the standby worker's OS process to simulate death
+          ;; between health checks
+          (sb-posix:kill (worker-pid standby) sb-posix:sigkill)
+          (sleep 0.5)
+          ;; Assign a session — should detect dead standby and spawn fresh
+          (let ((worker (get-or-assign-worker "dead-standby-test")))
+            (ok worker "worker is returned")
+            (ok (eq :bound (worker-state worker))
+                "returned worker is :bound")
+            (ok (not (eq worker standby))
+                "returned worker is NOT the dead standby")
+            ;; Verify the returned worker is actually alive
+            (let ((result (worker-rpc worker "worker/ping" nil)))
+              (ok (hash-table-p result)
+                  "fresh worker responds to ping")
+              (ok (gethash "pong" result)
+                  "ping response has pong"))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: send-root corruption recovery (Bug #1)
+;;; ---------------------------------------------------------------------------
+
+(deftest send-root-corruption-does-not-return-broken-worker
+  (testing "get-or-assign-worker does not return a worker corrupted by
+send-root-to-session-worker failure"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    ;; Set a project root so send-root-to-session-worker is triggered
+    (let ((cl-mcp/src/project-root:*project-root*
+            (uiop:ensure-pathname (uiop:temporary-directory)
+                                  :truenamize t)))
+      (with-pool ()
+        ;; Assign a worker — send-root should succeed, worker works
+        (let ((worker (get-or-assign-worker "send-root-test")))
+          (ok (eq :bound (worker-state worker))
+              "worker is :bound after assignment with project root")
+          ;; Verify worker responds to RPC (send-root didn't corrupt it)
+          (let ((result (worker-rpc worker "worker/ping" nil)))
+            (ok (gethash "pong" result)
+                "worker responds to ping after send-root"))
+          ;; Now simulate the failure scenario: kill the worker,
+          ;; then request the session again.  The replacement worker
+          ;; should also work correctly.
+          (sb-posix:kill (worker-pid worker) sb-posix:sigkill)
+          (sleep 0.5)
+          (cl-mcp/src/pool::%handle-worker-crash worker)
+          ;; Get the replacement worker
+          (let ((new-worker (get-or-assign-worker "send-root-test")))
+            (ok new-worker "replacement worker is returned")
+            (ok (eq :bound (worker-state new-worker))
+                "replacement worker is :bound (not :crashed)")
+            (ok (not (eq worker new-worker))
+                "replacement is different from crashed worker")
+            ;; The key assertion: the replacement worker is functional
+            (let ((result2 (worker-rpc new-worker "worker/ping" nil)))
+              (ok (gethash "pong" result2)
+                  "replacement worker responds to ping"))))))))

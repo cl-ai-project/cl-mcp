@@ -38,7 +38,10 @@
            #:worker-crashed-reason
            #:worker-spawn-failed
            #:+max-json-line-bytes+
-           #:%read-line-limited))
+           #:%read-line-limited
+           #:worker-crash-history-pushed-p
+           #:*reaper-threads*
+           #:*reaper-threads-lock*))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -58,6 +61,13 @@ but does not hard-fail for forward compatibility.")
 
 (defvar *worker-id-lock* (bt:make-lock "worker-id-lock")
   "Lock protecting *worker-id-counter*.")
+
+(defvar *reaper-threads* nil
+  "List of active reaper threads spawned by %mark-worker-crashed.
+Each thread terminates and self-removes after reaping its process.")
+
+(defvar *reaper-threads-lock* (bt:make-lock "reaper-threads-lock")
+  "Lock protecting *reaper-threads*.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Conditions
@@ -135,14 +145,15 @@ Handles both LF and CRLF line endings."
   (process-info nil)
   (stream nil)
   (socket nil)
-  (stream-lock (bt:make-lock "worker-stream-lock"))
+  (stream-lock (make-lock "worker-stream-lock"))
   (tcp-port nil)
   (swank-port nil)
   (pid nil)
   (needs-reset-notification nil :type boolean)
   (session-id nil)
   (request-counter 0 :type integer)
-  (stderr-thread nil))
+  (stderr-thread nil)
+  (crash-history-pushed-p nil :type boolean))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — ID generation
@@ -399,6 +410,11 @@ the handshake fails, or authentication is rejected."
                        "tcp_port" tcp-port
                        "swank_port" (or swank-port "none")
                        "pid" pid)
+            ;; Close stdout pipe - no longer needed after handshake.
+            ;; Frees up an FD that would otherwise be held open for
+            ;; the entire worker lifetime.
+            (ignore-errors
+              (close (sb-ext:process-output process)))
             (setf socket (%connect-to-worker "127.0.0.1" tcp-port))
             ;; Authenticate with shared secret
             (let ((auth-stream (usocket:socket-stream socket)))
@@ -492,23 +508,34 @@ Returns nothing."
       ;; Reap the OS process in a background thread to avoid blocking
       ;; the caller.  process-close calls waitpid internally, which
       ;; blocks if the worker process is still alive.
-      (bt:make-thread
-       (lambda ()
-         ;; SIGTERM first, then wait up to 2s, then SIGKILL if needed
-         ;; (matches kill-worker's graceful shutdown pattern)
-         (ignore-errors
-           (when (sb-ext:process-alive-p process)
-             (sb-ext:process-kill process 15)
-             (loop repeat 20
-                   while (sb-ext:process-alive-p process)
-                   do (sleep 0.1))
-             (when (sb-ext:process-alive-p process)
-               (log-event :warn "worker.reaper.sigkill" "id" wid)
-               (sb-ext:process-kill process 9)
-               (sleep 0.2))))
-         (ignore-errors (sb-ext:process-wait process nil nil))
-         (ignore-errors (sb-ext:process-close process)))
-       :name (format nil "reap-worker-~A" wid)))
+      (let ((reaper-thread nil))
+        (setf reaper-thread
+              (bt:make-thread
+               (lambda ()
+                 (unwind-protect
+                     (progn
+                       ;; SIGTERM first, then wait up to 2s, then SIGKILL if needed
+                       ;; (matches kill-worker's graceful shutdown pattern)
+                       (ignore-errors
+                         (when (sb-ext:process-alive-p process)
+                           (sb-ext:process-kill process 15)
+                           (loop repeat 20
+                                 while (sb-ext:process-alive-p process)
+                                 do (sleep 0.1))
+                           (when (sb-ext:process-alive-p process)
+                             (log-event :warn "worker.reaper.sigkill" "id" wid)
+                             (sb-ext:process-kill process 9)
+                             (sleep 0.2))))
+                       (ignore-errors (sb-ext:process-wait process nil nil))
+                       (ignore-errors (sb-ext:process-close process)))
+                   ;; Self-remove from reaper thread list on completion
+                   (bt:with-lock-held (*reaper-threads-lock*)
+                     (setf *reaper-threads*
+                           (remove reaper-thread *reaper-threads*)))))
+               :name (format nil "reap-worker-~A" wid)))
+        ;; Register the thread before it can self-remove
+        (bt:with-lock-held (*reaper-threads-lock*)
+          (push reaper-thread *reaper-threads*))))
     (log-event :warn "worker.crashed"
                "id" (worker-id worker)
                "pid" (worker-pid worker)

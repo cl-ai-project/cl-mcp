@@ -21,6 +21,8 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:*log-context*)
+  (:import-from #:bordeaux-threads
+                #:make-thread)
   (:export #:start))
 
 (in-package #:cl-mcp/src/worker/main)
@@ -114,39 +116,35 @@ SIGTERM which cascades into nested errors when stderr is a broken pipe."
        (log-event :info "worker.sigterm" "pid" (%get-pid)))
      (sb-ext:exit :code 0 :abort t))))
 
-#+linux
-(defun %install-parent-death-signal ()
-  "Request SIGTERM when the parent process dies (Linux PR_SET_PDEATHSIG).
-Ensures the worker exits even if the parent is killed with SIGKILL or
-terminated by OOM killer.  After the prctl call, re-checks getppid to
-close the race window where the parent dies between fork and prctl."
-  (let ((parent-pid (sb-posix:getppid)))
-    (handler-case
-        (let ((rc (sb-alien:alien-funcall
-                   (sb-alien:extern-alien
-                    "prctl"
-                    (function sb-alien:int
-                              sb-alien:int sb-alien:unsigned-long))
-                   1    ; PR_SET_PDEATHSIG
-                   15))) ; SIGTERM
-          (cond
-            ((/= rc 0)
-             (log-event :warn "worker.pdeathsig-failed"
-                        "pid" (%get-pid) "rc" rc))
-            ((/= (sb-posix:getppid) parent-pid)
-             ;; Parent died between fork and prctl — exit immediately.
-             (log-event :warn "worker.parent-already-dead"
-                        "pid" (%get-pid)
-                        "original_ppid" parent-pid)
-             (sb-ext:exit :code 0 :abort t))
-            (t
-             (log-event :info "worker.pdeathsig-installed"
-                        "pid" (%get-pid)
-                        "parent_pid" parent-pid))))
-      (error (e)
-        (log-event :warn "worker.pdeathsig-failed"
-                   "pid" (%get-pid)
-                   "error" (princ-to-string e))))))
+(defun %start-parent-watchdog ()
+  "Start a background thread that monitors the parent process via getppid().
+Exits the worker when the parent dies (ppid changes to 1 or differs from
+the original).  This replaces PR_SET_PDEATHSIG which is unreliable when
+the worker is forked from a short-lived thread (the signal fires when
+the forking thread exits, not when the process exits).
+
+Polls every 2 seconds — slightly slower than PDEATHSIG but reliable
+regardless of which thread spawned the worker."
+  (let ((original-ppid (sb-posix:getppid)))
+    (when (= original-ppid 1)
+      ;; Already orphaned at startup.
+      (log-event :warn "worker.parent-already-dead"
+                 "pid" (%get-pid) "ppid" 1)
+      (sb-ext:exit :code 0 :abort t))
+    (log-event :info "worker.parent-watchdog.started"
+               "pid" (%get-pid) "parent_pid" original-ppid)
+    (make-thread
+     (lambda ()
+       (loop (sleep 2)
+             (let ((ppid (sb-posix:getppid)))
+               (when (or (= ppid 1) (/= ppid original-ppid))
+                 (ignore-errors
+                   (log-event :info "worker.parent-died"
+                              "pid" (%get-pid)
+                              "original_ppid" original-ppid
+                              "current_ppid" ppid))
+                 (sb-ext:exit :code 0 :abort t)))))
+     :name "parent-watchdog")))
 
 (defun start ()
   "Entry point for worker child processes.
@@ -165,7 +163,6 @@ Roswell REPL."
   (handler-case
       (progn
         (%install-signal-handlers)
-        #+linux (%install-parent-death-signal)
         (let ((wid (uiop/os:getenv "MCP_WORKER_ID")))
           (when (and wid (plusp (length wid)))
             (setf *log-context* (list "worker_id" wid))))
@@ -181,6 +178,7 @@ Roswell REPL."
             (let ((devnull (open #P"/dev/null" :direction :output
                                                :if-exists :append)))
               (setf *standard-output* devnull))
+            (%start-parent-watchdog)
             (start-accept-loop server))))
     (serious-condition (e)
       (ignore-errors
