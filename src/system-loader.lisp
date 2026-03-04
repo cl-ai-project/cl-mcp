@@ -1,7 +1,8 @@
 ;;;; src/system-loader.lisp
 ;;;;
 ;;;; MCP tool for loading ASDF systems with structured output.
-;;;; Solves three problems with raw ql:quickload via repl-eval:
+;;;; Uses Quicklisp when available, falls back to pure ASDF.
+;;;; Solves three problems with raw repl-eval loading:
 ;;;; 1. Staleness: force=true (default) clears loaded state before reloading
 ;;;; 2. Output noise: suppresses verbose compilation/load output
 ;;;; 3. Timeout: dedicated timeout with worker-thread pattern
@@ -158,7 +159,10 @@ or NIL (no timeout). Default is 120 seconds."
             (lambda ()
               (if clear-fasls
                   (asdf:load-system system-name :force t)
-                  (ql:quickload system-name :silent t)))))
+                  (if (find-package :ql)
+                      (funcall (find-symbol "QUICKLOAD" :ql)
+                               system-name :silent t)
+                      (asdf:load-system system-name))))))
          timeout-seconds)
       (let* ((elapsed-ms
                (round (* 1000 (/ (- (get-internal-real-time) start-time)
@@ -208,13 +212,13 @@ or NIL (no timeout). Default is 120 seconds."
   :description
   "Load an ASDF system with structured output and reload support.
 
-Solves three problems with using ql:quickload via repl-eval:
+Solves three problems with loading systems via repl-eval:
 1. Staleness: force=true (default) clears loaded state before reloading
 2. Output noise: suppresses verbose compilation/load output
 3. Timeout: dedicated timeout prevents hanging on large systems
 
-PREREQUISITE: The system must be findable by ASDF (in quicklisp paths or
-registered via asdf:load-asd).
+Uses Quicklisp when available, falls back to pure ASDF otherwise.
+The system must be findable by ASDF or Quicklisp.
 
 Examples:
   First-time load: system='my-project', force=false
