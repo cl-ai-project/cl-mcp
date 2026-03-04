@@ -286,18 +286,24 @@ before a valid handshake is found."
 (defun %connect-to-worker (host port)
   "Open a TCP connection to the worker at HOST:PORT.
 Returns the usocket object.  The stream is accessible via
-USOCKET:SOCKET-STREAM.  Uses a 10-second connection timeout to
-avoid blocking on OS TCP timeout (60-120s) when the worker listener
-is not yet ready.
+USOCKET:SOCKET-STREAM.  Uses a 10-second timeout via
+SB-EXT:WITH-TIMEOUT to avoid blocking on OS TCP timeout
+(60-120s) when the worker listener is not yet ready.
 
-IMPORTANT: We use :connection-timeout (not :timeout) because
-usocket's :timeout also sets SO_RCVTIMEO on the underlying socket
-via socket-make-stream.  A 10s read timeout would cause
-SB-SYS:IO-TIMEOUT on any worker operation that takes >10 seconds
-(e.g. repl-eval of (sleep 15)), falsely killing the worker."
-  (usocket:socket-connect host port
-                          :element-type 'character
-                          :connection-timeout 10))
+We intentionally avoid usocket's :timeout and :connection-timeout
+keyword arguments:
+  - :timeout sets SO_RCVTIMEO on the socket, causing
+    SB-SYS:IO-TIMEOUT on any worker operation >10s (PR #67 bug).
+  - :connection-timeout was added in usocket 0.8.x and is
+    unavailable in older versions (e.g. 0.7.x via Qlot).
+SB-EXT:WITH-TIMEOUT provides connect-phase timeout without
+either issue."
+  (handler-case
+      (sb-ext:with-timeout 10
+        (usocket:socket-connect host port :element-type 'character))
+    (sb-ext:timeout ()
+      (error "Connection to worker at ~A:~A timed out after 10s"
+             host port))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — JSON-RPC
