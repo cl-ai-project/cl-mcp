@@ -581,6 +581,11 @@
      (semantic-grep \"/path/to/project\" \"timeout\" :form-types '(\"defun\" \"defmethod\"))
      (semantic-grep \"/path/to/project\" \"emit\" :include-form nil)  ; signature only
      (semantic-grep \"/path/to/project\" \"defun\" :limit 10)  ; first 10 results"
+  ;; Validate the regex pattern upfront so an invalid pattern is reported
+  ;; once with a clear error, instead of being silently swallowed per-file.
+  (handler-case (cl-ppcre:create-scanner pattern)
+    (cl-ppcre:ppcre-syntax-error (e)
+      (error "Invalid regex pattern ~S: ~A" pattern e)))
   (let ((files (collect-target-files root-directory :recursive recursive))
         (all-results nil)
         (count 0))

@@ -25,6 +25,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
 | Run tests | `run-tests` | `system`, `test` (optional) |
+| Diagnose pool | `pool-status`  | (no args)          |
 
 **Minimal Workflow (experienced users):**
 1. `repl-eval` — prototype in REPL
@@ -44,6 +45,35 @@ Before file operations, set the project root:
 Call `fs-set-project-root` with `"."` (auto-resolves to absolute path) or an explicit absolute path. Verify with `fs-get-project-info` if needed.
 
 **If operations fail with "project root not set"**: Call `fs-set-project-root` first.
+
+## Worker Pool Architecture
+
+When the worker pool is enabled (default), tools run in two process types:
+
+**Parent process** (inline — shared across all sessions):
+- File tools: `fs-read-file`, `fs-write-file`, `fs-list-directory`, `fs-get-project-info`, `fs-set-project-root`
+- Lisp-aware reading/editing: `lisp-read-file`, `lisp-edit-form`, `lisp-check-parens`
+- Search: `clgrep-search`, `clhs-lookup`
+- Diagnostics: `pool-status`
+
+**Worker process** (isolated — one dedicated process per session):
+- `repl-eval`, `load-system`, `run-tests`
+- `code-find`, `code-describe`, `code-find-references`
+- `inspect-object`
+
+**Key guarantees:**
+- **Session affinity**: All tool calls within your session route to the same
+  dedicated worker. `load-system` followed by `code-find` works because both
+  execute in the same process with shared state.
+- **Crash recovery**: If a worker crashes, a replacement is spawned and bound
+  to your session automatically. The next tool call returns a one-time crash
+  notification; re-issue `load-system` to restore loaded systems.
+- **File edits are not auto-loaded**: `lisp-edit-form` writes to disk in the
+  parent process. The worker sees file changes only when you explicitly call
+  `load-system` or evaluate `(load "path")` via `repl-eval`.
+
+Disable the worker pool with `MCP_NO_WORKER_POOL=1` (all tools run inline in
+a single process).
 
 ## Core Philosophy: Incremental Development
 
@@ -91,7 +121,7 @@ EXPLORE ──→ EXPERIMENT ──→ REFINE ────────┘
 **Why prefer cl-mcp tools?**
 - `clgrep-search` returns form type, name, signature, and package context
 - Tools respect project root security policies
-- Maintain consistency with the running Lisp image
+- Maintain consistency with the Lisp runtime (parent process for file tools, dedicated worker for eval tools)
 
 ### Tool Selection
 
@@ -109,7 +139,7 @@ What do you need to do?
 │   └─ Other files ────────→ fs-read-file
 │
 ├─ LOAD SYSTEM
-│   └─ Load/reload ASDF system ──→ load-system (PREFERRED over repl-eval + ql:quickload)
+│   └─ Load/reload ASDF system ──→ load-system (PREFERRED over repl-eval + asdf:load-system)
 │
 ├─ EXECUTE
 │   ├─ Test expression ────→ repl-eval
@@ -253,10 +283,10 @@ Use `repl-eval` for:
 - Verifying changes immediately after editing.
 - (Optional) Compiling definitions to surface warnings early.
 
-**For loading ASDF systems, prefer `load-system`** over `(ql:quickload ...)` via `repl-eval`.
+**For loading ASDF systems, prefer `load-system`** over `(asdf:load-system ...)` via `repl-eval`.
 `load-system` handles staleness (force-reload), output suppression, and timeouts automatically.
 
-**WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They are lost if the server restarts. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
+**WARNING:** Definitions created via `repl-eval` are **TRANSIENT**. They exist only in your session's worker process and are lost if the server restarts or the worker crashes. After a worker crash, the server spawns a replacement automatically and returns a one-time crash notification on your next tool call; re-issue `load-system` to restore state. To make changes permanent, you MUST edit the file using `lisp-edit-form` or `fs-write-file` (for new files).
 
 **Object Inspection (with Preview):**
 When `repl-eval` returns a non-primitive result (list, hash-table, CLOS instance, etc.), the response includes:
@@ -425,6 +455,8 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 
 5. **Verify**: Re-evaluate or run tests.
 
+**Note:** `lisp-edit-form` writes to disk but does not reload the definition in the worker. Either re-evaluate the `defun` form via `repl-eval` (step 3 already does this) or call `load-system` to reload the entire system from disk.
+
 **Optional: Compile check** — `(compile 'my-function)` surfaces warnings early. Check `stderr`.
 
 ### Scenario: Debugging
@@ -559,6 +591,7 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
 ### Scenario: Finishing / Pre-PR Check
 
 When you are in a “finish” phase (ready to run the full suite and stop iterating), prefer compiling the whole system from disk rather than compiling individual functions.
+This recompiles from disk in the worker, picking up all file changes made via `lisp-edit-form`.
 
 1. **Compile whole system:** Force a full recompile and inspect warnings:
    ```json
@@ -669,6 +702,16 @@ When primary tools fail or are insufficient:
 3. **Clear definition:** Use `(fmakunbound 'symbol)` if needed
 4. **Prefer file edits:** Use `lisp-edit-form` for persistent changes
 
+### Worker Crashed / State Lost
+**Symptom:** A tool call returns a crash notification, or previously loaded systems and REPL definitions are gone.
+
+**Diagnosis:** The worker process assigned to your session crashed and was replaced.
+
+**Solutions:**
+1. **Re-load your system:** `load-system` to restore packages and definitions in the new worker
+2. **Check pool health:** Use `pool-status` (no arguments) to see worker states
+3. **If crashes repeat:** The circuit breaker may trip after 3 crashes in 5 minutes. Check server logs for the root cause (e.g., out-of-memory, infinite loop)
+
 ### Parenthesis Mismatch
 **Symptom:** Evaluation fails with "unexpected end of file" or similar
 
@@ -695,7 +738,7 @@ When exploring, batch independent operations:
 - **Don't re-read:** Cache file contents mentally within a task
 
 ### REPL Efficiency
-- **Load once:** Use `load-system` at session start, not repeatedly
+- **Load once per session:** Use `load-system` at session start, not repeatedly. Each session has its own worker with independent state; loading in one session does not affect others.
 - **Batch evals:** Combine related expressions in one `repl-eval` call
 - **Compile late:** Only compile when implementation stabilizes
 

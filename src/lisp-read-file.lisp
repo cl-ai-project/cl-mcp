@@ -197,45 +197,61 @@ For defmethod, includes qualifiers like :before, :after, :around."
                    (incf comment))))))
     (values source comment blank)))
 
-(defun %format-lisp-file
-       (text name-scanner content-scanner include-comments comment-context
-        &key readtable)
+(defun %format-lisp-file (text name-scanner content-scanner include-comments
+                          comment-context &key readtable)
   (multiple-value-bind (source-lines-count comment-lines blank-lines)
       (%line-stats text)
     (let* ((nodes (parse-top-level-forms text :readtable readtable))
            (line-width (%line-number-width source-lines-count))
            (expanded 0)
            (total-forms 0)
+           (*package* *package*)
            (display
             (with-output-to-string (out)
-              (let ((pending-comments 'nil))
+              (let ((pending-comments nil))
                 (dolist (node nodes)
                   (cond
-                   ((and include-comments (%comment-node-p node))
-                    (let ((comment
-                           (ensure-trailing-newline
-                            (%comment-text node text))))
-                      (cond
-                       ((string= comment-context "all")
-                        (write-string comment out))
-                       ((string= comment-context "preceding")
-                        (push comment pending-comments)))))
-                   ((and (typep node 'cst-node)
-                         (eq (cst-node-kind node) :expr))
-                    (incf total-forms)
-                    (when (and include-comments pending-comments)
-                      (dolist (comment (nreverse pending-comments))
-                        (write-string comment out))
-                      (setf pending-comments 'nil))
-                    (multiple-value-bind (line expanded?)
-                        (%format-lisp-form node name-scanner content-scanner
-                         line-width)
-                      (when expanded? (incf expanded))
-                      (write-string (ensure-trailing-newline line) out)))
-                   (t (setf pending-comments 'nil))))
-                (when
-                    (and include-comments (string/= comment-context "none")
-                         pending-comments)
+                    ((and include-comments (%comment-node-p node))
+                     (let ((comment
+                            (ensure-trailing-newline
+                             (%comment-text node text))))
+                       (cond
+                         ((string= comment-context "all")
+                          (write-string comment out))
+                         ((string= comment-context "preceding")
+                          (push comment pending-comments)))))
+                    ((and (typep node 'cst-node)
+                          (eq (cst-node-kind node) :expr))
+                     (incf total-forms)
+                     (when (and include-comments pending-comments)
+                       (dolist (comment (nreverse pending-comments))
+                         (write-string comment out))
+                       (setf pending-comments nil))
+                     (multiple-value-bind (line expanded?)
+                         (%format-lisp-form node name-scanner
+                                            content-scanner line-width)
+                       (when expanded? (incf expanded))
+                       (write-string (ensure-trailing-newline line) out))
+                     ;; Track in-package to set *package* for correct
+                     ;; symbol printing of subsequent forms.
+                     (let* ((form (cst-node-value node))
+                            (head (and (consp form) (car form))))
+                       (when (and (symbolp head)
+                                  (string= (symbol-name head) "IN-PACKAGE")
+                                  (consp (cdr form)))
+                         (let* ((designator (second form))
+                                (pkg-name
+                                 (cond ((stringp designator) designator)
+                                       ((symbolp designator)
+                                        (symbol-name designator)))))
+                           (when pkg-name
+                             (let ((pkg (find-package pkg-name)))
+                               (when pkg
+                                 (setf *package* pkg))))))))
+                    (t (setf pending-comments nil))))
+                (when (and include-comments
+                           (string/= comment-context "none")
+                           pending-comments)
                   (dolist (comment (nreverse pending-comments))
                     (write-string comment out)))))))
       (values display
@@ -247,7 +263,6 @@ For defmethod, includes qualifiers like :before, :after, :around."
                       (gethash "blank_lines" meta) blank-lines
                       (gethash "source_lines" meta) source-lines-count)
                 meta)))))
-
 
 (defun %read-lines-slice (pathname offset limit)
   "Return three values: sliced text, truncated?, and total line count."

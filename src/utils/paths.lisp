@@ -70,35 +70,54 @@ If RELATIVE-TO is NIL, uses *project-root* as the base."
 
 (declaim (ftype (function ((or string pathname)) (or null pathname))
                 allowed-read-path))
+
 (defun allowed-read-path (pn)
   "Return PN (as absolute pathname) if readable per policy, else NIL.
-Allows project-root subpaths and source dirs of registered ASDF systems."
+Allows project-root subpaths and source dirs of registered ASDF systems.
+Resolves symlinks via TRUENAME before containment checks to prevent
+symlink-based path traversal."
   (ensure-project-root)
   (let* ((abs (canonical-path pn))
-         (normalized-abs (if (uiop/filesystem:directory-exists-p abs)
-                             (uiop/pathname:ensure-directory-pathname abs)
-                             abs))
-         (project-ok (path-inside-p normalized-abs
-                                    (uiop/pathname:ensure-directory-pathname *project-root*))))
+         ;; Resolve symlinks to get real filesystem path
+         (resolved (or (ignore-errors (truename abs)) abs))
+         (normalized-abs (if (uiop/filesystem:directory-exists-p resolved)
+                             (uiop/pathname:ensure-directory-pathname resolved)
+                             resolved))
+         (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
+         ;; Also resolve project root symlinks for consistent comparison
+         (resolved-project-dir (or (ignore-errors
+                                    (uiop/pathname:ensure-directory-pathname
+                                     (truename project-dir)))
+                                   project-dir))
+         (project-ok (path-inside-p normalized-abs resolved-project-dir)))
     (when project-ok
       (return-from allowed-read-path normalized-abs))
-    ;; Check ASDF system directories
+    ;; Check ASDF system directories (also resolve symlinks)
     (let ((systems (asdf/system-registry:registered-systems)))
       (dolist (name systems)
-        (let ((dir (ignore-errors (asdf/system:system-source-directory name))))
-          (when (and dir (path-inside-p normalized-abs dir))
+        (let* ((dir (ignore-errors (asdf/system:system-source-directory name)))
+               (resolved-dir (when dir
+                               (or (ignore-errors (truename dir)) dir))))
+          (when (and resolved-dir (path-inside-p normalized-abs resolved-dir))
             (return-from allowed-read-path normalized-abs)))))
     nil))
 
 (declaim (ftype (function ((or string pathname)) pathname) ensure-write-path))
+
 (defun ensure-write-path (path)
   "Ensure PATH is relative to project root and return absolute pathname.
+Resolves symlinks via TRUENAME to prevent symlink-based path traversal.
 Signals an error if outside project root or absolute."
   (ensure-project-root)
   (let* ((pn (uiop/pathname:ensure-pathname path :want-relative t))
          (abs (canonical-path pn :relative-to *project-root*))
-         (real (or (ignore-errors (truename abs)) abs)))
-    (unless (path-inside-p real (uiop/pathname:ensure-directory-pathname *project-root*))
+         (real (or (ignore-errors (truename abs)) abs))
+         (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
+         (resolved-project-dir (or (ignore-errors
+                                    (uiop/pathname:ensure-directory-pathname
+                                     (truename project-dir)))
+                                   project-dir)))
+    (unless (path-inside-p real resolved-project-dir)
       (error "Write path ~A is outside project root" path))
     real))
 

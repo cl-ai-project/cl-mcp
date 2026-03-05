@@ -57,6 +57,8 @@
                 #:sexp-join
                 #:sexp-show-structure
                 #:sexp-get-enclosing))
+  (:import-from #:cl-mcp/src/tools/pool-status
+                #:pool-status))
 
 (in-package #:cl-mcp/src/tools/all)
 

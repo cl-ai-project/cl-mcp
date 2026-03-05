@@ -2,14 +2,16 @@
 
 ;; Tell ASDF that eclector.parse-result package is provided by eclector
 (asdf:register-system-packages "eclector"
-                               '(:eclector.parse-result))
+                               '(:eclector.parse-result
+                                 :eclector.reader
+                                 :eclector.base))
 
 (asdf:defsystem "cl-mcp"
   :class :package-inferred-system
   :description "Model Context Protocol server for Common Lisp"
   :author "cxxxr, Satoshi Imai"
   :license "MIT"
-  :version "1.0.0"
+  :version "2.0.0"
   :depends-on ("alexandria"
                "cl-ppcre"
                "yason"

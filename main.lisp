@@ -51,6 +51,7 @@
   (:import-from #:cl-mcp/src/http
                 #:*http-server*
                 #:*http-server-port*
+                #:*http-auth-token*
                 #:http-server-running-p
                 #:start-http-server
                 #:stop-http-server)
@@ -79,6 +80,15 @@
                 #:sexp-join
                 #:sexp-show-structure
                 #:sexp-get-enclosing)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/pool
+                #:*worker-pool-warmup*
+                #:*max-pool-size*
+                #:initialize-pool
+                #:shutdown-pool
+                #:broadcast-root-to-workers
+                #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:run
@@ -148,8 +158,17 @@
            ;; HTTP server (Streamable HTTP transport)
            #:*http-server*
            #:*http-server-port*
+           #:*http-auth-token*
            #:http-server-running-p
            #:start-http-server
-           #:stop-http-server))
+           #:stop-http-server
+           ;; Worker pool
+           #:*use-worker-pool*
+           #:*worker-pool-warmup*
+           #:*max-pool-size*
+           #:initialize-pool
+           #:shutdown-pool
+           #:broadcast-root-to-workers
+           #:send-root-to-session-worker))
 
 (in-package #:cl-mcp/main)
