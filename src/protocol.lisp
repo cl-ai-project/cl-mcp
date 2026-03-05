@@ -226,7 +226,11 @@ so cancel-request can validate cross-session ownership."
     (when request-id
       (log-event :info "protocol.cancel-notification"
                  "request_id" request-id)
-      (cancel-request request-id *current-session-id*)))
+      ;; Wrap in ignore-errors so any failure in the cancel path cannot
+      ;; propagate to process-json-line's handler-case, which would
+      ;; generate a JSON-RPC error response for a notification —
+      ;; violating the spec ("Server MUST NOT reply to a Notification").
+      (ignore-errors (cancel-request request-id *current-session-id*))))
   nil)
 
 (defun handle-notification (state method params)

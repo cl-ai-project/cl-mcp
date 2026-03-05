@@ -43,10 +43,6 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/tools/define-tool
-                #:define-tool)
-  (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:text-content #:result)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
            #:*health-check-interval-seconds*
@@ -62,7 +58,8 @@
            #:pool-capacity-exceeded
            #:pool-spawn-cancelled
            #:*recovery-threads*
-           #:find-session-worker))
+           #:find-session-worker
+           #:pool-status-info))
 
 (in-package #:cl-mcp/src/pool)
 
@@ -1055,13 +1052,10 @@ unrestricted REPL access bypassing MCP security policies."
           (vector-push-extend ht result))))
     result))
 
-(define-tool "pool-status"
-  :description "Return worker pool diagnostic information including per-worker
-details and pool-level summary.  No arguments required.
-Returns pool_running, total_workers, standby_count, bound_count,
-max_pool_size, warmup_target, and a workers array."
-  :args ()
-  :body
+(defun pool-status-info ()
+  "Return a hash-table with pool diagnostic information.
+Keys: pool_running, total_workers, standby_count, bound_count,
+max_pool_size, warmup_target, workers (vector of per-worker hashes)."
   (let* ((running *pool-running*)
          (workers (if running (pool-worker-info) (vector)))
          (standby-count 0)
@@ -1071,16 +1065,12 @@ max_pool_size, warmup_target, and a workers array."
         (setf standby-count (length *standby-workers*)
               bound-count (- (length *all-workers*)
                              (length *standby-workers*)))))
-    (result id
-            (make-ht "content"
-                     (text-content
-                      (format nil "Pool: ~D workers (~D bound, ~D standby)~@[ [stopped]~]"
-                              (length workers) bound-count standby-count
-                              (not running)))
-                     "pool_running" (if running t nil)
-                     "total_workers" (length workers)
-                     "standby_count" standby-count
-                     "bound_count" bound-count
-                     "max_pool_size" *max-pool-size*
-                     "warmup_target" *worker-pool-warmup*
-                     "workers" workers))))
+    (let ((info (make-hash-table :test 'equal)))
+      (setf (gethash "pool_running" info) (if running t nil)
+            (gethash "total_workers" info) (length workers)
+            (gethash "standby_count" info) standby-count
+            (gethash "bound_count" info) bound-count
+            (gethash "max_pool_size" info) *max-pool-size*
+            (gethash "warmup_target" info) *worker-pool-warmup*
+            (gethash "workers" info) workers)
+      info)))

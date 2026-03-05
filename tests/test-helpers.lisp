@@ -16,12 +16,13 @@
 (in-package #:cl-mcp/tests/test-helpers)
 
 (defun spawn-available-p ()
-  "Check if we can spawn worker processes."
+  "Check if we can spawn worker processes.
+Uses :wait t and checks exit code to avoid a TOCTOU race where
+the short-lived process exits before process-alive-p is called."
   (ignore-errors
     (let ((p (sb-ext:run-program "ros" '("version")
-               :search t :output :stream :wait nil)))
-      (prog1 (sb-ext:process-alive-p p)
-        (ignore-errors (sb-ext:process-kill p 15))
+               :search t :output :stream :wait t)))
+      (prog1 (zerop (sb-ext:process-exit-code p))
         (ignore-errors (sb-ext:process-close p))))))
 
 (defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)

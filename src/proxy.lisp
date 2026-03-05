@@ -85,7 +85,7 @@ arguments hash-table.  ID is the JSON-RPC request id."
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON")
     ("CL-MCP/SRC/WORKER-CLIENT" . "KILL-WORKER")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-PROCESS-INFO"))
+    ("CL-MCP/SRC/WORKER-CLIENT" . "SIGNAL-WORKER-TERMINATE"))
   "Package/symbol pairs used by proxy-to-worker at runtime.
 Verified at pool initialization to detect stale strings early.")
 
@@ -139,8 +139,8 @@ all unresolvable symbols."
   "Cached fdefinition for WORKER-CLIENT:WORKER-CRASHED-REASON.")
 (defvar %cached-kill-worker% nil
   "Cached fdefinition for WORKER-CLIENT:KILL-WORKER.")
-(defvar %cached-worker-process-info% nil
-  "Cached fdefinition for WORKER-CLIENT:WORKER-PROCESS-INFO.")
+(defvar %cached-signal-worker-terminate% nil
+  "Cached fdefinition for WORKER-CLIENT:SIGNAL-WORKER-TERMINATE.")
 
 (defun %ensure-cached-bindings ()
   "Populate the cached function bindings on first use.  Called once
@@ -162,9 +162,9 @@ per image after verify-proxy-bindings has validated the symbols."
                                  "WORKER-CRASHED-REASON"))
           %cached-kill-worker%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "KILL-WORKER"))
-          %cached-worker-process-info%
+          %cached-signal-worker-terminate%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                 "WORKER-PROCESS-INFO")))))
+                                 "SIGNAL-WORKER-TERMINATE")))))
 
 (defun %invalidate-proxy-cache ()
   "Reset all cached late-bound function references to NIL.
@@ -177,7 +177,7 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-crashed-sym% nil
         %cached-worker-crashed-reason% nil
         %cached-kill-worker% nil
-        %cached-worker-process-info% nil))
+        %cached-signal-worker-terminate% nil))
 
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.
@@ -281,22 +281,26 @@ SIGTERM to break in-flight RPC, then calls kill-worker for cleanup.
 Returns T if found and cancelled, NIL otherwise."
   (let ((request-key (princ-to-string request-id))
         (session-id nil))
+    ;; Look up without removing — validate ownership first.
     (with-lock-held (*active-requests-lock*)
-      (setf session-id (gethash request-key *active-requests*))
-      (when session-id
-        (remhash request-key *active-requests*)))
+      (setf session-id (gethash request-key *active-requests*)))
     (unless session-id
       (log-event :debug "proxy.cancel.not-found"
                  "request_id" request-key)
       (return-from cancel-request nil))
-    ;; M2: Cross-session validation
+    ;; Cross-session validation: reject if caller doesn't own this request.
     (when (and caller-session-id
                (not (equal caller-session-id session-id)))
       (log-event :warn "proxy.cancel.session-mismatch"
                  "request_id" request-key
                  "caller_session" caller-session-id
-                 "owner_session" session-id)
+                 "owner_session" (if (> (length session-id) 8)
+                                     (subseq session-id 0 8)
+                                     session-id))
       (return-from cancel-request nil))
+    ;; Validation passed — remove entry before killing worker.
+    (with-lock-held (*active-requests-lock*)
+      (remhash request-key *active-requests*))
     (log-event :info "proxy.cancel.killing-worker"
                "request_id" request-key
                "session" session-id)
@@ -315,9 +319,7 @@ Returns T if found and cancelled, NIL otherwise."
             ;; kill-worker also acquires stream-lock -> deadlock.
             ;; SIGTERM breaks the TCP pipe, causing the blocked read
             ;; to fail with stream-error, which releases the lock.
-            (let ((process (funcall %cached-worker-process-info% worker)))
-              (when (and process (sb-ext:process-alive-p process))
-                (ignore-errors (sb-ext:process-kill process 15))))
+            (funcall %cached-signal-worker-terminate% worker)
             ;; Then kill-worker for full cleanup (socket close, state, reap)
             (funcall %cached-kill-worker% worker)
             (log-event :info "proxy.cancel.worker-killed"

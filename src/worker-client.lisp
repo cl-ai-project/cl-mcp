@@ -41,7 +41,8 @@
            #:%read-line-limited
            #:worker-crash-history-pushed-p
            #:*reaper-threads*
-           #:*reaper-threads-lock*))
+           #:*reaper-threads-lock*
+           #:signal-worker-terminate))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -597,6 +598,17 @@ without marking the worker as crashed."
 ;;; ---------------------------------------------------------------------------
 ;;; Public API — kill
 ;;; ---------------------------------------------------------------------------
+
+(defun signal-worker-terminate (worker)
+  "Send SIGTERM to the worker's OS process to break its TCP pipe.
+Used by cancel-request before kill-worker: SIGTERM causes the
+blocked read in worker-rpc to fail with stream-error, releasing
+stream-lock so kill-worker can acquire it without deadlocking.
+Returns T if signal was sent, NIL if process was already dead."
+  (let ((process (worker-process-info worker)))
+    (when (and process (sb-ext:process-alive-p process))
+      (ignore-errors (sb-ext:process-kill process 15))
+      t)))
 
 (defun kill-worker (worker)
   "Terminate the worker process and clean up resources.
