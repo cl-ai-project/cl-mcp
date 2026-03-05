@@ -4,7 +4,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:*project-root-lock*)
+  (:import-from #:bordeaux-threads #:with-lock-held)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content #:rpc-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -25,6 +27,12 @@
                 #:directory
                 #:directory-exists-p
                 #:absolute-pathname-p)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*
+                #:*current-session-id*)
+  (:import-from #:cl-mcp/src/pool
+                #:pool-worker-info
+                #:send-root-to-session-worker)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
   (:export #:fs-resolve-read-path
@@ -88,15 +96,26 @@ Returns the content string."
       text)))
 
 (defun %write-string-to-file (pn content)
+  "Write CONTENT to PN atomically via write-to-temp-then-rename.
+On failure the original file is preserved."
   (uiop/filesystem::ensure-directories-exist pn)
-  (with-open-file (out pn
-                       :direction :output
-                       :if-exists :supersede
-                       :if-does-not-exist :create
-                       :element-type 'character)
-    (write-string content out)
-    (finish-output out))
-  t)
+  (let ((tmp (make-pathname :name (format nil ".~A.tmp" (pathname-name pn))
+                            :type (pathname-type pn)
+                            :defaults pn)))
+    (unwind-protect
+         (progn
+           (with-open-file (out tmp
+                                :direction :output
+                                :if-exists :supersede
+                                :if-does-not-exist :create
+                                :element-type 'character)
+             (write-string content out)
+             (finish-output out))
+           (rename-file tmp pn)
+           t)
+      ;; Clean up temp file on failure
+      (when (probe-file tmp)
+        (ignore-errors (delete-file tmp))))))
 
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
@@ -199,6 +218,8 @@ Returns a hash-table with keys:
         (when (and cwd (uiop:subpathp cwd root))
           (setf (gethash "relative_cwd" h)
                 (uiop:native-namestring (uiop:enough-pathname cwd root)))))
+      (when *use-worker-pool*
+        (setf (gethash "workers" h) (pool-worker-info)))
       h)))
 
 (defun fs-set-project-root (path)
@@ -208,35 +229,46 @@ Returns a hash-table with updated path information:
   - cwd: the new current working directory
   - previous_root: the previous project root path (or (not set) if was nil)
   - status: confirmation message"
-  (unless (stringp path)
-    (error "path must be a string"))
+  (unless (stringp path) (error "path must be a string"))
+  (when (string= (string-trim '(#\Space #\Tab) path) "")
+    (error "path must not be empty"))
   (let* ((prev-root *project-root*)
-         (requested (uiop:ensure-directory-pathname path))
-         (base (ignore-errors (uiop:getcwd)))
-         (temp-root (if (uiop:absolute-pathname-p requested)
-                        requested
-                        (uiop:merge-pathnames* requested base))))
-    (unless (uiop:directory-exists-p temp-root)
+         (requested (uiop/pathname:ensure-directory-pathname path))
+         (base (ignore-errors (uiop/os:getcwd)))
+         (temp-root
+          (if (uiop/pathname:absolute-pathname-p requested)
+              requested
+              (uiop/pathname:merge-pathnames* requested base))))
+    (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
-    ;; Convert to absolute path using truename
     (let ((new-root (truename temp-root)))
-      ;; Update the project root parameter
-      (setf *project-root* new-root)
-      ;; Change the current working directory
-      (uiop:chdir new-root)
-      (setf *default-pathname-defaults*
-            (uiop:ensure-directory-pathname new-root))
-      (log-event :info "fs.set-project-root"
-                 "previous" (if prev-root (namestring prev-root) "(not set)")
-                 "new" (namestring new-root))
-      ;; Return updated path information
+      ;; C2: Reject overly broad roots that would disable the security sandbox
+      (let ((root-str (namestring new-root)))
+        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
+          (error "Refusing to set project root to ~A — too broad" root-str)))
+      ;; C3: Atomic multi-step mutation under lock
+      (bt:with-lock-held (*project-root-lock*)
+        (setf *project-root* new-root)
+        (uiop/os:chdir new-root)
+        (setf *default-pathname-defaults*
+                (uiop/pathname:ensure-directory-pathname new-root)))
+      (log-event :info "fs.set-project-root" "previous"
+       (if prev-root
+           (namestring prev-root)
+           "(not set)")
+       "new" (namestring new-root))
+      (when *use-worker-pool*
+        (ignore-errors
+         (send-root-to-session-worker *current-session-id* new-root)))
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "project_root" h) (namestring new-root)
-              (gethash "cwd" h) (namestring (uiop:getcwd))
+              (gethash "cwd" h) (namestring (uiop/os:getcwd))
               (gethash "previous_root" h)
-              (if prev-root (namestring prev-root) "(not set)")
+                (if prev-root
+                    (namestring prev-root)
+                    "(not set)")
               (gethash "status" h)
-              (format nil "Project root set to ~A" (namestring new-root)))
+                (format nil "Project root set to ~A" (namestring new-root)))
         h))))
 
 (define-tool "fs-read-file"
@@ -293,7 +325,16 @@ ASDF system"))
   :body
   (let ((entries (fs-list-directory path)))
     (result id
-            (make-ht "content" (text-content (format nil "~D entries" (length entries)))
+            (make-ht "content" (text-content
+                                (with-output-to-string (s)
+                                  (format s "~D entries in ~A~%" (length entries) path)
+                                  (loop for e across entries
+                                      do (if (hash-table-p e)
+                                             (format s "~A ~A~%"
+                                                     (if (equal (gethash "type" e) "directory")
+                                                         "[dir] " "[file]")
+                                                     (gethash "name" e))
+                                             (format s "~A~%" e)))))
                      "entries" entries
                      "path" path))))
 
@@ -303,16 +344,20 @@ path resolution context."
   :args ()
   :body
   (let* ((info (fs-get-project-info))
-         (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A"
+         (workers (gethash "workers" info))
+         (summary (format nil "Project root: ~A~%CWD: ~A~%Source: ~A~@[~%Workers: ~A active~]"
                           (gethash "project_root" info)
                           (or (gethash "cwd" info) "(none)")
-                          (gethash "project_root_source" info))))
+                          (gethash "project_root_source" info)
+                          (when (and workers (arrayp workers) (plusp (length workers)))
+                            (length workers)))))
     (result id
             (make-ht "content" (text-content summary)
                      "project_root" (gethash "project_root" info)
                      "cwd" (gethash "cwd" info)
                      "project_root_source" (gethash "project_root_source" info)
-                     "relative_cwd" (gethash "relative_cwd" info)))))
+                     "relative_cwd" (gethash "relative_cwd" info)
+                     "workers" (gethash "workers" info)))))
 
 (define-tool "fs-set-project-root"
   :description "Set the server's project root directory to the specified path.

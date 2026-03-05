@@ -5,7 +5,9 @@
 
 (defpackage #:cl-mcp/src/project-root
   (:use #:cl)
-  (:export #:*project-root*))
+  (:import-from #:bordeaux-threads #:make-lock)
+  (:export #:*project-root*
+           #:*project-root-lock*))
 
 (in-package #:cl-mcp/src/project-root)
 
@@ -15,3 +17,6 @@
       (uiop/pathname:ensure-directory-pathname env-root)))
   "Absolute pathname of the project root.
 Set via MCP_PROJECT_ROOT environment variable or fs-set-project-root tool.")
+
+(defvar *project-root-lock* (bt:make-lock "project-root-lock")
+  "Lock protecting multi-step mutations of *project-root* and related globals.")

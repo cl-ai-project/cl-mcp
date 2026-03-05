@@ -42,7 +42,9 @@
   (:import-from #:cl-mcp/src/test-runner
                 #:run-tests)
   (:import-from #:cl-mcp/src/system-loader
-                #:load-system))
+                #:load-system)
+  (:import-from #:cl-mcp/src/tools/pool-status
+                #:pool-status))
 
 (in-package #:cl-mcp/src/tools/all)
 

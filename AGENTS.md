@@ -9,6 +9,12 @@ The core system lives under `src/`, grouped by responsibility (`log`, `repl`, `p
 ## Build, Test, and Development Commands
 Use cl-mcp REPL, invoke individual suites with `(rove:run 'cl-mcp/tests/<package>)` via `repl-eval` so tests run inside the agent without shelling out.
 
+### Temporary Debug Logging
+- When cl-mcp shows unintended behavior or hits errors that are hard to diagnose, record each occurrence to a temp file immediately.
+- Use a per-session temp log (for example, `/tmp/cl-mcp-debug-<timestamp>.log`) and append entries instead of overwriting.
+- For every entry, include at least: timestamp, command/tool invocation, relevant inputs, observed error/output, and stack trace or restart information when available.
+- Redact secrets before writing logs, and reference the temp log in follow-up debugging notes, issues, or PRs.
+
 ### Running Individual Tests
 - From the MCP REPL, wrap the test invocation so stdout is captured:  
   `(with-output-to-string (*standard-output*) (rove:run-test 'cl-mcp/tests/integration-test::repl-eval-printlength))`

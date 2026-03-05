@@ -3,7 +3,9 @@
 (defpackage #:cl-mcp/tests/system-loader-test
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/system-loader
-                #:load-system))
+                #:load-system)
+  (:import-from #:cl-mcp/src/system-loader-core
+                #:%load-with-timeout))
 
 (in-package #:cl-mcp/tests/system-loader-test)
 
@@ -36,7 +38,7 @@
     ;; Use %load-with-timeout directly with a thunk that sleeps well beyond
     ;; the polling window to guarantee the worker is still alive at deadline.
     (multiple-value-bind (result-list timed-out-p errored-p)
-        (cl-mcp/src/system-loader::%load-with-timeout
+        (%load-with-timeout
          (lambda () (sleep 10) :never-reached)
          0.05)
       (ok timed-out-p "should report timeout")
@@ -71,14 +73,15 @@
 
 (deftest timeout-returns-completed-work
   (testing "worker completing within polling granularity returns success, not timeout"
-    ;; Keep this test stable on slower CI runners.
-    ;; timeout-seconds=0.0501 rounds up to two 50ms polling intervals
-    ;; (about 100ms effective). The worker sleeps 60ms, so it exceeds the
-    ;; nominal timeout but still completes before the rounded polling deadline.
+    ;; timeout=0.001s → ceiling(0.001/0.05)=1 → effective deadline ≈ 50ms.
+    ;; Worker sleeps 10ms, exceeding the nominal 1ms timeout but finishing
+    ;; well before the 50ms polling deadline (~40ms slack).  This avoids
+    ;; flaky failures on slow CI runners (macOS) where the previous 30ms
+    ;; slack was insufficient.
     (multiple-value-bind (result-list timed-out-p errored-p)
-        (cl-mcp/src/system-loader::%load-with-timeout
-         (lambda () (sleep 0.06) :done)
-         0.0501)
+        (%load-with-timeout
+         (lambda () (sleep 0.01) :done)
+         0.001)
       (ok (not timed-out-p) "completed work should not be reported as timeout")
       (ok (not errored-p))
       (ok (equal result-list '(:done))))))

@@ -688,3 +688,23 @@ then clean up."
           (ok (null (search "(* x 2)" updated)))
           ;; First method (string) should be untouched
           (ok (search "(string-upcase x)" updated)))))))
+
+(deftest normalize-string-uses-symbol-name
+  (testing "%normalize-string returns just the symbol name, not package-qualified"
+    (let* ((pkg-name "NORMALIZE-TEST-PKG")
+           (pkg (or (find-package pkg-name)
+                    (make-package pkg-name :use nil))))
+      (unwind-protect
+           (let ((sym (intern "MY-FUNC" pkg)))
+             (ok (string= "my-func"
+                          (cl-mcp/src/lisp-edit-form::%normalize-string sym)))
+             ;; Also verify non-symbol input still works
+             (ok (string= "hello"
+                          (cl-mcp/src/lisp-edit-form::%normalize-string "HELLO"))))
+        (delete-package pkg-name)))))
+
+(deftest validate-content-with-unknown-package
+  (testing "%validate-and-repair-content handles unknown package-qualified symbols"
+    (let ((content "(defun process (x) (unknown-val-pkg:transform x))"))
+      (ok (stringp
+           (cl-mcp/src/lisp-edit-form::%validate-and-repair-content content))))))

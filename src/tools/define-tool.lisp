@@ -15,7 +15,9 @@
                 #:extract-arg
                 #:extract-boolean-arg)
   (:import-from #:cl-mcp/src/tools/registry #:register-tool)
-  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json
+                #:sanitize-error-message)
   (:export #:define-tool))
 
 (in-package #:cl-mcp/src/tools/define-tool)
@@ -172,7 +174,7 @@ Example:
              (rpc-error ,id-sym -32603
                         (sanitize-for-json
                          (format nil "Internal error during ~A: ~A"
-                                 ,name e))))))
+                                 ,name (sanitize-error-message e)))))))
 
        ;; Registration
        (register-tool ,name (,descriptor-name) #',handler-name)
