@@ -202,6 +202,10 @@ TCP authentication, and sets MCP_WORKER_ID for log context."
 ;;; Internal helpers — process launch
 ;;; ---------------------------------------------------------------------------
 
+(defun %roswell-p ()
+  "Return T when running under Roswell."
+  (and (member :ros.init *features*) t))
+
 (defvar *cached-ros-path* nil
   "Cached result of %find-ros-path to avoid repeated subprocess forks.")
 
@@ -220,17 +224,56 @@ the first successful lookup."
                       "ros"))
               (error () "ros")))))
 
+(defvar *cached-sbcl-path* nil
+  "Cached result of %find-sbcl-path.")
+
+(defun %find-sbcl-path ()
+  "Locate the sbcl executable. Uses argv[0] of the running process first,
+falls back to 'which sbcl'."
+  (or *cached-sbcl-path*
+      (setf *cached-sbcl-path*
+            (or (let ((argv0 (first sb-ext:*posix-argv*)))
+                  (when (and argv0 (search "sbcl" argv0))
+                    argv0))
+                (handler-case
+                    (let ((path (string-trim '(#\Newline #\Return #\Space)
+                                  (uiop:run-program
+                                   '("which" "sbcl") :output :string))))
+                      (if (and path (plusp (length path))) path "sbcl"))
+                  (error () "sbcl"))))))
+
+(defun %build-sbcl-args ()
+  "Build command-line arguments for spawning a worker via bare SBCL.
+Loads quicklisp from the parent's ql:*quicklisp-home*, configures
+ASDF source registry to find cl-mcp, loads the worker system, and
+calls the entry point."
+  (let* ((ql-home (namestring ql:*quicklisp-home*))
+         (setup-path (namestring (merge-pathnames "setup.lisp" ql-home)))
+         (source-dir (namestring (asdf:system-source-directory :cl-mcp))))
+    (list "--noinform" "--non-interactive"
+          "--load" setup-path
+          "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry :inherit-configuration (:tree ~S)))"
+                           source-dir)
+          "--eval" "(ql:quickload :cl-mcp/src/worker/main :silent t)"
+          "--eval" "(cl-mcp/src/worker/main:start)")))
+
 (defun %launch-worker-process (secret id)
   "Launch a worker child process via sb-ext:run-program.
 Returns the sb-ext:process object with stdout and stderr as streams.
-SECRET is passed to the child environment for TCP authentication.
-ID is the worker's numeric identifier, passed via MCP_WORKER_ID."
-  (let ((ros-path (%find-ros-path)) (env (%build-environment secret id)))
-    (sb-ext:run-program ros-path
-                 (list "run" "-s" "cl-mcp/src/worker/main" "-e"
-                       "(cl-mcp/src/worker/main:start)")
-                 :output :stream :error :stream :wait nil :search t
-                 :environment env)))
+Uses ros-run when running under Roswell, bare sbcl otherwise."
+  (let ((env (%build-environment secret id)))
+    (if (%roswell-p)
+        (let ((ros-path (%find-ros-path)))
+          (sb-ext:run-program ros-path
+                              (list "run" "-s" "cl-mcp/src/worker/main" "-e"
+                                    "(cl-mcp/src/worker/main:start)")
+                              :output :stream :error :stream :wait nil
+                              :search t :environment env))
+        (let ((sbcl-path (%find-sbcl-path)))
+          (sb-ext:run-program sbcl-path
+                              (%build-sbcl-args)
+                              :output :stream :error :stream :wait nil
+                              :search t :environment env)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — handshake

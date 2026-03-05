@@ -17,11 +17,13 @@
 
 (defun spawn-available-p ()
   "Check if we can spawn worker processes.
-Uses :wait t and checks exit code to avoid a TOCTOU race where
-the short-lived process exits before process-alive-p is called."
+Uses :wait t and checks exit code to avoid a TOCTOU race."
   (ignore-errors
-    (let ((p (sb-ext:run-program "ros" '("version")
-               :search t :output :stream :wait t)))
+    (let* ((cmd (if (member :ros.init *features*)
+                    '("ros" "version")
+                    '("sbcl" "--version")))
+           (p (sb-ext:run-program (first cmd) (rest cmd)
+                :search t :output :stream :wait t)))
       (prog1 (zerop (sb-ext:process-exit-code p))
         (ignore-errors (sb-ext:process-close p))))))
 
