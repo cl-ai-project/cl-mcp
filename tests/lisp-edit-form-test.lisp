@@ -526,11 +526,24 @@ then clean up."
                     (= forms 2))
                 (error () nil))))))))
 
+(defun %try-load (system)
+  "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
+  (handler-case
+      (cond
+        ((find-package :ql)
+         (funcall (find-symbol "QUICKLOAD" :ql) system :silent t)
+         t)
+        ((asdf:find-system system nil)
+         (asdf:load-system system)
+         t)
+        (t nil))
+    (error () nil)))
+
 (deftest lisp-edit-form-with-custom-readtable
   (testing "readtable parameter enables editing files with custom reader macros"
     (handler-case
         (progn
-          (ql:quickload :cl-interpol :silent t)
+          (unless (%try-load :cl-interpol) (error "not available"))
           (with-temp-file "tests/tmp/edit-form-interpol.lisp"
               (format nil "(in-package :cl-user)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
             (lambda (path)
@@ -551,7 +564,7 @@ then clean up."
   (testing "in-readtable form triggers automatic readtable switching"
     (handler-case
         (progn
-          (ql:quickload :cl-interpol :silent t)
+          (unless (%try-load :cl-interpol) (error "not available"))
           (with-temp-file "tests/tmp/edit-form-in-readtable.lisp"
               (format nil "(in-package :cl-user)~%(named-readtables:in-readtable :interpol-syntax)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
             (lambda (path)
@@ -590,8 +603,8 @@ then clean up."
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
     (handler-case
         (progn
-          (ql:quickload :named-readtables :silent t)
-          (ql:quickload :cl-interpol :silent t)
+          (unless (%try-load :named-readtables) (error "not available"))
+          (unless (%try-load :cl-interpol) (error "not available"))
           ;; Create a test package with a named readtable at runtime
           (let ((test-pkg-name "CL-MCP-EDIT-TEST-PKG-QUALIFIED-RT"))
             (when (find-package test-pkg-name)
