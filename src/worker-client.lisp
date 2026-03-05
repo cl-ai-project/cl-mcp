@@ -242,20 +242,34 @@ falls back to 'which sbcl'."
                       (if (and path (plusp (length path))) path "sbcl"))
                   (error () "sbcl"))))))
 
+(defun %quicklisp-setup-path ()
+  "Return the absolute path to Quicklisp's setup.lisp if Quicklisp is
+loaded in the current image, or NIL otherwise."
+  (let ((ql-pkg (find-package :quicklisp)))
+    (when ql-pkg
+      (let ((sym (find-symbol "*QUICKLISP-HOME*" ql-pkg)))
+        (when (and sym (boundp sym))
+          (let ((home (symbol-value sym)))
+            (when home
+              (namestring (merge-pathnames "setup.lisp"
+                                           (namestring home))))))))))
+
 (defun %build-sbcl-args ()
   "Build command-line arguments for spawning a worker via bare SBCL.
-Loads quicklisp from the parent's ql:*quicklisp-home*, configures
-ASDF source registry to find cl-mcp, loads the worker system, and
-calls the entry point."
-  (let* ((ql-home (namestring ql:*quicklisp-home*))
-         (setup-path (namestring (merge-pathnames "setup.lisp" ql-home)))
-         (source-dir (namestring (asdf:system-source-directory :cl-mcp))))
-    (list "--noinform" "--non-interactive"
-          "--load" setup-path
-          "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry :inherit-configuration (:tree ~S)))"
-                           source-dir)
-          "--eval" "(ql:quickload :cl-mcp/src/worker/main :silent t)"
-          "--eval" "(cl-mcp/src/worker/main:start)")))
+Configures ASDF source registry to find cl-mcp, optionally loads
+Quicklisp setup.lisp if available, loads the worker system via ASDF,
+and calls the entry point."
+  (let ((source-dir (namestring (asdf:system-source-directory :cl-mcp)))
+        (ql-setup (%quicklisp-setup-path)))
+    (append
+     (list "--noinform" "--non-interactive")
+     (when ql-setup
+       (list "--load" ql-setup))
+     (list
+      "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry :inherit-configuration (:tree ~S)))"
+                       source-dir)
+      "--eval" "(asdf:load-system :cl-mcp/src/worker/main)"
+      "--eval" "(cl-mcp/src/worker/main:start)"))))
 
 (defun %launch-worker-process (secret id)
   "Launch a worker child process via sb-ext:run-program.

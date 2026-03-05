@@ -26,7 +26,7 @@
 (define-tool "code-find"
   :description "Locate the definition of a symbol (path and line) using sb-introspect.
 
-PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Prefer package-qualified symbols or supply the package argument.
 
 NOTE: If the symbol is not found, the system might not be loaded yet.
@@ -47,7 +47,7 @@ and is loaded"))
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
 
-PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Pass a package or a package-qualified symbol to avoid resolution errors.
 
 NOTE: If the symbol is not found, the system might not be loaded yet.
@@ -69,7 +69,7 @@ and is loaded"))
   :description "Find where a symbol is referenced using SBCL xref (calls, macroexpands, binds,
 references, sets).
 
-PREREQUISITE: The defining system MUST be loaded first (ql:quickload).
+PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Use package-qualified symbols when possible; set project_only=false to include
 external libs.
 

@@ -1,6 +1,7 @@
 ;;;; src/system-loader-core.lisp
 ;;;;
 ;;;; Core system loading logic, shared between parent and worker processes.
+;;;; Uses only ASDF (no Quicklisp dependency).
 
 (defpackage #:cl-mcp/src/system-loader-core
   (:use #:cl)
@@ -153,9 +154,7 @@ or NIL (no timeout). Default is 120 seconds."
              (asdf:clear-system system-name))
            (%call-with-suppressed-output
             (lambda ()
-              (if clear-fasls
-                  (asdf:load-system system-name :force t)
-                  (ql:quickload system-name :silent t)))))
+              (asdf:load-system system-name :force clear-fasls))))
          timeout-seconds)
       (let* ((elapsed-ms
                (round (* 1000 (/ (- (get-internal-real-time) start-time)
