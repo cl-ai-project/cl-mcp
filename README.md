@@ -12,6 +12,8 @@ Lisp development via MCP.
 ## Features
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
+- `notifications/cancelled` support for cooperative request cancellation
+- **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with per-session affinity, automatic crash recovery, and circuit breaker
 - Tools API
   - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
   - `load-system` — load ASDF systems with force-reload, output suppression, and timeout support
@@ -26,6 +28,7 @@ Lisp development via MCP.
   - `clgrep-search` — semantic grep for Lisp files with structure awareness
   - `clhs-lookup` — Common Lisp HyperSpec reference (symbols and sections)
   - `run-tests` — unified test runner with structured results (Rove, ASDF fallback)
+  - `pool-status` — worker pool diagnostics (worker counts, states, pool health)
 - Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -36,9 +39,33 @@ Lisp development via MCP.
     back; if it is **not** supported the server returns `error.code = -32602`
     with `data.supportedVersions`.
 
+## Worker Pool Isolation
+
+Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-find`,
+`code-describe`, `code-find-references`, `inspect-object`) run in **isolated
+child SBCL processes** rather than the parent MCP server image.
+
+- **Per-session affinity** — each MCP session is bound to a dedicated worker
+  process. The worker persists for the session lifetime, preserving loaded
+  systems and REPL state.
+- **Automatic crash recovery** — if a worker crashes, a replacement is spawned
+  and re-bound to the same session automatically.
+- **Circuit breaker** — if a session's worker crashes repeatedly (3 times
+  within 5 minutes by default), the pool stops respawning and reports the
+  failure to the client.
+- **Warm standby pool** — pre-spawned workers reduce first-request latency.
+- **Dual launcher** — workers can be spawned via Roswell (`ros`) or bare SBCL,
+  auto-detected at startup.
+
+File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-check-parens`,
+`clgrep-search`, `clhs-lookup`) continue to run inline in the parent process.
+
+Disable the worker pool by setting `MCP_NO_WORKER_POOL=1`. When disabled, all
+tools run inline in the parent process (single-image mode).
+
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
-- Quicklisp (for dependencies)
+- Quicklisp (optional; pure ASDF also works)
 - Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `clhs` (loaded on-demand by `clhs-lookup` tool).
 
 ## Quick Start
@@ -52,7 +79,7 @@ export MCP_PROJECT_ROOT=/path/to/your/project
 Load and run from an existing REPL:
 
 ```lisp
-(ql:quickload :cl-mcp)
+(asdf:load-system :cl-mcp)  ; or (ql:quickload :cl-mcp) if using Quicklisp
 
 ;; Start TCP transport on port 12345 in a new thread.
 (cl-mcp:start-tcp-server-thread :port 12345)
@@ -74,7 +101,7 @@ tool immediately after connecting to initialize the project root.
 Start the HTTP server and continue using your REPL:
 
 ```lisp
-(ql:quickload :cl-mcp)
+(asdf:load-system :cl-mcp)  ; or (ql:quickload :cl-mcp)
 
 ;; Start HTTP server on port 3000 (default)
 (cl-mcp:start-http-server :port 3000)
@@ -122,6 +149,15 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
 
 The bridge uses a bounded connect timeout but disables read timeouts after
 connecting, so it can stay idle indefinitely (until stdin closes).
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MCP_PROJECT_ROOT` | Project root directory for file operations | (required) |
+| `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `MCP_LOG_FILE` | Log to file (timestamped with PID, e.g., `/tmp/cl-mcp.log` → `/tmp/cl-mcp-2026-03-01T09-15-30-12345.log`) | (stderr only) |
+| `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
 
 ## Tools
 ### `repl-eval`
@@ -193,7 +229,7 @@ Example workflow:
 
 ### `load-system`
 Load an ASDF system with structured output and reload support. Preferred over
-`(ql:quickload ...)` via `repl-eval` for AI agents.
+`(ql:quickload ...)` or `(asdf:load-system ...)` via `repl-eval` for AI agents.
 
 Input:
 - `system` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"my-project/tests"`)
@@ -434,14 +470,36 @@ Notes:
 - Single test execution requires the test package to be loaded first
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
 
+### `pool-status`
+Return worker pool diagnostic information. No arguments required.
+
+Output fields:
+- `pool_running` (boolean): whether the pool health monitor is active
+- `total_workers` (integer): total live workers (bound + standby)
+- `bound_count` (integer): workers assigned to sessions
+- `standby_count` (integer): idle workers available for assignment
+- `max_pool_size` (integer): configured maximum worker count
+- `warmup_target` (integer): target number of warm standby workers
+- `workers` (array): per-worker details including `id`, `state` (`bound` or `standby`), `session_id`, `pid`, and `port`
+
+Example request:
+```json
+{"jsonrpc":"2.0","id":4,"method":"tools/call",
+ "params":{"name":"pool-status","arguments":{}}}
+```
+
 ## Logging
-- Structured JSON line logs to `*error-output*`.
-- Control level via env var `MCP_LOG_LEVEL` with one of: `debug`, `info`, `warn`, `error`.
+- Structured JSON line logs to `*error-output*` by default.
+- Control level via `MCP_LOG_LEVEL` with one of: `debug`, `info`, `warn`, `error`.
+- Optionally log to a file via `MCP_LOG_FILE`. The value is a path template;
+  the server inserts a timestamp and PID before the extension
+  (e.g., `/tmp/cl-mcp.log` → `/tmp/cl-mcp-2026-03-01T09-15-30-12345.log`).
+  When set, logs are written to both stderr and the file.
 
 Example:
 
 ```bash
-MCP_LOG_LEVEL=debug sbcl --eval '(ql:quickload :cl-mcp)' ...
+MCP_LOG_LEVEL=debug MCP_LOG_FILE=/tmp/cl-mcp.log sbcl --eval '(asdf:load-system :cl-mcp)' ...
 ```
 
 ## Running Tests
@@ -468,12 +526,15 @@ What’s covered:
 - Logging of RPC dispatch/results
 - TCP server accept/respond (newline‑delimited JSON)
 - Stdio↔TCP bridge stays alive on idle and exits cleanly when stdin closes
+- Worker pool lifecycle, crash recovery, circuit breaker, and pool-status
+- Request cancellation (`notifications/cancelled`) with worker termination
 
 Note: Running tests compiles FASLs into `~/.cache/...`. Ensure your environment
 allows writing there or configure SBCL’s cache directory accordingly.
 
 ## Project Layout
 - `src/` — core implementation (protocol, tools, transports)
+  - `src/worker/` — child worker process entry point (server, handlers, main)
 - `tests/` — Rove test suites invoked by ASDF `test-op`
 - `scripts/` — helper clients and a stdio↔TCP bridge
 - `prompts/` — system prompts for AI agents (repl-driven-development.md)
@@ -515,8 +576,10 @@ enforce security. They are all trivially bypassable via `repl-eval`:
   execution. Useful when parsing untrusted Lisp syntax, but `eval` itself
   is always permitted.
 - **Session management** — HTTP sessions track connection state and manage
-  worker process lifetimes. They are a resource management mechanism, not
-  a security isolation boundary. All sessions share the same Lisp image.
+  worker process lifetimes. With the worker pool enabled, each session gets
+  a dedicated child SBCL process, providing OS-level process isolation.
+  This is a resource management and stability mechanism (a crash in one
+  session's worker does not affect others), not a security boundary.
 
 ## Troubleshooting
 - Bridge exits after a few seconds of inactivity: ensure you’re using the
