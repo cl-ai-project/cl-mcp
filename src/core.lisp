@@ -7,7 +7,7 @@
 (in-package #:cl-mcp/src/core)
 
 (defparameter +server-version+
-  "1.0.0"
+  "1.1.0"
   "Semantic version of cl-mcp.")
 
 (declaim (ftype (function () simple-string) version))
