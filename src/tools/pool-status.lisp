@@ -18,7 +18,11 @@
   :description "Return worker pool diagnostic information including per-worker
 details and pool-level summary.  No arguments required.
 Returns pool_running, total_workers, standby_count, bound_count,
-max_pool_size, warmup_target, and a workers array."
+max_pool_size, warmup_target, and a workers array.
+
+Each entry in the workers array is an object with keys:
+id (integer), session (string or null, truncated to 8 chars),
+tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
   :args ()
   :body
   (let ((info (pool-status-info)))
