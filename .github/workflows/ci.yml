@@ -10,7 +10,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -29,8 +29,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install roswell
-          ros install sbcl-bin/2.5.0
+          brew install roswell sbcl
+          ros use sbcl/system
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
       - name: Install Dependencies
