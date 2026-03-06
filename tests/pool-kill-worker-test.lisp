@@ -15,11 +15,6 @@
   (:import-from #:cl-mcp/src/tools/pool-kill-worker
                 #:pool-kill-worker)
   (:import-from #:cl-mcp/src/pool
-                #:*worker-pool-warmup*
-                #:*health-check-interval-seconds*
-                #:*shutdown-replenish-wait-seconds*
-                #:initialize-pool
-                #:shutdown-pool
                 #:get-or-assign-worker
                 #:find-session-worker)
   (:import-from #:cl-mcp/src/worker-client
