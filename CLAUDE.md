@@ -101,6 +101,7 @@ export MCP_NO_WORKER_POOL=1
 5. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement using Eclector
 6. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
 7. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
+8. **Pool Management** (`src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp`): Worker pool diagnostics and worker lifecycle control
 
 ### Security Model
 
