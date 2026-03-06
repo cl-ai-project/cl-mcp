@@ -10,7 +10,8 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS temporarily disabled due to SBCL memory corruption on GH runner images
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
