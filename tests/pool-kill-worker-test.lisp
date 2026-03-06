@@ -169,3 +169,60 @@
         (let* ((r2 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
           (ok (null (gethash "killed" r2))
               "second kill should report no worker"))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Empty session ID test
+;;; ---------------------------------------------------------------------------
+
+(deftest pool-kill-worker-with-empty-session-id
+  (testing "returns error when session ID is empty string"
+    (let* ((*use-worker-pool* t)
+           (response (%call-kill-worker :session-id "")))
+      (let ((result (%result-of response)))
+        (ok (hash-table-p result))
+        (ok (null (gethash "killed" result))
+            "killed should be nil")
+        (ok (search "identify"
+                    (gethash "text"
+                             (aref (gethash "content" result) 0)))
+            "message should mention session identification")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Reset spawn failure test
+;;; ---------------------------------------------------------------------------
+
+(deftest pool-kill-worker-reset-spawn-failure
+  (testing "reports error when replacement spawn fails after kill (reset=true)"
+    (unless (spawn-available-p)
+      (skip "Cannot spawn workers"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "spawn-fail-session"))
+      (with-pool ()
+        ;; Assign a real worker so kill-session-worker returns :killed
+        (get-or-assign-worker "spawn-fail-session")
+        ;; Mock get-or-assign-worker to simulate spawn failure.
+        ;; kill-session-worker does not call get-or-assign-worker internally,
+        ;; so the real kill proceeds; only the reset spawn is affected.
+        (let ((original (symbol-function 'get-or-assign-worker)))
+          (unwind-protect
+              (progn
+                (setf (symbol-function 'get-or-assign-worker)
+                      (lambda (session-id)
+                        (declare (ignore session-id))
+                        (error "Simulated spawn failure")))
+                (let* ((response (%call-kill-worker
+                                  :session-id "spawn-fail-session"
+                                  :reset t))
+                       (result (%result-of response)))
+                  (ok (equal t (gethash "killed" result))
+                      "killed should be t (worker was killed)")
+                  (ok (null (gethash "reset" result))
+                      "reset should be nil (spawn failed)")
+                  (ok (equal t (gethash "isError" result))
+                      "isError should be t")
+                  (ok (search "spawn failed"
+                              (gethash "text"
+                                       (aref (gethash "content" result) 0)))
+                      "message should mention spawn failure")))
+            (setf (symbol-function 'get-or-assign-worker)
+                  original)))))))
