@@ -12,6 +12,8 @@
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/log
+                #:log-event)
   (:import-from #:cl-mcp/src/pool
                 #:kill-session-worker
                 #:get-or-assign-worker)
@@ -83,12 +85,17 @@ the next tool call that needs a worker."))
                                "Worker killed and replaced with a fresh one. Run load-system to restore your environment.")
                               "killed" t
                               "reset" t)))
-                 (error ()
+                 (error (e)
+                   (log-event :warn "pool.kill-worker.reset-failed"
+                              "session" session-id
+                              "error" (princ-to-string e))
                    (result id
                            (make-ht
                             "content"
                             (text-content
-                             "Worker killed but replacement spawn failed. The next tool call will retry automatically.")
+                             (format nil
+                                     "Worker killed but replacement spawn failed: ~A. The next tool call will retry automatically."
+                                     (princ-to-string e)))
                             "killed" t
                             "reset" nil
                             "isError" t)))))

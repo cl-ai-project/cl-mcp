@@ -935,27 +935,28 @@ that the health monitor (which snapshots workers under the lock
 then checks state outside it) will skip it and not treat the
 impending kill as a crash."
   (let ((worker-to-kill nil))
-    (bordeaux-threads:with-lock-held (*pool-lock*)
+    (bt:with-lock-held (*pool-lock*)
       (let ((entry (gethash session-id *affinity-map*)))
         (cond
-         ;; Bound worker — release immediately
-         ((and entry (typep entry 'worker))
-          (setf worker-to-kill entry)
-          (setf (worker-state worker-to-kill) :released)
-          (remhash session-id *affinity-map*)
-          (remhash session-id *crash-history*)
-          (setf *all-workers* (remove worker-to-kill *all-workers*)))
-         ;; Placeholder — mark cancelled so spawn thread cleans up
-         ((and entry (typep entry 'worker-placeholder))
-          (setf (worker-placeholder-cancelled entry) t)
-          (remhash session-id *affinity-map*)
-          (remhash session-id *crash-history*)
-          (log-event :info "pool.session.cancelled-spawn"
-                     "session" session-id)))))
+          ((and entry (typep entry 'worker))
+           (setf worker-to-kill entry)
+           (setf (worker-state worker-to-kill) :released)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)
+           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+          ((and entry (typep entry 'worker-placeholder))
+           (setf (worker-placeholder-cancelled entry) t)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)
+           (log-event :info "pool.session.cancelled-spawn"
+                      "session" session-id)))))
     (when worker-to-kill
       (log-event :info "pool.session.released"
                  "session" session-id
                  "worker_id" (worker-id worker-to-kill))
+      ;; Send SIGTERM first to break any in-flight RPC holding the
+      ;; stream-lock, then kill-worker can acquire it without deadlock.
+      (ignore-errors (signal-worker-terminate worker-to-kill))
       (ignore-errors (kill-worker worker-to-kill))
       (%schedule-replenish))))
 
