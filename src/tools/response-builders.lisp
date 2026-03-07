@@ -107,18 +107,23 @@ so that MCP clients rendering only content[].text still see them."
               (when (and stderr (plusp (length stderr)))
                 (format s "~&~%;; stderr~%~A" stderr))
               (when error-context
-                (let ((ctype (getf error-context :condition-type))
-                      (msg (getf error-context :message))
+                (let ((ctype (sanitize-for-json
+                              (getf error-context :condition-type)))
+                      (msg (sanitize-for-json
+                            (getf error-context :message)))
                       (restarts (getf error-context :restarts)))
                   (format s "~&~%[~A] ~A" (or ctype "ERROR") (or msg ""))
                   (when restarts
                     (format s "~&Restarts: ~{~A~^, ~}"
-                            (mapcar (lambda (r) (getf r :name))
+                            (mapcar (lambda (r)
+                                      (sanitize-for-json (getf r :name)))
                                     restarts))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)
-                 (subseq enriched 0 effective-limit)
+                 (concatenate 'string
+                              (subseq enriched 0 effective-limit)
+                              "...(truncated)")
                  enriched))))
     ht))
 
