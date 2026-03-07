@@ -152,3 +152,21 @@
       (ok (string= "before"
                     (sanitize-for-json
                      (format nil "before~CPunterminated dcs" esc)))))))
+
+(deftest sanitize-for-json-fast-path-returns-same-object
+  (testing "clean string returns the exact same string object (eq), not a copy"
+    ;; M-7 fix: fast-path pre-scans for problematic characters.
+    ;; If none found, returns the original string without allocation.
+    (let ((s "hello world"))
+      (ok (eq s (sanitize-for-json s))
+          "clean string should return same object via eq"))
+    (let ((s (format nil "line one~%line two~%")))
+      (ok (eq s (sanitize-for-json s))
+          "string with newlines only should return same object"))
+    (let ((s (format nil "tab~Chere" #\Tab)))
+      (ok (eq s (sanitize-for-json s))
+          "string with tabs only should return same object")))
+  (testing "string with control chars does NOT return same object"
+    (let ((s (format nil "has~Cbell" (code-char 7))))
+      (ok (not (eq s (sanitize-for-json s)))
+          "string with BEL should be sanitized (new allocation)"))))

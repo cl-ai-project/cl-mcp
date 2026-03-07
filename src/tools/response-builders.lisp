@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p #:register-object)
   (:import-from #:cl-mcp/src/inspect
-                #:generate-result-preview)
+                #:generate-result-preview
+                #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/repl-core
@@ -247,9 +248,7 @@ Returns a response with content added, or an isError payload."
       (make-ht "isError" t
                "content" (text-content
                           (gethash "message" inspection-result)))
-      (let ((summary (format nil "[~A] ~A"
-                             (gethash "kind" inspection-result)
-                             (gethash "summary" inspection-result))))
+      (progn
         (setf (gethash "content" inspection-result)
-              (text-content summary))
+              (text-content (format-inspect-elements inspection-result)))
         inspection-result)))

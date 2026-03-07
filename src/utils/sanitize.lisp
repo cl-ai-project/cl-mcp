@@ -9,6 +9,21 @@
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
+(defun %string-needs-sanitizing-p (string)
+  "Return T if STRING contains any characters that sanitize-for-json would strip.
+Fast pre-scan: iterates once looking for ESC, control chars, DEL, or
+supplemental plane characters."
+  (declare (type string string) (optimize (speed 3) (safety 1)))
+  (loop for i fixnum from 0 below (length string)
+        for code fixnum = (char-code (char string i))
+        thereis (or (= code 27)        ; ESC
+                    (and (< code 32)    ; Control chars
+                         (not (= code 9))   ; except tab
+                         (not (= code 10))  ; newline
+                         (not (= code 13))) ; carriage return
+                    (= code 127)       ; DEL
+                    (> code #xFFFF)))) ; Supplemental plane
+
 (defun sanitize-for-json (string)
   "Remove characters that are invalid in JSON strings.
 Strips ANSI/ECMA-48 escape sequences (CSI, OSC, DCS, SOS, PM, APC, and
@@ -20,6 +35,9 @@ princ-to-string then sanitized."
   (unless (stringp string)
     (return-from sanitize-for-json
       (sanitize-for-json (princ-to-string string))))
+  ;; Fast path: if string has no problematic characters, return as-is
+  (unless (%string-needs-sanitizing-p string)
+    (return-from sanitize-for-json string))
   (let ((result
          (make-array (length string) :element-type 'character :fill-pointer 0
                      :adjustable t))

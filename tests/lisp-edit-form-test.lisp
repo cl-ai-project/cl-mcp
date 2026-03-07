@@ -708,3 +708,55 @@ then clean up."
     (let ((content "(defun process (x) (unknown-val-pkg:transform x))"))
       (ok (stringp
            (cl-mcp/src/lisp-edit-form::%validate-and-repair-content content))))))
+
+(deftest lisp-edit-form-parinfer-warning-returned
+  (testing "parinfer warning is returned when content is auto-repaired"
+    ;; M-4 fix: lisp-edit-form returns parinfer warning as second value
+    ;; when closing delimiters are added.
+    (with-temp-file "tests/tmp/edit-form-parinfer-warning.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target (x)
+  (when x
+    (print x")
+          (declare (ignore updated))
+          (ok (stringp warning)
+              "should return a parinfer warning string")
+          (ok (search "closing delimiter" warning)
+              "warning should mention closing delimiters")
+          (ok (search "parinfer" warning)
+              "warning should mention parinfer")))))
+  (testing "no parinfer warning when content is already balanced"
+    (with-temp-file "tests/tmp/edit-form-no-parinfer-warning.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target () :new)")
+          (declare (ignore updated))
+          (ok (null warning)
+              "should not return warning for balanced content")))))
+  (testing "dry-run includes parinfer_warning in result hash-table"
+    (with-temp-file "tests/tmp/edit-form-parinfer-warning-dry-run.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((result (lisp-edit-form :file-path path
+                                      :form-type "defun"
+                                      :form-name "target"
+                                      :operation "replace"
+                                      :content "(defun target (x)
+  (list x"
+                                      :dry-run t)))
+          (ok (hash-table-p result))
+          (ok (gethash "parinfer_warning" result)
+              "dry-run result should include parinfer_warning key")
+          (ok (search "closing delimiter" (gethash "parinfer_warning" result))
+              "dry-run warning should mention closing delimiters"))))))

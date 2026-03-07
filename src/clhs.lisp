@@ -91,9 +91,11 @@ If the HyperSpec is not installed locally, attempts to install it first."
 
 (defun %section-to-filename (section-string)
   "Convert a section number like '22.3.1' to a filename like '22_ca.htm'.
-Each subsection letter corresponds to a=1, b=2, c=3, etc."
+Each subsection letter corresponds to a=1, b=2, c=3, etc.
+Chapter numbers are zero-padded to 2 digits (e.g., 7 -> 07)."
   (let* ((parts (cl-ppcre:split "\\." section-string))
-         (chapter (first parts))
+         (chapter-num (parse-integer (first parts)))
+         (chapter (format nil "~2,'0D" chapter-num))
          (subsections (rest parts)))
     (if (null subsections)
         (format nil "~A_.htm" chapter)

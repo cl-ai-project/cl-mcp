@@ -9,13 +9,14 @@
   (:import-from #:cl-mcp/src/utils/printing
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:export #:inspect-object-by-id
-           #:generate-result-preview))
+           #:generate-result-preview
+           #:format-inspect-elements))
 
 (in-package #:cl-mcp/src/inspect)
 
@@ -384,6 +385,66 @@ For nested non-primitive values, id fields are included for drill-down."
     (setf (gethash "id" result) id)
     result))
 
+(defun format-inspect-elements (inspection-result)
+  "Format structured inspection data as human-readable text lines."
+  (flet ((%repr-text (repr)
+           "Extract readable text from a value-representation hash-table.
+If REPR is not a hash-table, return its princ-to-string."
+           (if (hash-table-p repr)
+               (let ((v (gethash "value" repr)))
+                 (if (and v (not (hash-table-p v)))
+                     (princ-to-string v)
+                     (or (gethash "summary" repr) "?")))
+               (princ-to-string repr))))
+    (with-output-to-string (s)
+      (format s "[~A] ~A"
+              (gethash "kind" inspection-result)
+              (gethash "summary" inspection-result))
+      (when (gethash "id" inspection-result)
+        (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+      ;; List/array elements
+      (let ((elements (gethash "elements" inspection-result)))
+        (when (and elements (plusp (length elements)))
+          (format s "~&Elements:")
+          (loop for el in (coerce elements 'list)
+                for i from 0
+                do (if (hash-table-p el)
+                       (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
+                               i (%repr-text el) (gethash "id" el))
+                       (format s "~&  [~D] ~A" i el)))))
+      ;; Hash-table entries
+      (let ((entries (gethash "entries" inspection-result)))
+        (when (and entries (plusp (length entries)))
+          (format s "~&Entries (~A test):"
+                  (or (gethash "test" inspection-result) "EQL"))
+          (loop for entry in (coerce entries 'list)
+                do (when (hash-table-p entry)
+                     (let ((k (gethash "key" entry))
+                           (v (gethash "value" entry)))
+                       (format s "~&  ~A => ~A~@[ [object-id: ~A]~]"
+                               (%repr-text k) (%repr-text v)
+                               (when (hash-table-p v) (gethash "id" v))))))))
+      ;; CLOS slots
+      (let ((slots (gethash "slots" inspection-result)))
+        (when (and slots (plusp (length slots)))
+          (format s "~&Slots:")
+          (loop for slot in (coerce slots 'list)
+                do (when (hash-table-p slot)
+                     (let ((v (gethash "value" slot)))
+                       (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
+                               (gethash "name" slot "?")
+                               (%repr-text v)
+                               (when (hash-table-p v) (gethash "id" v))))))))
+      ;; Meta info (truncation)
+      (let ((meta (gethash "meta" inspection-result)))
+        (when (and meta (hash-table-p meta) (gethash "truncated" meta))
+          ;; Different inspectors use different keys for total count:
+          ;; list="length", vector/array="total_elements", hash-table="count"
+          (let ((total (or (gethash "total_elements" meta)
+                           (gethash "count" meta)
+                           (gethash "length" meta))))
+            (format s "~&  ... (truncated, ~A total)" total)))))))
+
 ;;; MCP Tool Definition
 
 (define-tool "inspect-object"
@@ -405,13 +466,10 @@ Use this to drill down into complex data structures like CLOS instances, structu
                                                     :max-depth (or max-depth 1)
                                                     :max-elements (or max-elements 50))))
       (if (gethash "error" inspection-result)
-          (result id
-                  (make-ht "isError" t
-                           "content" (text-content
-                                      (gethash "message" inspection-result))))
-          (let ((summary (format nil "[~A] ~A"
-                                 (gethash "kind" inspection-result)
-                                 (gethash "summary" inspection-result))))
+          (result id (make-ht "isError" t
+                              "content" (text-content
+                                         (gethash "message" inspection-result))))
+          (progn
             (setf (gethash "content" inspection-result)
-                  (text-content summary))
+                  (text-content (format-inspect-elements inspection-result)))
             (result id inspection-result))))))
