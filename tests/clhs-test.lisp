@@ -105,6 +105,18 @@
       (ok (gethash "symbol" symbol-result))
       (ok (null (gethash "section" symbol-result))))))
 
+(deftest clhs-lookup-section-not-found-returns-error
+  (testing "clhs-lookup returns isError for non-existent section"
+    (let ((result (clhs-lookup "99.99")))
+      (ok (hash-table-p result))
+      (ok (gethash "isError" result)
+          "should have isError flag for non-existent section")
+      (let ((content (gethash "content" result)))
+        (ok (vectorp content) "content should be MCP format vector")
+        (when (and (vectorp content) (> (length content) 0))
+          (ok (search "99.99" (gethash "text" (aref content 0)))
+              "error message should mention the section number"))))))
+
 (deftest clhs-lookup-format-as-symbol
   (testing "clhs-lookup treats 'format' as symbol not section"
     (let ((result (clhs-lookup "format")))

@@ -92,6 +92,44 @@
       (ok (string= stdout ""))
       (ok (string= stderr "")))))
 
+(deftest repl-eval-package-error-clean-message
+  (testing "package-error returns clean message without backtrace"
+    ;; (in-package :nonexistent) signals a real PACKAGE-ERROR condition,
+    ;; unlike %resolve-eval-package which signals SIMPLE-ERROR.
+    (multiple-value-bind (printed value stdout stderr error-context)
+        (repl-eval "(in-package :no-such-package-xyz-999)")
+      (declare (ignore stdout stderr))
+      (ok (search "Package error" printed)
+          "printed should start with Package error prefix")
+      (ok (string= printed value)
+          "printed and raw value should be the same string")
+      ;; Should NOT have a backtrace
+      (ok (not (search "Backtrace" printed))
+          "should not contain backtrace")
+      ;; Should NOT have error-context (clean exit via package-error handler)
+      (ok (null error-context)
+          "package-error should not produce error-context"))))
+
+(deftest repl-eval-reader-error-clean-message
+  (testing "reader-error returns clean message without backtrace"
+    ;; #.(+ 1 2) with safe-read=t signals READER-ERROR (not END-OF-FILE).
+    ;; END-OF-FILE from unbalanced parens is not a subtype of READER-ERROR.
+    (multiple-value-bind (printed value stdout stderr error-context)
+        (repl-eval "#.(+ 1 2)" :safe-read t)
+      (declare (ignore stdout stderr))
+      (ok (or (search "Reader error" printed)
+              (search "reader error" printed)
+              (search "read-eval" (string-downcase printed)))
+          "printed should indicate reader error")
+      (ok (string= printed value)
+          "printed and raw value should be the same string")
+      ;; Should NOT have a backtrace
+      (ok (not (search "Backtrace" printed))
+          "should not contain backtrace")
+      ;; Should NOT have error-context (clean exit via reader-error handler)
+      (ok (null error-context)
+          "reader-error should not produce error-context"))))
+
 (deftest repl-eval-max-output-length
   (testing "max-output-length truncates printed result"
     (multiple-value-bind (printed value stdout stderr)
