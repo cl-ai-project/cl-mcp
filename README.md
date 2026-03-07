@@ -696,10 +696,5 @@ ros run -s cl-mcp -e "(cl-mcp:run)"
 The server will use this path during initialization, though calling `fs-set-project-root`
 explicitly is still recommended for dynamic project switching.
 
-## Roadmap
-- Error taxonomy as condition types mapped to JSON-RPC errors
-- Bounds/quotas for tool outputs (content length caps)
-- `asdf-system-info` / `asdf-list-systems` tools (currently disabled)
-
 ## License
 MIT
