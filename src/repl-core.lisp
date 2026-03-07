@@ -64,13 +64,19 @@ Delegates to sanitize-for-json which also strips DEL (127)."
                      "...(truncated)")
         sanitized)))
 
+(define-condition %package-not-found-error (package-error)
+  ()
+  (:report (lambda (c stream)
+             (format stream "Package ~S does not exist"
+                     (package-error-package c)))))
+
 (defun %resolve-eval-package (package)
   (let ((pkg (etypecase package
                (package package)
                (symbol (find-package package))
                (string (find-package package)))))
     (unless pkg
-      (error "Package ~S does not exist" package))
+      (error '%package-not-found-error :package package))
     pkg))
 
 (defun %call-with-compiler-streams (stdout stderr thunk)
