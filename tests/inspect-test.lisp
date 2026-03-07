@@ -403,7 +403,9 @@
                  (ok (search "Entries" text)
                      "content text should include Entries section")
                  (ok (search "name" text)
-                     "content text should show hash key"))))))))))
+                     "content text should show hash key")
+                 (ok (search "Alice" text)
+                     "content text should show hash value (not #<HASH-TABLE>)"))))))))))
 
 (deftest inspect-content-text-includes-slots
   (testing "inspect-object content text includes formatted slots for CLOS instances"
@@ -421,4 +423,6 @@
                (ok (search "Slots:" text)
                    "content text should include Slots section")
                (ok (search "NAME" text)
-                   "content text should show slot names")))))))))
+                   "content text should show slot names")
+               (ok (search "Bob" text)
+                   "content text should show slot value (not #<HASH-TABLE>)")))))))))

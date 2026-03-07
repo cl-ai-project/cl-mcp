@@ -387,49 +387,59 @@ For nested non-primitive values, id fields are included for drill-down."
 
 (defun format-inspect-elements (inspection-result)
   "Format structured inspection data as human-readable text lines."
-  (with-output-to-string (s)
-    (format s "[~A] ~A"
-            (gethash "kind" inspection-result)
-            (gethash "summary" inspection-result))
-    (when (gethash "id" inspection-result)
-      (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
-    ;; List/array elements
-    (let ((elements (gethash "elements" inspection-result)))
-      (when (and elements (plusp (length elements)))
-        (format s "~&Elements:")
-        (loop for el in (coerce elements 'list)
-              for i from 0
-              do (if (hash-table-p el)
-                     (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
-                             i
-                             (gethash "value" el (gethash "summary" el "?"))
-                             (gethash "id" el))
-                     (format s "~&  [~D] ~A" i el)))))
-    ;; Hash-table entries
-    (let ((entries (gethash "entries" inspection-result)))
-      (when (and entries (plusp (length entries)))
-        (format s "~&Entries (~A test):"
-                (or (gethash "test" inspection-result) "EQL"))
-        (loop for entry in (coerce entries 'list)
-              do (when (hash-table-p entry)
-                   (format s "~&  ~A => ~A"
-                           (gethash "key" entry "?")
-                           (gethash "value" entry "?"))))))
-    ;; CLOS slots
-    (let ((slots (gethash "slots" inspection-result)))
-      (when (and slots (plusp (length slots)))
-        (format s "~&Slots:")
-        (loop for slot in (coerce slots 'list)
-              do (when (hash-table-p slot)
-                   (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
-                           (gethash "name" slot "?")
-                           (gethash "value" slot "?")
-                           (gethash "id" slot))))))
-    ;; Meta info (truncation)
-    (let ((meta (gethash "meta" inspection-result)))
-      (when (and meta (hash-table-p meta) (gethash "truncated" meta))
-        (format s "~&  ... (truncated, ~D total)"
-                (or (gethash "total_elements" meta) "?"))))))
+  (flet ((%repr-text (repr)
+           "Extract readable text from a value-representation hash-table.
+If REPR is not a hash-table, return its princ-to-string."
+           (if (hash-table-p repr)
+               (let ((v (gethash "value" repr)))
+                 (if (and v (not (hash-table-p v)))
+                     (princ-to-string v)
+                     (or (gethash "summary" repr) "?")))
+               (princ-to-string repr))))
+    (with-output-to-string (s)
+      (format s "[~A] ~A"
+              (gethash "kind" inspection-result)
+              (gethash "summary" inspection-result))
+      (when (gethash "id" inspection-result)
+        (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+      ;; List/array elements
+      (let ((elements (gethash "elements" inspection-result)))
+        (when (and elements (plusp (length elements)))
+          (format s "~&Elements:")
+          (loop for el in (coerce elements 'list)
+                for i from 0
+                do (if (hash-table-p el)
+                       (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
+                               i (%repr-text el) (gethash "id" el))
+                       (format s "~&  [~D] ~A" i el)))))
+      ;; Hash-table entries
+      (let ((entries (gethash "entries" inspection-result)))
+        (when (and entries (plusp (length entries)))
+          (format s "~&Entries (~A test):"
+                  (or (gethash "test" inspection-result) "EQL"))
+          (loop for entry in (coerce entries 'list)
+                do (when (hash-table-p entry)
+                     (let ((k (gethash "key" entry))
+                           (v (gethash "value" entry)))
+                       (format s "~&  ~A => ~A~@[ [object-id: ~A]~]"
+                               (%repr-text k) (%repr-text v)
+                               (when (hash-table-p v) (gethash "id" v))))))))
+      ;; CLOS slots
+      (let ((slots (gethash "slots" inspection-result)))
+        (when (and slots (plusp (length slots)))
+          (format s "~&Slots:")
+          (loop for slot in (coerce slots 'list)
+                do (when (hash-table-p slot)
+                     (let ((v (gethash "value" slot)))
+                       (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
+                               (gethash "name" slot "?")
+                               (%repr-text v)
+                               (when (hash-table-p v) (gethash "id" v))))))))
+      ;; Meta info (truncation)
+      (let ((meta (gethash "meta" inspection-result)))
+        (when (and meta (hash-table-p meta) (gethash "truncated" meta))
+          (format s "~&  ... (truncated, ~D total)"
+                  (or (gethash "total_elements" meta) "?")))))))
 
 ;;; MCP Tool Definition
 
