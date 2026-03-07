@@ -23,7 +23,8 @@
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content
+                #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -36,7 +37,6 @@
                 #:native-namestring
                 #:subpathp)
   (:export #:lisp-edit-form))
-
 
 (in-package #:cl-mcp/src/lisp-edit-form)
 
@@ -368,21 +368,110 @@ If multiple matches exist without an index, signals an error with candidate info
       (%apply-operation-normalized text node operation content)
       (%apply-operation-preserve-spacing text node operation content)))
 
+(defun %apply-edit-operation (text node old-text new-text)
+  "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
+Returns two values: the modified full file text and the modified form text.
+Signals an error if OLD-TEXT is not found or occurs multiple times within the form."
+  (let* ((start (cst-node-start node))
+         (end (cst-node-end node))
+         (form-text (subseq text start end))
+         (match-pos (search old-text form-text)))
+    (unless match-pos
+      (let* ((form-value (cst-node-value node))
+             (form-id (if (consp form-value)
+                          (format nil "~A ~A" (car form-value) (second form-value))
+                          "matched")))
+        (error "old_text not found in ~A form. ~
+                Note: matching is exact and whitespace-sensitive. ~
+                Use lisp-read-file with name_pattern to see the exact form text. ~
+                old_text begins with: ~S"
+               form-id
+               (subseq old-text 0 (min (length old-text) 60)))))
+    ;; Check for multiple occurrences
+    (let ((second-match (search old-text form-text
+                                :start2 (+ match-pos (length old-text)))))
+      (when second-match
+        (let ((count (loop for pos = (search old-text form-text)
+                             then (search old-text form-text
+                                          :start2 (+ pos (length old-text)))
+                           while pos count 1)))
+          (error "old_text matches ~D times in the form; ~
+                  provide more surrounding context to match exactly once"
+                 count))))
+    ;; Perform the replacement
+    (let* ((modified-form (concatenate 'string
+                                       (subseq form-text 0 match-pos)
+                                       new-text
+                                       (subseq form-text
+                                               (+ match-pos (length old-text)))))
+           (modified-file (concatenate 'string
+                                       (subseq text 0 start)
+                                       modified-form
+                                       (subseq text end))))
+      (values modified-file modified-form))))
 
-(defun lisp-edit-form (&key file-path form-type form-name operation content dry-run
-                            (normalize-blank-lines t) readtable)
+(defun %validate-form-parseable (form-text &optional readtable-designator)
+  "Validate that FORM-TEXT parses as a single complete Lisp form.
+Unlike %validate-and-repair-content, does NOT attempt parinfer repair.
+Signals an error if the text does not parse correctly."
+  (let* ((*read-eval* nil)
+         (custom-rt
+           (when readtable-designator
+             (let ((pkg
+                     (or (find-package :named-readtables)
+                         (find-package :editor-hints.named-readtables))))
+               (when pkg
+                 (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
+                   (when (and find-fn (fboundp find-fn))
+                     (funcall find-fn readtable-designator)))))))
+         (*readtable*
+           (if custom-rt
+               custom-rt
+               (copy-readtable nil))))
+    (handler-case
+        (call-with-lenient-packages
+         (lambda ()
+           (multiple-value-bind (form pos)
+               (read-from-string form-text nil :eof)
+             (when (eq form :eof)
+               (error "edit produced an empty form"))
+             (let ((rest-start (or (position-if-not
+                                    (lambda (ch)
+                                      (member ch '(#\Space #\Tab #\Newline #\Return)))
+                                    form-text :start pos)
+                                   (length form-text))))
+               (when (< rest-start (length form-text))
+                 (error "edit produced malformed form text (trailing content after form)")))
+             form-text)))
+      (error (e)
+        (error "edit operation produced invalid Lisp: ~A. ~
+                The form could not be parsed after replacement. ~
+                No changes were written to disk."
+               e)))))
+
+(defun lisp-edit-form (&key file-path form-type form-name operation content
+                            old-text new-text
+                            dry-run (normalize-blank-lines t) readtable)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
-FORM-NAME, OPERATION (\"replace\" | \"insert_before\" | \"insert_after\"), and
-CONTENT are required. If CONTENT has missing closing parentheses, they will
-be automatically added using parinfer. When DRY-RUN is true, no changes are
-written; instead, a preview hash-table is returned.
+FORM-NAME, and OPERATION are always required.
+
+For OPERATION \"replace\", \"insert_before\", or \"insert_after\": CONTENT is required
+and specifies the full Lisp form. Missing closing parentheses are auto-repaired
+using parinfer.
+
+For OPERATION \"edit\": OLD-TEXT and NEW-TEXT are required. Performs an exact text
+replacement within the matched form. CONTENT must not be provided. Does NOT
+auto-repair parentheses; if the edit breaks form structure, an error is signaled
+immediately.
+
+When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing both the file and the new content."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name)
-               (stringp operation) (stringp content))
-    (error "All parameters (file_path, form_type, form_name, operation, content) must be strings"))
+               (stringp operation))
+    (error "file_path, form_type, form_name, and operation must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
   (unless (member normalize-blank-lines '(t nil))
@@ -391,52 +480,109 @@ to use for parsing both the file and the new content."
          (op-key (cond ((string= op-normalized "replace") :replace)
                        ((string= op-normalized "insert_before") :insert-before)
                        ((string= op-normalized "insert_after") :insert-after)
+                       ((string= op-normalized "edit") :edit)
                        (t (error "Unsupported operation: ~A" operation))))
          (form-type-str (string-downcase form-type)))
-    (multiple-value-bind (validated-content parinfer-warning)
-        (%validate-and-repair-content content readtable)
-    (multiple-value-bind (abs rel)
-        (%normalize-paths file-path)
-      (let* ((original (fs-read-file abs))
-             (nodes (parse-top-level-forms original :readtable readtable))
-             (target (%find-target nodes form-type-str form-name)))
-        (unless target
-          (error "Form ~A ~A not found in ~A" form-type form-name abs))
-        (let* ((start (cst-node-start target))
-               (end (cst-node-end target))
-               (target-snippet (subseq original start end))
-               (updated (%apply-operation original target op-key validated-content
-                                         normalize-blank-lines))
-               (would-change (not (string= original updated))))
-          (log-event :debug "lisp.edit.form"
-                     "path" (namestring abs)
-                     "operation" op-normalized
-                     "form_type" form-type
-                     "form_name" form-name
-                     "normalize_blank_lines" normalize-blank-lines
-                     "bytes" (length updated)
-                     "dry_run" dry-run
-                     "would_change" would-change)
-          (cond
-            (dry-run
-             (let ((result (make-hash-table :test #'equal)))
-               (setf (gethash "would_change" result) would-change
-                     (gethash "original" result) target-snippet
-                     (gethash "preview" result) updated
-                     (gethash "file_path" result) (namestring abs)
-                     (gethash "operation" result) op-normalized)
-               (when parinfer-warning
-                 (setf (gethash "parinfer_warning" result) parinfer-warning))
-               result))
-            (t
-             (fs-write-file rel updated)
-             (values updated parinfer-warning)))))))))
+    ;; Operation-specific parameter validation
+    (case op-key
+      (:edit
+       (unless (and (stringp old-text) (stringp new-text))
+         (error "old_text and new_text are required for edit operation"))
+       (when (and content (stringp content))
+         (error "content must not be provided for edit; use old_text and new_text")))
+      (otherwise
+       (unless (stringp content)
+         (error "content is required for ~A operation" operation))))
+    (if (eq op-key :edit)
+        ;; Edit operation: scoped text replacement within matched form
+        (multiple-value-bind (abs rel)
+            (%normalize-paths file-path)
+          (let* ((original (fs-read-file abs))
+                 (nodes (parse-top-level-forms original :readtable readtable))
+                 (target (%find-target nodes form-type-str form-name)))
+            (unless target
+              (error "Form ~A ~A not found in ~A" form-type form-name abs))
+            (let ((target-snippet (subseq original
+                                         (cst-node-start target)
+                                         (cst-node-end target))))
+              (multiple-value-bind (updated modified-form)
+                  (%apply-edit-operation original target old-text new-text)
+                (let ((would-change (not (string= original updated))))
+                  ;; Validate modified form parses correctly (fail-fast, no parinfer)
+                  (when would-change
+                    (%validate-form-parseable modified-form readtable))
+                  (log-event :debug "lisp.edit.form"
+                             "path" (namestring abs)
+                             "operation" op-normalized
+                             "form_type" form-type
+                             "form_name" form-name
+                             "bytes" (length updated)
+                             "dry_run" dry-run
+                             "would_change" would-change)
+                  (cond
+                    (dry-run
+                     (let ((result (make-hash-table :test #'equal)))
+                       (setf (gethash "would_change" result) would-change
+                             (gethash "original" result) target-snippet
+                             (gethash "preview" result) updated
+                             (gethash "file_path" result) (namestring abs)
+                             (gethash "operation" result) op-normalized)
+                       result))
+                    (t
+                     (fs-write-file rel updated)
+                     updated)))))))
+        ;; Existing operations: replace, insert_before, insert_after
+        (multiple-value-bind (validated-content parinfer-warning)
+            (%validate-and-repair-content content readtable)
+          (multiple-value-bind (abs rel)
+              (%normalize-paths file-path)
+            (let* ((original (fs-read-file abs))
+                   (nodes (parse-top-level-forms original :readtable readtable))
+                   (target (%find-target nodes form-type-str form-name)))
+              (unless target
+                (error "Form ~A ~A not found in ~A" form-type form-name abs))
+              (let* ((start (cst-node-start target))
+                     (end (cst-node-end target))
+                     (target-snippet (subseq original start end))
+                     (updated (%apply-operation original target op-key validated-content
+                                               normalize-blank-lines))
+                     (would-change (not (string= original updated))))
+                (log-event :debug "lisp.edit.form"
+                           "path" (namestring abs)
+                           "operation" op-normalized
+                           "form_type" form-type
+                           "form_name" form-name
+                           "normalize_blank_lines" normalize-blank-lines
+                           "bytes" (length updated)
+                           "dry_run" dry-run
+                           "would_change" would-change)
+                (cond
+                  (dry-run
+                   (let ((result (make-hash-table :test #'equal)))
+                     (setf (gethash "would_change" result) would-change
+                           (gethash "original" result) target-snippet
+                           (gethash "preview" result) updated
+                           (gethash "file_path" result) (namestring abs)
+                           (gethash "operation" result) op-normalized)
+                     (when parinfer-warning
+                       (setf (gethash "parinfer_warning" result) parinfer-warning))
+                     result))
+                  (t
+                   (fs-write-file rel updated)
+                   (values updated parinfer-warning))))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
-Supports replace, insert_before, and insert_after while preserving formatting and comments.
-PREFERRED METHOD for editing existing Lisp source code - automatically repairs missing closing
-parentheses using parinfer.
+Supports replace, insert_before, insert_after, and edit operations while preserving
+formatting and comments.
+PREFERRED METHOD for editing existing Lisp source code.
+For replace/insert_before/insert_after: automatically repairs missing closing parentheses
+using parinfer.
+For edit: performs a scoped text replacement within the matched form using old_text/new_text.
+The old_text must match exactly once within the form (whitespace-sensitive).
+This is the most token-efficient way to make small changes to large forms.
+Does NOT auto-repair parentheses for edit — if the edit breaks form structure, it fails
+immediately and no changes are written to disk.
 ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ensure
 safety and structure preservation."
   :args ((file_path :type :string :required t
@@ -447,10 +593,16 @@ safety and structure preservation."
                     :description "Form name to match; for defmethod include specializers,
 e.g., \"print-object (my-class t)\"")
          (operation :type :string :required t
-                    :enum ("replace" "insert_before" "insert_after")
+                    :enum ("replace" "insert_before" "insert_after" "edit")
                     :description "Operation to perform")
-         (content :type :string :required t
-                  :description "Full Lisp form to insert or replace with. Must contain exactly ONE top-level form; multiple forms in a single call are not supported. Use separate insert_after calls to add multiple forms.")
+         (content :type :string
+                  :description "Full Lisp form for replace/insert_before/insert_after operations.
+Must contain exactly ONE top-level form. Not used for edit operation.")
+         (old_text :type :string
+                   :description "Text to find within the matched form (required for edit operation).
+Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
+         (new_text :type :string
+                   :description "Replacement text (required for edit operation)")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (normalize_blank_lines :type :boolean
@@ -462,58 +614,75 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
-  (handler-case
-      (multiple-value-bind (updated parinfer-warning)
-          (lisp-edit-form :file-path file_path
-                          :form-type form_type
-                          :form-name form_name
-                          :operation operation
-                          :content content
-                          :dry-run dry_run
-                          :normalize-blank-lines normalize_blank_lines
-                          :readtable (when readtable
-                                      (let ((colon-pos (position #\: readtable)))
-                                        (if colon-pos
-                                            ;; Package-qualified: "pkg:sym" or "pkg::sym"
-                                            (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                   (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                       (char= (char readtable (1+ colon-pos)) #\:))
-                                                                  (+ colon-pos 2)
-                                                                  (1+ colon-pos)))
-                                                   (sym-name (subseq readtable sym-start))
-                                                   (pkg (find-package (string-upcase pkg-name))))
-                                              (if pkg
-                                                  (intern (string-upcase sym-name) pkg)
-                                                  (error "Package ~A not found for readtable ~A"
-                                                         pkg-name readtable)))
-                                            ;; Keyword symbol (no colon prefix)
-                                            (intern (string-upcase readtable) :keyword)))))
-        (if dry_run
-            (let* ((preview (gethash "preview" updated))
-                   (would-change (gethash "would_change" updated))
-                   (original-form (gethash "original" updated))
-                   (pw (gethash "parinfer_warning" updated))
-                   (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]"
-                                    operation form_type file_path would-change pw)))
-              (result id
-                      (make-ht "path" file_path
-                               "operation" operation
-                               "form_type" form_type
-                               "form_name" form_name
-                               "would_change" would-change
-                               "original" original-form
-                               "preview" preview
-                               "content" (text-content summary))))
-            (let ((summary (format nil "Applied ~A to ~A ~A (~D chars)~@[~%WARNING: ~A~]"
-                                   operation form_type file_path (length updated) parinfer-warning)))
-              (result id
-                      (make-ht "path" file_path
-                               "operation" operation
-                               "form_type" form_type
-                               "form_name" form_name
-                               "bytes" (length updated)
-                               "content" (text-content summary))))))
-    (multiple-top-level-forms-error ()
-      (cl-mcp/src/tools/helpers:rpc-error
-       id -32602 (%multiple-top-level-forms-error-message)
-       (%multiple-top-level-forms-error-data)))))
+  (let ((op-lower (string-downcase operation)))
+    ;; Cross-parameter validation using arg-validation-error for -32602 codes
+    (cond
+      ((string= op-lower "edit")
+       (unless old_text
+         (error 'arg-validation-error :arg-name "old_text"
+                :message "old_text is required for edit operation"))
+       (unless new_text
+         (error 'arg-validation-error :arg-name "new_text"
+                :message "new_text is required for edit operation"))
+       (when content
+         (error 'arg-validation-error :arg-name "content"
+                :message "content must not be provided for edit operation; use old_text and new_text")))
+      (t
+       (unless content
+         (error 'arg-validation-error :arg-name "content"
+                :message (format nil "content is required for ~A operation" operation)))))
+    (handler-case
+        (multiple-value-bind (updated parinfer-warning)
+            (lisp-edit-form :file-path file_path
+                            :form-type form_type
+                            :form-name form_name
+                            :operation operation
+                            :content content
+                            :old-text old_text
+                            :new-text new_text
+                            :dry-run dry_run
+                            :normalize-blank-lines normalize_blank_lines
+                            :readtable (when readtable
+                                         (let ((colon-pos (position #\: readtable)))
+                                           (if colon-pos
+                                               (let* ((pkg-name (subseq readtable 0 colon-pos))
+                                                      (sym-start (if (and (< (1+ colon-pos) (length readtable))
+                                                                          (char= (char readtable (1+ colon-pos)) #\:))
+                                                                     (+ colon-pos 2)
+                                                                     (1+ colon-pos)))
+                                                      (sym-name (subseq readtable sym-start))
+                                                      (pkg (find-package (string-upcase pkg-name))))
+                                                 (if pkg
+                                                     (intern (string-upcase sym-name) pkg)
+                                                     (error "Package ~A not found for readtable ~A"
+                                                            pkg-name readtable)))
+                                               (intern (string-upcase readtable) :keyword)))))
+          (if dry_run
+              (let* ((preview (gethash "preview" updated))
+                     (would-change (gethash "would_change" updated))
+                     (original-form (gethash "original" updated))
+                     (pw (gethash "parinfer_warning" updated))
+                     (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]"
+                                      operation form_type file_path would-change pw)))
+                (result id
+                        (make-ht "path" file_path
+                                 "operation" operation
+                                 "form_type" form_type
+                                 "form_name" form_name
+                                 "would_change" would-change
+                                 "original" original-form
+                                 "preview" preview
+                                 "content" (text-content summary))))
+              (let ((summary (format nil "Applied ~A to ~A ~A (~D chars)~@[~%WARNING: ~A~]"
+                                     operation form_type file_path (length updated) parinfer-warning)))
+                (result id
+                        (make-ht "path" file_path
+                                 "operation" operation
+                                 "form_type" form_type
+                                 "form_name" form_name
+                                 "bytes" (length updated)
+                                 "content" (text-content summary))))))
+      (multiple-top-level-forms-error ()
+        (cl-mcp/src/tools/helpers:rpc-error
+         id -32602 (%multiple-top-level-forms-error-message)
+         (%multiple-top-level-forms-error-data))))))
