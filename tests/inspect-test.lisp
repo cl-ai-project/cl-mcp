@@ -426,3 +426,35 @@
                    "content text should show slot names")
                (ok (search "Bob" text)
                    "content text should show slot value (not #<HASH-TABLE>)")))))))))
+
+(deftest inspect-content-text-truncation-does-not-error
+  (testing "truncation marker works for lists (meta.length, not total_elements)"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (loop for i from 1 to 20 collect i))
+              (id (register-object obj))
+              (result (inspect-object-by-id id :max-elements 3)))
+         (let ((content (ht-get result "content")))
+           (ok (vectorp content) "content should be MCP format vector")
+           (when (and (vectorp content) (> (length content) 0))
+             (let ((text (gethash "text" (aref content 0))))
+               (ok (search "truncated" text)
+                   "content text should show truncation marker")
+               (ok (search "total" text)
+                   "content text should show total count"))))))))
+  (testing "truncation marker works for hash-tables (meta.count, not total_elements)"
+    (with-fresh-registry
+     (lambda ()
+       (let* ((obj (make-hash-table)))
+         (loop for i from 1 to 10
+               do (setf (gethash i obj) (* i 10)))
+         (let* ((id (register-object obj))
+                (result (inspect-object-by-id id :max-elements 3)))
+           (let ((content (ht-get result "content")))
+             (ok (vectorp content))
+             (when (and (vectorp content) (> (length content) 0))
+               (let ((text (gethash "text" (aref content 0))))
+                 (ok (search "truncated" text)
+                     "content text should show truncation marker for hash-tables")
+                 (ok (search "total" text)
+                     "content text should show total count for hash-tables"))))))))))

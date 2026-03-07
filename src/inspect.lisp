@@ -438,8 +438,12 @@ If REPR is not a hash-table, return its princ-to-string."
       ;; Meta info (truncation)
       (let ((meta (gethash "meta" inspection-result)))
         (when (and meta (hash-table-p meta) (gethash "truncated" meta))
-          (format s "~&  ... (truncated, ~D total)"
-                  (or (gethash "total_elements" meta) "?")))))))
+          ;; Different inspectors use different keys for total count:
+          ;; list="length", vector/array="total_elements", hash-table="count"
+          (let ((total (or (gethash "total_elements" meta)
+                           (gethash "count" meta)
+                           (gethash "length" meta))))
+            (format s "~&  ... (truncated, ~A total)" total)))))))
 
 ;;; MCP Tool Definition
 
