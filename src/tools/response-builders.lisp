@@ -14,6 +14,8 @@
                 #:generate-result-preview)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/repl-core
+                #:*default-max-output-length*)
   (:export #:build-eval-response
            #:build-load-system-response
            #:build-run-tests-response
@@ -68,7 +70,8 @@ result_object_id, result_preview, and error_context.
 The content text includes stdout/stderr/error-context/object-id
 so that MCP clients rendering only content[].text still see them."
   (let ((ht (make-ht "stdout" stdout "stderr" stderr))
-        (object-id nil))
+        (object-id nil)
+        (effective-limit (or max-output-length *default-max-output-length*)))
     ;; Determine object-id (needed for text enrichment below)
     (when (and (null error-context) (inspectable-p raw-value))
       (if include-result-preview
@@ -114,8 +117,8 @@ so that MCP clients rendering only content[].text still see them."
                                     restarts))))))))
       (setf (gethash "content" ht)
             (text-content
-             (if (and max-output-length (> (length enriched) max-output-length))
-                 (subseq enriched 0 max-output-length)
+             (if (> (length enriched) effective-limit)
+                 (subseq enriched 0 effective-limit)
                  enriched))))
     ht))
 

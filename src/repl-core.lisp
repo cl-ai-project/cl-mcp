@@ -136,7 +136,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                 (invoke-restart 'muffle-warning))))
                    (package-error
                     (lambda (e)
-                      (let ((msg (format nil "Package error: ~A" e)))
+                      (let* ((raw-msg (format nil "Package error: ~A" e))
+                             (msg (%truncate-output raw-msg max-output-length)))
                         (return-from %do-repl-eval
                           (values msg msg
                                   (%truncate-output (get-output-stream-string stdout) max-output-length)
@@ -147,7 +148,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                         :frames nil))))))
                    (reader-error
                     (lambda (e)
-                      (let ((msg (format nil "Reader error: ~A" e)))
+                      (let* ((raw-msg (format nil "Reader error: ~A" e))
+                             (msg (%truncate-output raw-msg max-output-length)))
                         (return-from %do-repl-eval
                           (values msg msg
                                   (%truncate-output (get-output-stream-string stdout) max-output-length)
