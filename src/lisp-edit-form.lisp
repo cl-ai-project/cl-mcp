@@ -372,42 +372,47 @@ If multiple matches exist without an index, signals an error with candidate info
   "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
 Returns two values: the modified full file text and the modified form text.
 Signals an error if OLD-TEXT is not found or occurs multiple times within the form."
+  (when (zerop (length old-text))
+    (error "old_text must not be empty"))
   (let* ((start (cst-node-start node))
          (end (cst-node-end node))
          (form-text (subseq text start end))
          (match-pos (search old-text form-text)))
     (unless match-pos
       (let* ((form-value (cst-node-value node))
-             (form-id (if (consp form-value)
-                          (format nil "~A ~A" (car form-value) (second form-value))
-                          "matched")))
+             (form-id
+              (if (consp form-value)
+                  (format nil "~A ~A" (car form-value) (second form-value))
+                  "matched")))
         (error "old_text not found in ~A form. ~
                 Note: matching is exact and whitespace-sensitive. ~
+                If the file may have different line endings (CRLF vs LF), ~
+                ensure old_text uses matching line endings. ~
                 Use lisp-read-file with name_pattern to see the exact form text. ~
                 old_text begins with: ~S"
-               form-id
-               (subseq old-text 0 (min (length old-text) 60)))))
-    ;; Check for multiple occurrences
-    (let ((second-match (search old-text form-text
-                                :start2 (+ match-pos (length old-text)))))
+               form-id (subseq old-text 0 (min (length old-text) 60)))))
+    (let ((second-match
+           (search old-text form-text :start2 (+ match-pos (length old-text)))))
       (when second-match
-        (let ((count (loop for pos = (search old-text form-text)
-                             then (search old-text form-text
-                                          :start2 (+ pos (length old-text)))
-                           while pos count 1)))
+        (let ((count
+               (loop for pos = (search old-text form-text) then (search
+                                                                  old-text
+                                                                  form-text
+                                                                  :start2
+                                                                  (+ pos
+                                                                     (length
+                                                                      old-text)))
+                     while pos
+                     count 1)))
           (error "old_text matches ~D times in the form; ~
                   provide more surrounding context to match exactly once"
                  count))))
-    ;; Perform the replacement
-    (let* ((modified-form (concatenate 'string
-                                       (subseq form-text 0 match-pos)
-                                       new-text
-                                       (subseq form-text
-                                               (+ match-pos (length old-text)))))
-           (modified-file (concatenate 'string
-                                       (subseq text 0 start)
-                                       modified-form
-                                       (subseq text end))))
+    (let* ((modified-form
+            (concatenate 'string (subseq form-text 0 match-pos) new-text
+                         (subseq form-text (+ match-pos (length old-text)))))
+           (modified-file
+            (concatenate 'string (subseq text 0 start) modified-form
+                         (subseq text end))))
       (values modified-file modified-form))))
 
 (defun %validate-form-parseable (form-text &optional readtable-designator)
@@ -488,7 +493,7 @@ to use for parsing both the file and the new content."
       (:edit
        (unless (and (stringp old-text) (stringp new-text))
          (error "old_text and new_text are required for edit operation"))
-       (when (and content (stringp content))
+       (when content
          (error "content must not be provided for edit; use old_text and new_text")))
       (otherwise
        (unless (stringp content)
@@ -528,9 +533,10 @@ to use for parsing both the file and the new content."
                              (gethash "file_path" result) (namestring abs)
                              (gethash "operation" result) op-normalized)
                        result))
-                    (t
+                    (would-change
                      (fs-write-file rel updated)
-                     updated)))))))
+                     updated)
+                    (t updated)))))))
         ;; Existing operations: replace, insert_before, insert_after
         (multiple-value-bind (validated-content parinfer-warning)
             (%validate-and-repair-content content readtable)
@@ -607,7 +613,8 @@ Performs exact raw text matching (whitespace-sensitive). Must occur exactly once
                   :description "When true, return a preview without writing to disk")
          (normalize_blank_lines :type :boolean
                                 :default t
-                                :description "When true (default), normalize blank lines around edited top-level forms.")
+                                :description "When true (default), normalize blank lines around edited top-level forms.
+Applies to replace, insert_before, and insert_after operations only; ignored for edit.")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style

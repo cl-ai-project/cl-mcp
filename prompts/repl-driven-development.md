@@ -18,7 +18,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
 | Load system | `load-system` | `system`, `force` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
-| Edit code | `lisp-edit-form` | `form_type`, `form_name` |
+| Edit code | `lisp-edit-form` | `form_type`, `form_name`, `old_text`/`new_text` for edit |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
@@ -169,6 +169,7 @@ What do you need to do?
 - `replace`: Replace the entire form definition
 - `insert_before`: Insert new form before the matched form
 - `insert_after`: Insert new form after the matched form
+- `edit`: Scoped text replacement within a matched form using `old_text`/`new_text` (most token-efficient for small changes; no parinfer auto-repair — fails immediately if edit breaks structure)
 
 **Dry-run safety switch**
 - Pass `dry_run: true` to preview edits without touching the file. Useful when unsure the matcher will hit the right form.
@@ -405,11 +406,17 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
    ```
    Test with `(my-function 5)` → refine → repeat until correct.
 
-4. **Persist**:
-   ```json
-   {"file_path": "src/core.lisp", "form_type": "defun", "form_name": "my-function",
-    "operation": "replace", "content": "(defun my-function (x)\n  (* x 2))"}
-   ```
+4. **Persist** (choose one):
+   - **Full replace** (when rewriting the whole form):
+     ```json
+     {"file_path": "src/core.lisp", "form_type": "defun", "form_name": "my-function",
+      "operation": "replace", "content": "(defun my-function (x)\n  (* x 2))"}
+     ```
+   - **Edit** (when changing a small part — saves output tokens):
+     ```json
+     {"file_path": "src/core.lisp", "form_type": "defun", "form_name": "my-function",
+      "operation": "edit", "old_text": "(+ x 1)", "new_text": "(* x 2)"}
+     ```
 
 5. **Verify**: Re-evaluate or run tests.
 

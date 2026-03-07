@@ -1075,3 +1075,26 @@ then clean up."
                   nil)
               (error (e)
                 (search "content must not be provided" (princ-to-string e)))))))))
+
+(deftest lisp-edit-form-edit-empty-old-text-error
+  (testing "edit with empty old_text signals error immediately"
+    (with-temp-file "tests/tmp/edit-op-empty-old-text.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (ok (handler-case
+                  (progn
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "target"
+                                    :operation "edit"
+                                    :old-text ""
+                                    :new-text "replacement")
+                    nil)
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t)))
+          (ok (search "old_text must not be empty" err-msg))
+          (ok (string= before (fs-read-file path)))))))
+)
