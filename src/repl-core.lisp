@@ -141,7 +141,10 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                           (values msg msg
                                   (%truncate-output (get-output-stream-string stdout) max-output-length)
                                   (%truncate-output (get-output-stream-string stderr) max-output-length)
-                                  nil)))))
+                                  (list :condition-type (princ-to-string (type-of e))
+                                        :message msg
+                                        :restarts nil
+                                        :frames nil))))))
                    (reader-error
                     (lambda (e)
                       (let ((msg (format nil "Reader error: ~A" e)))
@@ -149,7 +152,10 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                           (values msg msg
                                   (%truncate-output (get-output-stream-string stdout) max-output-length)
                                   (%truncate-output (get-output-stream-string stderr) max-output-length)
-                                  nil)))))
+                                  (list :condition-type (princ-to-string (type-of e))
+                                        :message msg
+                                        :restarts nil
+                                        :frames nil))))))
                    (error (lambda (e)
                             ;; Capture structured error context
                             (setf error-context

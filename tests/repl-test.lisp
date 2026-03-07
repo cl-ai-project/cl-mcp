@@ -106,9 +106,15 @@
       ;; Should NOT have a backtrace
       (ok (not (search "Backtrace" printed))
           "should not contain backtrace")
-      ;; Should NOT have error-context (clean exit via package-error handler)
-      (ok (null error-context)
-          "package-error should not produce error-context"))))
+      ;; Should have minimal error-context (condition type + message, no frames)
+      (ok error-context
+          "package-error should produce minimal error-context")
+      (ok (getf error-context :condition-type)
+          "error-context should have condition-type")
+      (ok (getf error-context :message)
+          "error-context should have message")
+      (ok (null (getf error-context :frames))
+          "error-context should have no backtrace frames"))))
 
 (deftest repl-eval-reader-error-clean-message
   (testing "reader-error returns clean message without backtrace"
@@ -126,9 +132,15 @@
       ;; Should NOT have a backtrace
       (ok (not (search "Backtrace" printed))
           "should not contain backtrace")
-      ;; Should NOT have error-context (clean exit via reader-error handler)
-      (ok (null error-context)
-          "reader-error should not produce error-context"))))
+      ;; Should have minimal error-context (condition type + message, no frames)
+      (ok error-context
+          "reader-error should produce minimal error-context")
+      (ok (getf error-context :condition-type)
+          "error-context should have condition-type")
+      (ok (getf error-context :message)
+          "error-context should have message")
+      (ok (null (getf error-context :frames))
+          "error-context should have no backtrace frames"))))
 
 (deftest repl-eval-max-output-length
   (testing "max-output-length truncates printed result"

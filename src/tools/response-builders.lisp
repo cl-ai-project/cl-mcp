@@ -59,7 +59,8 @@ and :frames as returned by repl-eval."
 (defun build-eval-response (printed raw-value stdout stderr error-context
                             &key include-result-preview
                                  (preview-max-depth 1)
-                                 (preview-max-elements 8))
+                                 (preview-max-elements 8)
+                                 max-output-length)
   "Build the standard repl-eval response hash-table.
 Called by both the inline tool path and the worker handler.
 Returns a hash-table with content, stdout, stderr, and optional
@@ -111,7 +112,11 @@ so that MCP clients rendering only content[].text still see them."
                     (format s "~&Restarts: ~{~A~^, ~}"
                             (mapcar (lambda (r) (getf r :name))
                                     restarts))))))))
-      (setf (gethash "content" ht) (text-content enriched)))
+      (setf (gethash "content" ht)
+            (text-content
+             (if (and max-output-length (> (length enriched) max-output-length))
+                 (subseq enriched 0 max-output-length)
+                 enriched))))
     ht))
 
 (defun build-load-system-response (system ht)

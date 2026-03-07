@@ -113,4 +113,5 @@ SBCL's default optimization does not preserve locals for inspection."
              (build-eval-response printed raw-value stdout stderr error-context
                                   :include-result-preview include-result-preview
                                   :preview-max-depth (or preview-max-depth 1)
-                                  :preview-max-elements (or preview-max-elements 8))))))
+                                  :preview-max-elements (or preview-max-elements 8)
+                                  :max-output-length max-output-length)))))
