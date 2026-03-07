@@ -82,6 +82,31 @@
             (ok (string-equal form-type "defmethod")
                 (format nil "Expected defmethod but got ~A" form-type))))))))
 
+(deftest clgrep-search-empty-pattern-rejected
+  (testing "clgrep-search signals error for empty pattern"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (ok (signals (clgrep-search "" :path "src/")))))
+  (testing "clgrep-search signals error for whitespace-only pattern"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (ok (signals (clgrep-search "   " :path "src/"))))))
+
+(deftest clgrep-search-default-limit
+  (testing "clgrep-search applies default limit of 200 when limit is not specified"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      ;; Search for "." which matches everything — should be capped at 200
+      (let ((results (clgrep-search "." :path "." :recursive t)))
+        (ok (listp results))
+        (ok (<= (length results) 200)
+            (format nil "Expected at most 200 results without explicit limit, got ~A"
+                    (length results))))))
+  (testing "clgrep-search explicit limit overrides default"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "defun" :path "src/" :recursive nil :limit 3)))
+        (ok (listp results))
+        (ok (<= (length results) 3)
+            (format nil "Expected at most 3 results with explicit limit, got ~A"
+                    (length results)))))))
+
 (deftest clgrep-search-case-insensitive
   (testing "clgrep-search with case-insensitive flag"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))

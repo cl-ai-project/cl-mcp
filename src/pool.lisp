@@ -27,6 +27,7 @@
   (:import-from #:cl-mcp/src/worker-client
                 #:worker
                 #:spawn-worker #:worker-rpc #:kill-worker
+                #:signal-worker-terminate
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
                 #:worker-tcp-port
@@ -51,6 +52,7 @@
            #:shutdown-pool
            #:get-or-assign-worker
            #:release-session
+           #:kill-session-worker
            #:broadcast-root-to-workers
            #:send-root-to-session-worker
            #:pool-worker-info
@@ -933,29 +935,69 @@ that the health monitor (which snapshots workers under the lock
 then checks state outside it) will skip it and not treat the
 impending kill as a crash."
   (let ((worker-to-kill nil))
-    (bordeaux-threads:with-lock-held (*pool-lock*)
+    (bt:with-lock-held (*pool-lock*)
       (let ((entry (gethash session-id *affinity-map*)))
         (cond
-         ;; Bound worker — release immediately
-         ((and entry (typep entry 'worker))
-          (setf worker-to-kill entry)
-          (setf (worker-state worker-to-kill) :released)
-          (remhash session-id *affinity-map*)
-          (remhash session-id *crash-history*)
-          (setf *all-workers* (remove worker-to-kill *all-workers*)))
-         ;; Placeholder — mark cancelled so spawn thread cleans up
-         ((and entry (typep entry 'worker-placeholder))
-          (setf (worker-placeholder-cancelled entry) t)
-          (remhash session-id *affinity-map*)
-          (remhash session-id *crash-history*)
-          (log-event :info "pool.session.cancelled-spawn"
-                     "session" session-id)))))
+          ((and entry (typep entry 'worker))
+           (setf worker-to-kill entry)
+           (setf (worker-state worker-to-kill) :released)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)
+           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+          ((and entry (typep entry 'worker-placeholder))
+           (setf (worker-placeholder-cancelled entry) t)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)
+           (log-event :info "pool.session.cancelled-spawn"
+                      "session" session-id)))))
     (when worker-to-kill
       (log-event :info "pool.session.released"
                  "session" session-id
                  "worker_id" (worker-id worker-to-kill))
+      ;; Send SIGTERM first to break any in-flight RPC holding the
+      ;; stream-lock, then kill-worker can acquire it without deadlock.
+      (ignore-errors (signal-worker-terminate worker-to-kill))
       (ignore-errors (kill-worker worker-to-kill))
       (%schedule-replenish))))
+
+(defun kill-session-worker (session-id)
+  "Kill the worker bound to SESSION-ID without ending the session.
+Unlike RELEASE-SESSION, the session remains active — the next tool
+call that requires a worker will get a fresh one via
+GET-OR-ASSIGN-WORKER.
+
+Clears the session's crash history so the intentional kill does not
+count toward the circuit breaker.
+
+Returns :KILLED if a worker was found and killed, :NO-WORKER if no
+worker was bound, :PLACEHOLDER if a spawn was in progress (cancelled)."
+  (let ((worker-to-kill nil)
+        (kill-result :no-worker))
+    (bt:with-lock-held (*pool-lock*)
+      (let ((entry (gethash session-id *affinity-map*)))
+        (cond
+          ((and entry (typep entry 'worker))
+           (setf worker-to-kill entry
+                 kill-result :killed)
+           (setf (worker-state worker-to-kill) :released)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)
+           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+          ((and entry (typep entry 'worker-placeholder))
+           (setf (worker-placeholder-cancelled entry) t
+                 kill-result :placeholder)
+           (remhash session-id *affinity-map*)
+           (remhash session-id *crash-history*)))))
+    (when worker-to-kill
+      (log-event :info "pool.session.worker-killed"
+                 "session" session-id
+                 "worker_id" (worker-id worker-to-kill))
+      ;; Send SIGTERM first to break any in-flight RPC holding the
+      ;; stream-lock, then kill-worker can acquire it without deadlock.
+      (ignore-errors (signal-worker-terminate worker-to-kill))
+      (ignore-errors (kill-worker worker-to-kill))
+      (%schedule-replenish))
+    kill-result))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- pool-worker-info

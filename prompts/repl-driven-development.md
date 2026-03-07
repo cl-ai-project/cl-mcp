@@ -26,6 +26,7 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
 | Run tests | `run-tests` | `system`, `test` (optional) |
 | Diagnose pool | `pool-status`  | (no args)          |
+| Kill worker   | `pool-kill-worker` | `reset` (optional) |
 
 **Minimal Workflow (experienced users):**
 1. `repl-eval` — prototype in REPL
@@ -54,7 +55,7 @@ When the worker pool is enabled (default), tools run in two process types:
 - File tools: `fs-read-file`, `fs-write-file`, `fs-list-directory`, `fs-get-project-info`, `fs-set-project-root`
 - Lisp-aware reading/editing: `lisp-read-file`, `lisp-edit-form`, `lisp-check-parens`
 - Search: `clgrep-search`, `clhs-lookup`
-- Diagnostics: `pool-status`
+- Diagnostics: `pool-status`, `pool-kill-worker`
 
 **Worker process** (isolated — one dedicated process per session):
 - `repl-eval`, `load-system`, `run-tests`
@@ -710,7 +711,8 @@ When primary tools fail or are insufficient:
 **Solutions:**
 1. **Re-load your system:** `load-system` to restore packages and definitions in the new worker
 2. **Check pool health:** Use `pool-status` (no arguments) to see worker states
-3. **If crashes repeat:** The circuit breaker may trip after 3 crashes in 5 minutes. Check server logs for the root cause (e.g., out-of-memory, infinite loop)
+3. **Kill and restart:** Use `pool-kill-worker` to intentionally kill a stuck or corrupted worker. Pass `reset=true` to immediately spawn a replacement.
+4. **If crashes repeat:** The circuit breaker may trip after 3 crashes in 5 minutes. Check server logs for the root cause (e.g., out-of-memory, infinite loop)
 
 ### Parenthesis Mismatch
 **Symptom:** Evaluation fails with "unexpected end of file" or similar

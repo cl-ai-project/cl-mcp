@@ -58,7 +58,9 @@
                 #:sexp-show-structure
                 #:sexp-get-enclosing))
   (:import-from #:cl-mcp/src/tools/pool-status
-                #:pool-status))
+                #:pool-status)
+  (:import-from #:cl-mcp/src/tools/pool-kill-worker
+                #:pool-kill-worker))
 
 (in-package #:cl-mcp/src/tools/all)
 

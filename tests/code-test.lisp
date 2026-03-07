@@ -40,6 +40,23 @@
       (ok (integerp line))
       (ok (> line 0)))))
 
+(deftest code-find-definition-logical-pathname
+  (testing "code-find-definition handles CL standard symbols with logical pathnames"
+    ;; CL standard symbols like CL:CAR have source locations with logical pathnames
+    ;; (e.g., SYS:SRC;CODE;LIST.LISP). Before the fix, this would crash with
+    ;; "logical namestring is not valid as a native namestring".
+    (multiple-value-bind (path line)
+        (code-find-definition "cl:car")
+      ;; path may be nil if SBCL source is not installed, but it should NOT crash
+      (if path
+          (progn
+            (ok (stringp path) "path should be a string")
+            ;; line may be nil if the translated source file doesn't exist on disk
+            (ok (or (null line) (and (integerp line) (> line 0)))
+                "line should be nil or a positive integer"))
+          ;; Even if source not found, no crash occurred
+          (ok t "code-find-definition did not crash on logical pathname")))))
+
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns valid structure"
     ;; Skip this test on macOS due to XREF instability

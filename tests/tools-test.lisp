@@ -372,8 +372,78 @@
         (ok (string= (gethash "stdout" result) "hi"))
         (ok (string= (gethash "stderr" result) "oops"))
         (let* ((content (gethash "content" result))
-               (first (aref content 0)))
-          (ok (string= (gethash "text" first) "42")))))))
+               (first (aref content 0))
+               (text (gethash "text" first)))
+          (ok (eql 0 (search "42" text))
+              "content text starts with result value")
+          (ok (search ";; stdout" text)
+              "content text includes stdout section")
+          (ok (search "hi" text)
+              "content text includes stdout output")
+          (ok (search ";; stderr" text)
+              "content text includes stderr section")
+          (ok (search "oops" text)
+              "content text includes stderr output"))))))
+
+(deftest tools-call-repl-eval-error-enriched-content
+  (testing "repl-eval error includes condition type and restarts in content text"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":4001,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"(/ 1 0)\"}}}")))
+      (let* ((resp (%pjl req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (gethash "content" result))
+             (first (and (arrayp content) (> (length content) 0) (aref content 0)))
+             (text (and first (gethash "text" first))))
+        (ok (stringp text) "content text should be a string")
+        ;; Error context should be visible in the content text
+        (ok (or (search "DIVISION-BY-ZERO" text)
+                (search "ARITHMETIC-ERROR" text)
+                (search "division" (string-downcase text)))
+            "content text should include condition type or error info")
+        ;; Error context should also exist as structured data
+        (ok (gethash "error_context" result)
+            "error_context should exist as structured data")))))
+
+(deftest tools-call-repl-eval-object-id-enriched-content
+  (testing "repl-eval non-primitive result includes object-id in content text"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":4002,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"repl-eval\","
+                 "\"arguments\":{\"code\":\"(make-hash-table)\"}}}")))
+      (let* ((resp (%pjl req))
+             (obj (parse resp))
+             (result (gethash "result" obj))
+             (content (gethash "content" result))
+             (first (and (arrayp content) (> (length content) 0) (aref content 0)))
+             (text (and first (gethash "text" first)))
+             (object-id (gethash "result_object_id" result)))
+        (ok (stringp text) "content text should be a string")
+        (ok (integerp object-id) "result_object_id should be present")
+        ;; Object ID should be visible in the content text
+        (ok (search "object-id:" text)
+            "content text should include [object-id: N]")
+        (ok (search (format nil "~A" object-id) text)
+            "content text should include the actual object id value")))))
+
+(deftest tools-call-repl-eval-limited-flag-correct
+  (testing "clgrep-search limited flag is true when default limit truncates results"
+    (with-test-project-root
+      (let ((req (concatenate 'string
+                   "{\"jsonrpc\":\"2.0\",\"id\":4003,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"clgrep-search\","
+                   "\"arguments\":{\"pattern\":\".\",\"path\":\"src\",\"recursive\":true}}}")))
+        (let* ((resp (%pjl req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (count (gethash "count" result))
+               (limited (gethash "limited" result)))
+          ;; "." matches everything in src/ recursively, should hit the 200 default limit
+          (when (>= count 200)
+            (ok limited
+                "limited should be true when default limit truncates results")))))))
 
 (deftest tools-call-namespaced-name
   (testing "namespaced tool name like lisp_mcp.repl-eval is accepted"

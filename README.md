@@ -29,6 +29,7 @@ Lisp development via MCP.
   - `clhs-lookup` — Common Lisp HyperSpec reference (symbols and sections)
   - `run-tests` — unified test runner with structured results (Rove, ASDF fallback)
   - `pool-status` — worker pool diagnostics (worker counts, states, pool health)
+  - `pool-kill-worker` — kill and optionally reset the session's worker process
 - Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
 - Structured JSON logs with level control via env var
 - Rove test suite wired through ASDF `test-op`
@@ -480,12 +481,39 @@ Output fields:
 - `standby_count` (integer): idle workers available for assignment
 - `max_pool_size` (integer): configured maximum worker count
 - `warmup_target` (integer): target number of warm standby workers
-- `workers` (array): per-worker details including `id`, `state` (`bound` or `standby`), `session_id`, `pid`, and `port`
+- `workers` (array): per-worker details including `id`, `state` (`bound` or `standby`), `session` (string or null, truncated to 8 chars), `pid`, and `tcp_port`
 
 Example request:
 ```json
 {"jsonrpc":"2.0","id":4,"method":"tools/call",
  "params":{"name":"pool-status","arguments":{}}}
+```
+
+### `pool-kill-worker`
+Kill the worker process bound to the current session. All Lisp state (loaded
+systems, REPL definitions, packages) in the worker is lost. Use this when a
+worker is stuck, has corrupted state, or you want a clean environment.
+
+Input:
+- `reset` (boolean, default `false`): when `true`, immediately spawn a replacement
+  worker after killing the current one; when `false`, defer spawning until the next
+  tool call that needs a worker
+
+Output fields:
+- `killed` (boolean): whether a worker was actually killed
+- `reset` (boolean|null): whether a replacement was spawned (only present when `killed` is true)
+- `cancelled_spawn` (boolean|null): true if a pending spawn was cancelled instead of killing a live worker
+- `isError` (boolean|null): true if kill succeeded but replacement spawn failed
+
+In both modes, you must call `load-system` again to restore previously loaded systems.
+
+Example requests:
+```json
+// Kill worker, let next tool call spawn a fresh one
+{"method":"tools/call","params":{"name":"pool-kill-worker","arguments":{}}}
+
+// Kill and immediately spawn a replacement
+{"method":"tools/call","params":{"name":"pool-kill-worker","arguments":{"reset":true}}}
 ```
 
 ## Logging

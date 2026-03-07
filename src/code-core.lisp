@@ -75,12 +75,13 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
 Returns NIL when the file cannot be read."
   (when (and pathname offset)
     (handler-case
-        (let* ((content (uiop:read-file-string pathname))
+        (let* ((physical (translate-logical-pathname pathname))
+               (content (uiop:read-file-string physical))
                (end (min (max offset 0) (length content))))
           (1+ (count #\Newline content :end end)))
       (error (e)
         (log-event :warn "code.find.line-error"
-                   "path" (uiop:native-namestring pathname)
+                   "path" (princ-to-string pathname)
                    "error" (princ-to-string e))
         nil))))
 

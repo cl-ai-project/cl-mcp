@@ -14,6 +14,8 @@
                 #:generate-result-preview)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/repl-core
+                #:*default-max-output-length*)
   (:export #:build-eval-response
            #:build-load-system-response
            #:build-run-tests-response
@@ -59,28 +61,70 @@ and :frames as returned by repl-eval."
 (defun build-eval-response (printed raw-value stdout stderr error-context
                             &key include-result-preview
                                  (preview-max-depth 1)
-                                 (preview-max-elements 8))
+                                 (preview-max-elements 8)
+                                 max-output-length)
   "Build the standard repl-eval response hash-table.
 Called by both the inline tool path and the worker handler.
 Returns a hash-table with content, stdout, stderr, and optional
-result_object_id, result_preview, and error_context."
-  (let ((ht (make-ht "content" (text-content printed)
-                     "stdout" stdout
-                     "stderr" stderr)))
+result_object_id, result_preview, and error_context.
+The content text includes stdout/stderr/error-context/object-id
+so that MCP clients rendering only content[].text still see them."
+  (let ((ht (make-ht "stdout" stdout "stderr" stderr))
+        (object-id nil)
+        (effective-limit (or max-output-length *default-max-output-length*)))
+    ;; Determine object-id (needed for text enrichment below)
     (when (and (null error-context) (inspectable-p raw-value))
       (if include-result-preview
-          (let ((preview (generate-result-preview
-                          raw-value
-                          :max-depth preview-max-depth
-                          :max-elements preview-max-elements)))
-            (setf (gethash "result_object_id" ht) (gethash "id" preview))
-            (setf (gethash "result_preview" ht) preview))
-          (let ((object-id (register-object raw-value)))
-            (when object-id
-              (setf (gethash "result_object_id" ht) object-id)))))
+          (handler-case
+              (let ((preview (generate-result-preview
+                              raw-value
+                              :max-depth preview-max-depth
+                              :max-elements preview-max-elements)))
+                (setf object-id (gethash "id" preview))
+                (setf (gethash "result_object_id" ht) object-id)
+                (setf (gethash "result_preview" ht) preview))
+            (serious-condition ()
+              ;; Fall back to simple registration without preview
+              (let ((oid (register-object raw-value)))
+                (when oid
+                  (setf object-id oid)
+                  (setf (gethash "result_object_id" ht) oid)))))
+          (let ((oid (register-object raw-value)))
+            (when oid
+              (setf object-id oid)
+              (setf (gethash "result_object_id" ht) oid)))))
     (when error-context
       (setf (gethash "error_context" ht)
             (%build-error-context-ht error-context)))
+    ;; Build enriched text for content[].text so MCP clients see everything
+    (let ((enriched
+            (with-output-to-string (s)
+              (write-string printed s)
+              (when object-id
+                (format s "~&[object-id: ~A]" object-id))
+              (when (and stdout (plusp (length stdout)))
+                (format s "~&~%;; stdout~%~A" stdout))
+              (when (and stderr (plusp (length stderr)))
+                (format s "~&~%;; stderr~%~A" stderr))
+              (when error-context
+                (let ((ctype (sanitize-for-json
+                              (getf error-context :condition-type)))
+                      (msg (sanitize-for-json
+                            (getf error-context :message)))
+                      (restarts (getf error-context :restarts)))
+                  (format s "~&~%[~A] ~A" (or ctype "ERROR") (or msg ""))
+                  (when restarts
+                    (format s "~&Restarts: ~{~A~^, ~}"
+                            (mapcar (lambda (r)
+                                      (sanitize-for-json (getf r :name)))
+                                    restarts))))))))
+      (setf (gethash "content" ht)
+            (text-content
+             (if (> (length enriched) effective-limit)
+                 (concatenate 'string
+                              (subseq enriched 0 effective-limit)
+                              "...(truncated)")
+                 enriched))))
     ht))
 
 (defun build-load-system-response (system ht)

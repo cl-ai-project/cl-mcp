@@ -347,14 +347,21 @@ Returns either a primitive value representation, an object-ref, or a circular-re
 Returns a hash-table with inspection results or error info."
   (let ((object (lookup-object id)))
     (if object
-        (let ((seen (make-hash-table :test 'eq))
-              (active (make-hash-table :test 'eq))
-              (result nil))
-          ;; Seed root ID so child references to root point to the caller-visible ID.
-          (setf (gethash object seen) id)
-          (setf result (%inspect-object-impl object seen active 0 max-depth max-elements))
-          (setf (gethash "id" result) id)
-          result)
+        (handler-case
+            (let ((seen (make-hash-table :test 'eq))
+                  (active (make-hash-table :test 'eq))
+                  (result nil))
+              ;; Seed root ID so child references to root point to the caller-visible ID.
+              (setf (gethash object seen) id)
+              (setf result (%inspect-object-impl object seen active 0 max-depth max-elements))
+              (setf (gethash "id" result) id)
+              result)
+          (serious-condition (e)
+            (make-ht "error" t
+                     "code" "INSPECTION_FAILED"
+                     "message" (format nil
+                                       "Cannot inspect object ID ~A: ~A (object may have been garbage-collected)"
+                                       id e))))
         (make-ht "error" t
                  "code" "OBJECT_NOT_FOUND"
                  "message" (format nil "Object ID ~A not found (may have been evicted from cache)" id)))))
