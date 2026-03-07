@@ -228,7 +228,7 @@ Unknown package prefixes are handled leniently via stub packages."
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
-            result
+            (values result nil)
             (let ((repaired (apply-indent-mode content)))
               (multiple-value-bind (repaired-result repaired-err)
                   (try-parse repaired)
@@ -236,7 +236,12 @@ Unknown package prefixes are handled leniently via stub packages."
                   (repaired-result
                    (log-event :info "lisp.edit.form" "auto-repair" "success"
                               "original-error" (princ-to-string err))
-                   repaired-result)
+                   ;; Return repaired content and a description of what changed
+                   (let ((added-count (- (length repaired) (length content))))
+                     (values repaired-result
+                             (format nil "~D closing delimiter~:P ~
+                                          ~[were~;was~:;were~] added by parinfer"
+                                     added-count added-count))))
                   ((and (typep err 'multiple-top-level-forms-error)
                         (typep repaired-err 'multiple-top-level-forms-error))
                    (error err))
@@ -387,8 +392,9 @@ to use for parsing both the file and the new content."
                        ((string= op-normalized "insert_before") :insert-before)
                        ((string= op-normalized "insert_after") :insert-after)
                        (t (error "Unsupported operation: ~A" operation))))
-         (form-type-str (string-downcase form-type))
-         (validated-content (%validate-and-repair-content content readtable)))
+         (form-type-str (string-downcase form-type)))
+    (multiple-value-bind (validated-content parinfer-warning)
+        (%validate-and-repair-content content readtable)
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
@@ -419,10 +425,12 @@ to use for parsing both the file and the new content."
                      (gethash "preview" result) updated
                      (gethash "file_path" result) (namestring abs)
                      (gethash "operation" result) op-normalized)
+               (when parinfer-warning
+                 (setf (gethash "parinfer_warning" result) parinfer-warning))
                result))
             (t
              (fs-write-file rel updated)
-             updated)))))))
+             (values updated parinfer-warning)))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
@@ -455,36 +463,38 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (handler-case
-      (let ((updated (lisp-edit-form :file-path file_path
-                                     :form-type form_type
-                                     :form-name form_name
-                                     :operation operation
-                                     :content content
-                                     :dry-run dry_run
-                                     :normalize-blank-lines normalize_blank_lines
-                                     :readtable (when readtable
-                                                 (let ((colon-pos (position #\: readtable)))
-                                                   (if colon-pos
-                                                       ;; Package-qualified: "pkg:sym" or "pkg::sym"
-                                                       (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                              (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                                  (char= (char readtable (1+ colon-pos)) #\:))
-                                                                             (+ colon-pos 2)
-                                                                             (1+ colon-pos)))
-                                                              (sym-name (subseq readtable sym-start))
-                                                              (pkg (find-package (string-upcase pkg-name))))
-                                                         (if pkg
-                                                             (intern (string-upcase sym-name) pkg)
-                                                             (error "Package ~A not found for readtable ~A"
-                                                                    pkg-name readtable)))
-                                                       ;; Keyword symbol (no colon prefix)
-                                                       (intern (string-upcase readtable) :keyword)))))))
+      (multiple-value-bind (updated parinfer-warning)
+          (lisp-edit-form :file-path file_path
+                          :form-type form_type
+                          :form-name form_name
+                          :operation operation
+                          :content content
+                          :dry-run dry_run
+                          :normalize-blank-lines normalize_blank_lines
+                          :readtable (when readtable
+                                      (let ((colon-pos (position #\: readtable)))
+                                        (if colon-pos
+                                            ;; Package-qualified: "pkg:sym" or "pkg::sym"
+                                            (let* ((pkg-name (subseq readtable 0 colon-pos))
+                                                   (sym-start (if (and (< (1+ colon-pos) (length readtable))
+                                                                       (char= (char readtable (1+ colon-pos)) #\:))
+                                                                  (+ colon-pos 2)
+                                                                  (1+ colon-pos)))
+                                                   (sym-name (subseq readtable sym-start))
+                                                   (pkg (find-package (string-upcase pkg-name))))
+                                              (if pkg
+                                                  (intern (string-upcase sym-name) pkg)
+                                                  (error "Package ~A not found for readtable ~A"
+                                                         pkg-name readtable)))
+                                            ;; Keyword symbol (no colon prefix)
+                                            (intern (string-upcase readtable) :keyword)))))
         (if dry_run
             (let* ((preview (gethash "preview" updated))
                    (would-change (gethash "would_change" updated))
                    (original-form (gethash "original" updated))
-                   (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])"
-                                    operation form_type file_path would-change)))
+                   (pw (gethash "parinfer_warning" updated))
+                   (summary (format nil "Dry-run ~A on ~A ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]"
+                                    operation form_type file_path would-change pw)))
               (result id
                       (make-ht "path" file_path
                                "operation" operation
@@ -494,15 +504,15 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "original" original-form
                                "preview" preview
                                "content" (text-content summary))))
-            (result id
-                    (make-ht "path" file_path
-                             "operation" operation
-                             "form_type" form_type
-                             "form_name" form_name
-                             "bytes" (length updated)
-                             "content" (text-content
-                                        (format nil "Applied ~A to ~A ~A (~D chars)"
-                                                operation form_type file_path (length updated)))))))
+            (let ((summary (format nil "Applied ~A to ~A ~A (~D chars)~@[~%WARNING: ~A~]"
+                                   operation form_type file_path (length updated) parinfer-warning)))
+              (result id
+                      (make-ht "path" file_path
+                               "operation" operation
+                               "form_type" form_type
+                               "form_name" form_name
+                               "bytes" (length updated)
+                               "content" (text-content summary))))))
     (multiple-top-level-forms-error ()
       (cl-mcp/src/tools/helpers:rpc-error
        id -32602 (%multiple-top-level-forms-error-message)

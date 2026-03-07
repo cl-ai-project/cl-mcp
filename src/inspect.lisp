@@ -9,13 +9,14 @@
   (:import-from #:cl-mcp/src/utils/printing
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:export #:inspect-object-by-id
-           #:generate-result-preview))
+           #:generate-result-preview
+           #:format-inspect-elements))
 
 (in-package #:cl-mcp/src/inspect)
 
@@ -384,6 +385,52 @@ For nested non-primitive values, id fields are included for drill-down."
     (setf (gethash "id" result) id)
     result))
 
+(defun format-inspect-elements (inspection-result)
+  "Format structured inspection data as human-readable text lines."
+  (with-output-to-string (s)
+    (format s "[~A] ~A"
+            (gethash "kind" inspection-result)
+            (gethash "summary" inspection-result))
+    (when (gethash "id" inspection-result)
+      (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+    ;; List/array elements
+    (let ((elements (gethash "elements" inspection-result)))
+      (when (and elements (plusp (length elements)))
+        (format s "~&Elements:")
+        (loop for el in (coerce elements 'list)
+              for i from 0
+              do (if (hash-table-p el)
+                     (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
+                             i
+                             (gethash "value" el (gethash "summary" el "?"))
+                             (gethash "id" el))
+                     (format s "~&  [~D] ~A" i el)))))
+    ;; Hash-table entries
+    (let ((entries (gethash "entries" inspection-result)))
+      (when (and entries (plusp (length entries)))
+        (format s "~&Entries (~A test):"
+                (or (gethash "test" inspection-result) "EQL"))
+        (loop for entry in (coerce entries 'list)
+              do (when (hash-table-p entry)
+                   (format s "~&  ~A => ~A"
+                           (gethash "key" entry "?")
+                           (gethash "value" entry "?"))))))
+    ;; CLOS slots
+    (let ((slots (gethash "slots" inspection-result)))
+      (when (and slots (plusp (length slots)))
+        (format s "~&Slots:")
+        (loop for slot in (coerce slots 'list)
+              do (when (hash-table-p slot)
+                   (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
+                           (gethash "name" slot "?")
+                           (gethash "value" slot "?")
+                           (gethash "id" slot))))))
+    ;; Meta info (truncation)
+    (let ((meta (gethash "meta" inspection-result)))
+      (when (and meta (hash-table-p meta) (gethash "truncated" meta))
+        (format s "~&  ... (truncated, ~D total)"
+                (or (gethash "total_elements" meta) "?"))))))
+
 ;;; MCP Tool Definition
 
 (define-tool "inspect-object"
@@ -405,13 +452,10 @@ Use this to drill down into complex data structures like CLOS instances, structu
                                                     :max-depth (or max-depth 1)
                                                     :max-elements (or max-elements 50))))
       (if (gethash "error" inspection-result)
-          (result id
-                  (make-ht "isError" t
-                           "content" (text-content
-                                      (gethash "message" inspection-result))))
-          (let ((summary (format nil "[~A] ~A"
-                                 (gethash "kind" inspection-result)
-                                 (gethash "summary" inspection-result))))
+          (result id (make-ht "isError" t
+                              "content" (text-content
+                                         (gethash "message" inspection-result))))
+          (progn
             (setf (gethash "content" inspection-result)
-                  (text-content summary))
+                  (text-content (format-inspect-elements inspection-result)))
             (result id inspection-result))))))

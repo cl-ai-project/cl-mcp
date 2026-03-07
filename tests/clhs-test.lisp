@@ -122,3 +122,22 @@
     (let ((result (clhs-lookup "format")))
       (ok (gethash "symbol" result))
       (ok (string= (gethash "symbol" result) "format")))))
+
+(deftest clhs-lookup-single-digit-chapter-section
+  (testing "clhs-lookup correctly handles single-digit chapter sections with zero-padding"
+    ;; M-6 fix: chapter numbers are zero-padded to 2 digits (e.g., 7 -> 07)
+    ;; so the file is 07_a.htm, not 7_a.htm.
+    (let ((result (clhs-lookup "7.1")))
+      (ok (hash-table-p result))
+      (when (gethash "section" result)
+        (ok (string= (gethash "section" result) "7.1")))
+      ;; If local, the URL should contain the zero-padded filename
+      (when (gethash "url" result)
+        (ok (search "07_a" (gethash "url" result))
+            "URL should use zero-padded chapter number 07_a.htm")))
+    ;; Also test chapter 3 subsection
+    (let ((result (clhs-lookup "3.1")))
+      (ok (hash-table-p result))
+      (when (gethash "url" result)
+        (ok (search "03_a" (gethash "url" result))
+            "URL should use zero-padded chapter number 03_a.htm")))))

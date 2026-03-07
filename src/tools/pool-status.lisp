@@ -28,9 +28,23 @@ tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
   (let ((info (pool-status-info)))
     (setf (gethash "content" info)
           (text-content
-           (format nil "Pool: ~D workers (~D bound, ~D standby)~@[ [stopped]~]"
-                   (gethash "total_workers" info)
-                   (gethash "bound_count" info)
-                   (gethash "standby_count" info)
-                   (not (gethash "pool_running" info)))))
+           (with-output-to-string (s)
+             (format s "Pool: ~D workers (~D bound, ~D standby)~@[ [stopped]~]"
+                     (gethash "total_workers" info)
+                     (gethash "bound_count" info)
+                     (gethash "standby_count" info)
+                     (not (gethash "pool_running" info)))
+             (format s "~&Max pool size: ~A, Warmup target: ~A"
+                     (gethash "max_pool_size" info)
+                     (gethash "warmup_target" info))
+             (let ((workers (gethash "workers" info)))
+               (when (and workers (plusp (length workers)))
+                 (format s "~&~%Workers:")
+                 (loop for w across workers
+                       do (format s "~&  #~A [~A] pid=~A port=~A~@[ session=~A~]"
+                                  (gethash "id" w)
+                                  (gethash "state" w)
+                                  (gethash "pid" w)
+                                  (gethash "tcp_port" w)
+                                  (gethash "session" w))))))))
     (result id info)))

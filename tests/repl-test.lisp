@@ -557,3 +557,54 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
             ;; With skip-internal, should have preview
             (ok (getf (first locals-2) :preview)
                 "with skip-internal, user frame SHOULD have preview")))))))
+
+(deftest repl-eval-printer-variable-isolation
+  (testing "user (setf *print-base* 16) does not affect result printing"
+    ;; C-1 fix: %eval-forms rebinds *print-base* to 10, so user's setf
+    ;; only modifies the local binding. After %eval-forms returns,
+    ;; prin1-to-string sees the outer (default) binding.
+    (multiple-value-bind (printed value)
+        (repl-eval "(progn (setf *print-base* 16) 255)")
+      (ok (= value 255))
+      (ok (string= printed "255")
+          "result should be decimal 255, not hex FF")))
+  (testing "user (setf *print-radix*) does not leak to result printing"
+    (multiple-value-bind (printed value)
+        (repl-eval "(progn (setf *print-radix* t) 42)")
+      (ok (= value 42))
+      (ok (string= printed "42")
+          "result should be plain 42, not #10r42")))
+  (testing "printer variable changes do not leak across calls"
+    (repl-eval "(setf *print-base* 16)")
+    (multiple-value-bind (printed value)
+        (repl-eval "10")
+      (ok (= value 10))
+      (ok (string= printed "10")
+          "second call should print 10 in decimal, not A in hex"))))
+
+(deftest repl-eval-print-circle-prevents-hang
+  (testing "circular structure prints with circle notation instead of hanging"
+    ;; M-3 fix: *print-circle* bound to T in result printing context.
+    (multiple-value-bind (printed value)
+        (repl-eval "(let ((x (list 1))) (setf (cdr x) x) x)"
+                   :timeout-seconds 5.0d0)
+      (declare (ignore value))
+      ;; Should NOT timeout - circular printing should work
+      (ok (not (search "timed out" printed))
+          "should not timeout on circular structure")
+      ;; Should contain circular reference notation
+      (ok (or (search "#1=" printed) (search "#" printed))
+          "should contain circular reference notation"))))
+
+(deftest repl-eval-truncate-sanitizes-correctly
+  (testing "truncated output is also sanitized for control characters"
+    ;; M-5 fix: truncate first, then sanitize (not the other way around).
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval
+         "(make-string 100 :initial-element (code-char 7))"
+         :max-output-length 20)
+      (declare (ignore value stdout stderr))
+      (ok (search "...(truncated)" printed)
+          "should be truncated")
+      (ok (not (%has-control-chars-p printed))
+          "truncated output should be sanitized"))))
