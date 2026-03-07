@@ -13,7 +13,7 @@ Lisp development via MCP.
 - JSON‑RPC 2.0 request/response framing (one message per line)
 - MCP initialize handshake with capability discovery
 - `notifications/cancelled` support for cooperative request cancellation
-- **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with per-session affinity, automatic crash recovery, and circuit breaker
+- **Worker pool isolation** — eval-dependent tools run in an isolated child SBCL process, separating the MCP server from potentially crashing evaluations. Features automatic crash recovery, circuit breaker, and per-session affinity for multi-client setups
 - Tools API
   - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
   - `load-system` — load ASDF systems with force-reload, output suppression, and timeout support
