@@ -131,7 +131,12 @@ Returns a hash table with:
                   (format nil "http://www.lispworks.com/documentation/HyperSpec/Body/~A"
                           filename))))
     (unless is-local
-      (log-event :warn "clhs" "action" "section not found locally" "section" section-string))
+      (log-event :warn "clhs" "action" "section not found locally" "section" section-string)
+      (let ((msg (format nil "Section ~A not found in local HyperSpec index"
+                         section-string)))
+        (return-from clhs-lookup-section
+          (make-ht "content" (text-content msg)
+                   "isError" t))))
     (let ((result (make-ht "section" section-string
                            "url" url
                            "source" (if is-local "local" "remote"))))

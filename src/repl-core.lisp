@@ -134,6 +134,30 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                               (format stderr "~&Warning: ~A~%" w)
                               (when (find-restart 'muffle-warning)
                                 (invoke-restart 'muffle-warning))))
+                   (package-error
+                    (lambda (e)
+                      (let* ((raw-msg (format nil "Package error: ~A" e))
+                             (msg (%truncate-output raw-msg max-output-length)))
+                        (return-from %do-repl-eval
+                          (values msg msg
+                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
+                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                  (list :condition-type (princ-to-string (type-of e))
+                                        :message msg
+                                        :restarts nil
+                                        :frames nil))))))
+                   (reader-error
+                    (lambda (e)
+                      (let* ((raw-msg (format nil "Reader error: ~A" e))
+                             (msg (%truncate-output raw-msg max-output-length)))
+                        (return-from %do-repl-eval
+                          (values msg msg
+                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
+                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                  (list :condition-type (princ-to-string (type-of e))
+                                        :message msg
+                                        :restarts nil
+                                        :frames nil))))))
                    (error (lambda (e)
                             ;; Capture structured error context
                             (setf error-context

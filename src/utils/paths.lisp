@@ -152,16 +152,18 @@ Signals an error if PATH is outside project root."
                 normalize-path-for-display))
 (defun normalize-path-for-display (pathname)
   "Return a namestring for PATHNAME, relative to *project-root* when possible.
-Falls back to CWD, then cl-mcp system source directory, else absolute."
+Falls back to CWD, then cl-mcp system source directory, else absolute.
+Logical pathnames are translated to physical before processing."
   (when pathname
-    (let ((pn (uiop/pathname:ensure-pathname pathname))
+    (let ((pn (translate-logical-pathname
+               (uiop/pathname:ensure-pathname pathname)))
           (bases (remove nil
                          (list *project-root*
                                (uiop/os:getcwd)
                                (ignore-errors
                                 (asdf/system:system-source-directory :cl-mcp))))))
-      (dolist (base bases (uiop/filesystem:native-namestring pn))
+      (dolist (base bases (namestring pn))
         (when (uiop/pathname:subpathp pn base)
           (return
-           (uiop/filesystem:native-namestring
+           (namestring
             (uiop/pathname:enough-pathname pn base))))))))

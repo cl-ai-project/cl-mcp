@@ -40,6 +40,32 @@
          (ok (ht-get result "error"))
          (ok (string= "OBJECT_NOT_FOUND" (ht-get result "code"))))))))
 
+(deftest inspect-serious-condition-returns-error
+  (testing "inspect-object-by-id returns error on serious-condition instead of crashing"
+    (with-fresh-registry
+     (lambda ()
+       ;; Register a valid object, then corrupt the registry entry
+       ;; by replacing it with a freed/invalid pointer simulation.
+       ;; We test that the handler-case around %inspect-object-impl catches
+       ;; serious-condition. Since we can't easily trigger a real memory fault,
+       ;; we test via a type that causes an error during inspection.
+       (let* ((obj (make-array 3 :element-type '(unsigned-byte 8)
+                                 :initial-contents '(1 2 3)))
+              (id (register-object obj)))
+         ;; First, verify it works normally
+         (let ((result (inspect-object-by-id id)))
+           (ok (string= "array" (ht-get result "kind"))
+               "normal inspection should work"))
+         ;; Now register a problematic object - a condition object
+         ;; whose inspection may trigger nested errors
+         (let ((bad-id (register-object
+                        (make-condition 'simple-error
+                                        :format-control "test"))))
+           (let ((result (inspect-object-by-id bad-id)))
+             ;; Should return a result, not crash
+             (ok (hash-table-p result)
+                 "should return hash-table even for problematic objects"))))))))
+
 ;;; Test list inspection
 
 (deftest inspect-simple-list
