@@ -116,6 +116,30 @@
       (ok (null (getf error-context :frames))
           "error-context should have no backtrace frames"))))
 
+(deftest repl-eval-package-arg-not-found-signals-package-error
+  (testing "package keyword arg with nonexistent package signals package-error cleanly"
+    ;; This tests the %resolve-eval-package path which signals
+    ;; %package-not-found-error (a subtype of package-error).
+    (multiple-value-bind (printed value stdout stderr error-context)
+        (repl-eval "(+ 1 1)" :package "NONEXISTENT-PKG-12345")
+      (declare (ignore stdout stderr))
+      (ok (search "does not exist" printed)
+          "printed should contain 'does not exist'")
+      (ok (string= printed value)
+          "printed and raw value should be the same string")
+      ;; Should NOT have a backtrace (caught by package-error handler)
+      (ok (not (search "Backtrace" printed))
+          "should not contain backtrace")
+      ;; Should have minimal error-context
+      (ok error-context
+          "should produce error-context")
+      (ok (getf error-context :condition-type)
+          "error-context should have condition-type")
+      (ok (search "PACKAGE" (getf error-context :condition-type))
+          "condition-type should indicate a package error")
+      (ok (null (getf error-context :frames))
+          "error-context should have no backtrace frames"))))
+
 (deftest repl-eval-reader-error-clean-message
   (testing "reader-error returns clean message without backtrace"
     ;; #.(+ 1 2) with safe-read=t signals READER-ERROR (not END-OF-FILE).
