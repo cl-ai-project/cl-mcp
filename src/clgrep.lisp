@@ -65,14 +65,18 @@ Returns a list of alists, each containing:
   :form-start-line - Start line of the containing form
   :form-end-line   - End line of the containing form
   :form            - The full top-level form text (only if INCLUDE-FORM is true)"
-  (let* ((search-path (resolve-path-in-project path :must-exist t))
+  (when (or (null pattern)
+            (zerop (length (string-trim '(#\Space #\Tab) pattern))))
+    (error "Pattern cannot be empty"))
+  (let* ((effective-limit (or limit 200))
+         (search-path (resolve-path-in-project path :must-exist t))
          (types (%parse-form-types form-types))
          (results (semantic-grep search-path pattern
                                  :recursive recursive
                                  :case-insensitive case-insensitive
                                  :form-types types
                                  :include-form include-form
-                                 :limit limit)))
+                                 :limit effective-limit)))
     (log-event :info "clgrep.search"
                "pattern" pattern
                "path" (namestring search-path)
@@ -111,7 +115,7 @@ Recommended workflow:
          (form-types :type :array :json-name "form_types"
                      :description "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)")
          (limit :type :integer
-                :description "Maximum number of results to return (optional, defaults to unlimited)")
+                :description "Maximum number of results to return (optional, defaults to 200)")
          (include-form :type :boolean :json-name "include_form"
                        :description "Include full form text in results (default: false, returns signatures only)"))
   :body

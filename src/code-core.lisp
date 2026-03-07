@@ -74,15 +74,16 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
   "Convert character OFFSET within PATHNAME to a 1-based line number.
 Returns NIL when the file cannot be read."
   (when (and pathname offset)
-    (handler-case
-        (let* ((content (uiop:read-file-string pathname))
-               (end (min (max offset 0) (length content))))
-          (1+ (count #\Newline content :end end)))
-      (error (e)
-        (log-event :warn "code.find.line-error"
-                   "path" (uiop:native-namestring pathname)
-                   "error" (princ-to-string e))
-        nil))))
+    (let ((physical (translate-logical-pathname pathname)))
+      (handler-case
+          (let* ((content (uiop:read-file-string physical))
+                 (end (min (max offset 0) (length content))))
+            (1+ (count #\Newline content :end end)))
+        (error (e)
+          (log-event :warn "code.find.line-error"
+                     "path" (namestring physical)
+                     "error" (princ-to-string e))
+          nil)))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) &optional))

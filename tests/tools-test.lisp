@@ -372,8 +372,18 @@
         (ok (string= (gethash "stdout" result) "hi"))
         (ok (string= (gethash "stderr" result) "oops"))
         (let* ((content (gethash "content" result))
-               (first (aref content 0)))
-          (ok (string= (gethash "text" first) "42")))))))
+               (first (aref content 0))
+               (text (gethash "text" first)))
+          (ok (eql 0 (search "42" text))
+              "content text starts with result value")
+          (ok (search ";; stdout" text)
+              "content text includes stdout section")
+          (ok (search "hi" text)
+              "content text includes stdout output")
+          (ok (search ";; stderr" text)
+              "content text includes stderr section")
+          (ok (search "oops" text)
+              "content text includes stderr output"))))))
 
 (deftest tools-call-namespaced-name
   (testing "namespaced tool name like lisp_mcp.repl-eval is accepted"
