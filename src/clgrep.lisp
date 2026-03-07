@@ -119,7 +119,8 @@ Recommended workflow:
          (include-form :type :boolean :json-name "include_form"
                        :description "Include full form text in results (default: false, returns signatures only)"))
   :body
-  (let* ((results
+  (let* ((effective-limit (or limit 200))
+         (results
           (clgrep-search pattern
                          :path path
                          :recursive recursive
@@ -133,4 +134,4 @@ Recommended workflow:
                                                (encode formatted s)))
                      "matches" formatted
                      "count" (length results)
-                     "limited" (and limit (<= limit (length results)))))))
+                     "limited" (<= effective-limit (length results))))))

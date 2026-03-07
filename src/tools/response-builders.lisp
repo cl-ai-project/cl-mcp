@@ -71,13 +71,20 @@ so that MCP clients rendering only content[].text still see them."
     ;; Determine object-id (needed for text enrichment below)
     (when (and (null error-context) (inspectable-p raw-value))
       (if include-result-preview
-          (let ((preview (generate-result-preview
-                          raw-value
-                          :max-depth preview-max-depth
-                          :max-elements preview-max-elements)))
-            (setf object-id (gethash "id" preview))
-            (setf (gethash "result_object_id" ht) object-id)
-            (setf (gethash "result_preview" ht) preview))
+          (handler-case
+              (let ((preview (generate-result-preview
+                              raw-value
+                              :max-depth preview-max-depth
+                              :max-elements preview-max-elements)))
+                (setf object-id (gethash "id" preview))
+                (setf (gethash "result_object_id" ht) object-id)
+                (setf (gethash "result_preview" ht) preview))
+            (serious-condition ()
+              ;; Fall back to simple registration without preview
+              (let ((oid (register-object raw-value)))
+                (when oid
+                  (setf object-id oid)
+                  (setf (gethash "result_object_id" ht) oid)))))
           (let ((oid (register-object raw-value)))
             (when oid
               (setf object-id oid)
