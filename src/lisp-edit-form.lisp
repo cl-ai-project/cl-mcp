@@ -392,16 +392,14 @@ Signals an error if OLD-TEXT is not found or occurs multiple times within the fo
                 old_text begins with: ~S"
                form-id (subseq old-text 0 (min (length old-text) 60)))))
     (let ((second-match
-           (search old-text form-text :start2 (+ match-pos (length old-text)))))
+           (search old-text form-text :start2 (1+ match-pos))))
       (when second-match
         (let ((count
                (loop for pos = (search old-text form-text) then (search
                                                                   old-text
                                                                   form-text
                                                                   :start2
-                                                                  (+ pos
-                                                                     (length
-                                                                      old-text)))
+                                                                  (1+ pos))
                      while pos
                      count 1)))
           (error "old_text matches ~D times in the form; ~
