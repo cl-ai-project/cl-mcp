@@ -25,8 +25,8 @@
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content
-                #:arg-validation-error #:tool-error)
+                #:make-ht #:result #:rpc-error #:text-content
+                #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -742,7 +742,9 @@ is used instead of Eclector, which means comments are NOT preserved."))
          id -32602 (%multiple-top-level-forms-error-message)
          (%multiple-top-level-forms-error-data)))
       (error (e)
-        (tool-error id
-                    (sanitize-for-json
-                     (sanitize-error-message (format nil "~A" e)))
-                    :protocol-version (protocol-version state))))))
+        (let ((msg (sanitize-for-json
+                    (sanitize-error-message (format nil "~A" e)))))
+          (if (and (protocol-version state)
+                   (string>= (protocol-version state) "2025-11-25"))
+              (result id (make-ht "content" (text-content msg) "isError" t))
+              (rpc-error id -32603 msg)))))))
