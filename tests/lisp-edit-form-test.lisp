@@ -1154,3 +1154,50 @@ then clean up."
             "second oneOf entry should include insert_after")
         (ok (find "content" other-required :test #'string=)
             "non-edit entry should require content")))))
+
+(deftest lisp-edit-form-edit-handler-returns-tool-error
+  (testing "handler returns isError for edit operational errors, not -32603"
+    ;; Edit operational errors (old_text not found, multiple matches,
+    ;; broken structure) should return tool-error (isError: true),
+    ;; not rpc-error -32603.
+    (with-temp-file "tests/tmp/edit-handler-tool-error.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (_ (setf (cl-mcp/src/state:protocol-version state) "2025-11-25"))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "edit"
+                      "old_text" "nonexistent text"
+                      "new_text" "replacement")))
+          (declare (ignore _))
+          ;; old_text not found → should be tool-error, not -32603
+          (let* ((response (funcall handler state "test-id-1" args))
+                 (result-obj (gethash "result" response))
+                 (is-error (and result-obj (gethash "isError" result-obj)))
+                 (content (and result-obj (gethash "content" result-obj)))
+                 (text (and content (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            ;; Should NOT be an rpc error (-32603)
+            (ng (gethash "error" response)
+                "edit old_text-not-found should not produce rpc error -32603")
+            ;; Should have result with isError
+            (ok result-obj "response should have result field")
+            (ok is-error "result should have isError = true")
+            (ok (and text (search "old_text not found" text))
+                "error message should mention old_text not found"))
+          ;; Also test that non-edit errors still produce -32603
+          (let* ((args2 (cl-mcp/src/tools/helpers:make-ht
+                         "file_path" path
+                         "form_type" "defun"
+                         "form_name" "nonexistent-function"
+                         "operation" "replace"
+                         "content" "(defun nonexistent-function () nil)"))
+                 (response2 (funcall handler state "test-id-2" args2))
+                 (err (gethash "error" response2)))
+            (ok err "replace with bad form_name should produce rpc error")
+            (ok (= -32603 (gethash "code" err))
+                "replace error should be -32603")))))))

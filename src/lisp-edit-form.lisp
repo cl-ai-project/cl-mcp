@@ -22,9 +22,11 @@
                 #:log-event)
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
+  (:import-from #:cl-mcp/src/state
+                #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
-                #:arg-validation-error)
+                #:arg-validation-error #:tool-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -720,4 +722,9 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (multiple-top-level-forms-error ()
         (cl-mcp/src/tools/helpers:rpc-error
          id -32602 (%multiple-top-level-forms-error-message)
-         (%multiple-top-level-forms-error-data))))))
+         (%multiple-top-level-forms-error-data)))
+      (error (e)
+        (if (string= op-lower "edit")
+            (tool-error id (format nil "~A" e)
+                        :protocol-version (protocol-version state))
+            (error e))))))

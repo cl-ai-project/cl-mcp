@@ -364,8 +364,19 @@ Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
-- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
-- `content` (string, required): full form text to insert
+- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `edit`
+- `content` (string, required for replace/insert_before/insert_after): full form text to insert or replace with
+- `old_text` (string, required for edit): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
+- `new_text` (string, required for edit): replacement text
+- `dry_run` (boolean, default `false`): preview changes without writing to disk
+- `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
+- `readtable` (string, optional): named-readtable designator for files using custom reader macros
+
+Operations:
+- **replace**: Replace the entire matched form with `content`
+- **insert_before**: Insert `content` as a new form before the matched form
+- **insert_after**: Insert `content` as a new form after the matched form
+- **edit**: Scoped text replacement within the matched form using `old_text`/`new_text`. Most token-efficient for small changes to large forms. Does not auto-repair parentheses — fails immediately if the edit breaks form structure.
 
 Output:
 - `path`, `operation`, `form_type`, `form_name`
