@@ -1120,3 +1120,37 @@ then clean up."
                 (ok (null (search "Hello" updated)))))))
       (error ()
         (skip "cl-interpol not available")))))
+
+(deftest lisp-edit-form-schema-oneOf-conditional-required
+  (testing "inputSchema contains oneOf with operation-conditional required fields"
+    (let* ((descriptor (cl-mcp/src/lisp-edit-form::lisp-edit-form-descriptor))
+           (schema (gethash "inputSchema" descriptor))
+           (one-of (gethash "oneOf" schema)))
+      ;; oneOf must be present
+      (ok one-of "oneOf should be present in inputSchema")
+      (ok (= 2 (length one-of)) "oneOf should have 2 entries")
+      ;; First entry: edit operation requires old_text and new_text
+      (let* ((edit-entry (aref one-of 0))
+             (edit-props (gethash "properties" edit-entry))
+             (edit-op (gethash "operation" edit-props))
+             (edit-required (gethash "required" edit-entry)))
+        (ok (string= "edit" (gethash "const" edit-op))
+            "first oneOf entry should match operation=edit")
+        (ok (find "old_text" edit-required :test #'string=)
+            "edit entry should require old_text")
+        (ok (find "new_text" edit-required :test #'string=)
+            "edit entry should require new_text"))
+      ;; Second entry: non-edit operations require content
+      (let* ((other-entry (aref one-of 1))
+             (other-props (gethash "properties" other-entry))
+             (other-op (gethash "operation" other-props))
+             (other-enum (gethash "enum" other-op))
+             (other-required (gethash "required" other-entry)))
+        (ok (find "replace" other-enum :test #'string=)
+            "second oneOf entry should include replace")
+        (ok (find "insert_before" other-enum :test #'string=)
+            "second oneOf entry should include insert_before")
+        (ok (find "insert_after" other-enum :test #'string=)
+            "second oneOf entry should include insert_after")
+        (ok (find "content" other-required :test #'string=)
+            "non-edit entry should require content")))))

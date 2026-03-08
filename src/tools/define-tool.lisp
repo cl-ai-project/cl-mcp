@@ -104,7 +104,7 @@
 
 ;;;; Main Macro
 
-(defmacro define-tool (name &key description args body)
+(defmacro define-tool (name &key description args body input-schema-extra)
   "Define an MCP tool with descriptor, handler, and registration.
 
 NAME is the tool name string (e.g., \"fs-list-directory\").
@@ -121,6 +121,19 @@ ARGS is a list of argument specifications. Each spec can be:
     - default: Default value (for :boolean only)
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
     - description: Schema description
+
+INPUT-SCHEMA-EXTRA is an optional form that evaluates to a property list of
+additional key-value pairs to merge into the inputSchema object. Use this to
+add JSON Schema features like oneOf, if/then/else, or dependentRequired that
+cannot be expressed through the simple ARGS DSL.
+
+Example:
+  :input-schema-extra
+  (list \"oneOf\"
+        (vector (make-ht \"properties\" (make-ht \"op\" (make-ht \"const\" \"a\"))
+                         \"required\" (vector \"x\"))
+                (make-ht \"properties\" (make-ht \"op\" (make-ht \"const\" \"b\"))
+                         \"required\" (vector \"y\"))))
 
 BODY is the handler body. It has access to:
   - All argument names as local variables
@@ -151,13 +164,17 @@ Example:
          ,(format nil "Return the MCP tool descriptor for ~A." name)
          (let ((properties (make-hash-table :test #'equal)))
            ,@(mapcar #'%generate-schema-property parsed-specs)
-           (make-ht "name" ,name
-                    "description" ,description
-                    "inputSchema"
-                    (make-ht "type" "object"
-                             "properties" properties
-                             ,@(when required-names
-                                 `("required" (vector ,@required-names)))))))
+           (let ((input-schema
+                   (make-ht "type" "object"
+                            "properties" properties
+                            ,@(when required-names
+                                `("required" (vector ,@required-names))))))
+             ,@(when input-schema-extra
+                 `((loop for (k v) on ,input-schema-extra by #'cddr
+                         do (setf (gethash k input-schema) v))))
+             (make-ht "name" ,name
+                      "description" ,description
+                      "inputSchema" input-schema))))
 
        ;; Handler function
        (defun ,handler-name (,state-sym ,id-sym ,args-sym)

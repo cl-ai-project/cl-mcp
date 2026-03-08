@@ -638,6 +638,13 @@ Applies to replace, insert_before, and insert_after operations only; ignored for
 Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
+  :input-schema-extra
+  (list "oneOf"
+        (vector (make-ht "properties" (make-ht "operation" (make-ht "const" "edit"))
+                         "required" (vector "old_text" "new_text"))
+                (make-ht "properties" (make-ht "operation"
+                                               (make-ht "enum" (vector "replace" "insert_before" "insert_after")))
+                         "required" (vector "content"))))
   :body
   (let ((op-lower (string-downcase operation)))
     ;; Cross-parameter validation using arg-validation-error for -32602 codes
