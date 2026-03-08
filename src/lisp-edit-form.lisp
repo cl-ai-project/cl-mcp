@@ -738,9 +738,13 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                (when (and edit-p changed-p)
                                  (list "delta" (- (length new_text) (length old_text)))))))))
       (multiple-top-level-forms-error ()
-        (cl-mcp/src/tools/helpers:rpc-error
-         id -32602 (%multiple-top-level-forms-error-message)
-         (%multiple-top-level-forms-error-data)))
+        (if (and (protocol-version state)
+                 (string>= (protocol-version state) "2025-11-25"))
+            (result id (make-ht "content"
+                                (text-content (%multiple-top-level-forms-error-message))
+                                "isError" t))
+            (rpc-error id -32602 (%multiple-top-level-forms-error-message)
+                       (%multiple-top-level-forms-error-data))))
       (error (e)
         (let ((msg (sanitize-for-json
                     (sanitize-error-message (format nil "~A" e)))))
