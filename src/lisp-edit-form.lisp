@@ -623,7 +623,8 @@ e.g., \"print-object (my-class t)\"")
                     :description "Operation to perform")
          (content :type :string
                   :description "Full Lisp form for replace/insert_before/insert_after operations.
-Must contain exactly ONE top-level form. Not used for edit operation.")
+Required for non-edit operations. Must contain exactly ONE top-level form.
+Not used for edit operation.")
          (old_text :type :string
                    :description "Text to find within the matched form (required for edit operation).
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
@@ -640,16 +641,11 @@ Applies to replace, insert_before, and insert_after operations only; ignored for
 Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
-  :input-schema-extra
-  (list "oneOf"
-        (vector (make-ht "properties" (make-ht "operation" (make-ht "const" "edit"))
-                         "required" (vector "old_text" "new_text"))
-                (make-ht "properties" (make-ht "operation"
-                                               (make-ht "enum" (vector "replace" "insert_before" "insert_after")))
-                         "required" (vector "content"))))
   :body
   (let ((op-lower (string-downcase operation)))
-    ;; Cross-parameter validation using arg-validation-error for -32602 codes
+    ;; Cross-parameter validation using arg-validation-error for -32602 codes.
+    ;; The public schema stays within API-supported JSON Schema features, so
+    ;; operation-conditional requirements are enforced here at runtime.
     (cond
       ((string= op-lower "edit")
        (unless old_text
