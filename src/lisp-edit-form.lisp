@@ -452,18 +452,23 @@ Signals an error if the text does not parse correctly."
                 No changes were written to disk."
                e)))))
 
-(defun %detect-readtable-from-nodes (nodes)
-  "Scan parsed NODES for an IN-READTABLE form and return its designator, or NIL.
-This mirrors the auto-detection logic in parse-top-level-forms."
-  (dolist (node nodes)
-    (when (and (typep node 'cst-node)
-               (eq (cst-node-kind node) :expr))
-      (let ((value (cst-node-value node)))
-        (when (and (consp value)
-                   (symbolp (car value))
-                   (string= (symbol-name (car value)) "IN-READTABLE")
-                   (consp (cdr value)))
-          (return (second value)))))))
+(defun %detect-readtable-before-node (nodes target)
+  "Return the readtable designator active before TARGET, or NIL.
+Scans NODES in order and only considers IN-READTABLE forms that appear
+before TARGET's start position."
+  (let ((target-start (cst-node-start target))
+        (result nil))
+    (dolist (node nodes result)
+      (when (>= (cst-node-start node) target-start)
+        (return result))
+      (when (and (typep node 'cst-node)
+                 (eq (cst-node-kind node) :expr))
+        (let ((value (cst-node-value node)))
+          (when (and (consp value)
+                     (symbolp (car value))
+                     (string= (symbol-name (car value)) "IN-READTABLE")
+                     (consp (cdr value)))
+            (setf result (second value))))))))
 
 (defun lisp-edit-form (&key file-path form-type form-name operation content
                             old-text new-text
@@ -528,7 +533,7 @@ to use for parsing both the file and the new content."
                   (when would-change
                     (%validate-form-parseable
                      modified-form
-                     (or readtable (%detect-readtable-from-nodes nodes))))
+                     (or readtable (%detect-readtable-before-node nodes target))))
                   (log-event :debug "lisp.edit.form"
                              "path" (namestring abs)
                              "operation" op-normalized
