@@ -454,6 +454,19 @@ Signals an error if the text does not parse correctly."
                 No changes were written to disk."
                e)))))
 
+(defun %detect-readtable-from-nodes (nodes)
+  "Scan parsed NODES for an IN-READTABLE form and return its designator, or NIL.
+This mirrors the auto-detection logic in parse-top-level-forms."
+  (dolist (node nodes)
+    (when (and (typep node 'cst-node)
+               (eq (cst-node-kind node) :expr))
+      (let ((value (cst-node-value node)))
+        (when (and (consp value)
+                   (symbolp (car value))
+                   (string= (symbol-name (car value)) "IN-READTABLE")
+                   (consp (cdr value)))
+          (return (second value)))))))
+
 (defun lisp-edit-form (&key file-path form-type form-name operation content
                             old-text new-text
                             dry-run (normalize-blank-lines t) readtable)
@@ -515,7 +528,9 @@ to use for parsing both the file and the new content."
                 (let ((would-change (not (string= original updated))))
                   ;; Validate modified form parses correctly (fail-fast, no parinfer)
                   (when would-change
-                    (%validate-form-parseable modified-form readtable))
+                    (%validate-form-parseable
+                     modified-form
+                     (or readtable (%detect-readtable-from-nodes nodes))))
                   (log-event :debug "lisp.edit.form"
                              "path" (namestring abs)
                              "operation" op-normalized
@@ -628,6 +643,9 @@ is used instead of Eclector, which means comments are NOT preserved."))
        (unless old_text
          (error 'arg-validation-error :arg-name "old_text"
                 :message "old_text is required for edit operation"))
+       (when (zerop (length old_text))
+         (error 'arg-validation-error :arg-name "old_text"
+                :message "old_text must not be empty"))
        (unless new_text
          (error 'arg-validation-error :arg-name "new_text"
                 :message "new_text is required for edit operation"))

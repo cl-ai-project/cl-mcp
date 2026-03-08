@@ -1098,3 +1098,25 @@ then clean up."
           (ok (search "old_text must not be empty" err-msg))
           (ok (string= before (fs-read-file path)))))))
 )
+
+(deftest lisp-edit-form-edit-auto-detected-readtable
+  (testing "edit validates modified form using auto-detected readtable from in-readtable"
+    (handler-case
+        (progn
+          (unless (%try-load :cl-interpol) (error "not available"))
+          (with-temp-file "tests/tmp/edit-op-auto-readtable.lisp"
+              (format nil
+                      "(in-package :cl-user)~%(named-readtables:in-readtable :interpol-syntax)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
+            (lambda (path)
+              ;; Edit without explicit readtable parameter - should auto-detect
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "greet"
+                              :operation "edit"
+                              :old-text "Hello"
+                              :new-text "Hi")
+              (let ((updated (fs-read-file path)))
+                (ok (search "#?\"Hi, ${name}!\"" updated))
+                (ok (null (search "Hello" updated)))))))
+      (error ()
+        (skip "cl-interpol not available")))))
