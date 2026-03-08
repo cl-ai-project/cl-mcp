@@ -742,7 +742,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
                  (string>= (protocol-version state) "2025-11-25"))
             (result id (make-ht "content"
                                 (text-content (%multiple-top-level-forms-error-message))
-                                "isError" t))
+                                "isError" t
+                                "remediation" (%multiple-top-level-forms-error-data)))
             (rpc-error id -32602 (%multiple-top-level-forms-error-message)
                        (%multiple-top-level-forms-error-data))))
       (error (e)
