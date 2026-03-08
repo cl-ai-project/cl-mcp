@@ -380,8 +380,17 @@ Operations:
 
 Output:
 - `path`, `operation`, `form_type`, `form_name`
+- `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
+- `delta` (integer, edit only): character count difference (`new_text` length minus `old_text` length)
 - `content`: human-readable summary string of the applied change
+
+Dry-run output (when `dry_run` is true):
+- `would_change` (boolean): whether the operation would modify the file
+- `original` (string): the matched form text before changes
+- `preview` (string): modified form text (edit) or full file preview (other operations)
+- `parinfer_warning` (string, optional): auto-repair warning for non-edit operations
+- `content`: human-readable summary
 
 ### `code-find`
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.

@@ -31,6 +31,9 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message
+                #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
   (:import-from #:uiop
@@ -391,8 +394,9 @@ Signals an error if OLD-TEXT is not found or occurs multiple times within the fo
                 If the file may have different line endings (CRLF vs LF), ~
                 ensure old_text uses matching line endings. ~
                 Use lisp-read-file with name_pattern to see the exact form text. ~
-                old_text begins with: ~S"
-               form-id (subseq old-text 0 (min (length old-text) 60)))))
+                old_text begins with: ~S~:[~;...~]"
+               form-id (subseq old-text 0 (min (length old-text) 60))
+               (> (length old-text) 60))))
     (let ((second-match
            (search old-text form-text :start2 (1+ match-pos))))
       (when second-match
@@ -549,14 +553,14 @@ to use for parsing both the file and the new content."
                      (let ((result (make-hash-table :test #'equal)))
                        (setf (gethash "would_change" result) would-change
                              (gethash "original" result) target-snippet
-                             (gethash "preview" result) updated
+                             (gethash "preview" result) modified-form
                              (gethash "file_path" result) (namestring abs)
                              (gethash "operation" result) op-normalized)
                        result))
                     (would-change
                      (fs-write-file rel updated)
-                     updated)
-                    (t updated)))))))
+                     (values updated nil t))
+                    (t (values updated nil nil))))))))
         ;; Existing operations: replace, insert_before, insert_after
         (multiple-value-bind (validated-content parinfer-warning)
             (%validate-and-repair-content content readtable)
@@ -594,8 +598,9 @@ to use for parsing both the file and the new content."
                        (setf (gethash "parinfer_warning" result) parinfer-warning))
                      result))
                   (t
-                   (fs-write-file rel updated)
-                   (values updated parinfer-warning))))))))))
+                   (when would-change
+                     (fs-write-file rel updated))
+                   (values updated parinfer-warning would-change))))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
@@ -665,7 +670,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
          (error 'arg-validation-error :arg-name "content"
                 :message (format nil "content is required for ~A operation" operation)))))
     (handler-case
-        (multiple-value-bind (updated parinfer-warning)
+        (multiple-value-bind (updated parinfer-warning changed-p)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -677,7 +682,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                             :normalize-blank-lines normalize_blank_lines
                             :readtable (when readtable
                                          (let ((colon-pos (position #\: readtable)))
-                                           (if colon-pos
+                                           (if (and colon-pos (plusp colon-pos))
                                                (let* ((pkg-name (subseq readtable 0 colon-pos))
                                                       (sym-start (if (and (< (1+ colon-pos) (length readtable))
                                                                           (char= (char readtable (1+ colon-pos)) #\:))
@@ -689,7 +694,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                                      (intern (string-upcase sym-name) pkg)
                                                      (error "Package ~A not found for readtable ~A"
                                                             pkg-name readtable)))
-                                               (intern (string-upcase readtable) :keyword)))))
+                                               (intern (string-upcase (string-left-trim ":" readtable)) :keyword)))))
           (if dry_run
               (let* ((preview (gethash "preview" updated))
                      (would-change (gethash "would_change" updated))
@@ -706,21 +711,38 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                  "original" original-form
                                  "preview" preview
                                  "content" (text-content summary))))
-              (let ((summary (format nil "Applied ~A to ~A ~A (~D chars)~@[~%WARNING: ~A~]"
-                                     operation form_type file_path (length updated) parinfer-warning)))
+              (let* ((edit-p (string= op-lower "edit"))
+                     (summary
+                      (cond
+                       ((not changed-p)
+                        (format nil "No change to ~A ~A in ~A (old_text already matches new_text)"
+                                form_type form_name file_path))
+                       (edit-p
+                        (format nil "Applied ~A to ~A ~A (~D chars ~:[~;→ ~D chars~])~@[~%WARNING: ~A~]"
+                                operation form_type file_path
+                                (length old_text)
+                                new_text (length new_text)
+                                parinfer-warning))
+                       (t
+                        (format nil "Applied ~A to ~A ~A (~D chars)~@[~%WARNING: ~A~]"
+                                operation form_type file_path (length updated) parinfer-warning)))))
                 (result id
-                        (make-ht "path" file_path
-                                 "operation" operation
-                                 "form_type" form_type
-                                 "form_name" form_name
-                                 "bytes" (length updated)
-                                 "content" (text-content summary))))))
+                        (apply #'make-ht
+                               "path" file_path
+                               "operation" operation
+                               "form_type" form_type
+                               "form_name" form_name
+                               "would_change" changed-p
+                               "bytes" (length updated)
+                               "content" (text-content summary)
+                               (when (and edit-p changed-p)
+                                 (list "delta" (- (length new_text) (length old_text)))))))))
       (multiple-top-level-forms-error ()
         (cl-mcp/src/tools/helpers:rpc-error
          id -32602 (%multiple-top-level-forms-error-message)
          (%multiple-top-level-forms-error-data)))
       (error (e)
-        (if (string= op-lower "edit")
-            (tool-error id (format nil "~A" e)
-                        :protocol-version (protocol-version state))
-            (error e))))))
+        (tool-error id
+                    (sanitize-for-json
+                     (sanitize-error-message (format nil "~A" e)))
+                    :protocol-version (protocol-version state))))))

@@ -582,7 +582,7 @@
                       (obj (parse resp))
                       (result (gethash "result" obj)))
                  (ok (string= (gethash "jsonrpc" obj) "2.0"))
-                 (ok (null (gethash "would_change" result)) "dry_run=false should not return would_change")
+                 (ok (gethash "would_change" result) "dry_run=false should include would_change=true")
                  (ok (null (gethash "preview" result)) "dry_run=false should not return preview")
                  ;; Verify file was actually changed
                  (let ((file-content (uiop:read-file-string

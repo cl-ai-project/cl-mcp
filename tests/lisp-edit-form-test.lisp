@@ -1186,7 +1186,7 @@ then clean up."
             (ok is-error "result should have isError = true")
             (ok (and text (search "old_text not found" text))
                 "error message should mention old_text not found"))
-          ;; Also test that non-edit errors still produce -32603
+          ;; Non-edit errors also use tool-error (M3 fix)
           (let* ((args2 (cl-mcp/src/tools/helpers:make-ht
                          "file_path" path
                          "form_type" "defun"
@@ -1194,7 +1194,14 @@ then clean up."
                          "operation" "replace"
                          "content" "(defun nonexistent-function () nil)"))
                  (response2 (funcall handler state "test-id-2" args2))
-                 (err (gethash "error" response2)))
-            (ok err "replace with bad form_name should produce rpc error")
-            (ok (= -32603 (gethash "code" err))
-                "replace error should be -32603")))))))
+                 (result2 (gethash "result" response2))
+                 (is-error2 (and result2 (gethash "isError" result2)))
+                 (content2 (and result2 (gethash "content" result2)))
+                 (text2 (and content2 (> (length content2) 0)
+                              (gethash "text" (aref content2 0)))))
+            (ng (gethash "error" response2)
+                "replace error should not produce rpc error -32603")
+            (ok result2 "replace error response should have result field")
+            (ok is-error2 "replace error result should have isError = true")
+            (ok (and text2 (search "not found" text2))
+                "replace error message should mention not found")))))))
