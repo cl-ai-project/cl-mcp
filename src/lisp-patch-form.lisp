@@ -251,4 +251,9 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (tool-error id
                   (sanitize-for-json
                    (sanitize-error-message (format nil "~A" e)))
+                  :protocol-version (protocol-version state)))
+    (error (e)
+      (tool-error id
+                  (sanitize-for-json
+                   (sanitize-error-message (format nil "~A" e)))
                   :protocol-version (protocol-version state)))))
