@@ -1,7 +1,4 @@
 ;;;; src/lisp-edit-form.lisp
-;;;;
-;;;; Structure-aware editing of top-level Lisp forms (replace/insert).
-;;;; For scoped text replacement within forms, see lisp-patch-form.lisp.
 
 (defpackage #:cl-mcp/src/lisp-edit-form
   (:use #:cl)
@@ -281,9 +278,7 @@ to use for parsing both the file and the new content."
          (op-key (cond ((string= op-normalized "replace") :replace)
                        ((string= op-normalized "insert_before") :insert-before)
                        ((string= op-normalized "insert_after") :insert-after)
-                       (t (error "Unsupported operation: ~A. ~
-                                  Use lisp-patch-form for scoped text replacement."
-                                 operation)))))
+                       (t (error "Unsupported operation: ~A" operation)))))
     (multiple-value-bind (abs rel original nodes target target-snippet)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore nodes))
@@ -325,7 +320,6 @@ Supports replace, insert_before, and insert_after operations while preserving
 formatting and comments.
 PREFERRED METHOD for editing existing Lisp source code.
 Automatically repairs missing closing parentheses using parinfer.
-For scoped text replacement within a form (old_text/new_text), use 'lisp-patch-form' instead.
 ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ensure
 safety and structure preservation."
   :args ((file_path :type :string :required t
@@ -354,10 +348,6 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (progn
-    ;; Deprecation guard: redirect agents still using operation="edit"
-    (when (string= (string-downcase operation) "edit")
-      (error 'arg-validation-error :arg-name "operation"
-             :message "The 'edit' operation has moved to the 'lisp-patch-form' tool. Use lisp-patch-form with old_text and new_text parameters instead."))
     (unless content
       (error 'arg-validation-error :arg-name "content"
              :message (format nil "content is required for ~A operation" operation)))

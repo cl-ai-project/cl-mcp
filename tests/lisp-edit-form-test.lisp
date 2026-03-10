@@ -803,20 +803,13 @@ then clean up."
              (required (gethash "required" schema)))
         (ok operation "operation property should exist")
         (ok content "content property should exist")
-        ;; old_text and new_text should NOT exist (moved to lisp-patch-form)
-        (ok (null (gethash "old_text" properties))
-            "old_text property should not exist on lisp-edit-form")
-        (ok (null (gethash "new_text" properties))
-            "new_text property should not exist on lisp-edit-form")
         ;; operation enum should have exactly 3 values
         (let ((enum (gethash "enum" operation)))
           (ok (= 3 (length enum))
               "operation enum should have exactly 3 values")
           (ok (find "replace" enum :test #'string=))
           (ok (find "insert_before" enum :test #'string=))
-          (ok (find "insert_after" enum :test #'string=))
-          (ok (null (find "edit" enum :test #'string=))
-              "edit should not be in operation enum"))
+          (ok (find "insert_after" enum :test #'string=)))
         ;; content should be in required list
         (ok (find "file_path" required :test #'string=)
             "file_path should remain globally required")
@@ -828,55 +821,6 @@ then clean up."
             "operation should remain globally required")
         (ok (find "content" required :test #'string=)
             "content should now be globally required")))))
-
-(deftest lisp-edit-form-edit-operation-redirect
-  (testing "operation='edit' returns deprecation error mentioning lisp-patch-form (new protocol)"
-    (with-temp-file "tests/tmp/edit-op-redirect.lisp"
-        (format nil "(defun target () :ok)~%")
-      (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
-               (_ (setf (cl-mcp/src/state:protocol-version state) "2025-11-25"))
-               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
-               (args (cl-mcp/src/tools/helpers:make-ht
-                      "file_path" path
-                      "form_type" "defun"
-                      "form_name" "target"
-                      "operation" "edit"
-                      "content" "(defun target () :new)")))
-          (declare (ignore _))
-          ;; New protocol: arg-validation-error → tool execution error (isError: true)
-          (let* ((response (funcall handler state "test-redirect" args))
-                 (result-obj (gethash "result" response))
-                 (is-error (and result-obj (gethash "isError" result-obj)))
-                 (content (and result-obj (gethash "content" result-obj)))
-                 (text (and content (> (length content) 0)
-                            (gethash "text" (aref content 0)))))
-            (ok result-obj "response should have result field")
-            (ok is-error "result should have isError = true")
-            (ok (and text (search "lisp-patch-form" text))
-                "error message should mention lisp-patch-form")
-            (ok (and text (search "moved" text))
-                "error message should say edit has moved"))))))
-  (testing "operation='edit' returns -32602 rpc-error for old protocol"
-    (with-temp-file "tests/tmp/edit-op-redirect-old.lisp"
-        (format nil "(defun target () :ok)~%")
-      (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
-               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
-               (args (cl-mcp/src/tools/helpers:make-ht
-                      "file_path" path
-                      "form_type" "defun"
-                      "form_name" "target"
-                      "operation" "edit"
-                      "content" "(defun target () :new)")))
-          ;; Old protocol (nil): arg-validation-error → -32602 rpc-error
-          (let* ((response (funcall handler state "test-redirect-old" args))
-                 (err (gethash "error" response)))
-            (ok err "old protocol should produce rpc error")
-            (ok (eql -32602 (gethash "code" err))
-                "error code should be -32602")
-            (ok (search "lisp-patch-form" (gethash "message" err))
-                "error message should mention lisp-patch-form")))))))
 
 (deftest lisp-edit-form-handler-returns-tool-error
   (testing "handler returns isError for operational errors on new protocol"
