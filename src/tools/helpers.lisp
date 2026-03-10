@@ -7,6 +7,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/hash
                 #:make-string-hash-table)
+  (:import-from #:yason
+                #:false)
   (:export #:make-ht
            #:result
            #:rpc-error
