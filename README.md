@@ -417,9 +417,10 @@ Output:
 
 Dry-run output (when `dry_run` is true):
 - `would_change` (boolean): whether the operation would modify the file
+- `operation`: always `"patch"`
 - `original` (string): the matched form text before changes
 - `preview` (string): modified form text after replacement
-- `content`: human-readable summary
+- `content`: human-readable summary with original and preview form text
 
 ### `code-find`
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.

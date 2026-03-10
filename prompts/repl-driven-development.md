@@ -178,8 +178,8 @@ What do you need to do?
 - Fails immediately if the patch breaks form structure (no changes written)
 
 **Dry-run safety switch**
-- Pass `dry_run: true` to preview edits without touching the file. Useful when unsure the matcher will hit the right form.
-- The call returns a hash-table with keys: `"would_change"` (boolean), `"original"` (matched form text), `"preview"` (modified form text for edit, or full file text for other operations), `"file_path"`, `"operation"`.
+- Both `lisp-edit-form` and `lisp-patch-form` support `dry_run: true` to preview without touching the file. Useful when unsure the matcher will hit the right form.
+- The call returns a hash-table with keys: `"would_change"` (boolean), `"original"` (matched form text), `"preview"` (full file text for `lisp-edit-form`, modified form text for `lisp-patch-form`), `"file_path"`, `"operation"`.
 - Example:
   ```json
   {"name": "lisp-edit-form",
