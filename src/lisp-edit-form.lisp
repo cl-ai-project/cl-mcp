@@ -18,7 +18,7 @@
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:rpc-error #:text-content
-                #:arg-validation-error)
+                #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -33,8 +33,7 @@
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form)
-  (:import-from #:yason
-                #:false)
+  (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
 
 (in-package #:cl-mcp/src/lisp-edit-form)
@@ -375,7 +374,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "operation" operation
                                "form_type" form_type
                                "form_name" form_name
-                               "would_change" (if would-change t yason:false)
+                               "would_change" (json-bool would-change)
                                "original" original-form
                                "preview" preview
                                "content" (text-content summary)
@@ -394,7 +393,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                  "operation" operation
                                  "form_type" form_type
                                  "form_name" form_name
-                                 "would_change" (if changed-p t yason:false)
+                                 "would_change" (json-bool changed-p)
                                  "bytes" (length updated)
                                  "content" (text-content summary))))))
       (multiple-top-level-forms-error ()

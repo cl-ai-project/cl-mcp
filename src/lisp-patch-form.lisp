@@ -19,7 +19,7 @@
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
-                #:arg-validation-error #:tool-error)
+                #:arg-validation-error #:tool-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -33,8 +33,7 @@
                 #:%detect-readtable-before-node
                 #:%whitespace-char-p
                 #:%locate-target-form)
-  (:import-from #:yason
-                #:false)
+  (:documentation "Scoped text replacement within a matched top-level Lisp form.")
   (:export #:lisp-patch-form))
 
 (in-package #:cl-mcp/src/lisp-patch-form)
@@ -238,7 +237,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                  "operation" "patch"
                                  "form_type" form_type
                                  "form_name" form_name
-                                 "would_change" (if would-change t yason:false)
+                                 "would_change" (json-bool would-change)
                                  "original" original-form
                                  "preview" preview
                                  "content" (text-content summary))))
@@ -254,7 +253,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "path" file_path
                                "form_type" form_type
                                "form_name" form_name
-                               "would_change" (if changed-p t yason:false)
+                               "would_change" (json-bool changed-p)
                                "bytes" (length updated)
                                "content" (text-content summary)
                                (when changed-p
