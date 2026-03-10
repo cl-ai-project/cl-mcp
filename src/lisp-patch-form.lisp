@@ -197,7 +197,7 @@ Use 'lisp-edit-form' instead when replacing or inserting entire forms."
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
-e.g., \"print-object (my-class t)\"")
+e.g., \"print-object ((obj my-class) stream)\"")
          (old_text :type :string :required t
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
@@ -229,10 +229,13 @@ is used instead of Eclector, which means comments are NOT preserved."))
               (let* ((preview (gethash "preview" updated))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
-                     (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])"
-                                      form_type form_name file_path would-change)))
+                     (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])~
+                                      ~%~%--- original ---~%~A~%~%--- preview ---~%~A"
+                                      form_type form_name file_path would-change
+                                      original-form preview)))
                 (result id
                         (make-ht "path" file_path
+                                 "operation" "patch"
                                  "form_type" form_type
                                  "form_name" form_name
                                  "would_change" (if would-change t yason:false)

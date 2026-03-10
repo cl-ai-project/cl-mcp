@@ -297,13 +297,12 @@ then clean up."
         (format nil "(defun target (x)~%  (+ x 1))~%")
       (lambda (path)
         (let ((before (fs-read-file path)))
-          (multiple-value-bind (updated pw changed-p)
+          (multiple-value-bind (updated changed-p)
               (lisp-patch-form :file-path path
                                :form-type "defun"
                                :form-name "target"
                                :old-text "(+ x 1)"
                                :new-text "(+ x 1)")
-            (declare (ignore pw))
             (ok (stringp updated))
             (ok (null changed-p) "changed-p should be nil for no-op")
             (ok (string= before (fs-read-file path))

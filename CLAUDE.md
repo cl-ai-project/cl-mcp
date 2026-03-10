@@ -144,7 +144,7 @@ guardrails against accidental misuse, not security boundaries.
 
 ### When Editing Code
 1. **Never overwrite Lisp files with `fs-write-file`** - use `lisp-edit-form` or `lisp-patch-form` instead
-2. For `defmethod`, include specializers in `form_name`: `"print-object (my-class t)"`
+2. For `defmethod`, include specializers in `form_name`: `"print-object ((obj my-class) stream)"`
 3. `lisp-edit-form` operations: `replace`, `insert_before`, `insert_after` — content should be the complete form including `(defun ...)` wrapper
 4. `lisp-patch-form`: use `old_text`/`new_text` for token-efficient sub-form replacement (no parinfer auto-repair)
 

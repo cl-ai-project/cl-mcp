@@ -163,7 +163,7 @@ What do you need to do?
 - **Why?** They preserve file structure, comments, and formatting. They use CST parsing to safely locate forms.
 - **Constraints:**
     - Match specific top-level forms (e.g., `defun`, `defmethod`, `defmacro`).
-    - For `defmethod`, you MUST include specializers in `form_name` (e.g., `print-object (my-class t)`).
+    - For `defmethod`, you MUST include specializers in `form_name` (e.g., `print-object ((obj my-class) stream)`).
     - Do NOT try to match lines with regex using other tools. Use the structural parser.
 - **New Files:** Only use `fs-write-file` when creating a brand new file from scratch.
 
@@ -647,7 +647,7 @@ When primary tools fail or are insufficient:
    ```json
    {"path": "src/file.lisp", "collapsed": true}
    ```
-2. **Check specializers:** For methods, include them: `"form_name": "my-method (string t)"`
+2. **Check specializers:** For methods, include the full lambda-list: `"form_name": "my-method ((s string))"`
 3. **Check package context:** Ensure the form is in the expected file
 4. **Use exact form type:** Use `defun`, not `function` or `def`
 

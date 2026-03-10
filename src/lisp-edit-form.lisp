@@ -329,7 +329,7 @@ safety and structure preservation."
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
-e.g., \"print-object (my-class t)\"")
+e.g., \"print-object ((obj my-class) stream)\"")
          (operation :type :string :required t
                     :enum ("replace" "insert_before" "insert_after")
                     :description "Operation to perform")

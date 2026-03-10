@@ -365,7 +365,7 @@ insert_after operations with automatic parinfer repair for missing closing paren
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
 - `content` (string, required): full form text to insert or replace with
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
@@ -402,7 +402,7 @@ replacing or inserting entire forms.
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
 - `new_text` (string, required): replacement text
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
