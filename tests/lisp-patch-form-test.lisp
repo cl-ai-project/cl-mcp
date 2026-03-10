@@ -422,3 +422,41 @@ then clean up."
             (ok is-error "result should have isError = true")
             (ok (and text (search "old_text not found" text))
                 "error message should mention old_text not found")))))))
+
+(deftest lisp-patch-form-old-protocol-returns-32602
+  (testing "old protocol: old_text not found returns -32602 not -32603"
+    (with-temp-file "tests/tmp/patch-old-proto-notfound.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "old_text" "nonexistent text"
+                      "new_text" "replacement")))
+          (let* ((response (funcall handler state "test-old-1" args))
+                 (err (gethash "error" response)))
+            (ok err "old protocol should produce rpc error")
+            (ok (eql -32602 (gethash "code" err))
+                "error code should be -32602 not -32603")
+            (ok (search "old_text not found" (gethash "message" err))
+                "error message should mention old_text not found"))))))
+  (testing "old protocol: empty old_text returns -32602 not -32603"
+    (with-temp-file "tests/tmp/patch-old-proto-empty.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "old_text" ""
+                      "new_text" "replacement")))
+          (let* ((response (funcall handler state "test-old-2" args))
+                 (err (gethash "error" response)))
+            (ok err "old protocol should produce rpc error for empty old_text")
+            (ok (eql -32602 (gethash "code" err))
+                "error code should be -32602 not -32603")))))))

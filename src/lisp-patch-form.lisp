@@ -18,7 +18,8 @@
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:rpc-error #:text-content)
+                #:make-ht #:result #:text-content
+                #:arg-validation-error #:tool-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -41,7 +42,8 @@
 Returns two values: the modified full file text and the modified form text.
 Signals an error if OLD-TEXT is not found or occurs multiple times within the form."
   (when (zerop (length old-text))
-    (error "old_text must not be empty"))
+    (error 'arg-validation-error :arg-name "old_text"
+           :message "old_text must not be empty"))
   (let* ((start (cst-node-start node))
          (end (cst-node-end node))
          (form-text (subseq text start end))
@@ -248,9 +250,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                              (when changed-p
                                (list "delta" (- (length new_text) (length old_text)))))))))
     (error (e)
-      (let ((msg (sanitize-for-json
-                  (sanitize-error-message (format nil "~A" e)))))
-        (if (and (protocol-version state)
-                 (string>= (protocol-version state) "2025-11-25"))
-            (result id (make-ht "content" (text-content msg) "isError" t))
-            (rpc-error id -32603 msg))))))
+      (tool-error id
+                  (sanitize-for-json
+                   (sanitize-error-message (format nil "~A" e)))
+                  :protocol-version (protocol-version state)))))
