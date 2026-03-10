@@ -32,6 +32,7 @@
            #:%normalize-paths
            #:%find-target
            #:%resolve-named-readtable
+           #:%parse-readtable-designator
            #:%detect-readtable-before-node
            #:%whitespace-char-p
            #:%locate-target-form))
@@ -113,6 +114,29 @@ editor-hints.named-readtables package."
         (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
           (when (and find-fn (fboundp find-fn))
             (funcall find-fn designator)))))))
+
+(defun %parse-readtable-designator (readtable-string)
+  "Parse a readtable string from MCP tool args into a symbol designator.
+Handles three forms:
+  \"pkg:sym\"  or \"pkg::sym\" → interned symbol in PKG
+  \":keyword\" or \"keyword\"  → keyword symbol
+Returns NIL if READTABLE-STRING is NIL."
+  (when readtable-string
+    (let ((colon-pos (position #\: readtable-string)))
+      (if (and colon-pos (plusp colon-pos))
+          (let* ((pkg-name (subseq readtable-string 0 colon-pos))
+                 (sym-start (if (and (< (1+ colon-pos) (length readtable-string))
+                                     (char= (char readtable-string (1+ colon-pos)) #\:))
+                                (+ colon-pos 2)
+                                (1+ colon-pos)))
+                 (sym-name (subseq readtable-string sym-start))
+                 (pkg (find-package (string-upcase pkg-name))))
+            (if pkg
+                (intern (string-upcase sym-name) pkg)
+                (error "Package ~A not found for readtable ~A"
+                       pkg-name readtable-string)))
+          (intern (string-upcase (string-left-trim ":" readtable-string))
+                  :keyword)))))
 
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.

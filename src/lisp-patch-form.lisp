@@ -29,7 +29,9 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
+                #:%parse-readtable-designator
                 #:%detect-readtable-before-node
+                #:%whitespace-char-p
                 #:%locate-target-form)
   (:import-from #:yason
                 #:false)
@@ -37,10 +39,15 @@
 
 (in-package #:cl-mcp/src/lisp-patch-form)
 
-(defun %apply-edit-operation (text node old-text new-text)
+(define-condition patch-operation-error (error)
+  ((reason :initarg :reason :reader patch-operation-reason))
+  (:report (lambda (c s) (write-string (patch-operation-reason c) s)))
+  (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
+
+(defun %apply-patch-operation (text node old-text new-text)
   "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
 Returns two values: the modified full file text and the modified form text.
-Signals an error if OLD-TEXT is not found or occurs multiple times within the form."
+Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times."
   (when (zerop (length old-text))
     (error 'arg-validation-error :arg-name "old_text"
            :message "old_text must not be empty"))
@@ -54,14 +61,15 @@ Signals an error if OLD-TEXT is not found or occurs multiple times within the fo
               (if (consp form-value)
                   (format nil "~A ~A" (car form-value) (second form-value))
                   "matched")))
-        (error "old_text not found in ~A form. ~
+        (error 'patch-operation-error
+               :reason (format nil "old_text not found in ~A form. ~
                 Note: matching is exact and whitespace-sensitive. ~
                 If the file may have different line endings (CRLF vs LF), ~
                 ensure old_text uses matching line endings. ~
                 Use lisp-read-file with name_pattern to see the exact form text. ~
                 old_text begins with: ~S~:[~;...~]"
-               form-id (subseq old-text 0 (min (length old-text) 60))
-               (> (length old-text) 60))))
+                       form-id (subseq old-text 0 (min (length old-text) 60))
+                       (> (length old-text) 60)))))
     (let ((second-match
            (search old-text form-text :start2 (1+ match-pos))))
       (when second-match
@@ -73,9 +81,10 @@ Signals an error if OLD-TEXT is not found or occurs multiple times within the fo
                                                                   (1+ pos))
                      while pos
                      count 1)))
-          (error "old_text matches ~D times in the form; ~
+          (error 'patch-operation-error
+                 :reason (format nil "old_text matches ~D times in the form; ~
                   provide more surrounding context to match exactly once"
-                 count))))
+                                 count)))))
     (let* ((modified-form
             (concatenate 'string (subseq form-text 0 match-pos) new-text
                          (subseq form-text (+ match-pos (length old-text)))))
@@ -86,7 +95,8 @@ Signals an error if OLD-TEXT is not found or occurs multiple times within the fo
 
 (defun %validate-form-parseable (form-text &optional readtable-designator)
   "Validate that FORM-TEXT parses as a single complete Lisp form.
-Does NOT attempt parinfer repair. Signals an error if the text does not parse correctly."
+Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR if the text
+does not parse correctly."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*
@@ -99,20 +109,23 @@ Does NOT attempt parinfer repair. Signals an error if the text does not parse co
            (multiple-value-bind (form pos)
                (read-from-string form-text nil :eof)
              (when (eq form :eof)
-               (error "patch produced an empty form"))
-             (let ((rest-start (or (position-if-not
-                                    (lambda (ch)
-                                      (member ch '(#\Space #\Tab #\Newline #\Return)))
-                                    form-text :start pos)
+               (error 'patch-operation-error
+                      :reason "patch produced an empty form"))
+             (let ((rest-start (or (position-if-not #'%whitespace-char-p
+                                                    form-text :start pos)
                                    (length form-text))))
                (when (< rest-start (length form-text))
-                 (error "patch produced malformed form text (trailing content after form)")))
+                 (error 'patch-operation-error
+                        :reason "patch produced malformed form text (trailing content after form)")))
              form-text)))
+      (patch-operation-error (e)
+        (error e))
       (error (e)
-        (error "patch operation produced invalid Lisp: ~A. ~
+        (error 'patch-operation-error
+               :reason (format nil "patch operation produced invalid Lisp: ~A. ~
                 The form could not be parsed after replacement. ~
                 No changes were written to disk."
-               e)))))
+                               e))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
@@ -137,7 +150,7 @@ to use for parsing the file."
   (multiple-value-bind (abs rel original nodes target target-snippet)
       (%locate-target-form file-path form-type form-name readtable)
     (multiple-value-bind (updated modified-form)
-        (%apply-edit-operation original target old-text new-text)
+        (%apply-patch-operation original target old-text new-text)
       (let ((would-change (not (string= original updated))))
         (when would-change
           (%validate-form-parseable
@@ -161,9 +174,9 @@ to use for parsing the file."
              result))
           (would-change
            (fs-write-file rel updated)
-           (values updated nil t))
+           (values updated t))
           (t
-           (values updated nil nil)))))))
+           (values updated nil)))))))
 
 (define-tool "lisp-patch-form"
   :description "Scoped text replacement within a matched top-level Lisp form.
@@ -195,29 +208,14 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (handler-case
-      (multiple-value-bind (updated _pw changed-p)
+      (multiple-value-bind (updated changed-p)
           (lisp-patch-form :file-path file_path
                            :form-type form_type
                            :form-name form_name
                            :old-text old_text
                            :new-text new_text
                            :dry-run dry_run
-                           :readtable (when readtable
-                                        (let ((colon-pos (position #\: readtable)))
-                                          (if (and colon-pos (plusp colon-pos))
-                                              (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                     (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                         (char= (char readtable (1+ colon-pos)) #\:))
-                                                                    (+ colon-pos 2)
-                                                                    (1+ colon-pos)))
-                                                     (sym-name (subseq readtable sym-start))
-                                                     (pkg (find-package (string-upcase pkg-name))))
-                                                (if pkg
-                                                    (intern (string-upcase sym-name) pkg)
-                                                    (error "Package ~A not found for readtable ~A"
-                                                           pkg-name readtable)))
-                                              (intern (string-upcase (string-left-trim ":" readtable)) :keyword)))))
-        (declare (ignore _pw))
+                           :readtable (%parse-readtable-designator readtable))
         (if dry_run
             (let* ((preview (gethash "preview" updated))
                    (would-change (eq t (gethash "would_change" updated)))
@@ -249,7 +247,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                              "content" (text-content summary)
                              (when changed-p
                                (list "delta" (- (length new_text) (length old_text)))))))))
-    (error (e)
+    (patch-operation-error (e)
       (tool-error id
                   (sanitize-for-json
                    (sanitize-error-message (format nil "~A" e)))

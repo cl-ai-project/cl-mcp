@@ -30,6 +30,7 @@
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
+                #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form)
   (:import-from #:yason
@@ -360,21 +361,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                             :content content
                             :dry-run dry_run
                             :normalize-blank-lines normalize_blank_lines
-                            :readtable (when readtable
-                                         (let ((colon-pos (position #\: readtable)))
-                                           (if (and colon-pos (plusp colon-pos))
-                                               (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                      (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                          (char= (char readtable (1+ colon-pos)) #\:))
-                                                                     (+ colon-pos 2)
-                                                                     (1+ colon-pos)))
-                                                      (sym-name (subseq readtable sym-start))
-                                                      (pkg (find-package (string-upcase pkg-name))))
-                                                 (if pkg
-                                                     (intern (string-upcase sym-name) pkg)
-                                                     (error "Package ~A not found for readtable ~A"
-                                                            pkg-name readtable)))
-                                               (intern (string-upcase (string-left-trim ":" readtable)) :keyword)))))
+                            :readtable (%parse-readtable-designator readtable))
           (if dry_run
               (let* ((preview (gethash "preview" updated))
                      (would-change (eq t (gethash "would_change" updated)))

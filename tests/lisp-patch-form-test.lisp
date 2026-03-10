@@ -184,7 +184,10 @@ then clean up."
                 (error (e)
                   (setf err-msg (princ-to-string e))
                   t)))
-          (ok (search "invalid Lisp" err-msg))
+          (ok (or (search "invalid Lisp" err-msg)
+                  (search "trailing content" err-msg)
+                  (search "malformed form text" err-msg))
+              "error message should describe the structural problem")
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-empty-old-text-error
