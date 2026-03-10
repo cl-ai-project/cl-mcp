@@ -23,7 +23,8 @@ Lisp development via MCP.
   - `fs-set-project-root` — set the server's project root and working directory
   - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
   - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
-  - `lisp-edit-form` — structure-aware edits to top-level forms using Eclector CST
+  - `lisp-edit-form` — structure-aware edits to top-level forms (replace/insert) using Eclector CST
+  - `lisp-patch-form` — scoped text replacement within a matched form (token-efficient small edits)
   - `lisp-check-parens` — detect mismatched delimiters in code slices
   - `clgrep-search` — semantic grep for Lisp files with structure awareness
   - `clhs-lookup` — Common Lisp HyperSpec reference (symbols and sections)
@@ -58,7 +59,7 @@ child SBCL processes** rather than the parent MCP server image.
 - **Dual launcher** — workers can be spawned via Roswell (`ros`) or bare SBCL,
   auto-detected at startup.
 
-File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-check-parens`,
+File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`,
 `clgrep-search`, `clhs-lookup`) continue to run inline in the parent process.
 
 Disable the worker pool by setting `MCP_NO_WORKER_POOL=1`. When disabled, all
@@ -358,16 +359,15 @@ Notes:
 
 ### `lisp-edit-form`
 Perform structure-aware edits to a top-level form using Eclector CST parsing while
-preserving surrounding formatting and comments.
+preserving surrounding formatting and comments. Supports replace, insert_before, and
+insert_after operations with automatic parinfer repair for missing closing parentheses.
 
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
-- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `edit`
-- `content` (string, required for replace/insert_before/insert_after): full form text to insert or replace with
-- `old_text` (string, required for edit): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
-- `new_text` (string, required for edit): replacement text
+- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
+- `content` (string, required): full form text to insert or replace with
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
@@ -376,20 +376,49 @@ Operations:
 - **replace**: Replace the entire matched form with `content`
 - **insert_before**: Insert `content` as a new form before the matched form
 - **insert_after**: Insert `content` as a new form after the matched form
-- **edit**: Scoped text replacement within the matched form using `old_text`/`new_text`. Most token-efficient for small changes to large forms. Does not auto-repair parentheses — fails immediately if the edit breaks form structure.
 
 Output:
 - `path`, `operation`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
-- `delta` (integer, edit only): character count difference (`new_text` length minus `old_text` length)
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
 - `would_change` (boolean): whether the operation would modify the file
 - `original` (string): the matched form text before changes
-- `preview` (string): modified form text (edit) or full file preview (other operations)
-- `parinfer_warning` (string, optional): auto-repair warning for non-edit operations
+- `preview` (string): full file preview with changes applied
+- `parinfer_warning` (string, optional): auto-repair warning when closing delimiters are added
+- `content`: human-readable summary
+
+### `lisp-patch-form`
+Scoped text replacement within a matched top-level Lisp form. Finds `old_text` (exact,
+whitespace-sensitive match) within the form and replaces it with `new_text`. Most
+token-efficient way to make small changes to large forms.
+
+Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
+immediately and no changes are written to disk. Use `lisp-edit-form` instead when
+replacing or inserting entire forms.
+
+Input:
+- `file_path` (string, required): absolute path or project-relative path
+- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object (my-class t)"`
+- `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
+- `new_text` (string, required): replacement text
+- `dry_run` (boolean, default `false`): preview changes without writing to disk
+- `readtable` (string, optional): named-readtable designator for files using custom reader macros
+
+Output:
+- `path`, `form_type`, `form_name`
+- `would_change` (boolean): whether the file was modified
+- `bytes`: size of the updated file content
+- `delta` (integer, present only when `would_change` is true): character count difference (`new_text` length minus `old_text` length)
+- `content`: human-readable summary string of the applied change
+
+Dry-run output (when `dry_run` is true):
+- `would_change` (boolean): whether the operation would modify the file
+- `original` (string): the matched form text before changes
+- `preview` (string): modified form text after replacement
 - `content`: human-readable summary
 
 ### `code-find`

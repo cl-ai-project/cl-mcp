@@ -4,6 +4,8 @@
   (:use #:cl #:rove)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%normalize-string)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -697,10 +699,10 @@ then clean up."
       (unwind-protect
            (let ((sym (intern "MY-FUNC" pkg)))
              (ok (string= "my-func"
-                          (cl-mcp/src/lisp-edit-form::%normalize-string sym)))
+                          (%normalize-string sym)))
              ;; Also verify non-symbol input still works
              (ok (string= "hello"
-                          (cl-mcp/src/lisp-edit-form::%normalize-string "HELLO"))))
+                          (%normalize-string "HELLO"))))
         (delete-package pkg-name)))))
 
 (deftest validate-content-with-unknown-package
@@ -761,368 +763,30 @@ then clean up."
           (ok (search "closing delimiter" (gethash "parinfer_warning" result))
               "dry-run warning should mention closing delimiters"))))))
 
-;;; ============================================================
-;;; Edit operation tests
-;;; ============================================================
-
-(deftest lisp-edit-form-edit-basic
-  (testing "edit replaces a sub-expression within a defun"
-    (with-temp-file "tests/tmp/edit-op-basic.lisp"
-        (format nil "(defun compute (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "compute"
-                        :operation "edit"
-                        :old-text "(+ x 1)"
-                        :new-text "(* x 2)")
-        (let ((updated (fs-read-file path)))
-          (ok (search "(* x 2)" updated))
-          (ok (null (search "(+ x 1)" updated))))))))
-
-(deftest lisp-edit-form-edit-preserves-surrounding
-  (testing "edit only modifies target form, rest of file unchanged"
-    (with-temp-file "tests/tmp/edit-op-preserve.lisp"
-        (format nil "(defun before () :keep)~%~%(defun target (x)~%  (+ x 1))~%~%(defun after () :keep)~%")
-      (lambda (path)
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "target"
-                        :operation "edit"
-                        :old-text "(+ x 1)"
-                        :new-text "(- x 1)")
-        (let ((updated (fs-read-file path)))
-          (ok (search "(- x 1)" updated))
-          (ok (search "(defun before () :keep)" updated))
-          (ok (search "(defun after () :keep)" updated)))))))
-
-(deftest lisp-edit-form-edit-multiline
-  (testing "edit replaces a multi-line block within a form"
-    (with-temp-file "tests/tmp/edit-op-multiline.lisp"
-        (format nil "(defun process (data)~%  (when data~%    (print data)~%    (+ 1 2)))~%")
-      (lambda (path)
-        (let ((old-block (format nil "(when data~%    (print data)~%    (+ 1 2))"))
-              (new-block (format nil "(when data~%    (log-info data)~%    (+ 1 2))")))
-          (lisp-edit-form :file-path path
-                          :form-type "defun"
-                          :form-name "process"
-                          :operation "edit"
-                          :old-text old-block
-                          :new-text new-block)
-          (let ((updated (fs-read-file path)))
-            (ok (search "(log-info data)" updated))
-            (ok (null (search "(print data)" updated)))))))))
-
-(deftest lisp-edit-form-edit-not-found-error
-  (testing "edit signals error when old_text is not in the form"
-    (with-temp-file "tests/tmp/edit-op-not-found.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text "nonexistent text"
-                                    :new-text "replacement")
-                    nil)
-                (error (e)
-                  (setf err-msg (princ-to-string e))
-                  t)))
-          (ok (search "old_text not found" err-msg))
-          (ok (search "whitespace-sensitive" err-msg))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-multiple-matches-error
-  (testing "edit signals error when old_text matches multiple times"
-    (with-temp-file "tests/tmp/edit-op-multi-match.lisp"
-        (format nil "(defun target (x)~%  (+ (abs x) (abs x) (abs x)))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text "(abs x)"
-                                    :new-text "(abs y)")
-                    nil)
-                (error (e)
-                  (setf err-msg (princ-to-string e))
-                  t)))
-          (ok (search "3 times" err-msg))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-content-rejected
-  (testing "edit rejects content parameter"
-    (with-temp-file "tests/tmp/edit-op-content-rejected.lisp"
-        (format nil "(defun target () :ok)~%")
+(deftest lisp-edit-form-replace-no-op
+  (testing "replace with identical content does not write file"
+    (with-temp-file "tests/tmp/edit-form-replace-noop.lisp"
+        (format nil "(defun target () :same)~%")
       (lambda (path)
         (let ((before (fs-read-file path)))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text ":ok"
-                                    :new-text ":new"
-                                    :content "(defun target () :new)")
-                    nil)
-                (error (e)
-                  (search "content must not be provided" (princ-to-string e)))))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-missing-params
-  (testing "edit without old_text signals error"
-    (with-temp-file "tests/tmp/edit-op-missing-params.lisp"
-        (format nil "(defun target () :ok)~%")
-      (lambda (path)
-        (let ((before (fs-read-file path)))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :new-text "replacement")
-                    nil)
-                (error (e)
-                  (search "old_text and new_text are required" (princ-to-string e)))))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-dry-run
-  (testing "edit dry-run returns preview without modifying file"
-    (with-temp-file "tests/tmp/edit-op-dry-run.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (result (lisp-edit-form :file-path path
-                                      :form-type "defun"
-                                      :form-name "target"
-                                      :operation "edit"
-                                      :old-text "(+ x 1)"
-                                      :new-text "(* x 2)"
-                                      :dry-run t)))
-          (ok (hash-table-p result))
-          (ok (gethash "would_change" result))
-          (ok (search "(+ x 1)" (gethash "original" result)))
-          (ok (search "(* x 2)" (gethash "preview" result)))
-          (ok (string= "edit" (gethash "operation" result)))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-breaks-structure
-  (testing "edit that breaks form structure signals error, no changes written"
-    (with-temp-file "tests/tmp/edit-op-breaks-structure.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (ok (handler-case
-                  (progn
-                    ;; Remove a closing paren, breaking the form
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text "(+ x 1))"
-                                    :new-text "(+ x 1)")
-                    nil)
-                (error (e)
-                  (setf err-msg (princ-to-string e))
-                  t)))
-          (ok (search "invalid Lisp" err-msg))
-          (ok (search "No changes were written" err-msg))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-defmethod
-  (testing "edit works with defmethod form matching"
-    (let ((initial (concatenate 'string
-                    "(defmethod render ((w widget) stream)" (string #\Newline)
-                    "  (format stream \"<~A>\" (name w)))" (string #\Newline))))
-      (with-temp-file "tests/tmp/edit-op-defmethod.lisp"
-          initial
-        (lambda (path)
-          (lisp-edit-form :file-path path
-                          :form-type "defmethod"
-                          :form-name "render ((w widget) stream)"
-                          :operation "edit"
-                          :old-text "(name w)"
-                          :new-text "(widget-name w)")
-          (let ((updated (fs-read-file path)))
-            (ok (search "(widget-name w)" updated))
-            (ok (null (search "(name w)" updated)))))))))
-
-(deftest lisp-edit-form-edit-changes-form-name
-  (testing "edit can rename the function (matching happens before edit)"
-    (with-temp-file "tests/tmp/edit-op-rename.lisp"
-        (format nil "(defun my-func (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "my-func"
-                        :operation "edit"
-                        :old-text "my-func"
-                        :new-text "my-func-v2")
-        (let ((updated (fs-read-file path)))
-          (ok (search "my-func-v2" updated))
-          ;; The original name should only appear as part of the new name
-          (ok (null (search "(defun my-func " updated))))))))
-
-(deftest lisp-edit-form-edit-no-op
-  (testing "edit with old_text == new_text reports would_change as false"
-    (with-temp-file "tests/tmp/edit-op-no-op.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (result (lisp-edit-form :file-path path
-                                      :form-type "defun"
-                                      :form-name "target"
-                                      :operation "edit"
-                                      :old-text "(+ x 1)"
-                                      :new-text "(+ x 1)"
-                                      :dry-run t)))
-          (ok (hash-table-p result))
-          (ok (not (gethash "would_change" result)))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-old-text-in-string-literal
-  (testing "edit matches old_text in code when it also appears in a string"
-    (with-temp-file "tests/tmp/edit-op-string-literal.lisp"
-        (format nil "(defun target ()~%  (error \"call (+ x 1) here\")~%  (+ x 1))~%")
-      (lambda (path)
-        ;; "(+ x 1)" appears twice: in the string and in code
-        ;; Provide enough context to uniquely match the code occurrence
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "target"
-                        :operation "edit"
-                        :old-text (format nil "  (+ x 1))")
-                        :new-text (format nil "  (* x 2))"))
-        (let ((updated (fs-read-file path)))
-          (ok (search "(* x 2)" updated))
-          ;; String literal should be preserved
-          (ok (search "\"call (+ x 1) here\"" updated)))))))
-
-(deftest lisp-edit-form-edit-unrepairable-structure
-  (testing "edit that completely destroys form structure gives clear error"
-    (with-temp-file "tests/tmp/edit-op-unrepairable.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text "(defun target (x)"
-                                    :new-text "completely broken ((( stuff")
-                    nil)
-                (error (e)
-                  (setf err-msg (princ-to-string e))
-                  t)))
-          (ok (search "invalid Lisp" err-msg))
-          (ok (string= before (fs-read-file path))))))))
-
-(deftest lisp-edit-form-edit-rpc-error-code
-  (testing "handler uses arg-validation-error for missing edit params"
-    ;; arg-validation-error is caught by define-tool and mapped to -32602
-    ;; We test the CL-level validation which uses plain error
-    (with-temp-file "tests/tmp/edit-op-rpc-error.lisp"
-        (format nil "(defun target () :ok)~%")
-      (lambda (path)
-        ;; Missing old-text should signal an error
-        (ok (handler-case
-                (progn
-                  (lisp-edit-form :file-path path
-                                  :form-type "defun"
-                                  :form-name "target"
-                                  :operation "edit"
-                                  :old-text nil
-                                  :new-text "replacement")
-                  nil)
-              (error (e)
-                (search "old_text and new_text are required" (princ-to-string e)))))
-        ;; Missing new-text should signal an error
-        (ok (handler-case
-                (progn
-                  (lisp-edit-form :file-path path
-                                  :form-type "defun"
-                                  :form-name "target"
-                                  :operation "edit"
-                                  :old-text "some text"
-                                  :new-text nil)
-                  nil)
-              (error (e)
-                (search "old_text and new_text are required" (princ-to-string e)))))
-        ;; Content with edit should signal an error
-        (ok (handler-case
-                (progn
-                  (lisp-edit-form :file-path path
-                                  :form-type "defun"
-                                  :form-name "target"
-                                  :operation "edit"
-                                  :old-text ":ok"
-                                  :new-text ":new"
-                                  :content "(defun target () :new)")
-                  nil)
-              (error (e)
-                (search "content must not be provided" (princ-to-string e)))))))))
-
-(deftest lisp-edit-form-edit-empty-old-text-error
-  (testing "edit with empty old_text signals error immediately"
-    (with-temp-file "tests/tmp/edit-op-empty-old-text.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (ok (handler-case
-                  (progn
-                    (lisp-edit-form :file-path path
-                                    :form-type "defun"
-                                    :form-name "target"
-                                    :operation "edit"
-                                    :old-text ""
-                                    :new-text "replacement")
-                    nil)
-                (error (e)
-                  (setf err-msg (princ-to-string e))
-                  t)))
-          (ok (search "old_text must not be empty" err-msg))
-          (ok (string= before (fs-read-file path)))))))
-)
-
-(deftest lisp-edit-form-edit-auto-detected-readtable
-  (testing "edit validates modified form using auto-detected readtable from in-readtable"
-    (handler-case
-        (progn
-          (unless (%try-load :cl-interpol) (error "not available"))
-          (with-temp-file "tests/tmp/edit-op-auto-readtable.lisp"
-              (format nil
-                      "(in-package :cl-user)~%(named-readtables:in-readtable :interpol-syntax)~%~%(defun greet (name)~%  #?\"Hello, ${name}!\")~%")
-            (lambda (path)
-              ;; Edit without explicit readtable parameter - should auto-detect
+          (multiple-value-bind (updated pw changed-p)
               (lisp-edit-form :file-path path
                               :form-type "defun"
-                              :form-name "greet"
-                              :operation "edit"
-                              :old-text "Hello"
-                              :new-text "Hi")
-              (let ((updated (fs-read-file path)))
-                (ok (search "#?\"Hi, ${name}!\"" updated))
-                (ok (null (search "Hello" updated)))))))
-      (error ()
-        (skip "cl-interpol not available")))))
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :same)")
+            (declare (ignore pw))
+            (ok (stringp updated))
+            (ok (null changed-p) "changed-p should be nil for no-op replace")
+            (ok (string= before (fs-read-file path))
+                "file should not have been rewritten")))))))
+
+;;; ============================================================
+;;; Schema and handler tests
+;;; ============================================================
 
 (deftest lisp-edit-form-schema-avoids-top-level-combinators
-  (testing "inputSchema stays within API-supported top-level JSON Schema features"
+  (testing "inputSchema has 3-value operation enum, content required, no old_text/new_text"
     (let* ((descriptor (cl-mcp/src/lisp-edit-form::lisp-edit-form-descriptor))
            (schema (gethash "inputSchema" descriptor)))
       (ok (string= "object" (gethash "type" schema))
@@ -1136,13 +800,24 @@ then clean up."
       (let* ((properties (gethash "properties" schema))
              (operation (gethash "operation" properties))
              (content (gethash "content" properties))
-             (old-text (gethash "old_text" properties))
-             (new-text (gethash "new_text" properties))
              (required (gethash "required" schema)))
         (ok operation "operation property should exist")
         (ok content "content property should exist")
-        (ok old-text "old_text property should exist")
-        (ok new-text "new_text property should exist")
+        ;; old_text and new_text should NOT exist (moved to lisp-patch-form)
+        (ok (null (gethash "old_text" properties))
+            "old_text property should not exist on lisp-edit-form")
+        (ok (null (gethash "new_text" properties))
+            "new_text property should not exist on lisp-edit-form")
+        ;; operation enum should have exactly 3 values
+        (let ((enum (gethash "enum" operation)))
+          (ok (= 3 (length enum))
+              "operation enum should have exactly 3 values")
+          (ok (find "replace" enum :test #'string=))
+          (ok (find "insert_before" enum :test #'string=))
+          (ok (find "insert_after" enum :test #'string=))
+          (ok (null (find "edit" enum :test #'string=))
+              "edit should not be in operation enum"))
+        ;; content should be in required list
         (ok (find "file_path" required :test #'string=)
             "file_path should remain globally required")
         (ok (find "form_type" required :test #'string=)
@@ -1150,15 +825,14 @@ then clean up."
         (ok (find "form_name" required :test #'string=)
             "form_name should remain globally required")
         (ok (find "operation" required :test #'string=)
-            "operation should remain globally required")))))
+            "operation should remain globally required")
+        (ok (find "content" required :test #'string=)
+            "content should now be globally required")))))
 
-(deftest lisp-edit-form-edit-handler-returns-tool-error
-  (testing "handler returns isError for edit operational errors, not -32603"
-    ;; Edit operational errors (old_text not found, multiple matches,
-    ;; broken structure) should return tool-error (isError: true),
-    ;; not rpc-error -32603.
-    (with-temp-file "tests/tmp/edit-handler-tool-error.lisp"
-        (format nil "(defun target (x)~%  (+ x 1))~%")
+(deftest lisp-edit-form-edit-operation-redirect
+  (testing "operation='edit' returns deprecation error mentioning lisp-patch-form (new protocol)"
+    (with-temp-file "tests/tmp/edit-op-redirect.lisp"
+        (format nil "(defun target () :ok)~%")
       (lambda (path)
         (let* ((state (cl-mcp/src/state:make-state))
                (_ (setf (cl-mcp/src/state:protocol-version state) "2025-11-25"))
@@ -1168,40 +842,104 @@ then clean up."
                       "form_type" "defun"
                       "form_name" "target"
                       "operation" "edit"
-                      "old_text" "nonexistent text"
-                      "new_text" "replacement")))
+                      "content" "(defun target () :new)")))
           (declare (ignore _))
-          ;; old_text not found → should be tool-error, not -32603
+          ;; New protocol: arg-validation-error → tool execution error (isError: true)
+          (let* ((response (funcall handler state "test-redirect" args))
+                 (result-obj (gethash "result" response))
+                 (is-error (and result-obj (gethash "isError" result-obj)))
+                 (content (and result-obj (gethash "content" result-obj)))
+                 (text (and content (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            (ok result-obj "response should have result field")
+            (ok is-error "result should have isError = true")
+            (ok (and text (search "lisp-patch-form" text))
+                "error message should mention lisp-patch-form")
+            (ok (and text (search "moved" text))
+                "error message should say edit has moved"))))))
+  (testing "operation='edit' returns -32602 rpc-error for old protocol"
+    (with-temp-file "tests/tmp/edit-op-redirect-old.lisp"
+        (format nil "(defun target () :ok)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "edit"
+                      "content" "(defun target () :new)")))
+          ;; Old protocol (nil): arg-validation-error → -32602 rpc-error
+          (let* ((response (funcall handler state "test-redirect-old" args))
+                 (err (gethash "error" response)))
+            (ok err "old protocol should produce rpc error")
+            (ok (eql -32602 (gethash "code" err))
+                "error code should be -32602")
+            (ok (search "lisp-patch-form" (gethash "message" err))
+                "error message should mention lisp-patch-form")))))))
+
+(deftest lisp-edit-form-handler-returns-tool-error
+  (testing "handler returns isError for operational errors on new protocol"
+    (with-temp-file "tests/tmp/edit-handler-tool-error.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (_ (setf (cl-mcp/src/state:protocol-version state) "2025-11-25"))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent-function"
+                      "operation" "replace"
+                      "content" "(defun nonexistent-function () nil)")))
+          (declare (ignore _))
           (let* ((response (funcall handler state "test-id-1" args))
                  (result-obj (gethash "result" response))
                  (is-error (and result-obj (gethash "isError" result-obj)))
                  (content (and result-obj (gethash "content" result-obj)))
                  (text (and content (> (length content) 0)
                             (gethash "text" (aref content 0)))))
-            ;; Should NOT be an rpc error (-32603)
             (ng (gethash "error" response)
-                "edit old_text-not-found should not produce rpc error -32603")
-            ;; Should have result with isError
+                "replace error should not produce rpc error -32603")
             (ok result-obj "response should have result field")
             (ok is-error "result should have isError = true")
-            (ok (and text (search "old_text not found" text))
-                "error message should mention old_text not found"))
-          ;; Non-edit errors also use tool-error (M3 fix)
-          (let* ((args2 (cl-mcp/src/tools/helpers:make-ht
-                         "file_path" path
-                         "form_type" "defun"
-                         "form_name" "nonexistent-function"
-                         "operation" "replace"
-                         "content" "(defun nonexistent-function () nil)"))
-                 (response2 (funcall handler state "test-id-2" args2))
-                 (result2 (gethash "result" response2))
-                 (is-error2 (and result2 (gethash "isError" result2)))
-                 (content2 (and result2 (gethash "content" result2)))
-                 (text2 (and content2 (> (length content2) 0)
-                              (gethash "text" (aref content2 0)))))
-            (ng (gethash "error" response2)
-                "replace error should not produce rpc error -32603")
-            (ok result2 "replace error response should have result field")
-            (ok is-error2 "replace error result should have isError = true")
-            (ok (and text2 (search "not found" text2))
-                "replace error message should mention not found")))))))
+            (ok (and text (search "not found" text))
+                "error message should mention not found")))))))
+
+(deftest lisp-edit-form-old-protocol-error-returns-rpc-error
+  (testing "old protocol errors return -32603 rpc-error, not isError"
+    (with-temp-file "tests/tmp/edit-old-proto.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        ;; Test with nil protocol version (no initialize handshake)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent"
+                      "operation" "replace"
+                      "content" "(defun nonexistent () nil)")))
+          ;; nil protocol → should get rpc error -32603
+          (let* ((response (funcall handler state "test-nil-proto" args))
+                 (err (gethash "error" response)))
+            (ok err "nil protocol should produce rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "error code should be -32603 for nil protocol")))
+        ;; Test with old protocol version
+        (let* ((state (cl-mcp/src/state:make-state))
+               (_ (setf (cl-mcp/src/state:protocol-version state) "2024-11-05"))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent"
+                      "operation" "replace"
+                      "content" "(defun nonexistent () nil)")))
+          (declare (ignore _))
+          ;; old protocol → should get rpc error -32603
+          (let* ((response (funcall handler state "test-old-proto" args))
+                 (err (gethash "error" response)))
+            (ok err "old protocol should produce rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "error code should be -32603 for old protocol")))))))

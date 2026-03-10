@@ -12,6 +12,7 @@
   (:import-from #:cl-mcp/tests/cst-test)
   (:import-from #:cl-mcp/tests/lisp-read-file-test)
   (:import-from #:cl-mcp/tests/lisp-edit-form-test)
+  (:import-from #:cl-mcp/tests/lisp-patch-form-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)

@@ -25,6 +25,8 @@
                 #:fs-set-project-root)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-patch-form
+                #:lisp-patch-form)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/code
