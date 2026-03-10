@@ -148,7 +148,11 @@ to use for parsing the file."
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
   (multiple-value-bind (abs rel original nodes target target-snippet)
-      (%locate-target-form file-path form-type form-name readtable)
+      (handler-case
+          (%locate-target-form file-path form-type form-name readtable)
+        (error (e)
+          (error 'patch-operation-error
+                 :reason (format nil "~A" e))))
     (multiple-value-bind (updated modified-form)
         (%apply-patch-operation original target old-text new-text)
       (let ((would-change (not (string= original updated))))
@@ -207,53 +211,53 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
-  (handler-case
-      (multiple-value-bind (updated changed-p)
-          (lisp-patch-form :file-path file_path
-                           :form-type form_type
-                           :form-name form_name
-                           :old-text old_text
-                           :new-text new_text
-                           :dry-run dry_run
-                           :readtable (%parse-readtable-designator readtable))
-        (if dry_run
-            (let* ((preview (gethash "preview" updated))
-                   (would-change (eq t (gethash "would_change" updated)))
-                   (original-form (gethash "original" updated))
-                   (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])"
-                                    form_type form_name file_path would-change)))
-              (result id
-                      (make-ht "path" file_path
+  (let ((readtable-designator
+         (handler-case (%parse-readtable-designator readtable)
+           (error (e)
+             (error 'arg-validation-error :arg-name "readtable"
+                    :message (format nil "~A" e))))))
+    (handler-case
+        (multiple-value-bind (updated changed-p)
+            (lisp-patch-form :file-path file_path
+                             :form-type form_type
+                             :form-name form_name
+                             :old-text old_text
+                             :new-text new_text
+                             :dry-run dry_run
+                             :readtable readtable-designator)
+          (if dry_run
+              (let* ((preview (gethash "preview" updated))
+                     (would-change (eq t (gethash "would_change" updated)))
+                     (original-form (gethash "original" updated))
+                     (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])"
+                                      form_type form_name file_path would-change)))
+                (result id
+                        (make-ht "path" file_path
+                                 "form_type" form_type
+                                 "form_name" form_name
+                                 "would_change" (if would-change t yason:false)
+                                 "original" original-form
+                                 "preview" preview
+                                 "content" (text-content summary))))
+              (let ((summary
+                     (if (not changed-p)
+                         (format nil "No change to ~A ~A in ~A (old_text already matches new_text)"
+                                 form_type form_name file_path)
+                         (format nil "Applied patch to ~A ~A in ~A (~D chars → ~D chars)"
+                                 form_type form_name file_path
+                                 (length old_text) (length new_text)))))
+                (result id
+                        (apply #'make-ht
+                               "path" file_path
                                "form_type" form_type
                                "form_name" form_name
-                               "would_change" (if would-change t yason:false)
-                               "original" original-form
-                               "preview" preview
-                               "content" (text-content summary))))
-            (let ((summary
-                   (if (not changed-p)
-                       (format nil "No change to ~A ~A in ~A (old_text already matches new_text)"
-                               form_type form_name file_path)
-                       (format nil "Applied patch to ~A ~A in ~A (~D chars → ~D chars)"
-                               form_type form_name file_path
-                               (length old_text) (length new_text)))))
-              (result id
-                      (apply #'make-ht
-                             "path" file_path
-                             "form_type" form_type
-                             "form_name" form_name
-                             "would_change" (if changed-p t yason:false)
-                             "bytes" (length updated)
-                             "content" (text-content summary)
-                             (when changed-p
-                               (list "delta" (- (length new_text) (length old_text)))))))))
-    (patch-operation-error (e)
-      (tool-error id
-                  (sanitize-for-json
-                   (sanitize-error-message (format nil "~A" e)))
-                  :protocol-version (protocol-version state)))
-    (error (e)
-      (tool-error id
-                  (sanitize-for-json
-                   (sanitize-error-message (format nil "~A" e)))
-                  :protocol-version (protocol-version state)))))
+                               "would_change" (if changed-p t yason:false)
+                               "bytes" (length updated)
+                               "content" (text-content summary)
+                               (when changed-p
+                                 (list "delta" (- (length new_text) (length old_text)))))))))
+      (patch-operation-error (e)
+        (tool-error id
+                    (sanitize-for-json
+                     (sanitize-error-message (format nil "~A" e)))
+                    :protocol-version (protocol-version state))))))
