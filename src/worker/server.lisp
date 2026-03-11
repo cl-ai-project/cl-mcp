@@ -110,7 +110,7 @@ the shared secret."
        (%make-error id -32600 "Not authenticated"))))
   ;; Handle authentication as a built-in method
   (when (string= method "worker/authenticate")
-    (let* ((expected (uiop/os:getenv "MCP_WORKER_SECRET"))
+    (let ((expected (uiop/os:getenv "MCP_WORKER_SECRET"))
            (provided (and params (gethash "secret" params))))
       (cond
         ((null expected)

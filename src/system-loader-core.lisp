@@ -156,7 +156,7 @@ or NIL (no timeout). Default is 120 seconds."
             (lambda ()
               (asdf:load-system system-name :force clear-fasls))))
          timeout-seconds)
-      (let* ((elapsed-ms
+      (let ((elapsed-ms
                (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                  internal-time-units-per-second))))
              (ht (make-ht "system" system-name)))

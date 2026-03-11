@@ -506,7 +506,7 @@
    Each result is an alist with file, line, match, package, signature, and optionally form."
   (let ((results nil))
     (handler-case
-        (let* ((content (uiop:read-file-string filepath))
+        (let ((content (uiop:read-file-string filepath))
                (scanner (if case-insensitive
                             (cl-ppcre:create-scanner pattern :case-insensitive-mode t)
                             pattern)))

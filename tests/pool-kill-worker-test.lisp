@@ -34,7 +34,7 @@
 
 (defun %call-kill-worker (&key (session-id "test-session") reset)
   "Invoke the pool-kill-worker handler with the given parameters."
-  (let* ((handler (get-tool-handler "pool-kill-worker"))
+  (let ((handler (get-tool-handler "pool-kill-worker"))
          (state (make-state))
          (*current-session-id* session-id)
          (params (make-hash-table :test 'equal)))
@@ -165,11 +165,11 @@
       (with-pool ()
         ;; Assign and kill once
         (get-or-assign-worker "double-kill-session")
-        (let* ((r1 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
+        (let ((r1 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
           (ok (equal t (gethash "killed" r1))
               "first kill should succeed"))
         ;; Second kill
-        (let* ((r2 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
+        (let ((r2 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
           (ok (null (gethash "killed" r2))
               "second kill should report no worker"))))))
 

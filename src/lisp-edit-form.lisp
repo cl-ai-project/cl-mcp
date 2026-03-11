@@ -204,7 +204,7 @@ Unknown package prefixes are handled leniently via stub packages."
          (concatenate 'string prefix between snippet rest))))))
 
 (defun %apply-operation-normalized (text node operation content)
-  (let* ((start (cst-node-start node))
+  (let ((start (cst-node-start node))
          (end (cst-node-end node))
          (snippet (%trim-outer-whitespace content)))
     (ecase operation

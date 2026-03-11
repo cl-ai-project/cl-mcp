@@ -436,7 +436,7 @@ then clean up."
     (with-temp-file "tests/tmp/patch-old-proto-notfound.lisp"
         (format nil "(defun target (x)~%  (+ x 1))~%")
       (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
+        (let ((state (cl-mcp/src/state:make-state))
                (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
                (args (cl-mcp/src/tools/helpers:make-ht
                       "file_path" path
@@ -455,7 +455,7 @@ then clean up."
     (with-temp-file "tests/tmp/patch-old-proto-empty.lisp"
         (format nil "(defun target (x)~%  (+ x 1))~%")
       (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
+        (let ((state (cl-mcp/src/state:make-state))
                (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
                (args (cl-mcp/src/tools/helpers:make-ht
                       "file_path" path

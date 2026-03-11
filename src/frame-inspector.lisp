@@ -37,7 +37,7 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
           (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
                     :valid)
             (handler-case
-                (let* ((sym (sb-di:debug-var-symbol var))
+                (let ((sym (sb-di:debug-var-symbol var))
                        (val (sb-di:debug-var-value var frame)))
                   (if (inspectable-p val)
                       ;; Non-primitive: generate preview or just register

@@ -862,7 +862,7 @@ then clean up."
         (format nil "(defun target (x)~%  (+ x 1))~%")
       (lambda (path)
         ;; Test with nil protocol version (no initialize handshake)
-        (let* ((state (cl-mcp/src/state:make-state))
+        (let ((state (cl-mcp/src/state:make-state))
                (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
                (args (cl-mcp/src/tools/helpers:make-ht
                       "file_path" path

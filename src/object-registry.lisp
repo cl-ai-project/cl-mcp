@@ -54,7 +54,7 @@ Primitives (numbers, strings, symbols, characters) are excluded."
 
 (defun %evict-oldest (registry)
   "Remove the oldest entry from REGISTRY. Called with lock held."
-  (let* ((history (object-registry-history registry))
+  (let ((history (object-registry-history registry))
          (storage (object-registry-storage registry))
          (head (object-registry-head registry))
          (count (object-registry-count registry)))
@@ -73,7 +73,7 @@ Evicts oldest entry if registry is full."
   (unless (inspectable-p object)
     (return-from register-object nil))
   (bt:with-lock-held ((object-registry-lock registry))
-    (let* ((storage (object-registry-storage registry))
+    (let ((storage (object-registry-storage registry))
            (history (object-registry-history registry))
            (id (object-registry-next-id registry))
            (head (object-registry-head registry))
