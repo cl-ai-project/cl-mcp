@@ -1,7 +1,9 @@
 ;;;; tests/define-tool-test.lisp
 
 (defpackage #:cl-mcp/tests/define-tool-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/tools/helpers

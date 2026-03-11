@@ -1,7 +1,9 @@
 ;;;; tests/protocol-test.lisp
 
 (defpackage #:cl-mcp/tests/protocol-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/protocol
                 #:process-json-line
                 #:protocol-version

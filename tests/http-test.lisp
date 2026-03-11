@@ -1,7 +1,9 @@
 ;;;; tests/http-test.lisp
 
 (defpackage #:cl-mcp/tests/http-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/http
                 #:*http-server-port*
                 #:*http-auth-token*

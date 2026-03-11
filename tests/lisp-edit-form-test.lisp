@@ -1,7 +1,13 @@
 ;;;; tests/lisp-edit-form-test.lisp
 
 (defpackage #:cl-mcp/tests/lisp-edit-form-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:ng
+                #:skip)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core

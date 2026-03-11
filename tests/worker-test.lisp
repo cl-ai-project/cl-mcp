@@ -3,7 +3,10 @@
 ;;;; Tests for worker process TCP server infrastructure.
 
 (defpackage #:cl-mcp/tests/worker-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/worker/server
                 #:make-worker-server
                 #:server-port

@@ -1,7 +1,9 @@
 ;;;; tests/repl-test.lisp
 
 (defpackage #:cl-mcp/tests/repl-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/repl #:repl-eval)
   (:import-from #:cl-mcp/src/inspect #:generate-result-preview)
   (:import-from #:cl-mcp/src/object-registry #:inspectable-p))
@@ -199,8 +201,7 @@
             (repl-eval code)
           (declare (ignore printed value stdout))
           (ok (search (symbol-name var) stderr :test #'char-equal)))))
-    #-sbcl
-    (skip "SBCL-only: SB-EXT::WITH-COMPILATION-UNIT")))
+))
 
 (deftest repl-eval-suppresses-compiler-trace-output
   (testing "compiler trace output is discarded"
@@ -214,8 +215,7 @@
       (declare (ignore printed value))
       (ok (string= stdout ""))
       (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
-    #-sbcl
-    (skip "SBCL-only: SB-C::*COMPILER-TRACE-OUTPUT*")))
+))
 
 (deftest repl-eval-sanitizes-ansi-escape-codes
   (testing "ANSI escape codes are stripped from stdout"

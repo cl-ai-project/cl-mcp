@@ -1,7 +1,9 @@
 ;;;; tests/object-registry-test.lisp
 
 (defpackage #:cl-mcp/tests/object-registry-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p
                 #:register-object

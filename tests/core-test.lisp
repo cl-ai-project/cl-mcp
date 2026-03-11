@@ -1,7 +1,9 @@
 ;;;; tests/core-test.lisp
 
 (defpackage #:cl-mcp/tests/core-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/core #:version)
   (:import-from #:cl-mcp/src/run))
 

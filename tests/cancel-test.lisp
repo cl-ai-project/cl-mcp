@@ -3,7 +3,10 @@
 ;;;; Tests for notifications/cancelled handling.
 
 (defpackage #:cl-mcp/tests/cancel-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/proxy
                 #:*active-requests*
                 #:*active-requests-lock*

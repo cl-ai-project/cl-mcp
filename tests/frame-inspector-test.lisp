@@ -1,7 +1,9 @@
 ;;;; tests/frame-inspector-test.lisp
 
 (defpackage #:cl-mcp/tests/frame-inspector-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/frame-inspector
                 #:capture-error-context))
 

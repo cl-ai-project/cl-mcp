@@ -1,7 +1,13 @@
 ;;;; tests/lisp-patch-form-test.lisp
 
 (defpackage #:cl-mcp/tests/lisp-patch-form-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:ng
+                #:skip)
   (:import-from #:cl-mcp/src/lisp-patch-form
                 #:lisp-patch-form)
   (:import-from #:cl-mcp/src/fs

@@ -3,7 +3,13 @@
 ;;;; Tests for worker-client and pool manager.
 
 (defpackage #:cl-mcp/tests/pool-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:signals
+                #:skip)
   (:import-from #:cl-mcp/src/worker-client
                 #:spawn-worker #:worker-rpc #:kill-worker
                 #:worker-tcp-port #:worker-swank-port

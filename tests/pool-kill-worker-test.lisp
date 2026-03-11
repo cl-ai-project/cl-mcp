@@ -3,7 +3,10 @@
 ;;;; Tests for pool-kill-worker MCP tool.
 
 (defpackage #:cl-mcp/tests/pool-kill-worker-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry

@@ -1,7 +1,9 @@
 ;;;; tests/fs-test.lisp
 
 (defpackage #:cl-mcp/tests/fs-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
   (:import-from #:asdf #:system-source-directory)
   (:import-from #:cl-mcp/src/fs

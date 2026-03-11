@@ -1,7 +1,10 @@
 ;;;; tests/tools-test.lisp
 
 (defpackage #:cl-mcp/tests/tools-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)

@@ -1,5 +1,7 @@
 (defpackage #:cl-mcp/tests/utils-strings-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline))
 

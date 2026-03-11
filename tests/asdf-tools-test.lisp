@@ -1,7 +1,9 @@
 ;;;; tests/asdf-tools-test.lisp
 
 (defpackage #:cl-mcp/tests/asdf-tools-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/asdf-tools
                 #:asdf-system-info
                 #:asdf-list-systems))

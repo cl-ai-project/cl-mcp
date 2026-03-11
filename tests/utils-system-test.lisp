@@ -1,5 +1,7 @@
 (defpackage #:cl-mcp/tests/utils-system-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count))
 
