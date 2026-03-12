@@ -60,9 +60,9 @@
 
 (deftest pool-kill-worker-when-pool-disabled
   (testing "returns informative message when worker pool is disabled"
-    (let* ((*use-worker-pool* nil)
-           (response (%call-kill-worker)))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* nil))
+      (let* ((response (%call-kill-worker))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")
@@ -76,13 +76,13 @@
 
 (deftest pool-kill-worker-with-no-session
   (testing "returns error when no session ID is available"
-    (let* ((*use-worker-pool* t)
-           (handler (get-tool-handler "pool-kill-worker"))
-           (state (make-state))
-           (*current-session-id* nil)
-           (params (make-hash-table :test 'equal))
-           (response (funcall handler state 1 params)))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* t))
+      (let* ((handler (get-tool-handler "pool-kill-worker"))
+             (state (make-state))
+             (*current-session-id* nil)
+             (params (make-hash-table :test 'equal))
+             (response (funcall handler state 1 params))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")))))
@@ -179,9 +179,9 @@
 
 (deftest pool-kill-worker-with-empty-session-id
   (testing "returns error when session ID is empty string"
-    (let* ((*use-worker-pool* t)
-           (response (%call-kill-worker :session-id "")))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* t))
+      (let* ((response (%call-kill-worker :session-id ""))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")
