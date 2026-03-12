@@ -1,7 +1,9 @@
 ;;;; tests/logging-test.lisp
 
 (defpackage #:cl-mcp/tests/logging-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/log
                 #:*log-level* #:*log-stream* #:*log-context*

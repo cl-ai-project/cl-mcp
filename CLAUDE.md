@@ -98,10 +98,11 @@ export MCP_NO_WORKER_POOL=1
 2. **System Loader** (`src/system-loader.lisp`): ASDF system loading with force-reload, output suppression, timeout
 3. **File System** (`src/fs.lisp`): Read/write/list with project root security policy
 4. **Lisp-Aware Reading** (`src/lisp-read-file.lisp`): Collapsed signatures, pattern-based expansion
-5. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement using Eclector
-6. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
-7. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
-8. **Pool Management** (`src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp`): Worker pool diagnostics and worker lifecycle control
+5. **Structure-Aware Editing** (`src/lisp-edit-form.lisp`): CST-based form replacement/insertion using Eclector
+6. **Scoped Text Patching** (`src/lisp-patch-form.lisp`): Token-efficient sub-form text replacement
+7. **Code Intelligence** (`src/code.lisp`): Symbol definition lookup, describe, xref via sb-introspect
+8. **Validation** (`src/validate.lisp`, `src/parinfer.lisp`): Parenthesis checking, auto-repair
+9. **Pool Management** (`src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp`): Worker pool diagnostics and worker lifecycle control
 
 ### Security Model
 
@@ -142,10 +143,10 @@ guardrails against accidental misuse, not security boundaries.
 ## Important Patterns & Constraints
 
 ### When Editing Code
-1. **Never overwrite Lisp files with `fs-write-file`** - use `lisp-edit-form` instead
-2. For `defmethod`, include specializers in `form_name`: `"print-object (my-class t)"`
-3. Operations: `replace`, `insert_before`, `insert_after`
-4. Content should be the complete form including `(defun ...)` wrapper
+1. **Never overwrite Lisp files with `fs-write-file`** - use `lisp-edit-form` or `lisp-patch-form` instead
+2. For `defmethod`, include specializers in `form_name`: `"print-object ((obj my-class) stream)"`
+3. `lisp-edit-form` operations: `replace`, `insert_before`, `insert_after` — content should be the complete form including `(defun ...)` wrapper
+4. `lisp-patch-form`: use `old_text`/`new_text` for token-efficient sub-form replacement (no parinfer auto-repair)
 
 ### When Reading Code
 1. **Prefer `lisp-read-file` over `fs-read-file`** for `.lisp`/`.asd` files

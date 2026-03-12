@@ -1,7 +1,9 @@
 ;;;; tests/validate-test.lisp
 
 (defpackage #:cl-mcp/tests/validate-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens
                 #:*check-parens-max-bytes*))

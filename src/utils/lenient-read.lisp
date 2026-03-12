@@ -78,7 +78,7 @@ Invokes the USE-ANYWAY restart to accept the internal symbol as-is."
   "Handle SBCL's simple-reader-package-error condition.
 Dispatches on the format control string to determine whether the error
 is about a missing package, a missing symbol, or a non-external symbol."
-  (let* ((ctrl (simple-condition-format-control condition))
+  (let ((ctrl (simple-condition-format-control condition))
          (args (simple-condition-format-arguments condition)))
     (cond
       ;; "Package ~A does not exist."

@@ -3,7 +3,10 @@
 ;;;; Tests for pool-kill-worker MCP tool.
 
 (defpackage #:cl-mcp/tests/pool-kill-worker-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry
@@ -31,7 +34,7 @@
 
 (defun %call-kill-worker (&key (session-id "test-session") reset)
   "Invoke the pool-kill-worker handler with the given parameters."
-  (let* ((handler (get-tool-handler "pool-kill-worker"))
+  (let ((handler (get-tool-handler "pool-kill-worker"))
          (state (make-state))
          (*current-session-id* session-id)
          (params (make-hash-table :test 'equal)))
@@ -57,9 +60,9 @@
 
 (deftest pool-kill-worker-when-pool-disabled
   (testing "returns informative message when worker pool is disabled"
-    (let* ((*use-worker-pool* nil)
-           (response (%call-kill-worker)))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* nil))
+      (let* ((response (%call-kill-worker))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")
@@ -73,13 +76,13 @@
 
 (deftest pool-kill-worker-with-no-session
   (testing "returns error when no session ID is available"
-    (let* ((*use-worker-pool* t)
-           (handler (get-tool-handler "pool-kill-worker"))
-           (state (make-state))
-           (*current-session-id* nil)
-           (params (make-hash-table :test 'equal))
-           (response (funcall handler state 1 params)))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* t))
+      (let* ((handler (get-tool-handler "pool-kill-worker"))
+             (state (make-state))
+             (*current-session-id* nil)
+             (params (make-hash-table :test 'equal))
+             (response (funcall handler state 1 params))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")))))
@@ -162,11 +165,11 @@
       (with-pool ()
         ;; Assign and kill once
         (get-or-assign-worker "double-kill-session")
-        (let* ((r1 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
+        (let ((r1 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
           (ok (equal t (gethash "killed" r1))
               "first kill should succeed"))
         ;; Second kill
-        (let* ((r2 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
+        (let ((r2 (%result-of (%call-kill-worker :session-id "double-kill-session"))))
           (ok (null (gethash "killed" r2))
               "second kill should report no worker"))))))
 
@@ -176,9 +179,9 @@
 
 (deftest pool-kill-worker-with-empty-session-id
   (testing "returns error when session ID is empty string"
-    (let* ((*use-worker-pool* t)
-           (response (%call-kill-worker :session-id "")))
-      (let ((result (%result-of response)))
+    (let ((*use-worker-pool* t))
+      (let* ((response (%call-kill-worker :session-id ""))
+             (result (%result-of response)))
         (ok (hash-table-p result))
         (ok (null (gethash "killed" result))
             "killed should be nil")

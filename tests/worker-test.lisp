@@ -3,7 +3,10 @@
 ;;;; Tests for worker process TCP server infrastructure.
 
 (defpackage #:cl-mcp/tests/worker-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/worker/server
                 #:make-worker-server
                 #:server-port
@@ -40,7 +43,7 @@
         (skip "socket unavailable")
         (let ((server (make-worker-server :port 0)))
           (unwind-protect
-               (let* ((port (server-port server))
+               (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
@@ -79,7 +82,7 @@
                                      (gethash "msg" params))
                                ht)))
           (unwind-protect
-               (let* ((port (server-port server))
+               (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
@@ -115,7 +118,7 @@
         (skip "socket unavailable")
         (let ((server (make-worker-server :port 0)))
           (unwind-protect
-               (let* ((port (server-port server))
+               (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
@@ -153,7 +156,7 @@
                              (declare (ignore params))
                              (error "kaboom")))
           (unwind-protect
-               (let* ((port (server-port server))
+               (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
@@ -191,7 +194,7 @@
         (skip "socket unavailable")
         (let ((server (make-worker-server :port 0)))
           (unwind-protect
-               (let* ((port (server-port server))
+               (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
@@ -283,7 +286,7 @@ Cleans up server and socket on exit."
 (deftest worker-eval-returns-result
   (testing "worker/eval evaluates code and returns result with content"
     (with-handler-server (stream)
-      (let* ((params (make-hash-table :test 'equal)))
+      (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "code" params) "(+ 1 2)"
               (gethash "package" params) "CL-USER")
         (let* ((response (%send-and-receive stream 100 "worker/eval" params))
@@ -658,7 +661,7 @@ Cleans up server and socket on exit."
            (progn
              (setf (uiop/os:getenv "MCP_WORKER_SECRET") "test-secret-42")
              (with-handler-server (stream)
-               (let* ((params (make-hash-table :test 'equal)))
+               (let ((params (make-hash-table :test 'equal)))
                  (setf (gethash "code" params) "(+ 1 2)"
                        (gethash "package" params) "CL-USER")
                  (let* ((response (%send-and-receive
@@ -680,7 +683,7 @@ Cleans up server and socket on exit."
            (progn
              (setf (uiop/os:getenv "MCP_WORKER_SECRET") "correct-secret")
              (with-handler-server (stream)
-               (let* ((params (make-hash-table :test 'equal)))
+               (let ((params (make-hash-table :test 'equal)))
                  (setf (gethash "secret" params) "wrong-secret")
                  (let* ((response (%send-and-receive
                                    stream 201 "worker/authenticate"
@@ -703,7 +706,7 @@ Cleans up server and socket on exit."
              (setf (uiop/os:getenv "MCP_WORKER_SECRET") "the-secret")
              (with-handler-server (stream)
                ;; Step 1: authenticate
-               (let* ((auth-params (make-hash-table :test 'equal)))
+               (let ((auth-params (make-hash-table :test 'equal)))
                  (setf (gethash "secret" auth-params) "the-secret")
                  (let* ((auth-resp (%send-and-receive
                                     stream 202 "worker/authenticate"
@@ -713,7 +716,7 @@ Cleans up server and socket on exit."
                    (ok (gethash "authenticated" auth-result)
                        "authenticated is true")))
                ;; Step 2: now eval should work
-               (let* ((eval-params (make-hash-table :test 'equal)))
+               (let ((eval-params (make-hash-table :test 'equal)))
                  (setf (gethash "code" eval-params) "(+ 10 20)"
                        (gethash "package" eval-params) "CL-USER")
                  (let* ((eval-resp (%send-and-receive
@@ -732,7 +735,7 @@ Cleans up server and socket on exit."
            (progn
              (sb-posix:unsetenv "MCP_WORKER_SECRET")
              (with-handler-server (stream)
-               (let* ((params (make-hash-table :test 'equal)))
+               (let ((params (make-hash-table :test 'equal)))
                  (setf (gethash "code" params) "(+ 3 4)"
                        (gethash "package" params) "CL-USER")
                  (let* ((response (%send-and-receive
@@ -750,7 +753,7 @@ Cleans up server and socket on exit."
 (deftest worker-load-system-returns-result
   (testing "worker/load-system with a known system returns content"
     (with-handler-server (stream)
-      (let* ((params (make-hash-table :test 'equal)))
+      (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "system" params) "cl-mcp")
         (let* ((response (%send-and-receive
                           stream 300 "worker/load-system" params))
@@ -771,7 +774,7 @@ Cleans up server and socket on exit."
 (deftest worker-code-find-references-returns-result
   (testing "worker/code-find-references with cl:car returns result"
     (with-handler-server (stream)
-      (let* ((params (make-hash-table :test 'equal)))
+      (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "symbol" params) "cl:car"
               (gethash "project_only" params) nil)
         (let* ((response (%send-and-receive
@@ -823,7 +826,7 @@ Cleans up server and socket on exit."
 (deftest worker-set-project-root-rejects-filesystem-root
   (testing "worker/set-project-root rejects / as root"
     (with-handler-server (stream)
-      (let* ((params (make-hash-table :test 'equal)))
+      (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "path" params) "/")
         (let* ((response (%send-and-receive
                           stream 400 "worker/set-project-root" params))

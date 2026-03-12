@@ -1,6 +1,10 @@
 (defpackage #:cl-mcp/tests/clgrep-utils-test
-  (:use #:cl
-        #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:signals)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:grep-file
                 #:extract-toplevel-form

@@ -1,7 +1,12 @@
 ;;;; tests/clgrep-test.lisp
 
 (defpackage #:cl-mcp/tests/clgrep-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:signals)
   (:import-from #:cl-mcp/src/fs
                 #:*project-root*)
   (:import-from #:cl-mcp/src/clgrep

@@ -1,7 +1,9 @@
 ;;;; tests/system-loader-test.lisp
 
 (defpackage #:cl-mcp/tests/system-loader-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/system-loader
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core

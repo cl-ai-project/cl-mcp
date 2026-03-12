@@ -1,7 +1,9 @@
 ;;;; tests/parinfer-test.lisp
 
 (defpackage #:cl-mcp/tests/parinfer-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode))
 

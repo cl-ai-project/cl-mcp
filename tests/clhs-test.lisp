@@ -1,7 +1,12 @@
 ;;;; tests/clhs-test.lisp
 
 (defpackage #:cl-mcp/tests/clhs-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:signals)
   (:import-from #:cl-mcp/src/clhs
                 #:clhs-lookup))
 

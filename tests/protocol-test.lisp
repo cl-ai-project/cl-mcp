@@ -1,7 +1,9 @@
 ;;;; tests/protocol-test.lisp
 
 (defpackage #:cl-mcp/tests/protocol-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/protocol
                 #:process-json-line
                 #:protocol-version
@@ -353,7 +355,7 @@
 
 (deftest sanitize-for-encoding-handles-cyclic-list
   (testing "%sanitize-for-encoding terminates on cyclic cons list"
-    (let* ((sanitize-fn (find-symbol "%SANITIZE-FOR-ENCODING"
+    (let ((sanitize-fn (find-symbol "%SANITIZE-FOR-ENCODING"
                                      :cl-mcp/src/protocol))
            (cell (list "a" "b" "c")))
       ;; Make it cyclic: (nconc cell cell) → infinite loop for mapcar
@@ -381,7 +383,7 @@
 
 (deftest encode-json-level2-succeeds-for-non-serializable
   (testing "%encode-json level-2 succeeds when sanitizer converts objects to strings"
-    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+    (let ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal)))
       (setf (gethash "jsonrpc" ht) "2.0")
       (setf (gethash "id" ht) 99)
@@ -400,7 +402,7 @@
 
 (deftest encode-json-preserves-string-id-with-control-chars
   (testing "level-2 fallback preserves string ID containing \\b and \\f"
-    (let* ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
+    (let ((encode-fn (find-symbol "%ENCODE-JSON" :cl-mcp/src/protocol))
            (ht (make-hash-table :test 'equal))
            (id-with-ctrl (format nil "req~Cbs~Cff" #\Backspace #\Page)))
       (setf (gethash "jsonrpc" ht) "2.0")

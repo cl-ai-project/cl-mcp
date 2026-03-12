@@ -1,9 +1,17 @@
 ;;;; tests/lisp-edit-form-test.lisp
 
 (defpackage #:cl-mcp/tests/lisp-edit-form-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:ng
+                #:skip)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%normalize-string)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -697,10 +705,10 @@ then clean up."
       (unwind-protect
            (let ((sym (intern "MY-FUNC" pkg)))
              (ok (string= "my-func"
-                          (cl-mcp/src/lisp-edit-form::%normalize-string sym)))
+                          (%normalize-string sym)))
              ;; Also verify non-symbol input still works
              (ok (string= "hello"
-                          (cl-mcp/src/lisp-edit-form::%normalize-string "HELLO"))))
+                          (%normalize-string "HELLO"))))
         (delete-package pkg-name)))))
 
 (deftest validate-content-with-unknown-package
@@ -760,3 +768,128 @@ then clean up."
               "dry-run result should include parinfer_warning key")
           (ok (search "closing delimiter" (gethash "parinfer_warning" result))
               "dry-run warning should mention closing delimiters"))))))
+
+(deftest lisp-edit-form-replace-no-op
+  (testing "replace with identical content does not write file"
+    (with-temp-file "tests/tmp/edit-form-replace-noop.lisp"
+        (format nil "(defun target () :same)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path)))
+          (multiple-value-bind (updated pw changed-p)
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :same)")
+            (declare (ignore pw))
+            (ok (stringp updated))
+            (ok (null changed-p) "changed-p should be nil for no-op replace")
+            (ok (string= before (fs-read-file path))
+                "file should not have been rewritten")))))))
+
+;;; ============================================================
+;;; Schema and handler tests
+;;; ============================================================
+
+(deftest lisp-edit-form-schema-avoids-top-level-combinators
+  (testing "inputSchema has 3-value operation enum, content required, no old_text/new_text"
+    (let* ((descriptor (cl-mcp/src/lisp-edit-form::lisp-edit-form-descriptor))
+           (schema (gethash "inputSchema" descriptor)))
+      (ok (string= "object" (gethash "type" schema))
+          "inputSchema should remain a top-level object schema")
+      (ok (null (gethash "oneOf" schema))
+          "top-level oneOf should be absent")
+      (ok (null (gethash "allOf" schema))
+          "top-level allOf should be absent")
+      (ok (null (gethash "anyOf" schema))
+          "top-level anyOf should be absent")
+      (let* ((properties (gethash "properties" schema))
+             (operation (gethash "operation" properties))
+             (content (gethash "content" properties))
+             (required (gethash "required" schema)))
+        (ok operation "operation property should exist")
+        (ok content "content property should exist")
+        ;; operation enum should have exactly 3 values
+        (let ((enum (gethash "enum" operation)))
+          (ok (= 3 (length enum))
+              "operation enum should have exactly 3 values")
+          (ok (find "replace" enum :test #'string=))
+          (ok (find "insert_before" enum :test #'string=))
+          (ok (find "insert_after" enum :test #'string=)))
+        ;; content should be in required list
+        (ok (find "file_path" required :test #'string=)
+            "file_path should remain globally required")
+        (ok (find "form_type" required :test #'string=)
+            "form_type should remain globally required")
+        (ok (find "form_name" required :test #'string=)
+            "form_name should remain globally required")
+        (ok (find "operation" required :test #'string=)
+            "operation should remain globally required")
+        (ok (find "content" required :test #'string=)
+            "content should now be globally required")))))
+
+(deftest lisp-edit-form-handler-returns-tool-error
+  (testing "handler returns isError for operational errors on new protocol"
+    (with-temp-file "tests/tmp/edit-handler-tool-error.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (_ (setf (cl-mcp/src/state:protocol-version state) "2025-11-25"))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent-function"
+                      "operation" "replace"
+                      "content" "(defun nonexistent-function () nil)")))
+          (declare (ignore _))
+          (let* ((response (funcall handler state "test-id-1" args))
+                 (result-obj (gethash "result" response))
+                 (is-error (and result-obj (gethash "isError" result-obj)))
+                 (content (and result-obj (gethash "content" result-obj)))
+                 (text (and content (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            (ng (gethash "error" response)
+                "replace error should not produce rpc error -32603")
+            (ok result-obj "response should have result field")
+            (ok is-error "result should have isError = true")
+            (ok (and text (search "not found" text))
+                "error message should mention not found")))))))
+
+(deftest lisp-edit-form-old-protocol-error-returns-rpc-error
+  (testing "old protocol errors return -32603 rpc-error, not isError"
+    (with-temp-file "tests/tmp/edit-old-proto.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        ;; Test with nil protocol version (no initialize handshake)
+        (let ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent"
+                      "operation" "replace"
+                      "content" "(defun nonexistent () nil)")))
+          ;; nil protocol → should get rpc error -32603
+          (let* ((response (funcall handler state "test-nil-proto" args))
+                 (err (gethash "error" response)))
+            (ok err "nil protocol should produce rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "error code should be -32603 for nil protocol")))
+        ;; Test with old protocol version
+        (let* ((state (cl-mcp/src/state:make-state))
+               (_ (setf (cl-mcp/src/state:protocol-version state) "2024-11-05"))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "nonexistent"
+                      "operation" "replace"
+                      "content" "(defun nonexistent () nil)")))
+          (declare (ignore _))
+          ;; old protocol → should get rpc error -32603
+          (let* ((response (funcall handler state "test-old-proto" args))
+                 (err (gethash "error" response)))
+            (ok err "old protocol should produce rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "error code should be -32603 for old protocol")))))))

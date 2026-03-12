@@ -1,7 +1,9 @@
 ;;;; tests/lenient-read-test.lisp
 
 (defpackage #:cl-mcp/tests/lenient-read-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
   (:import-from #:cl-mcp/src/project-root
@@ -100,8 +102,7 @@
             "symbol name is BAZ")))
     (ok (null (find-package "SBCL-READER-TEST-PKG"))
         "stub cleaned up after CL reader test")
-    #-sbcl
-    (skip "SBCL-specific test")))
+))
 
 (deftest stubs-cleaned-on-error
   (testing "stub packages are cleaned up even when body signals an error"

@@ -1,5 +1,7 @@
 (defpackage #:cl-mcp/tests/utils-hash-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/hash
                 #:make-string-hash-table
                 #:alist-to-hash-table))

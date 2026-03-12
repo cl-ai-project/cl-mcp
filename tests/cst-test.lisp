@@ -1,7 +1,9 @@
 ;;;; tests/cst-test.lisp
 
 (defpackage #:cl-mcp/tests/cst-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-kind

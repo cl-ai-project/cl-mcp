@@ -116,7 +116,7 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
         (loop for test-fail across failed-tests
               do (let ((test-name (funcall test-name-fn test-fail)))
                    (loop for testing-fail in (funcall test-failed-fn test-fail)
-                         do (let* ((testing-desc (funcall test-name-fn testing-fail))
+                         do (let ((testing-desc (funcall test-name-fn testing-fail))
                                    (assertions (%rove-extract-assertions testing-fail)))
                               (dolist (assertion assertions)
                                 (setf (gethash "test_name" assertion)
@@ -126,7 +126,7 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
         (loop for suite-fail across failed-tests
               do (loop for test-fail in (funcall test-failed-fn suite-fail)
                        do (loop for testing-fail in (funcall test-failed-fn test-fail)
-                                do (let* ((test-name (funcall test-name-fn test-fail))
+                                do (let ((test-name (funcall test-name-fn test-fail))
                                           (testing-desc (funcall test-name-fn testing-fail))
                                           (assertions (%rove-extract-assertions testing-fail)))
                                      (dolist (assertion assertions)
@@ -201,7 +201,7 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
     (dolist (test-result results)
       (let ((test-name (funcall test-name-fn test-result)))
         (dolist (testing-fail (funcall test-failed-fn test-result))
-          (let* ((testing-desc (funcall test-name-fn testing-fail))
+          (let ((testing-desc (funcall test-name-fn testing-fail))
                  (assertions (%rove-extract-assertions testing-fail)))
             (dolist (assertion assertions)
               (setf (gethash "test_name" assertion)
@@ -387,7 +387,7 @@ Returns a hash table with structured results."
   ;; would fall back to the ASDF text-capture path that cannot report
   ;; individual test counts (always returns passed=0, failed=0).
   (%ensure-system-loaded system-name)
-  (let* ((fw (%resolve-framework system-name framework))
+  (let ((fw (%resolve-framework system-name framework))
          (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
                "framework" (string-downcase (symbol-name fw))

@@ -3,7 +3,13 @@
 ;;;; Tests for worker-client and pool manager.
 
 (defpackage #:cl-mcp/tests/pool-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+    (:import-from #:rove
+                #:deftest
+                #:testing
+                #:ok
+                #:signals
+                #:skip)
   (:import-from #:cl-mcp/src/worker-client
                 #:spawn-worker #:worker-rpc #:kill-worker
                 #:worker-tcp-port #:worker-swank-port
@@ -530,7 +536,7 @@ in the cleanup form regardless of success or failure."
     (unless (spawn-available-p)
       (skip "ros not available"))
     (with-pool ()
-      (let* ((worker (get-or-assign-worker "concurrent-rpc"))
+      (let ((worker (get-or-assign-worker "concurrent-rpc"))
              (results (make-array 3 :initial-element nil))
              (threads nil))
         (unwind-protect
@@ -975,7 +981,7 @@ in the cleanup form regardless of success or failure."
       (let* ((long-sid "abcdefghijklmnopqrstuvwxyz-1234567890")
              (worker (get-or-assign-worker long-sid)))
         (ok worker "worker assigned with long session ID")
-        (let* ((info-vec (pool-worker-info))
+        (let ((info-vec (pool-worker-info))
                (found nil))
           (dotimes (i (length info-vec))
             (let* ((ht (aref info-vec i))

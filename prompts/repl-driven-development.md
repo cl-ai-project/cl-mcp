@@ -18,7 +18,8 @@ EXPLORE → EXPERIMENT → PERSIST → VERIFY
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
 | Load system | `load-system` | `system`, `force` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
-| Edit code | `lisp-edit-form` | `form_type`, `form_name` |
+| Edit form | `lisp-edit-form` | `form_type`, `form_name`, `operation`, `content` |
+| Patch form | `lisp-patch-form` | `form_type`, `form_name`, `old_text`, `new_text` |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
@@ -51,7 +52,7 @@ When the worker pool is enabled (default), tools run in two process types:
 
 **Parent process** (inline — shared across all sessions):
 - File tools: `fs-read-file`, `fs-write-file`, `fs-list-directory`, `fs-get-project-info`, `fs-set-project-root`
-- Lisp-aware reading/editing: `lisp-read-file`, `lisp-edit-form`, `lisp-check-parens`
+- Lisp-aware reading/editing: `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`
 - Search: `clgrep-search`, `clhs-lookup`
 - Diagnostics: `pool-status`, `pool-kill-worker`
 
@@ -145,7 +146,8 @@ What do you need to do?
 │   └─ Inspect result ─────→ inspect-object (use result_object_id)
 │
 ├─ EDIT
-│   ├─ Existing .lisp ─────→ lisp-edit-form (ALWAYS)
+│   ├─ Replace/insert form ─→ lisp-edit-form (structural operations)
+│   ├─ Small text change ───→ lisp-patch-form (token-efficient sub-form edit)
 │   └─ New file ───────────→ fs-write-file (minimal), then lisp-edit-form
 │
 └─ REFERENCE
@@ -156,23 +158,28 @@ What do you need to do?
 
 ### 1. Editing Code
 
-**ALWAYS use `lisp-edit-form` for modifying existing Lisp source code.**
+**ALWAYS use `lisp-edit-form` or `lisp-patch-form` for modifying existing Lisp source code.**
 
-- **Why?** It preserves file structure, comments, and formatting. It uses CST parsing to safely locate forms.
+- **Why?** They preserve file structure, comments, and formatting. They use CST parsing to safely locate forms.
 - **Constraints:**
     - Match specific top-level forms (e.g., `defun`, `defmethod`, `defmacro`).
-    - For `defmethod`, you MUST include specializers in `form_name` (e.g., `print-object (my-class t)`).
+    - For `defmethod`, you MUST include specializers in `form_name` (e.g., `print-object ((obj my-class) stream)`).
     - Do NOT try to match lines with regex using other tools. Use the structural parser.
 - **New Files:** Only use `fs-write-file` when creating a brand new file from scratch.
 
-**Operations available:**
+**`lisp-edit-form` operations** (structural — with parinfer auto-repair):
 - `replace`: Replace the entire form definition
 - `insert_before`: Insert new form before the matched form
 - `insert_after`: Insert new form after the matched form
 
+**`lisp-patch-form`** (scoped text replacement — no auto-repair):
+- Uses `old_text`/`new_text` for token-efficient sub-form replacement
+- Most efficient for small changes within large forms
+- Fails immediately if the patch breaks form structure (no changes written)
+
 **Dry-run safety switch**
-- Pass `dry_run: true` to preview edits without touching the file. Useful when unsure the matcher will hit the right form.
-- The call returns a hash-table with keys: `"would_change"` (boolean), `"original"` (matched form text), `"preview"` (post-edit file text), `"file_path"`, `"operation"`.
+- Both `lisp-edit-form` and `lisp-patch-form` support `dry_run: true` to preview without touching the file. Useful when unsure the matcher will hit the right form.
+- The call returns a hash-table with keys: `"would_change"` (boolean), `"original"` (matched form text), `"preview"` (full file text for `lisp-edit-form`, modified form text for `lisp-patch-form`), `"file_path"`, `"operation"`.
 - Example:
   ```json
   {"name": "lisp-edit-form",
@@ -405,11 +412,19 @@ repl-eval (experiment) → lisp-edit-form (persist) → repl-eval (verify)
    ```
    Test with `(my-function 5)` → refine → repeat until correct.
 
-4. **Persist**:
-   ```json
-   {"file_path": "src/core.lisp", "form_type": "defun", "form_name": "my-function",
-    "operation": "replace", "content": "(defun my-function (x)\n  (* x 2))"}
-   ```
+4. **Persist** (choose one):
+   - **Full replace** via `lisp-edit-form` (when rewriting the whole form):
+     ```json
+     {"name": "lisp-edit-form", "arguments": {"file_path": "src/core.lisp",
+      "form_type": "defun", "form_name": "my-function",
+      "operation": "replace", "content": "(defun my-function (x)\n  (* x 2))"}}
+     ```
+   - **Patch** via `lisp-patch-form` (when changing a small part — saves output tokens):
+     ```json
+     {"name": "lisp-patch-form", "arguments": {"file_path": "src/core.lisp",
+      "form_type": "defun", "form_name": "my-function",
+      "old_text": "(+ x 1)", "new_text": "(* x 2)"}}
+     ```
 
 5. **Verify**: Re-evaluate or run tests.
 
@@ -632,7 +647,7 @@ When primary tools fail or are insufficient:
    ```json
    {"path": "src/file.lisp", "collapsed": true}
    ```
-2. **Check specializers:** For methods, include them: `"form_name": "my-method (string t)"`
+2. **Check specializers:** For methods, include the full lambda-list: `"form_name": "my-method ((s string))"`
 3. **Check package context:** Ensure the form is in the expected file
 4. **Use exact form type:** Use `defun`, not `function` or `def`
 
@@ -718,7 +733,7 @@ When exploring, batch independent operations:
 
 **Development loop:**
 1. `repl-eval` — experiment until correct
-2. `lisp-edit-form` — persist
+2. `lisp-edit-form` or `lisp-patch-form` — persist
 3. `repl-eval` — verify
 
 **When stuck:**

@@ -1,7 +1,9 @@
 ;;;; tests/utils-sanitize-test.lisp
 
 (defpackage #:cl-mcp/tests/utils-sanitize-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json))
 
 (in-package #:cl-mcp/tests/utils-sanitize-test)

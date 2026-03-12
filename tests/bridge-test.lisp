@@ -1,7 +1,9 @@
 ;;;; tests/bridge-test.lisp
 
 (defpackage #:cl-mcp/tests/bridge-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/main #:serve-tcp)
   (:import-from #:bordeaux-threads #:make-thread))
 

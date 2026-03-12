@@ -194,7 +194,7 @@ TOCTOU race with concurrent requests for the same session."
       (with-lock-held (*active-requests-lock*)
         (setf (gethash request-key *active-requests*) session-id))
       (unwind-protect
-          (let* ((worker
+          (let ((worker
                   (handler-case
                       (funcall %cached-get-or-assign% session-id)
                     (error (e)

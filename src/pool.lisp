@@ -819,7 +819,7 @@ cannot be created."
          (when (and (not circuit-breaker-tripped)
                     (eq :crashed (worker-state entry))
                     (worker-crash-history-pushed-p entry))
-           (let* ((window-start (- (get-universal-time) *crash-breaker-window*))
+           (let ((window-start (- (get-universal-time) *crash-breaker-window*))
                   (history (gethash session-id *crash-history*)))
              (setf history
                    (remove-if (lambda (ts) (< ts window-start)) history))

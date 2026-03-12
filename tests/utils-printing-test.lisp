@@ -1,5 +1,7 @@
 (defpackage #:cl-mcp/tests/utils-printing-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/printing
                 #:safe-prin1))
 

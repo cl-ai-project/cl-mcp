@@ -1,7 +1,9 @@
 ;;;; tests/inspect-test.lisp
 
 (defpackage #:cl-mcp/tests/inspect-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object
                 #:*object-registry*
@@ -125,7 +127,7 @@
   (testing "inspect hash-table"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (make-hash-table :test 'equal)))
+       (let ((obj (make-hash-table :test 'equal)))
          (setf (gethash "key1" obj) "value1")
          (setf (gethash "key2" obj) 42)
          (let* ((id (register-object obj))
@@ -203,7 +205,7 @@
   (testing "circular references are detected"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (list 1 2 3)))
+       (let ((obj (list 1 2 3)))
          ;; Create circular reference
          (setf (cdr (last obj)) obj)
          (let* ((id (register-object obj))
@@ -316,7 +318,7 @@
   (testing "inspect CLOS instance that references itself"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (make-instance 'self-ref-node :name "root")))
+       (let ((obj (make-instance 'self-ref-node :name "root")))
          (setf (node-self obj) obj)
          (let* ((id (register-object obj))
                 (result (inspect-object-by-id id :max-depth 2)))
@@ -334,7 +336,7 @@
   (testing "inspect hash-table with list keys"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (make-hash-table :test 'equal)))
+       (let ((obj (make-hash-table :test 'equal)))
          (setf (gethash '(a b) obj) "first")
          (setf (gethash '(c d) obj) "second")
          (let* ((id (register-object obj))
@@ -351,7 +353,7 @@
   (testing "inspect hash-table with nested hash-table value"
     (with-fresh-registry
      (lambda ()
-       (let* ((inner (make-hash-table))
+       (let ((inner (make-hash-table))
               (outer (make-hash-table)))
          (setf (gethash :x inner) 10)
          (setf (gethash :nested outer) inner)
@@ -390,7 +392,7 @@
   (testing "inspect-object content text includes formatted entries for hash-tables"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (make-hash-table :test 'equal)))
+       (let ((obj (make-hash-table :test 'equal)))
          (setf (gethash "name" obj) "Alice")
          (let* ((id (register-object obj))
                 (result (inspect-object-by-id id)))
@@ -445,7 +447,7 @@
   (testing "truncation marker works for hash-tables (meta.count, not total_elements)"
     (with-fresh-registry
      (lambda ()
-       (let* ((obj (make-hash-table)))
+       (let ((obj (make-hash-table)))
          (loop for i from 1 to 10
                do (setf (gethash i obj) (* i 10)))
          (let* ((id (register-object obj))

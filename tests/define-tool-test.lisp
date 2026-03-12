@@ -1,7 +1,9 @@
 ;;;; tests/define-tool-test.lisp
 
 (defpackage #:cl-mcp/tests/define-tool-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -96,7 +98,7 @@
 
 (deftest define-tool-boolean-default
   (testing "boolean args use default values correctly"
-    (let* ((state (make-state))
+    (let ((state (make-state))
            (args (make-ht "value" "test")))
       ;; Without uppercase flag (default nil)
       (let* ((result (test-options-handler state 3 args))
@@ -110,7 +112,7 @@
 
 (deftest define-tool-optional-args
   (testing "optional string args work correctly"
-    (let* ((state (make-state))
+    (let ((state (make-state))
            (args (make-ht "value" "world")))
       ;; Without prefix
       (let* ((result (test-options-handler state 5 args))

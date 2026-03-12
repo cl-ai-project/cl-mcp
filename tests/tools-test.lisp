@@ -1,7 +1,10 @@
 ;;;; tests/tools-test.lisp
 
 (defpackage #:cl-mcp/tests/tools-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
@@ -77,7 +80,7 @@
 
 (deftest tools-helper-tool-call-failed-p
   (testing "%tool-call-failed-p detects JSON-RPC and tool-level failures"
-    (let* ((jsonrpc-fail (make-hash-table :test #'equal))
+    (let ((jsonrpc-fail (make-hash-table :test #'equal))
            (tool-fail (make-hash-table :test #'equal))
            (tool-fail-result (make-hash-table :test #'equal))
            (ok-resp (make-hash-table :test #'equal))
@@ -92,7 +95,7 @@
 
 (deftest tools-helper-tool-call-message
   (testing "%tool-call-message extracts message from error or tool content"
-    (let* ((jsonrpc-fail (make-hash-table :test #'equal))
+    (let ((jsonrpc-fail (make-hash-table :test #'equal))
            (jsonrpc-err (make-hash-table :test #'equal))
            (tool-fail (make-hash-table :test #'equal))
            (tool-result (make-hash-table :test #'equal))
@@ -563,7 +566,7 @@
   (testing "tools/call lisp-edit-form with dry_run=false applies changes"
     (with-test-project-root
       ;; Create a temporary file
-      (let* ((tmp-path "tests/tmp/dry-run-test.lisp")
+      (let ((tmp-path "tests/tmp/dry-run-test.lisp")
              (initial-content "(defun test-fn () 1)")
              (new-content "(defun test-fn () 2)"))
         (with-open-file (out (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)
@@ -582,7 +585,7 @@
                       (obj (parse resp))
                       (result (gethash "result" obj)))
                  (ok (string= (gethash "jsonrpc" obj) "2.0"))
-                 (ok (null (gethash "would_change" result)) "dry_run=false should not return would_change")
+                 (ok (gethash "would_change" result) "dry_run=false should include would_change=true")
                  (ok (null (gethash "preview" result)) "dry_run=false should not return preview")
                  ;; Verify file was actually changed
                  (let ((file-content (uiop:read-file-string
@@ -594,7 +597,7 @@
 (deftest tools-call-lisp-edit-form-default-normalizes-blank-lines
   (testing "tools/call lisp-edit-form normalizes blank lines when option is omitted"
     (with-test-project-root
-      (let* ((tmp-path "tests/tmp/lisp-edit-form-normalize-default.lisp")
+      (let ((tmp-path "tests/tmp/lisp-edit-form-normalize-default.lisp")
              (initial-content (format nil
                                       "(defun alpha () :a)~%(defun target () :old)~%~%~%(defun omega () :z)~%"))
              (new-content "(defun target () :new)"))
@@ -1223,7 +1226,7 @@
 (deftest tools-call-fs-set-project-root-concurrency
   (testing "fs-set-project-root and fs reads stay stable under concurrent calls"
     (with-test-project-root
-      (let* ((root (namestring cl-mcp/src/project-root:*project-root*))
+      (let ((root (namestring cl-mcp/src/project-root:*project-root*))
              (errors '())
              (lock (bordeaux-threads:make-lock "tools-test-fs-root-concurrency")))
         (labels ((record-error (message)

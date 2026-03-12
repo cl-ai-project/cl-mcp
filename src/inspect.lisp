@@ -237,7 +237,7 @@ Returns either a primitive value representation, an object-ref, or a circular-re
     #+sbcl
     (handler-case
         ;; Use dynamic symbol lookup for SBCL internals to avoid reader errors
-        (let* ((layout-of-fn (find-symbol "LAYOUT-OF" "SB-KERNEL"))
+        (let ((layout-of-fn (find-symbol "LAYOUT-OF" "SB-KERNEL"))
                (wrapper-info-fn (find-symbol "WRAPPER-INFO" "SB-KERNEL"))
                (wrapper-dd-fn (find-symbol "WRAPPER-DD" "SB-KERNEL"))
                (dd-slots-fn (find-symbol "DD-SLOTS" "SB-KERNEL"))
@@ -375,7 +375,7 @@ Returns a hash-table with:
   - kind, type, summary, etc.: structural preview
   - truncated: T if elements were omitted due to max-elements limit
 For nested non-primitive values, id fields are included for drill-down."
-  (let* ((id (register-object object))
+  (let ((id (register-object object))
          (seen (make-hash-table :test 'eq))
          (active (make-hash-table :test 'eq))
          (result nil))

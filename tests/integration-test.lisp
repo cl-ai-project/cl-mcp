@@ -1,7 +1,9 @@
 ;;;; tests/integration-test.lisp
 
 (defpackage #:cl-mcp/tests/integration-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
@@ -9,8 +11,34 @@
 
 (in-package #:cl-mcp/tests/integration-test)
 
+(defvar *integration-context-ready* nil
+  "When true, this test image has loaded cl-mcp/main and initialized
+project root for integration tool calls.")
+
+(defun %project-root-string ()
+  "Return absolute project root path for integration tests."
+  (handler-case
+      (namestring
+       (uiop/pathname:ensure-directory-pathname
+        (asdf:system-source-directory "cl-mcp")))
+    (error ()
+      (namestring (uiop/pathname:ensure-directory-pathname (uiop:getcwd))))))
+
+(defun %ensure-integration-context ()
+  "Load tool definitions and set project root so this file can run in isolation."
+  (unless *integration-context-ready*
+    (asdf:load-system "cl-mcp/main")
+    (let* ((root (%project-root-string))
+           (pkg (or (find-package "CL-MCP/SRC/FS")
+                    (error "CL-MCP/SRC/FS package not found after load-system")))
+           (setter (or (find-symbol "FS-SET-PROJECT-ROOT" pkg)
+                       (error "FS-SET-PROJECT-ROOT not found in CL-MCP/SRC/FS"))))
+      (funcall setter root)
+      (setf *integration-context-ready* t))))
+
 (defun %pjl (line &rest args)
   "Call process-json-line with worker pool disabled for inline testing."
+  (%ensure-integration-context)
   (let ((*use-worker-pool* nil))
     (apply #'process-json-line line args)))
 

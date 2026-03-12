@@ -1,7 +1,9 @@
 ;;;; tests/tcp-test.lisp
 
 (defpackage #:cl-mcp/tests/tcp-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/tcp
                 #:serve-tcp
                 #:start-tcp-server-thread

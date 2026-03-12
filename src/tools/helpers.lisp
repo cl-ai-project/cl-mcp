@@ -7,11 +7,15 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/hash
                 #:make-string-hash-table)
+  (:import-from #:yason
+                #:false)
   (:export #:make-ht
            #:result
            #:rpc-error
            #:text-content
            #:tool-error
+           ;; JSON serialization helpers
+           #:json-bool
            ;; Argument extraction helpers
            #:arg-validation-error
            #:validation-message
@@ -60,6 +64,21 @@ PROTOCOL-VERSION should be a string like \"2025-11-25\" or NIL."
   (if (and protocol-version (string>= protocol-version "2025-11-25"))
       (result id (make-ht "content" (text-content message) "isError" t))
       (rpc-error id -32602 message)))
+
+(declaim (inline json-bool))
+
+(defun json-bool (value)
+  "Convert a Common Lisp generalized boolean to a strict JSON boolean.
+In CL, any non-NIL value is truthy, but JSON requires exactly true or
+false.  Yason serializes T as true and YASON:FALSE as false; plain NIL
+would serialize as null.  This helper normalizes the mismatch:
+
+  (json-bool some-flag)  =>  T          when SOME-FLAG is non-NIL
+  (json-bool nil)        =>  YASON:FALSE
+
+Typical usage in MCP tool responses:
+  (make-ht \"would_change\" (json-bool changed-p))"
+  (if value t yason:false))
 
 ;;;; Argument Extraction Helpers
 ;;;;

@@ -3,7 +3,9 @@
 ;;;; Tests for structured error context in repl-eval.
 
 (defpackage #:cl-mcp/tests/repl-error-context-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/repl
                 #:repl-eval))
 

@@ -259,7 +259,7 @@ lisp-edit-form for existing Lisp files."
                           (if next-tool
                               " Use lisp-edit-form for existing Lisp files."
                               ""))))))
-      (let* ((payload
+      (let ((payload
                (make-ht "content" (text-content summary)
                         "ok" ok
                         "kind" (gethash "kind" check-result)

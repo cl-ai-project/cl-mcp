@@ -1,7 +1,10 @@
 ;;;; tests/lisp-read-file-test.lisp
 
 (defpackage #:cl-mcp/tests/lisp-read-file-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/fs

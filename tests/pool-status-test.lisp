@@ -3,7 +3,10 @@
 ;;;; Tests for pool-status MCP tool.
 
 (defpackage #:cl-mcp/tests/pool-status-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry

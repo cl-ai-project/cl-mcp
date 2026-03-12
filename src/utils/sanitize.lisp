@@ -134,6 +134,8 @@ clean string suitable for JSON-RPC error responses."
     (setf msg (princ-to-string msg)))
   ;; Remove #<...> object representations (SBCL stream objects, etc.)
   (setf msg (cl-ppcre:regex-replace-all "#<[^>]*>" msg ""))
+  ;; Remove #P"..." pathname literals (SBCL file error messages)
+  (setf msg (cl-ppcre:regex-replace-all "#P\"[^\"]*\"" msg "<path>"))
   ;; Remove multi-line "Stream:" sections that SBCL appends
   (setf msg (cl-ppcre:regex-replace-all "(?s)\\s*Stream:.*" msg ""))
   ;; Collapse multiple spaces into one

@@ -3,7 +3,10 @@
 ;;;; Tests for notifications/cancelled handling.
 
 (defpackage #:cl-mcp/tests/cancel-test
-  (:use #:cl #:rove)
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok
+                #:skip)
   (:import-from #:cl-mcp/src/proxy
                 #:*active-requests*
                 #:*active-requests-lock*
@@ -53,7 +56,7 @@
     (with-lock-held (*active-requests-lock*)
       (setf (gethash "proto-req-7" *active-requests*) "fake-session"))
     (unwind-protect
-        (let* ((params (let ((ht (make-hash-table :test 'equal)))
+        (let ((params (let ((ht (make-hash-table :test 'equal)))
                          (setf (gethash "requestId" ht) "proto-req-7")
                          ht))
                (state (make-state)))
@@ -65,7 +68,7 @@
 
 (deftest handle-cancelled-notification-unknown-id-is-noop
   (testing "notifications/cancelled for unknown requestId is a no-op"
-    (let* ((params (let ((ht (make-hash-table :test 'equal)))
+    (let ((params (let ((ht (make-hash-table :test 'equal)))
                      (setf (gethash "requestId" ht) "unknown-req-999")
                      ht))
            (state (make-state)))

@@ -61,7 +61,7 @@ key-present-with-false (use NIL)."
   "Evaluate code and return the same response structure as define-tool
 \"repl-eval\": content, stdout, stderr, and optional result_object_id,
 result_preview, and error_context."
-  (let* ((code (gethash "code" params))
+  (let ((code (gethash "code" params))
          (package (gethash "package" params))
          (print-level (gethash "print_level" params))
          (print-length (gethash "print_length" params))
@@ -102,7 +102,7 @@ result_preview, and error_context."
 (defun %handle-load-system (params)
   "Load an ASDF system.  Returns the same structure as define-tool
 \"load-system\"."
-  (let* ((system (gethash "system" params))
+  (let ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
          (timeout-seconds (gethash "timeout_seconds" params)))
@@ -123,7 +123,7 @@ result_preview, and error_context."
 (defun %handle-run-tests (params)
   "Run tests for a system.  Returns the same structure as define-tool
 \"run-tests\".  Honors timeout_seconds to limit test execution time."
-  (let* ((system (gethash "system" params))
+  (let ((system (gethash "system" params))
          (framework (gethash "framework" params))
          (test (gethash "test" params))
          (tests (gethash "tests" params))
