@@ -280,8 +280,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
                 (when (and limit (>= count limit))
                   (setf hit-limit t)
                   (return)))
-              (incf line-idx)
-              )
+              (incf line-idx))
       (when hit-limit
         (loop for line = (read-line in nil :eof)
               until (eq line :eof) do (incf line-idx)))

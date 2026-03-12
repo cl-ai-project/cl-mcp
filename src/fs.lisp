@@ -98,7 +98,7 @@ Returns the content string."
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
 On failure the original file is preserved."
-  (uiop/filesystem::ensure-directories-exist pn)
+  (ensure-directories-exist pn)
   (let ((tmp (make-pathname :name (format nil ".~A.tmp" (pathname-name pn))
                             :type (pathname-type pn)
                             :defaults pn)))
@@ -313,8 +313,7 @@ to preserve structure and comments."
                          "content" (text-content
                                     (format nil "Wrote ~A (~D chars)" path (length content)))
                          "path" path
-                         "bytes" (length content)))))
-  )
+                         "bytes" (length content))))))
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.
