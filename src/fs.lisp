@@ -115,7 +115,7 @@ On failure the original file is preserved."
            t)
       ;; Clean up temp file on failure
       (when (probe-file tmp)
-        (ignore-errors (delete-file tmp))))))
+        (handler-case (delete-file tmp) (file-error () nil))))))
 
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
