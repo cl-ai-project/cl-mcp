@@ -200,8 +200,7 @@
         (multiple-value-bind (printed value stdout stderr)
             (repl-eval code)
           (declare (ignore printed value stdout))
-          (ok (search (symbol-name var) stderr :test #'char-equal)))))
-))
+          (ok (search (symbol-name var) stderr :test #'char-equal)))))))
 
 (deftest repl-eval-suppresses-compiler-trace-output
   (testing "compiler trace output is discarded"
@@ -214,8 +213,7 @@
   :ok)")
       (declare (ignore printed value))
       (ok (string= stdout ""))
-      (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))
-))
+      (ok (not (search "trace-out" (string-downcase stderr) :test #'char-equal))))))
 
 (deftest repl-eval-sanitizes-ansi-escape-codes
   (testing "ANSI escape codes are stripped from stdout"

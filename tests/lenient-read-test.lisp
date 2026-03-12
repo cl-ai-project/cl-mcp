@@ -101,8 +101,7 @@
         (ok (string= "BAZ" (symbol-name sym))
             "symbol name is BAZ")))
     (ok (null (find-package "SBCL-READER-TEST-PKG"))
-        "stub cleaned up after CL reader test")
-))
+        "stub cleaned up after CL reader test")))
 
 (deftest stubs-cleaned-on-error
   (testing "stub packages are cleaned up even when body signals an error"

@@ -171,8 +171,7 @@ then clean up."
           (ok beta-pos)
           (ok between)
           (ok (search (format nil "~C~C" #\Newline #\Newline) between))
-          (ok (null (search (make-string 3 :initial-element #\Newline) between)))
-        )))))
+          (ok (null (search (make-string 3 :initial-element #\Newline) between))))))))
 
 (deftest lisp-edit-form-insert-after-keeps-existing-blank-line
   (testing "insert_after does not add extra blank lines when whitespace already exists"
@@ -194,8 +193,7 @@ then clean up."
           (ok between)
           (ok (search (format nil "~C~C" #\Newline #\Newline) between))
           (ok (null (search (make-string 3 :initial-element #\Newline) between)))
-          (ok (search "(defun gamma () :g)" text)))
-      ))))
+          (ok (search "(defun gamma () :g)" text)))))))
 
 (deftest lisp-edit-form-replace-normalizes-blank-lines-around-target
   (testing "replace normalizes blank lines before and after the edited form"

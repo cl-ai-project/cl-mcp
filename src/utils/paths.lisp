@@ -79,15 +79,16 @@ symlink-based path traversal."
   (ensure-project-root)
   (let* ((abs (canonical-path pn))
          ;; Resolve symlinks to get real filesystem path
-         (resolved (or (ignore-errors (truename abs)) abs))
+         (resolved (or (handler-case (truename abs) (file-error () nil)) abs))
          (normalized-abs (if (uiop/filesystem:directory-exists-p resolved)
                              (uiop/pathname:ensure-directory-pathname resolved)
                              resolved))
          (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
          ;; Also resolve project root symlinks for consistent comparison
-         (resolved-project-dir (or (ignore-errors
-                                    (uiop/pathname:ensure-directory-pathname
-                                     (truename project-dir)))
+         (resolved-project-dir (or (handler-case
+                                       (uiop/pathname:ensure-directory-pathname
+                                        (truename project-dir))
+                                     (file-error () nil))
                                    project-dir))
          (project-ok (path-inside-p normalized-abs resolved-project-dir)))
     (when project-ok
@@ -97,7 +98,7 @@ symlink-based path traversal."
       (dolist (name systems)
         (let* ((dir (ignore-errors (asdf/system:system-source-directory name)))
                (resolved-dir (when dir
-                               (or (ignore-errors (truename dir)) dir))))
+                               (or (handler-case (truename dir) (file-error () nil)) dir))))
           (when (and resolved-dir (path-inside-p normalized-abs resolved-dir))
             (return-from allowed-read-path normalized-abs)))))
     nil))
@@ -111,11 +112,12 @@ Signals an error if outside project root or absolute."
   (ensure-project-root)
   (let* ((pn (uiop/pathname:ensure-pathname path :want-relative t))
          (abs (canonical-path pn :relative-to *project-root*))
-         (real (or (ignore-errors (truename abs)) abs))
+         (real (or (handler-case (truename abs) (file-error () nil)) abs))
          (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
-         (resolved-project-dir (or (ignore-errors
-                                    (uiop/pathname:ensure-directory-pathname
-                                     (truename project-dir)))
+         (resolved-project-dir (or (handler-case
+                                       (uiop/pathname:ensure-directory-pathname
+                                        (truename project-dir))
+                                     (file-error () nil))
                                    project-dir)))
     (unless (path-inside-p real resolved-project-dir)
       (error "Write path ~A is outside project root" path))
@@ -140,9 +142,9 @@ Signals an error if PATH is outside project root."
                            pn
                            (uiop/pathname:merge-pathnames* pn base))))))
     (let ((canonical (if must-exist
-                         (or (ignore-errors (truename target))
+                         (or (handler-case (truename target) (file-error () nil))
                              (error "Path does not exist: ~A" target))
-                         (or (ignore-errors (truename target))
+                         (or (handler-case (truename target) (file-error () nil))
                              target))))
       (unless (path-inside-p canonical base)
         (error "Path ~A is outside project root ~A" target base))

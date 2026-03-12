@@ -104,11 +104,11 @@ on large outputs)."
     (if syms
         (progv (nreverse syms) (nreverse vals)
           ;; Ensure warnings are emitted within this dynamic extent.
-          (sb-ext::with-compilation-unit (:override t
-                                          :source-namestring "repl-eval")
+          (with-compilation-unit (:override t
+                                  :source-namestring "repl-eval")
             (funcall thunk)))
-        (sb-ext::with-compilation-unit (:override t
-                                        :source-namestring "repl-eval")
+        (with-compilation-unit (:override t
+                                :source-namestring "repl-eval")
           (funcall thunk))))
   #-sbcl
   (funcall thunk))

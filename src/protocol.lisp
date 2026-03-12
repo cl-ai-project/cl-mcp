@@ -112,8 +112,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (log-event :warn "json-encode-retry"
                    "reason" (ignore-errors (princ-to-string e1))))
       (handler-case
-          (let ((id-preserved (ignore-errors
-                                 (and (hash-table-p obj) (gethash "id" obj))))
+          (let ((id-preserved (and (hash-table-p obj) (gethash "id" obj)))
                  (clean (%sanitize-for-encoding obj)))
             ;; Restore original "id" so yason:encode escapes it properly.
             ;; %sanitize-for-encoding strips \b/\f via sanitize-for-json,
@@ -125,8 +124,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
           (ignore-errors
             (log-event :error "json-encode-failed"
                        "reason" (ignore-errors (princ-to-string e2))))
-          (let* ((id (ignore-errors
-                       (and (hash-table-p obj) (gethash "id" obj))))
+          (let* ((id (and (hash-table-p obj) (gethash "id" obj)))
                  (id-json (cond
                             ((numberp id)
                              (or (ignore-errors
