@@ -172,12 +172,17 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                (let ((root-str (namestring (truename root-dir))))
+                (let* ((root-str (namestring (truename root-dir)))
+                       (raw-str (namestring root-dir)))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
-                    ;; Skip root application but continue initialization normally
-                    ((member root-str '("/" "/tmp/" "/home/")
-                             :test #'string=)
+                    ;; Skip root application but continue initialization normally.
+                    ;; Check both truename-resolved and raw paths because macOS
+                    ;; symlinks like /tmp -> /private/tmp bypass truename-only checks.
+                    ((or (member root-str '("/" "/tmp/" "/home/")
+                                 :test #'string=)
+                         (member raw-str '("/" "/tmp/" "/home/")
+                                 :test #'string=))
                      (log-event :warn "initialize.sync-root.rejected"
                                 "path" root-str
                                 "reason" "too broad"))

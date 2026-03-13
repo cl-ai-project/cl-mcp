@@ -12,6 +12,8 @@
                 #:make-ht)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -71,23 +73,32 @@
 
 (deftest initialize-broad-root-returns-valid-response
   (testing "initialize with overly broad rootPath skips root but returns valid JSON-RPC"
-    (let* ((line (concatenate
-                  'string
-                  "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\","
-                  "\"params\":{\"protocolVersion\":\"2025-06-18\","
-                  "\"rootPath\":\"/tmp\"}}"))
-           (resp (process-json-line line)))
-      (ok (stringp resp) "response must be a string, not nil")
-      (let ((obj (parse resp)))
-        (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (eql (gethash "id" obj) 5))
-        ;; Must be a valid result, not an error
-        (ok (gethash "result" obj) "must have result key")
-        (ok (null (gethash "error" obj)) "must not be an error response")
-        (let ((result (gethash "result" obj)))
-          (ok (gethash "serverInfo" result) "must have serverInfo")
-          (ok (gethash "protocolVersion" result)
-              "must have negotiated protocolVersion"))))))
+    ;; Save/restore *project-root* and CWD because handle-initialize may
+    ;; mutate them as a side effect (the broad-root guard should prevent it,
+    ;; but we restore defensively to avoid polluting later test suites).
+    (let ((saved-root *project-root*)
+          (saved-cwd (ignore-errors (uiop:getcwd))))
+      (unwind-protect
+           (let* ((line (concatenate
+                         'string
+                         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\","
+                         "\"params\":{\"protocolVersion\":\"2025-06-18\","
+                         "\"rootPath\":\"/tmp\"}}"))
+                  (resp (process-json-line line)))
+             (ok (stringp resp) "response must be a string, not nil")
+             (let ((obj (parse resp)))
+               (ok (string= (gethash "jsonrpc" obj) "2.0"))
+               (ok (eql (gethash "id" obj) 5))
+               ;; Must be a valid result, not an error
+               (ok (gethash "result" obj) "must have result key")
+               (ok (null (gethash "error" obj)) "must not be an error response")
+               (let ((result (gethash "result" obj)))
+                 (ok (gethash "serverInfo" result) "must have serverInfo")
+                 (ok (gethash "protocolVersion" result)
+                     "must have negotiated protocolVersion"))))
+        (setf *project-root* saved-root)
+        (when saved-cwd
+          (ignore-errors (uiop:chdir saved-cwd)))))))
 
 (deftest ping-returns-empty
   (testing "ping returns empty result object"
