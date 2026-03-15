@@ -142,6 +142,18 @@
       (ok (null (getf error-context :frames))
           "error-context should have no backtrace frames"))))
 
+(deftest repl-eval-package-case-insensitive
+  (testing "lowercase package name is accepted (case-insensitive lookup)"
+    (multiple-value-bind (printed value)
+        (repl-eval "(+ 1 1)" :package "cl-user")
+      (ok (string= printed "2") "lowercase 'cl-user' should resolve correctly")
+      (ok (= value 2))))
+  (testing "mixed-case package name is accepted"
+    (multiple-value-bind (printed value)
+        (repl-eval "(+ 3 4)" :package "Cl-User")
+      (ok (string= printed "7") "mixed-case 'Cl-User' should resolve correctly")
+      (ok (= value 7)))))
+
 (deftest repl-eval-reader-error-clean-message
   (testing "reader-error returns clean message without backtrace"
     ;; #.(+ 1 2) with safe-read=t signals READER-ERROR (not END-OF-FILE).

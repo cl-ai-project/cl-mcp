@@ -29,7 +29,7 @@ Signals an error when the package does not exist."
      (or (find-package package)
          (error "Package ~S does not exist" package)))
     ((stringp package)
-     (or (find-package package)
+     (or (find-package (string-upcase package))
          (error "Package ~A does not exist" package)))
     (t (error "Invalid package designator ~S" package))))
 

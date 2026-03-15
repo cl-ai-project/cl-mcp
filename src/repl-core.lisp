@@ -77,7 +77,7 @@ on large outputs)."
   (let ((pkg (etypecase package
                (package package)
                (symbol (find-package package))
-               (string (find-package package)))))
+               (string (find-package (string-upcase package))))))
     (unless pkg
       (error '%package-not-found-error :package package))
     pkg))
