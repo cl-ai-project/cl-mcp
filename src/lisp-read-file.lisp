@@ -353,10 +353,18 @@ For defmethod, includes qualifiers like :before, :after, :around."
     (t
      (multiple-value-bind (text truncated total)
          (%read-lines-slice resolved 0 line-limit)
-       (let ((meta (make-hash-table :test #'equal)))
+       (let* ((meta (make-hash-table :test #'equal))
+              (end-line (min line-limit total))
+              (footer (when (< end-line total)
+                        (format nil "[Showing lines 1-~D of ~D. ~
+                                     Use collapsed=false with offset=~D to read more.]~%"
+                                end-line total end-line)))
+              (content (if footer
+                           (concatenate 'string text footer)
+                           text)))
          (setf (gethash "truncated" meta) truncated
                (gethash "total_lines" meta) total)
-         (values text meta
+         (values content meta
                  (if (lisp-source-path-p resolved)
                      "lisp-snippet"
                      "text-snippet")))))))
@@ -411,7 +419,10 @@ unless you need exact raw bytes.
 Use 'name_pattern' to locate specific definitions (e.g., functions, classes)
 without reading the entire file.
 Use 'collapsed=true' (default) to see only signatures, or 'collapsed=false'
-for full source."
+for full source.
+When reading in raw mode (collapsed=false) and output is truncated, a
+'[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
+to guide pagination. Use the suggested offset value in a follow-up call."
   :args ((path :type :string :required t
                :description "Path to read; absolute inside project or registered ASDF system,
 or relative to project root")
