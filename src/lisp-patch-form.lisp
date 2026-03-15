@@ -27,6 +27,8 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/package-context
+                #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
@@ -92,7 +94,8 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
                          (subseq text end))))
       (values modified-file modified-form))))
 
-(defun %validate-form-parseable (form-text &optional readtable-designator)
+(defun %validate-form-parseable (form-text &optional readtable-designator
+                                           package-name source-path)
   "Validate that FORM-TEXT parses as a single complete Lisp form.
 Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR if the text
 does not parse correctly."
@@ -103,7 +106,8 @@ does not parse correctly."
                custom-rt
                (copy-readtable nil))))
     (handler-case
-        (call-with-lenient-packages
+        (call-with-package-context
+         package-name
          (lambda ()
            (multiple-value-bind (form pos)
                (read-from-string form-text nil :eof)
@@ -116,7 +120,8 @@ does not parse correctly."
                (when (< rest-start (length form-text))
                  (error 'patch-operation-error
                         :reason "patch produced malformed form text (trailing content after form)")))
-             form-text)))
+             form-text))
+         :source-path source-path)
       (patch-operation-error (e)
         (error e))
       (error (e)
@@ -146,7 +151,7 @@ to use for parsing the file."
     (error "old_text and new_text must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
-  (multiple-value-bind (abs rel original nodes target target-snippet)
+  (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
       (handler-case
           (%locate-target-form file-path form-type form-name readtable)
         (error (e)
@@ -159,7 +164,9 @@ to use for parsing the file."
           (%validate-form-parseable
            modified-form
            (or readtable
-               (%detect-readtable-before-node nodes target))))
+               (%detect-readtable-before-node nodes target))
+           file-package-name
+           abs))
         (log-event :debug "lisp.patch.form"
                    "path" (namestring abs)
                    "form_type" form-type

@@ -198,10 +198,12 @@ For defmethod, includes qualifiers like :before, :after, :around."
     (values source comment blank)))
 
 (defun %format-lisp-file (text name-scanner content-scanner include-comments
-                          comment-context &key readtable)
+                          comment-context &key readtable source-path)
   (multiple-value-bind (source-lines-count comment-lines blank-lines)
       (%line-stats text)
-    (let* ((nodes (parse-top-level-forms text :readtable readtable))
+    (let* ((nodes (parse-top-level-forms text
+                                         :readtable readtable
+                                         :source-path source-path))
            (line-width (%line-number-width source-lines-count))
            (expanded 0)
            (total-forms 0)
@@ -322,6 +324,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
      (let ((text (fs-read-file resolved)))
        (multiple-value-bind (display meta-table)
            (%format-lisp-file text name-scanner content-scanner include-comments comment-context
+                              :source-path resolved
                               :readtable readtable)
          (values display meta-table "lisp-collapsed"))))
     ((not collapsed)
@@ -446,4 +449,3 @@ is used instead of Eclector, which means comments are NOT preserved."))
                      "path" (gethash "path" file-result)
                      "mode" (gethash "mode" file-result)
                      "meta" (gethash "meta" file-result)))))
-

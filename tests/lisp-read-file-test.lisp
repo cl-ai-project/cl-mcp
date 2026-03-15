@@ -168,6 +168,45 @@
           (ok (search "(defmethod resize :after ((s shape) factor) ...)" content))
           (ok (search "(defmethod resize :around ((s shape) factor) ...)" content)))))))
 
+(deftest lisp-read-file-discovers-separate-package-definition-for-local-nicknames
+  (testing "collapsed read works when package local nicknames are defined in another source file"
+    (let* ((pkg-name "CL-MCP-TMP-LN-READ-USER")
+           (target-name "CL-MCP-TMP-LN-READ-TARGET")
+           (defs-relative "tests/tmp/lisp-read-local-nicknames-package.lisp")
+           (source-relative "tests/tmp/lisp-read-local-nicknames-source.lisp")
+           (defs-content
+             (format nil
+                     "(defpackage #:~A~%  (:use #:cl)~%  (:local-nicknames (#:ad #:~A)))~%"
+                     pkg-name target-name))
+           (source-content
+             (format nil
+                     "(in-package #:~A)~%~%~
+(defun make-thing ()~%  (ad:make-dual 1.0 0.0))~%~%~
+(defun other-thing ()~%  (ad:make-dual 2.0 1.0))~%"
+                     pkg-name)))
+      (when (find-package pkg-name)
+        (delete-package pkg-name))
+      (when (find-package target-name)
+        (delete-package target-name))
+      (fs-write-file defs-relative defs-content)
+      (fs-write-file source-relative source-content)
+      (unwind-protect
+           (let* ((result (lisp-read-file source-relative))
+                  (content (gethash "content" result)))
+             (ok (null (find-package pkg-name))
+                 "user package is not preloaded in parent")
+             (ok (null (find-package target-name))
+                 "nickname target package is not preloaded in parent")
+             (ok (stringp content))
+             (ok (search "(defun make-thing () ...)" content))
+             (ok (search "(defun other-thing () ...)" content))
+             (ok (null (find-package pkg-name))
+                 "synthesized user package is cleaned up")
+             (ok (null (find-package target-name))
+                 "synthesized target package is cleaned up"))
+        (ignore-errors (delete-file (fs-resolve-read-path defs-relative)))
+        (ignore-errors (delete-file (fs-resolve-read-path source-relative)))))))
+
 
 (deftest lisp-read-file-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"

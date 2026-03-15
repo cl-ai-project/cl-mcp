@@ -28,6 +28,8 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
+  (:import-from #:cl-mcp/src/package-context
+                #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
@@ -100,17 +102,15 @@ blank line. For EOF boundary use a single newline."
   "Trim leading/trailing horizontal and vertical whitespace from TEXT."
   (string-trim '(#\Space #\Tab #\Newline #\Return) text))
 
-(defun %validate-and-repair-content (content &optional readtable-designator)
+(defun %validate-and-repair-content (content &optional readtable-designator
+                                             package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
 using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
-         (*readtable*
-          (if custom-rt
-              custom-rt
-              (copy-readtable nil))))
+         (*readtable* (if custom-rt custom-rt (copy-readtable nil))))
     (labels ((whitespace-char-p (ch)
                (member ch '(#\Space #\Tab #\Newline #\Return)))
              (rest-parses-as-complete-forms-p (text start)
@@ -134,23 +134,27 @@ Unknown package prefixes are handled leniently via stub packages."
                    (error nil nil))))
              (try-parse (text)
                (handler-case
-                   (call-with-lenient-packages
+                   (call-with-package-context
+                    package-name
                     (lambda ()
                       (multiple-value-bind (form pos)
                           (read-from-string text nil :eof)
-                        (when (eq form :eof) (error "content is empty"))
+                        (when (eq form :eof)
+                          (error "content is empty"))
                         (let* ((len (length text))
                                (rest-start
-                                (or (position-if-not #'whitespace-char-p
-                                                     text :start pos)
-                                    len)))
+                                 (or (position-if-not #'whitespace-char-p
+                                                      text :start pos)
+                                     len)))
                           (when (< rest-start len)
                             (if (rest-parses-as-complete-forms-p text rest-start)
                                 (error 'multiple-top-level-forms-error)
                                 (error
                                  "content has trailing malformed characters after the first form"))))
-                        text)))
-                 (error (e) (values nil e)))))
+                        text))
+                    :source-path source-path)
+                 (error (e)
+                   (values nil e)))))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
@@ -162,7 +166,6 @@ Unknown package prefixes are handled leniently via stub packages."
                   (repaired-result
                    (log-event :info "lisp.edit.form" "auto-repair" "success"
                               "original-error" (princ-to-string err))
-                   ;; Return repaired content and a description of what changed
                    (let ((added-count (- (length repaired) (length content))))
                      (values repaired-result
                              (format nil "~D closing delimiter~:P ~
@@ -279,11 +282,12 @@ to use for parsing both the file and the new content."
                        ((string= op-normalized "insert_before") :insert-before)
                        ((string= op-normalized "insert_after") :insert-after)
                        (t (error "Unsupported operation: ~A" operation)))))
-    (multiple-value-bind (abs rel original nodes target target-snippet)
+    (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
         (%locate-target-form file-path form-type form-name readtable)
-      (declare (ignore nodes))
+      (declare (ignore nodes _))
       (multiple-value-bind (validated-content parinfer-warning)
-          (%validate-and-repair-content content readtable)
+          (%validate-and-repair-content content readtable
+                                        file-package-name abs)
         (let* ((updated (%apply-operation original target op-key
                                           validated-content
                                           normalize-blank-lines))

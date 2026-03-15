@@ -6,6 +6,9 @@
                 #:parse-result-client
                 #:make-expression-result
                 #:make-skipped-input-result)
+  (:import-from #:cl-mcp/src/package-context
+                #:call-with-file-package-context
+                #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
   (:export #:cst-node
@@ -141,7 +144,63 @@ Returns the complete list of nodes (including previously collected NODES)."
                      :start-line (%pos->line start)
                      :end-line (%pos->line end)))))
 
-(defun parse-top-level-forms (text &key readtable)
+(defun %parse-top-level-forms-core (text readtable)
+  "Parse TEXT into CST nodes assuming *PACKAGE* and *LINE-TABLE* are already bound."
+  (if readtable
+      (let ((custom-rt (%try-switch-readtable readtable)))
+        (if custom-rt
+            (call-with-lenient-packages
+             (lambda ()
+               (with-input-from-string (stream text)
+                 (%read-remaining-with-cl-reader stream nil custom-rt))))
+            (error "Readtable ~S not found." readtable)))
+      (let ((*readtable* (copy-readtable))
+            (*read-eval* nil)
+            (nodes '())
+            (client (make-instance 'parse-result-client)))
+        (with-input-from-string (stream text)
+          (handler-case
+              (call-with-lenient-packages
+               (lambda ()
+                 (loop
+                   (multiple-value-bind (result orphan-results)
+                       (eclector.parse-result:read client stream nil :eof)
+                     (dolist (orphan orphan-results)
+                       (push orphan nodes))
+                     (when (eq result :eof)
+                       (return (nreverse nodes)))
+                     (push result nodes)
+                     (when (and (typep result 'cst-node)
+                                (eq (cst-node-kind result) :expr))
+                       (let ((pkg-name (%in-package-form-p
+                                        (cst-node-value result))))
+                         (when pkg-name
+                           (let ((pkg (find-package pkg-name)))
+                             (when pkg
+                               (setf *package* pkg)))))
+                       (let ((designator
+                               (%in-readtable-form-p (cst-node-value result))))
+                         (when designator
+                           (let ((custom-rt (%try-switch-readtable designator)))
+                             (when custom-rt
+                               (return
+                                 (%read-remaining-with-cl-reader
+                                  stream nodes custom-rt)))))))))))
+            (reader-error (e)
+              (let ((msg (format nil "~A" e)))
+                (if (search "READ-EVAL" msg)
+                    (error
+                     "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
+If you need to parse files containing #., consider removing or replacing the #. forms, ~
+or use a separate evaluation step."
+                     e)
+                    (error
+                     "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
+specify the 'readtable' parameter with the named-readtable designator ~
+(e.g., readtable: \"interpol-syntax\")."
+                     e)))))))))
+
+(defun parse-top-level-forms (text &key readtable source-path initial-package)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
 stub packages that are cleaned up after parsing.
@@ -149,57 +208,18 @@ When an IN-PACKAGE form is encountered, *PACKAGE* is updated so that
 package-local-nicknames activate for subsequent forms."
   (let ((*line-table* (%build-line-table text))
         (*package* *package*))
-    (if readtable
-        (let ((custom-rt (%try-switch-readtable readtable)))
-          (if custom-rt
-              (call-with-lenient-packages
-               (lambda ()
-                 (with-input-from-string (stream text)
-                   (%read-remaining-with-cl-reader stream nil custom-rt))))
-              (error "Readtable ~S not found." readtable)))
-        (let ((*readtable* (copy-readtable))
-              (*read-eval* nil)
-              (nodes '())
-              (client (make-instance 'parse-result-client)))
-          (with-input-from-string (stream text)
-            (handler-case
-                (call-with-lenient-packages
-                 (lambda ()
-                   (loop
-                     (multiple-value-bind (result orphan-results)
-                         (eclector.parse-result:read client stream nil :eof)
-                       (dolist (orphan orphan-results)
-                         (push orphan nodes))
-                       (when (eq result :eof)
-                         (return (nreverse nodes)))
-                       (push result nodes)
-                       (when (and (typep result 'cst-node)
-                                  (eq (cst-node-kind result) :expr))
-                         ;; Track in-package to activate local-nicknames
-                         (let ((pkg-name (%in-package-form-p
-                                          (cst-node-value result))))
-                           (when pkg-name
-                             (let ((pkg (find-package pkg-name)))
-                               (when pkg
-                                 (setf *package* pkg)))))
-                         (let ((designator
-                                (%in-readtable-form-p (cst-node-value result))))
-                           (when designator
-                             (let ((custom-rt (%try-switch-readtable designator)))
-                               (when custom-rt
-                                 (return
-                                  (%read-remaining-with-cl-reader
-                                   stream nodes custom-rt)))))))))))
-              (reader-error (e)
-                (let ((msg (format nil "~A" e)))
-                  (if (search "READ-EVAL" msg)
-                      (error
-                       "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
-                              If you need to parse files containing #., consider removing or replacing ~
-                              the #. forms, or use a separate evaluation step."
-                       e)
-                      (error
-                       "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
-                              specify the 'readtable' parameter with the named-readtable designator ~
-                              (e.g., readtable: \"interpol-syntax\")."
-                       e))))))))))
+    (cond
+      (initial-package
+       (call-with-package-context
+        initial-package
+        (lambda ()
+          (%parse-top-level-forms-core text readtable))
+        :source-path source-path))
+      (source-path
+       (call-with-file-package-context
+        source-path
+        (lambda ()
+          (%parse-top-level-forms-core text readtable))
+        :text text))
+      (t
+       (%parse-top-level-forms-core text readtable)))))

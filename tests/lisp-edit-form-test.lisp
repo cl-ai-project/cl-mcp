@@ -715,6 +715,42 @@ then clean up."
       (ok (stringp
            (cl-mcp/src/lisp-edit-form::%validate-and-repair-content content))))))
 
+(deftest lisp-edit-form-synthesizes-same-file-local-nickname-context
+  (testing "lisp-edit-form works when package local nicknames exist only in the file header"
+    (let* ((pkg-name "CL-MCP-TMP-LN-SAME-FILE-USER")
+           (target-name "CL-MCP-TMP-LN-SAME-FILE-TARGET")
+           (relative "tests/tmp/edit-form-local-nickname-same-file.lisp")
+           (content
+             (format nil
+                     "(defpackage #:~A~%  (:use #:cl)~%  (:local-nicknames (#:ad #:~A)))~%~%~
+(in-package #:~A)~%~%~
+(defun make-thing ()~%  (ad:make-dual 1.0 0.0))~%~%~
+(defun other-thing ()~%  (ad:make-dual 2.0 1.0))~%"
+                     pkg-name target-name pkg-name)))
+      (when (find-package pkg-name)
+        (delete-package pkg-name))
+      (when (find-package target-name)
+        (delete-package target-name))
+      (with-temp-file relative content
+        (lambda (path)
+          (ok (null (find-package pkg-name))
+              "user package is not preloaded in parent")
+          (ok (null (find-package target-name))
+              "nickname target package is not preloaded in parent")
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "make-thing"
+                          :operation "replace"
+                          :content "(defun make-thing ()
+  (ad:make-dual 99.0 0.0))")
+          (let ((updated (fs-read-file path)))
+            (ok (search "99.0" updated))
+            (ok (search "other-thing" updated)))
+          (ok (null (find-package pkg-name))
+              "synthesized user package is cleaned up")
+          (ok (null (find-package target-name))
+              "synthesized target package is cleaned up"))))))
+
 (deftest lisp-edit-form-parinfer-warning-returned
   (testing "parinfer warning is returned when content is auto-repaired"
     ;; M-4 fix: lisp-edit-form returns parinfer warning as second value
