@@ -408,9 +408,9 @@
        (let* ((result (lisp-read-file path :collapsed nil :offset 9999))
               (content (gethash "content" result)))
          (ok (not (search "[Showing lines" content))
-             "no footer when offset is beyond EOF")
-         (ok (string= content "")
-             "content is empty when offset is beyond EOF"))))))
+             "no pagination footer when offset is beyond EOF")
+         (ok (search "[Offset" content)
+             "EOF message is shown when offset is beyond EOF"))))))
 
 (deftest lisp-read-file-raw-limit-zero-signals-error
   (testing "limit=0 signals an error"
@@ -418,7 +418,20 @@
      "tests/tmp/limit-zero-test.lisp"
      ";;; test"
      (lambda (path)
-       (ok (typep (handler-case (lisp-read-file path :collapsed nil :limit 0)
-                    (error (e) e))
-                  'error)
-           "limit=0 should signal an error")))))
+       (let ((e (handler-case (lisp-read-file path :collapsed nil :limit 0)
+                  (error (e) e))))
+         (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+             "limit=0 should signal arg-validation-error, not a generic internal error"))))))
+
+(deftest lisp-read-file-raw-eof-offset-message
+  (testing "EOF message content when offset is past end of file"
+    (with-temp-lisp-file
+     "tests/tmp/eof-msg-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 10 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 20))
+              (content (gethash "content" result)))
+         (ok (search "Offset 20" content)
+             "EOF message should include the requested offset")
+         (ok (search "10 total line" content)
+             "EOF message should include the total line count"))))))

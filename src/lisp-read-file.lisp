@@ -14,7 +14,7 @@
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paths
@@ -29,9 +29,6 @@
                 #:pathname-type)
   (:export #:lisp-read-file
            #:lisp-source-path-p))
-
-
-
 
 (in-package #:cl-mcp/src/lisp-read-file)
 
@@ -338,9 +335,13 @@ For defmethod, includes qualifiers like :before, :after, :around."
                         (format nil "[Showing lines ~D-~D of ~D. ~
                                      Use offset=~D to read more.]~%"
                                 start-line end-line total end-line)))
-              (content (if footer
-                           (concatenate 'string text footer)
-                           text)))
+              (eof-msg (when (and (string= text "") (> (or offset 0) 0))
+                         (format nil "[Offset ~D is past end of file (~D total line~:P).]~%"
+                                 (or offset 0) total)))
+              (content (cond
+                         (footer (concatenate 'string text footer))
+                         (eof-msg eof-msg)
+                         (t text))))
          (setf (gethash "truncated" meta) truncated
                (gethash "total_lines" meta) total)
          (values content meta "raw"))))
@@ -382,21 +383,26 @@ without an explicit IN-READTABLE form.
 
 Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"meta\"."
   (unless (stringp path)
-    (error "path must be a string"))
+    (error 'arg-validation-error :arg-name "path" :message "path must be a string"))
   (unless (member collapsed '(t nil))
-    (error "collapsed must be boolean"))
+    (error 'arg-validation-error :arg-name "collapsed" :message "collapsed must be boolean"))
   (unless (member include-comments '(t nil))
-    (error "include-comments must be boolean"))
+    (error 'arg-validation-error :arg-name "include_comments"
+           :message "include-comments must be boolean"))
   (unless (member comment-context '("preceding" "all" "none") :test #'string=)
-    (error "comment-context must be \"preceding\", \"all\", or \"none\""))
+    (error 'arg-validation-error :arg-name "comment_context"
+           :message "comment-context must be \"preceding\", \"all\", or \"none\""))
   (when (and offset (not (integerp offset)))
-    (error "offset must be an integer when provided"))
+    (error 'arg-validation-error :arg-name "offset"
+           :message "offset must be an integer when provided"))
   (when (and offset (< offset 0))
-    (error "offset must be non-negative"))
+    (error 'arg-validation-error :arg-name "offset" :message "offset must be non-negative"))
   (when (and limit (not (integerp limit)))
-    (error "limit must be an integer when provided"))
+    (error 'arg-validation-error :arg-name "limit"
+           :message "limit must be an integer when provided"))
   (when (and limit (<= limit 0))
-    (error "limit must be a positive integer when provided"))
+    (error 'arg-validation-error :arg-name "limit"
+           :message "limit must be a positive integer when provided"))
   (let ((resolved (fs-resolve-read-path path))
         (line-limit (or limit *default-line-limit*))
         (name-scanner (%compile-scanner name-pattern))

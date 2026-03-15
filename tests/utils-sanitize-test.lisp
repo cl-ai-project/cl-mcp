@@ -4,7 +4,9 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok)
-  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json))
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json
+                #:sanitize-error-message))
 
 (in-package #:cl-mcp/tests/utils-sanitize-test)
 
@@ -172,3 +174,15 @@
     (let ((s (format nil "has~Cbell" (code-char 7))))
       (ok (not (eq s (sanitize-for-json s)))
           "string with BEL should be sanitized (new allocation)"))))
+
+(deftest sanitize-error-message-shows-pathname
+  (testing "pathname literals are unwrapped to show the actual path"
+    (ok (string= "The file /tmp/no-such-file does not exist"
+                 (sanitize-error-message
+                  "The file #P\"/tmp/no-such-file\" does not exist"))
+        "pathname literal should be replaced with the path string, not <path>"))
+  (testing "multiple pathname literals are all unwrapped"
+    (let ((msg (sanitize-error-message "copied #P\"/a\" to #P\"/b\" failed")))
+      (ok (search "/a" msg) "first path shown")
+      (ok (search "/b" msg) "second path shown")
+      (ok (not (search "#P" msg)) "no residual #P prefix"))))
