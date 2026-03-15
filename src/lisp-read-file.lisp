@@ -39,7 +39,7 @@
   '("lisp" "lsp" "cl" "asd" "ros")
   "File extensions treated as Lisp source.")
 
-(defparameter *default-line-limit* 2000
+(defparameter *default-line-limit* 500
   "Default maximum number of lines to return when LIMIT is not supplied.")
 
 (defparameter *text-context-lines* 5
@@ -284,6 +284,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
                   (return)))
               (incf line-idx))
       (when hit-limit
+        (incf line-idx)
         (loop for line = (read-line in nil :eof)
               until (eq line :eof) do (incf line-idx)))
       (let ((total line-idx)
@@ -330,10 +331,19 @@ For defmethod, includes qualifiers like :before, :after, :around."
     ((not collapsed)
      (multiple-value-bind (text truncated total)
          (%read-lines-slice resolved (or offset 0) line-limit)
-       (let ((meta (make-hash-table :test #'equal)))
+       (let* ((meta (make-hash-table :test #'equal))
+              (start-line (1+ (or offset 0)))
+              (end-line (+ (or offset 0) line-limit))
+              (footer (when truncated
+                        (format nil "[Showing lines ~D-~D of ~D. ~
+                                     Use offset=~D to read more.]~%"
+                                start-line end-line total end-line)))
+              (content (if footer
+                           (concatenate 'string text footer)
+                           text)))
          (setf (gethash "truncated" meta) truncated
                (gethash "total_lines" meta) total)
-         (values text meta "raw"))))
+         (values content meta "raw"))))
     ((and content-scanner (not (lisp-source-path-p resolved)))
      (multiple-value-bind (text truncated)
          (%text-filter-with-context resolved content-scanner line-limit)
