@@ -10,9 +10,15 @@
                 #:package-does-not-exist
                 #:symbol-does-not-exist
                 #:symbol-is-not-external)
-  (:export #:call-with-lenient-packages))
+  (:export #:call-with-lenient-packages
+           #:call-with-managed-packages))
 
 (in-package #:cl-mcp/src/utils/lenient-read)
+
+(defvar *managed-lenient-packages* nil
+  "Additional package objects treated as writable temporary packages.
+Bound by parent-side package-context synthesis so the lenient reader can
+intern/export symbols into pre-created local nickname target stubs.")
 
 (defun %find-restart-by-name (name-string condition)
   "Find the first restart whose name matches NAME-STRING by string comparison.
@@ -55,7 +61,9 @@ For real packages, lets the error propagate so typos are reported normally.
 Interns and exports the symbol via USE-VALUE to prevent subsequent
 symbol-is-not-external errors on repeated single-colon access."
   (let ((pkg (eclector.reader::desired-symbol-package condition)))
-    (when (and pkg (member pkg (car stubs) :test #'eq))
+    (when (and pkg
+               (or (member pkg (car stubs) :test #'eq)
+                   (member pkg *managed-lenient-packages* :test #'eq)))
       (let ((sym-name (eclector.reader::desired-symbol-name condition)))
         (let ((sym (intern sym-name pkg)))
           (export sym pkg)
@@ -68,7 +76,9 @@ symbol-is-not-external errors on repeated single-colon access."
 Only handles the condition if the symbol's package is a stub we created.
 Invokes the USE-ANYWAY restart to accept the internal symbol as-is."
   (let ((pkg (eclector.reader::desired-symbol-package condition)))
-    (when (and pkg (member pkg (car stubs) :test #'eq))
+    (when (and pkg
+               (or (member pkg (car stubs) :test #'eq)
+                   (member pkg *managed-lenient-packages* :test #'eq)))
       (let ((r (%find-restart-by-name "USE-ANYWAY" condition)))
         (when r
           (invoke-restart r))))))
@@ -97,7 +107,9 @@ is about a missing package, a missing symbol, or a non-external symbol."
              (pkg-name (second args)))
          (when (and (stringp sym-name) (stringp pkg-name))
            (let ((pkg (find-package pkg-name)))
-             (when (and pkg (member pkg (car stubs) :test #'eq))
+             (when (and pkg
+                        (or (member pkg (car stubs) :test #'eq)
+                            (member pkg *managed-lenient-packages* :test #'eq)))
                (export (intern sym-name pkg) pkg)
                (let ((r (%find-restart-by-name "CONTINUE" condition)))
                  (when r (invoke-restart r))))))))
@@ -108,7 +120,9 @@ is about a missing package, a missing symbol, or a non-external symbol."
              (pkg-name (second args)))
          (when (and (stringp sym-name) (stringp pkg-name))
            (let ((pkg (find-package pkg-name)))
-             (when (and pkg (member pkg (car stubs) :test #'eq))
+             (when (and pkg
+                        (or (member pkg (car stubs) :test #'eq)
+                            (member pkg *managed-lenient-packages* :test #'eq)))
                (export (intern sym-name pkg) pkg)
                (let ((r (%find-restart-by-name "CONTINUE" condition)))
                  (when r (invoke-restart r)))))))))))
@@ -163,6 +177,14 @@ Examples:
               #+sbcl
               (sb-int:simple-reader-package-error
                 (lambda (c)
-                  (%handle-sbcl-reader-package-error c stubs-cell))))
+                 (%handle-sbcl-reader-package-error c stubs-cell))))
            (funcall thunk))
       (%cleanup-stub-packages (car stubs-cell)))))
+
+(defun call-with-managed-packages (packages thunk)
+  "Call THUNK with PACKAGES added to the managed temporary package set.
+These packages are treated like writable stubs by call-with-lenient-packages,
+but their lifecycle is owned by the caller."
+  (let ((*managed-lenient-packages*
+          (append packages *managed-lenient-packages*)))
+    (call-with-lenient-packages thunk)))

@@ -16,6 +16,8 @@
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms)
+  (:import-from #:cl-mcp/src/package-context
+                #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
@@ -208,16 +210,20 @@ Returns seven values:
   NODES — parsed CST nodes
   TARGET — matched CST node
   TARGET-SNIPPET — text of the matched form
-  FORM-TYPE-STR — downcased form-type string"
+  FORM-TYPE-STR — downcased form-type string
+  FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form"
   (let ((form-type-str (string-downcase form-type)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
-             (nodes (parse-top-level-forms original :readtable readtable))
+             (nodes (parse-top-level-forms original
+                                           :readtable readtable
+                                           :source-path abs))
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))
         (let ((target-snippet (subseq original
                                      (cst-node-start target)
                                      (cst-node-end target))))
-          (values abs rel original nodes target target-snippet form-type-str))))))
+          (values abs rel original nodes target target-snippet form-type-str
+                  (extract-in-package-name-from-text original)))))))
