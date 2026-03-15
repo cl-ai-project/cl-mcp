@@ -422,7 +422,7 @@ or relative to project root")
          (offset :type :integer
                  :description "0-based line offset when collapsed=false (raw mode only)")
          (limit :type :integer
-                :description "Maximum lines to return; defaults to 2000")
+                :description "Maximum lines to return; defaults to 500")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
