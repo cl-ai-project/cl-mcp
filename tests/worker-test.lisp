@@ -877,3 +877,30 @@ Cleans up server and socket on exit."
         (ok (= 8080 tcp-port) "tcp-port parsed")
         (ok (null swank-port) "swank-port is NIL when key absent")
         (ok (= 99 pid) "pid parsed")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Docker PID 1 fix tests (MCP_PARENT_PID injection via %build-environment)
+;;; ---------------------------------------------------------------------------
+
+(deftest worker-build-env-includes-parent-pid
+  (testing "%build-environment injects MCP_PARENT_PID set to the current process PID"
+    (let* ((env (cl-mcp/src/worker-client::%build-environment "test-secret" 99))
+           (expected (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid)))
+           (found (find expected env :test #'string=)))
+      (ok found "env list contains MCP_PARENT_PID=<current-pid>"))))
+
+(deftest worker-build-env-strips-inherited-parent-pid
+  (testing "%build-environment replaces any inherited MCP_PARENT_PID with the current PID"
+    (let ((prev (uiop/os:getenv "MCP_PARENT_PID")))
+      (unwind-protect
+           (progn
+             ;; Simulate a stale/inherited MCP_PARENT_PID (e.g. nested invocation)
+             (setf (uiop/os:getenv "MCP_PARENT_PID") "99999")
+             (let* ((env (cl-mcp/src/worker-client::%build-environment "s" 1))
+                    (expected (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid)))
+                    (found (find expected env :test #'string=))
+                    (stale (find "MCP_PARENT_PID=99999" env :test #'string=)))
+               (ok found "env contains MCP_PARENT_PID=<current-pid>")
+               (ok (not stale)
+                   "inherited MCP_PARENT_PID=99999 is stripped from env")))
+        (%restore-env "MCP_PARENT_PID" prev)))))

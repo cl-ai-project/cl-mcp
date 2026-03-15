@@ -189,7 +189,7 @@ TCP authentication, and sets MCP_WORKER_ID for log context."
               (and (>= (length s) 13)
                    (string= "MCP_LOG_FILE=" s :end2 13))
               (and (>= (length s) 16)
-                   (string= "MCP_PARENT_PID=" s :end2 16))))
+                   (string= "MCP_PARENT_PID=" s :end2 15))))
            current-env)))
     (let ((env
            (list* (format nil "MCP_WORKER_SECRET=~A" secret)
