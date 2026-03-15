@@ -261,6 +261,52 @@ then clean up."
             (ok (search "(widget-name w)" updated))
             (ok (null (search "(name w)" updated)))))))))
 
+(deftest lisp-patch-form-discovers-separate-package-definition-for-local-nicknames
+  (testing "patch works when package local nicknames are defined in a separate file"
+    (let* ((pkg-name "CL-MCP-TMP-LN-PATCH-USER")
+           (target-name "CL-MCP-TMP-LN-PATCH-TARGET")
+           (defs-relative "tests/tmp/patch-form-local-nicknames-package.lisp")
+           (source-relative "tests/tmp/patch-form-local-nicknames-source.lisp")
+           (defs-path (project-path defs-relative))
+           (source-path (project-path source-relative))
+           (defs-content
+             (format nil
+                     "(defpackage #:~A~%  (:use #:cl)~%  (:local-nicknames (#:ad #:~A)))~%"
+                     pkg-name target-name))
+           (source-content
+             (format nil
+                     "(in-package #:~A)~%~%~
+(defun make-thing ()~%  (ad:make-dual 1.0 0.0))~%~%~
+(defun other-thing ()~%  (ad:make-dual 2.0 1.0))~%"
+                     pkg-name)))
+      (when (find-package pkg-name)
+        (delete-package pkg-name))
+      (when (find-package target-name)
+        (delete-package target-name))
+      (ensure-directories-exist defs-path)
+      (fs-write-file defs-relative defs-content)
+      (fs-write-file source-relative source-content)
+      (unwind-protect
+           (progn
+             (ok (null (find-package pkg-name))
+                 "user package is not preloaded in parent")
+             (ok (null (find-package target-name))
+                 "nickname target package is not preloaded in parent")
+             (lisp-patch-form :file-path source-path
+                              :form-type "defun"
+                              :form-name "make-thing"
+                              :old-text "(ad:make-dual 1.0 0.0)"
+                              :new-text "(ad:make-dual 88.0 0.0)")
+             (let ((updated (fs-read-file source-path)))
+               (ok (search "88.0" updated))
+               (ok (search "other-thing" updated)))
+             (ok (null (find-package pkg-name))
+                 "synthesized user package is cleaned up")
+             (ok (null (find-package target-name))
+                 "synthesized target package is cleaned up"))
+        (ignore-errors (delete-file defs-path))
+        (ignore-errors (delete-file source-path))))))
+
 ;;; ============================================================
 ;;; Edge cases
 ;;; ============================================================

@@ -207,6 +207,52 @@
         (ignore-errors (delete-file (fs-resolve-read-path defs-relative)))
         (ignore-errors (delete-file (fs-resolve-read-path source-relative)))))))
 
+(deftest lisp-read-file-discovers-multiple-separate-local-nicknames
+  (testing "collapsed read works when another file defines multiple local nicknames"
+    (let* ((pkg-name "CL-MCP-TMP-LN-READ-MULTI-USER")
+           (ad-target-name "CL-MCP-TMP-LN-READ-MULTI-AD-TARGET")
+           (math-target-name "CL-MCP-TMP-LN-READ-MULTI-MATH-TARGET")
+           (defs-relative "tests/tmp/lisp-read-local-nicknames-multi-package.lisp")
+           (source-relative "tests/tmp/lisp-read-local-nicknames-multi-source.lisp")
+           (defs-content
+             (format nil
+                     "(defpackage #:~A~%  (:use #:cl)~%  (:local-nicknames (#:ad #:~A) (#:math #:~A)))~%"
+                     pkg-name ad-target-name math-target-name))
+           (source-content
+             (format nil
+                     "(in-package #:~A)~%~%~
+(defun make-thing ()~%  (ad:make-dual 1.0 0.0))~%~%~
+(defun scale-thing ()~%  (math:scale 2.0 4.0))~%"
+                     pkg-name)))
+      (when (find-package pkg-name)
+        (delete-package pkg-name))
+      (when (find-package ad-target-name)
+        (delete-package ad-target-name))
+      (when (find-package math-target-name)
+        (delete-package math-target-name))
+      (fs-write-file defs-relative defs-content)
+      (fs-write-file source-relative source-content)
+      (unwind-protect
+           (let* ((result (lisp-read-file source-relative))
+                  (content (gethash "content" result)))
+             (ok (null (find-package pkg-name))
+                 "user package is not preloaded in parent")
+             (ok (null (find-package ad-target-name))
+                 "ad target package is not preloaded in parent")
+             (ok (null (find-package math-target-name))
+                 "math target package is not preloaded in parent")
+             (ok (stringp content))
+             (ok (search "(defun make-thing () ...)" content))
+             (ok (search "(defun scale-thing () ...)" content))
+             (ok (null (find-package pkg-name))
+                 "synthesized user package is cleaned up")
+             (ok (null (find-package ad-target-name))
+                 "synthesized ad target package is cleaned up")
+             (ok (null (find-package math-target-name))
+                 "synthesized math target package is cleaned up"))
+        (ignore-errors (delete-file (fs-resolve-read-path defs-relative)))
+        (ignore-errors (delete-file (fs-resolve-read-path source-relative)))))))
+
 
 (deftest lisp-read-file-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
