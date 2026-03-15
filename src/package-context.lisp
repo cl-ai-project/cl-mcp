@@ -15,7 +15,6 @@
                 #:call-with-lenient-packages
                 #:call-with-managed-packages)
   (:import-from #:uiop
-                #:directory-exists-p
                 #:directory-files
                 #:ensure-directory-pathname
                 #:ensure-pathname

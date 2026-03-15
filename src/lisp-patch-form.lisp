@@ -22,8 +22,6 @@
                 #:arg-validation-error #:tool-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:import-from #:cl-mcp/src/utils/lenient-read
-                #:call-with-lenient-packages)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message
                 #:sanitize-for-json)

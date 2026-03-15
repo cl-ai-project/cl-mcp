@@ -21,10 +21,10 @@
     (or (and pos (let ((idx (1+ pos))) (when (< idx (length argv)) (nth idx argv))))
         default)))
 
-  (let* ((host (or (argv-get "--host") (or (uiop:getenv "MCP_HOST") "127.0.0.1")))
-       (port (parse-integer (or (argv-get "--port") (or (uiop:getenv "MCP_PORT") "12345"))))
-       (sock nil)
-       (stream nil))
+(let ((host (or (argv-get "--host") (or (uiop:getenv "MCP_HOST") "127.0.0.1")))
+      (port (parse-integer (or (argv-get "--port") (or (uiop:getenv "MCP_PORT") "12345"))))
+      (sock nil)
+      (stream nil))
   (handler-case
       (progn
         (setf sock (usocket:socket-connect host port :element-type 'character))
