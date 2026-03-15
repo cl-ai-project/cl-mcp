@@ -335,10 +335,9 @@
 
 (deftest lisp-read-file-raw-truncated-footer
   (testing "appends footer when content is truncated in raw mode"
-    (with-temp-lisp-file
-     "tests/tmp/footer-test.lisp"
-     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 20 collect i))
-     (lambda (path)
+    (with-temp-lisp-file "tests/tmp/footer-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 20 collect i))
+      (lambda (path)
        (let* ((result (lisp-read-file path :collapsed nil :limit 5))
               (content (gethash "content" result)))
          (ok (search "[Showing lines 1-5 of 20." content)
@@ -348,10 +347,9 @@
 
 (deftest lisp-read-file-raw-truncated-footer-with-offset
   (testing "footer reflects correct range when offset is used"
-    (with-temp-lisp-file
-     "tests/tmp/footer-offset-test.lisp"
-     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 30 collect i))
-     (lambda (path)
+    (with-temp-lisp-file "tests/tmp/footer-offset-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 30 collect i))
+      (lambda (path)
        (let* ((result (lisp-read-file path :collapsed nil :offset 10 :limit 5))
               (content (gethash "content" result)))
          (ok (search "[Showing lines 11-15 of 30." content)
@@ -361,10 +359,9 @@
 
 (deftest lisp-read-file-raw-no-footer-when-complete
   (testing "no footer when entire file fits within limit"
-    (with-temp-lisp-file
-     "tests/tmp/no-footer-test.lisp"
-     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 5 collect i))
-     (lambda (path)
+    (with-temp-lisp-file "tests/tmp/no-footer-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 5 collect i))
+      (lambda (path)
        (let* ((result (lisp-read-file path :collapsed nil :limit 100))
               (content (gethash "content" result)))
          (ok (not (search "[Showing lines" content))
@@ -372,10 +369,9 @@
 
 (deftest lisp-read-file-default-limit-is-500
   (testing "default limit is 500 lines (not 2000)"
-    (with-temp-lisp-file
-     "tests/tmp/default-limit-test.lisp"
-     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 600 collect i))
-     (lambda (path)
+    (with-temp-lisp-file "tests/tmp/default-limit-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 600 collect i))
+      (lambda (path)
        (let* ((result (lisp-read-file path :collapsed nil))
               (content (gethash "content" result)))
          (ok (search "[Showing lines 1-500 of 600." content)
