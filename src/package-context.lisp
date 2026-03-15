@@ -7,6 +7,8 @@
 
 (defpackage #:cl-mcp/src/package-context
   (:use #:cl)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-file)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/lenient-read
@@ -115,18 +117,19 @@ Stops after the first non-header top-level form once package header forms
 have begun, to avoid descending into the rest of the file."
   (call-with-lenient-packages
    (lambda ()
-     (with-input-from-string (stream text)
-       (let ((forms nil)
-             (saw-header nil))
-         (loop for form = (read stream nil :eof)
-               until (eq form :eof)
-               do (cond
-                    ((%header-form-p form)
-                     (push form forms)
-                     (setf saw-header t))
-                    (saw-header
-                     (return))))
-         (nreverse forms))))))
+     (let ((*read-eval* nil))
+       (with-input-from-string (stream text)
+         (let ((forms nil)
+               (saw-header nil))
+           (loop for form = (read stream nil :eof)
+                 until (eq form :eof)
+                 do (cond
+                      ((%header-form-p form)
+                       (push form forms)
+                       (setf saw-header t))
+                      (saw-header
+                       (return))))
+           (nreverse forms)))))))
 
 (defun %extract-in-package-name-from-forms (forms)
   "Return the first package name mentioned in FORMS' IN-PACKAGE declaration."
@@ -197,17 +200,13 @@ have begun, to avoid descending into the rest of the file."
 (defun %package-specs-in-file (pathname)
   "Return a list of PACKAGE-SPEC values extracted from PATHNAME."
   (handler-case
-      (with-open-file (in pathname :direction :input :element-type 'character)
-        (let* ((text (with-output-to-string (out)
-                       (loop for line = (read-line in nil nil)
-                             while line
-                             do (write-line line out))))
-               (forms (%read-header-forms-from-text text))
-               (specs nil))
-          (dolist (form forms (nreverse specs))
-            (let ((spec (%extract-package-spec form pathname)))
-              (when spec
-                (push spec specs))))))
+      (let* ((text (fs-read-file pathname))
+             (forms (%read-header-forms-from-text text))
+             (specs nil))
+        (dolist (form forms (nreverse specs))
+          (let ((spec (%extract-package-spec form pathname)))
+            (when spec
+              (push spec specs)))))
     (reader-error ()
       nil)
     #+sbcl
@@ -328,11 +327,7 @@ project source and bind *PACKAGE* to the synthesized package while THUNK runs."
   "Call THUNK with the package context implied by FILE-PATH's IN-PACKAGE form."
   (let ((file-text
           (or text
-              (with-open-file (in file-path :direction :input :element-type 'character)
-                (with-output-to-string (out)
-                  (loop for line = (read-line in nil nil)
-                        while line
-                        do (write-line line out)))))))
+              (fs-read-file file-path))))
     (call-with-package-context
      (extract-in-package-name-from-text file-text)
      thunk
