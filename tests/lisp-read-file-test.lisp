@@ -376,3 +376,49 @@
               (content (gethash "content" result)))
          (ok (search "[Showing lines 1-500 of 600." content)
              "default limit should be 500"))))))
+
+(deftest lisp-read-file-raw-no-footer-on-last-chunk
+  (testing "no footer when last paginated chunk exhausts the file"
+    (with-temp-lisp-file
+     "tests/tmp/last-chunk-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 1200 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 1000 :limit 500))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer on last chunk when remaining lines fit within limit"))))))
+
+(deftest lisp-read-file-raw-no-footer-on-exact-size
+  (testing "no footer when file is exactly limit lines"
+    (with-temp-lisp-file
+     "tests/tmp/exact-size-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 500 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer when file is exactly 500 lines (= default limit"))))))
+
+(deftest lisp-read-file-raw-no-footer-offset-beyond-eof
+  (testing "no footer when offset is beyond end of file"
+    (with-temp-lisp-file
+     "tests/tmp/beyond-eof-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 10 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 9999))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer when offset is beyond EOF")
+         (ok (string= content "")
+             "content is empty when offset is beyond EOF"))))))
+
+(deftest lisp-read-file-raw-limit-zero-signals-error
+  (testing "limit=0 signals an error"
+    (with-temp-lisp-file
+     "tests/tmp/limit-zero-test.lisp"
+     ";;; test"
+     (lambda (path)
+       (ok (typep (handler-case (lisp-read-file path :collapsed nil :limit 0)
+                    (error (e) e))
+                  'error)
+           "limit=0 should signal an error")))))

@@ -333,8 +333,8 @@ For defmethod, includes qualifiers like :before, :after, :around."
          (%read-lines-slice resolved (or offset 0) line-limit)
        (let* ((meta (make-hash-table :test #'equal))
               (start-line (1+ (or offset 0)))
-              (end-line (+ (or offset 0) line-limit))
-              (footer (when truncated
+              (end-line (min (+ (or offset 0) line-limit) total))
+              (footer (when (< end-line total)
                         (format nil "[Showing lines ~D-~D of ~D. ~
                                      Use offset=~D to read more.]~%"
                                 start-line end-line total end-line)))
@@ -387,6 +387,8 @@ Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"me
     (error "offset must be non-negative"))
   (when (and limit (not (integerp limit)))
     (error "limit must be an integer when provided"))
+  (when (and limit (<= limit 0))
+    (error "limit must be a positive integer when provided"))
   (let ((resolved (fs-resolve-read-path path))
         (line-limit (or limit *default-line-limit*))
         (name-scanner (%compile-scanner name-pattern))

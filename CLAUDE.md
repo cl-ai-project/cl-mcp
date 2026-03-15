@@ -133,7 +133,7 @@ guardrails against accidental misuse, not security boundaries.
 **Token-Efficient Reading**:
 - `lisp-read-file` with `collapsed=true` shows only signatures (like `(defun foo (args) ...)`)
 - Use `name_pattern` regex to expand specific definitions
-- Defaults to 2000 line limit for raw reads
+- Defaults to 500 line limit for raw reads; when truncated, a `[Showing lines A-B of N. Use offset=B to read more.]` footer is appended
 
 **Project Root Synchronization**:
 - Critical for all file operations
