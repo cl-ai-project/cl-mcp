@@ -85,13 +85,12 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0 :token nil)
-                 (ok acceptor)
-                 (ok (integerp port))
-                 (ok (http-server-running-p))
-                 (ok (eql *http-server-port* port))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0 :token nil)
+               (ok acceptor)
+               (ok (integerp port))
+               (ok (http-server-running-p))
+               (ok (eql *http-server-port* port)))
           (stop-http-server)))
     (ok (not (http-server-running-p)))))
 
@@ -100,13 +99,12 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor1 port1)
+             (multiple-value-bind (acceptor1 port1)
+                 (start-http-server :host "127.0.0.1" :port 0 :token nil)
+               (multiple-value-bind (acceptor2 port2)
                    (start-http-server :host "127.0.0.1" :port 0 :token nil)
-                 (multiple-value-bind (acceptor2 port2)
-                     (start-http-server :host "127.0.0.1" :port 0 :token nil)
-                   (ok (eql acceptor1 acceptor2))
-                   (ok (eql port1 port2)))))
+                 (ok (eql acceptor1 acceptor2))
+                 (ok (eql port1 port2))))
           (stop-http-server)))))
 
 (deftest http-post-initialize
@@ -114,28 +112,27 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0 :token nil)
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (multiple-value-bind (status headers body)
-                     (handler-case
-                         (send-http-request
-                          port "POST" "/mcp"
-                          :body (concatenate
-                                 'string
-                                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                 "\"method\":\"initialize\",\"params\":{}}")
-                          :headers '(("Content-Type" . "application/json")
-                                     ("Accept" . "application/json")))
-                       (error (e)
-                         (declare (ignore e))
-                         (values nil nil nil)))
-                   (when status
-                     (ok (eql status 200))
-                     (ok (search "Mcp-Session-Id" headers))
-                     (ok (search "\"result\"" body))))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0 :token nil)
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (multiple-value-bind (status headers body)
+                   (handler-case
+                       (send-http-request
+                        port "POST" "/mcp"
+                        :body (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                               "\"method\":\"initialize\",\"params\":{}}")
+                        :headers '(("Content-Type" . "application/json")
+                                   ("Accept" . "application/json")))
+                     (error (e)
+                       (declare (ignore e))
+                       (values nil nil nil)))
+                 (when status
+                   (ok (eql status 200))
+                   (ok (search "Mcp-Session-Id" headers))
+                   (ok (search "\"result\"" body)))))
           (stop-http-server)))))
 
 (deftest http-post-without-session-header
@@ -143,23 +140,22 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0 :token nil)
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (let ((status
-                         (handler-case
-                             (send-http-request
-                              port "POST" "/mcp"
-                              :body (concatenate
-                                     'string
-                                     "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                     "\"method\":\"tools/list\",\"params\":{}}")
-                              :headers '(("Content-Type" . "application/json")))
-                           (error () nil))))
-                   (when status
-                     (ok (eql status 400))))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0 :token nil)
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (let ((status
+                       (handler-case
+                           (send-http-request
+                            port "POST" "/mcp"
+                            :body (concatenate
+                                   'string
+                                   "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                   "\"method\":\"tools/list\",\"params\":{}}")
+                            :headers '(("Content-Type" . "application/json")))
+                         (error () nil))))
+                 (when status
+                   (ok (eql status 400)))))
           (stop-http-server)))))
 
 ;;; Session timeout tests
@@ -281,28 +277,27 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0
-                                      :token "test-token")
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (multiple-value-bind (status headers)
-                     (handler-case
-                         (send-http-request
-                          port "POST" "/mcp"
-                          :body (concatenate
-                                 'string
-                                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                 "\"method\":\"initialize\",\"params\":{}}")
-                          :headers '(("Content-Type" . "application/json")
-                                     ("Accept" . "application/json")))
-                       (error () (values nil nil)))
-                   (when status
-                     (ok (eql status 401)
-                         "Should return 401 without auth header")
-                     (ok (search "Www-Authenticate" headers)
-                         "Should include WWW-Authenticate header")))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0
+                                    :token "test-token")
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (multiple-value-bind (status headers)
+                   (handler-case
+                       (send-http-request
+                        port "POST" "/mcp"
+                        :body (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                               "\"method\":\"initialize\",\"params\":{}}")
+                        :headers '(("Content-Type" . "application/json")
+                                   ("Accept" . "application/json")))
+                     (error () (values nil nil)))
+                 (when status
+                   (ok (eql status 401)
+                       "Should return 401 without auth header")
+                   (ok (search "Www-Authenticate" headers)
+                       "Should include WWW-Authenticate header"))))
           (stop-http-server)))))
 
 (deftest auth-401-with-wrong-token
@@ -310,27 +305,26 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0
-                                      :token "correct-token")
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (let ((status
-                         (handler-case
-                             (send-http-request
-                              port "POST" "/mcp"
-                              :body (concatenate
-                                     'string
-                                     "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                     "\"method\":\"initialize\",\"params\":{}}")
-                              :headers '(("Content-Type" . "application/json")
-                                         ("Accept" . "application/json")
-                                         ("Authorization" . "Bearer wrong-token")))
-                           (error () nil))))
-                   (when status
-                     (ok (eql status 401)
-                         "Should return 401 with wrong token")))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0
+                                    :token "correct-token")
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (let ((status
+                       (handler-case
+                           (send-http-request
+                            port "POST" "/mcp"
+                            :body (concatenate
+                                   'string
+                                   "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                   "\"method\":\"initialize\",\"params\":{}}")
+                            :headers '(("Content-Type" . "application/json")
+                                       ("Accept" . "application/json")
+                                       ("Authorization" . "Bearer wrong-token")))
+                         (error () nil))))
+                 (when status
+                   (ok (eql status 401)
+                       "Should return 401 with wrong token"))))
           (stop-http-server)))))
 
 (deftest auth-200-with-correct-token
@@ -338,31 +332,30 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0
-                                      :token "correct-token")
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (multiple-value-bind (status headers body)
-                     (handler-case
-                         (send-http-request
-                          port "POST" "/mcp"
-                          :body (concatenate
-                                 'string
-                                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                 "\"method\":\"initialize\",\"params\":{}}")
-                          :headers '(("Content-Type" . "application/json")
-                                     ("Accept" . "application/json")
-                                     ("Authorization" . "Bearer correct-token")))
-                       (error () (values nil nil nil)))
-                   (when status
-                     (ok (eql status 200)
-                         "Should return 200 with correct token")
-                     (ok (search "Mcp-Session-Id" headers)
-                         "Should include session ID")
-                     (ok (search "\"result\"" body)
-                         "Should return result")))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0
+                                    :token "correct-token")
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (multiple-value-bind (status headers body)
+                   (handler-case
+                       (send-http-request
+                        port "POST" "/mcp"
+                        :body (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                               "\"method\":\"initialize\",\"params\":{}}")
+                        :headers '(("Content-Type" . "application/json")
+                                   ("Accept" . "application/json")
+                                   ("Authorization" . "Bearer correct-token")))
+                     (error () (values nil nil nil)))
+                 (when status
+                   (ok (eql status 200)
+                       "Should return 200 with correct token")
+                   (ok (search "Mcp-Session-Id" headers)
+                       "Should include session ID")
+                   (ok (search "\"result\"" body)
+                       "Should return result"))))
           (stop-http-server)))))
 
 (deftest auth-options-skips-auth
@@ -370,21 +363,20 @@ Uses Connection: close to avoid keep-alive hanging."
     (if (not (http-port-available-p))
         (ok t "port unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (acceptor port)
-                   (start-http-server :host "127.0.0.1" :port 0
-                                      :token "test-token")
-                 (declare (ignore acceptor))
-                 (sleep 0.1d0)
-                 (let ((status
-                         (handler-case
-                             (send-http-request
-                              port "OPTIONS" "/mcp"
-                              :headers '(("Origin" . "http://localhost:8080")))
-                           (error () nil))))
-                   (when status
-                     (ok (eql status 204)
-                         "OPTIONS should return 204 without auth")))))
+             (multiple-value-bind (acceptor port)
+                 (start-http-server :host "127.0.0.1" :port 0
+                                    :token "test-token")
+               (declare (ignore acceptor))
+               (sleep 0.1d0)
+               (let ((status
+                       (handler-case
+                           (send-http-request
+                            port "OPTIONS" "/mcp"
+                            :headers '(("Origin" . "http://localhost:8080")))
+                         (error () nil))))
+                 (when status
+                   (ok (eql status 204)
+                       "OPTIONS should return 204 without auth"))))
           (stop-http-server)))))
 
 ;;; ------------------------------------------------------------

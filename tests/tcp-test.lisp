@@ -97,32 +97,31 @@
     (if (not (socket-available-p))
         (ok t "socket unavailable")
         (unwind-protect
-             (progn
-               (multiple-value-bind (thr port)
-                   (start-tcp-server-thread :host "127.0.0.1" :port 0
-                                            :accept-once nil)
-                 (ok thr)
-                 (ok (tcp-server-running-p))
-                 (ok (integerp port))
-                 (let* ((sock (usocket:socket-connect "127.0.0.1" port
-                                                      :element-type 'character))
-                        (stream (usocket:socket-stream sock)))
-                   (unwind-protect
-                        (let ((req (concatenate
-                                    'string
-                                    "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                    "\"method\":\"initialize\",\"params\":{}}\n")))
-                          (write-string req stream)
-                          (finish-output stream)
-                          ;; Signal EOF to server read loop after sending request.
-                          (ignore-errors (usocket:socket-shutdown sock :output))
-                          (let ((line (read-line stream)))
-                            (ok (search "\"result\"" line))))
-                     (ignore-errors (close stream))
-                     (ignore-errors (usocket:socket-close sock))))
-                 (ok (eq :already-running
-                         (ensure-tcp-server-thread :host "127.0.0.1" :port port
-                                                   :accept-once nil)))))
+             (multiple-value-bind (thr port)
+                 (start-tcp-server-thread :host "127.0.0.1" :port 0
+                                          :accept-once nil)
+               (ok thr)
+               (ok (tcp-server-running-p))
+               (ok (integerp port))
+               (let* ((sock (usocket:socket-connect "127.0.0.1" port
+                                                    :element-type 'character))
+                      (stream (usocket:socket-stream sock)))
+                 (unwind-protect
+                      (let ((req (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                  "\"method\":\"initialize\",\"params\":{}}\n")))
+                        (write-string req stream)
+                        (finish-output stream)
+                        ;; Signal EOF to server read loop after sending request.
+                        (ignore-errors (usocket:socket-shutdown sock :output))
+                        (let ((line (read-line stream)))
+                          (ok (search "\"result\"" line))))
+                   (ignore-errors (close stream))
+                   (ignore-errors (usocket:socket-close sock))))
+               (ok (eq :already-running
+                       (ensure-tcp-server-thread :host "127.0.0.1" :port port
+                                                 :accept-once nil))))
           (stop-tcp-server-thread)))
     (ok (not (tcp-server-running-p)))))
 
