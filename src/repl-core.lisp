@@ -203,7 +203,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                       (%truncate-output (get-output-stream-string stderr) max-output-length)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
-        (let ((forms (%read-all input (not safe-read))))
+        (let ((forms (let ((*package* pkg)) (%read-all input (not safe-read)))))
           (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
     (let ((*print-level* print-level)
           (*print-length* print-length)
