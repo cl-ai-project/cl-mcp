@@ -122,30 +122,47 @@ SIGTERM which cascades into nested errors when stderr is a broken pipe."
 
 (defun %start-parent-watchdog ()
   "Start a background thread that monitors the parent process via getppid().
-Exits the worker when the parent dies (ppid changes to 1 or differs from
-the original).  This replaces PR_SET_PDEATHSIG which is unreliable when
-the worker is forked from a short-lived thread (the signal fires when
-the forking thread exits, not when the process exits).
+Exits the worker when the parent dies (ppid changes from the expected value).
+This replaces PR_SET_PDEATHSIG which is unreliable when the worker is forked
+from a short-lived thread (the signal fires when the forking thread exits, not
+when the process exits).
+
+The expected parent PID is taken from the MCP_PARENT_PID environment variable
+when available.  This handles deployments where the server process runs as
+PID 1 (e.g. Docker containers without a dedicated init process): in those
+environments getppid() legitimately returns 1 and the old ppid==1 early-exit
+check would incorrectly treat the worker as orphaned immediately.
 
 Polls every 2 seconds — slightly slower than PDEATHSIG but reliable
 regardless of which thread spawned the worker."
-  (let ((original-ppid (sb-posix:getppid)))
-    (when (= original-ppid 1)
-      ;; Already orphaned at startup.
+  (let* ((original-ppid (sb-posix:getppid))
+         ;; MCP_PARENT_PID is injected by %build-environment in worker-client.
+         ;; Fall back to the live getppid() value when the variable is absent
+         ;; (e.g. MCP_NO_WORKER_POOL=1, manual invocation, or older server).
+         (env-ppid-str (uiop/os:getenv "MCP_PARENT_PID"))
+         (expected-ppid
+          (if (and env-ppid-str (plusp (length env-ppid-str)))
+              (or (ignore-errors (parse-integer env-ppid-str)) original-ppid)
+              original-ppid)))
+    (when (and (/= expected-ppid 1) (/= original-ppid expected-ppid))
+      ;; The spawning thread already exited before we started — genuinely
+      ;; orphaned.  Do not apply this check when the legitimate parent IS
+      ;; PID 1 (server running as container init).
       (log-event :warn "worker.parent-already-dead"
-                 "pid" (%get-pid) "ppid" 1)
+                 "pid" (%get-pid) "expected_ppid" expected-ppid
+                 "actual_ppid" original-ppid)
       (sb-ext:exit :code 0 :abort t))
     (log-event :info "worker.parent-watchdog.started"
-               "pid" (%get-pid) "parent_pid" original-ppid)
+               "pid" (%get-pid) "parent_pid" expected-ppid)
     (make-thread
      (lambda ()
        (loop (sleep 2)
              (let ((ppid (sb-posix:getppid)))
-               (when (or (= ppid 1) (/= ppid original-ppid))
+               (when (/= ppid expected-ppid)
                  (ignore-errors
                    (log-event :info "worker.parent-died"
                               "pid" (%get-pid)
-                              "original_ppid" original-ppid
+                              "expected_ppid" expected-ppid
                               "current_ppid" ppid))
                  (sb-ext:exit :code 0 :abort t)))))
      :name "parent-watchdog")))

@@ -187,11 +187,14 @@ TCP authentication, and sets MCP_WORKER_ID for log context."
               (and (>= (length s) 14)
                    (string= "MCP_WORKER_ID=" s :end2 14))
               (and (>= (length s) 13)
-                   (string= "MCP_LOG_FILE=" s :end2 13))))
+                   (string= "MCP_LOG_FILE=" s :end2 13))
+              (and (>= (length s) 16)
+                   (string= "MCP_PARENT_PID=" s :end2 16))))
            current-env)))
     (let ((env
            (list* (format nil "MCP_WORKER_SECRET=~A" secret)
                   (format nil "MCP_WORKER_ID=~A" id)
+                  (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
                   "MCP_NO_WORKER_POOL=1" filtered)))
       (if *project-root*
           (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
