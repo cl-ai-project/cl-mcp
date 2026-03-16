@@ -166,22 +166,6 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                         :message msg
                                         :restarts nil
                                         :frames nil))))))
-                   (end-of-file
-                    (lambda (e)
-                      ;; Unbalanced parens produce END-OF-FILE from the reader,
-                      ;; not READER-ERROR.  Give a short, actionable hint without
-                      ;; a backtrace (the call stack is always inside the reader
-                      ;; and is not useful for diagnosing a user input mistake).
-                      (declare (ignore e))
-                      (let ((msg "Reader error: unexpected end of file -- check for unbalanced parentheses"))
-                        (return-from %do-repl-eval
-                          (values msg msg
-                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
-                                  (list :condition-type "END-OF-FILE"
-                                        :message msg
-                                        :restarts nil
-                                        :frames nil))))))
                    (reader-error
                     (lambda (e)
                       (let* ((raw-msg (format nil "Reader error: ~A" e))
@@ -219,7 +203,22 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                       (%truncate-output (get-output-stream-string stderr) max-output-length)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
-        (let ((forms (let ((*package* pkg)) (%read-all input (not safe-read)))))
+        (let ((forms (handler-case
+                         (let ((*package* pkg)) (%read-all input (not safe-read)))
+                       (end-of-file (e)
+                         ;; Scope END-OF-FILE handling to the read phase only.
+                         ;; Runtime EOF (e.g. reading from an empty stream in user
+                         ;; code) must NOT be silently rewritten as an input error.
+                         (declare (ignore e))
+                         (let ((msg "Reader error: unexpected end of file -- check for unbalanced parentheses"))
+                           (return-from %do-repl-eval
+                             (values msg msg
+                                     (%truncate-output (get-output-stream-string stdout) max-output-length)
+                                     (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                     (list :condition-type "END-OF-FILE"
+                                           :message msg
+                                           :restarts nil
+                                           :frames nil))))))))
           (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
     (let ((*print-level* print-level)
           (*print-length* print-length)
