@@ -166,6 +166,22 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                         :message msg
                                         :restarts nil
                                         :frames nil))))))
+                   (end-of-file
+                    (lambda (e)
+                      ;; Unbalanced parens produce END-OF-FILE from the reader,
+                      ;; not READER-ERROR.  Give a short, actionable hint without
+                      ;; a backtrace (the call stack is always inside the reader
+                      ;; and is not useful for diagnosing a user input mistake).
+                      (declare (ignore e))
+                      (let ((msg "Reader error: unexpected end of file -- check for unbalanced parentheses"))
+                        (return-from %do-repl-eval
+                          (values msg msg
+                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
+                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                  (list :condition-type "END-OF-FILE"
+                                        :message msg
+                                        :restarts nil
+                                        :frames nil))))))
                    (reader-error
                     (lambda (e)
                       (let* ((raw-msg (format nil "Reader error: ~A" e))
