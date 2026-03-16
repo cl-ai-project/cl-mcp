@@ -439,3 +439,33 @@
              "EOF message should include the requested offset")
          (ok (search "10 total line" content)
              "EOF message should include the total line count"))))))
+
+(deftest lisp-read-file-invalid-name-pattern-signals-error
+  (testing "invalid regex in name_pattern signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "src/core.lisp" :name-pattern "(")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "invalid name_pattern regex should signal arg-validation-error")))
+  (testing "invalid regex in content_pattern signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "src/core.lisp" :content-pattern "[unclosed")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "invalid content_pattern regex should signal arg-validation-error"))))
+
+(deftest lisp-read-file-empty-path-signals-error
+  (testing "empty string path signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "empty path should signal arg-validation-error, not a filesystem error"))))
+
+(deftest lisp-read-file-unbalanced-parens-helpful-error
+  (testing "unbalanced parens produce a message mentioning lisp-check-parens"
+    (with-temp-lisp-file "tests/tmp/unbalanced-parens.lisp"
+        "(defun broken ("
+      (lambda (path)
+        (let ((msg (handler-case (lisp-read-file path)
+                     (error (e) (format nil "~A" e)))))
+          (ok msg "should signal an error on unbalanced parens")
+          (ok (search "lisp-check-parens" msg)
+              "error message should mention lisp-check-parens"))))))

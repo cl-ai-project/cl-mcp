@@ -49,9 +49,16 @@
     (and type (member (string-downcase type) *lisp-source-extensions*
                       :test #'string=))))
 
-(defun %compile-scanner (pattern)
+(defun %compile-scanner (pattern param-name)
+  "Compile PATTERN into a CL-PPCRE scanner.
+Returns NIL for NIL or empty PATTERN.  Raises ARG-VALIDATION-ERROR when
+PATTERN is a non-empty string that is not valid regex syntax."
   (when (and (stringp pattern) (plusp (length pattern)))
-    (create-scanner pattern)))
+    (handler-case (create-scanner pattern)
+      (ppcre:ppcre-syntax-error (e)
+        (error 'arg-validation-error
+               :arg-name param-name
+               :message (format nil "invalid regex: ~A" e))))))
 
 (defun %docstring-first-line (string)
   (when (stringp string)
@@ -316,11 +323,16 @@ For defmethod, includes qualifiers like :before, :after, :around."
   (cond
     ((and collapsed (lisp-source-path-p resolved))
      (let ((text (fs-read-file resolved)))
-       (multiple-value-bind (display meta-table)
-           (%format-lisp-file text name-scanner content-scanner include-comments comment-context
-                              :source-path resolved
-                              :readtable readtable)
-         (values display meta-table "lisp-collapsed"))))
+       (handler-case
+           (multiple-value-bind (display meta-table)
+               (%format-lisp-file text name-scanner content-scanner include-comments comment-context
+                                  :source-path resolved
+                                  :readtable readtable)
+             (values display meta-table "lisp-collapsed"))
+         (end-of-file ()
+           (error "Unexpected end of file while parsing ~A; ~
+                   check for unbalanced parentheses (use lisp-check-parens)"
+                  (file-namestring resolved))))))
     ((not collapsed)
      (multiple-value-bind (text total)
          (%read-lines-slice resolved (or offset 0) line-limit)
@@ -381,6 +393,8 @@ without an explicit IN-READTABLE form.
 Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"meta\"."
   (unless (stringp path)
     (error 'arg-validation-error :arg-name "path" :message "path must be a string"))
+  (when (zerop (length path))
+    (error 'arg-validation-error :arg-name "path" :message "path must not be empty"))
   (unless (member collapsed '(t nil))
     (error 'arg-validation-error :arg-name "collapsed" :message "collapsed must be boolean"))
   (unless (member include-comments '(t nil))
@@ -402,8 +416,8 @@ Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"me
            :message "limit must be a positive integer when provided"))
   (let ((resolved (fs-resolve-read-path path))
         (line-limit (or limit *default-line-limit*))
-        (name-scanner (%compile-scanner name-pattern))
-        (content-scanner (%compile-scanner content-pattern)))
+        (name-scanner (%compile-scanner name-pattern "name_pattern"))
+        (content-scanner (%compile-scanner content-pattern "content_pattern")))
     (multiple-value-bind (content meta mode)
         (%lisp-read-file-content resolved collapsed name-scanner content-scanner
                                  offset line-limit include-comments comment-context
