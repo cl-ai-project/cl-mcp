@@ -48,7 +48,11 @@
            (content (gethash "content" result)))
       (ok (stringp content))
       (ok (search "+server-version+" content))
-      (ok (search ": (defun version" content))
+      ;; Symbol print form depends on whether cl-mcp/src/core package is loaded.
+      ;; If not preloaded, the temporary package is deleted after parsing, making
+      ;; symbols uninterned so write prints them as #:version.
+      (ok (or (search ": (defun version" content)
+              (search ": (defun #:version" content)))
       (ok (not (search "(defun version () ...)" content))))))
 
 (deftest lisp-read-file-raw-text-mode

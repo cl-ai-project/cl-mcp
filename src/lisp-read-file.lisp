@@ -73,8 +73,10 @@
   (when (consp form)
     (let ((head (car form))
           (name (second form)))
-      (when (member head '(defun defmacro defvar defparameter defconstant defclass
-                           defstruct defgeneric defmethod defpackage))
+      (when (and (symbolp head)
+                 (let ((n (symbol-name head)))
+                   (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
+                       (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
         (list (string-downcase (prin1-to-string name)))))))
 
 (defun %form->string (form)
