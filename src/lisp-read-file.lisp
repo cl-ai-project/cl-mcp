@@ -50,9 +50,7 @@
                       :test #'string=))))
 
 (defun %compile-scanner (pattern)
-  (when pattern
-    (unless (stringp pattern)
-      (error "Pattern must be a string or NIL"))
+  (when (and (stringp pattern) (plusp (length pattern)))
     (create-scanner pattern)))
 
 (defun %docstring-first-line (string)
@@ -259,7 +257,6 @@ For defmethod, includes qualifiers like :before, :after, :around."
               (let ((meta (make-hash-table :test #'equal)))
                 (setf (gethash "total_forms" meta) total-forms
                       (gethash "expanded_forms" meta) expanded
-                      (gethash "truncated" meta) nil
                       (gethash "comment_lines" meta) comment-lines
                       (gethash "blank_lines" meta) blank-lines
                       (gethash "source_lines" meta) source-lines-count)
@@ -286,11 +283,8 @@ For defmethod, includes qualifiers like :before, :after, :around."
         (incf line-idx)
         (loop for line = (read-line in nil :eof)
               until (eq line :eof) do (incf line-idx)))
-      (let ((total line-idx)
-            (truncated (or (> offset 0)
-                           (and limit hit-limit))))
+      (let ((total line-idx))
         (values (format nil "~{~A~%~}" (nreverse lines))
-                truncated
                 total)))))
 
 (defun %text-filter-with-context (pathname scanner limit)
@@ -328,7 +322,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
                               :readtable readtable)
          (values display meta-table "lisp-collapsed"))))
     ((not collapsed)
-     (multiple-value-bind (text truncated total)
+     (multiple-value-bind (text total)
          (%read-lines-slice resolved (or offset 0) line-limit)
        (let* ((meta (make-hash-table :test #'equal))
               (start-line (1+ (or offset 0)))
@@ -344,7 +338,7 @@ For defmethod, includes qualifiers like :before, :after, :around."
                          (footer (concatenate 'string text footer))
                          (eof-msg eof-msg)
                          (t text))))
-         (setf (gethash "truncated" meta) truncated
+         (setf (gethash "truncated" meta) (if footer t nil)
                (gethash "total_lines" meta) total)
          (values content meta "raw"))))
     ((and content-scanner (not (lisp-source-path-p resolved)))
@@ -354,18 +348,19 @@ For defmethod, includes qualifiers like :before, :after, :around."
          (setf (gethash "truncated" meta) truncated)
          (values text meta "text-filtered"))))
     (t
-     (multiple-value-bind (text truncated total)
-         (%read-lines-slice resolved 0 line-limit)
+     (multiple-value-bind (text total)
+         (%read-lines-slice resolved (or offset 0) line-limit)
        (let* ((meta (make-hash-table :test #'equal))
-              (end-line (min line-limit total))
+              (start-line (1+ (or offset 0)))
+              (end-line (min (+ (or offset 0) line-limit) total))
               (footer (when (< end-line total)
-                        (format nil "[Showing lines 1-~D of ~D. ~
-                                     Use collapsed=false with offset=~D to read more.]~%"
-                                end-line total end-line)))
+                        (format nil "[Showing lines ~D-~D of ~D. ~
+                                     Use offset=~D to read more.]~%"
+                                start-line end-line total end-line)))
               (content (if footer
                            (concatenate 'string text footer)
                            text)))
-         (setf (gethash "truncated" meta) truncated
+         (setf (gethash "truncated" meta) (if footer t nil)
                (gethash "total_lines" meta) total)
          (values content meta
                  (if (lisp-source-path-p resolved)
