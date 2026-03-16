@@ -618,3 +618,24 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
           "should be truncated")
       (ok (not (%has-control-chars-p printed))
           "truncated output should be sanitized"))))
+
+(deftest repl-eval-unbalanced-parens-clean-error
+  (testing "unbalanced parentheses return a short hint without a backtrace"
+    (let ((result (repl-eval "(defun foo (x")))
+      ;; Should mention unbalanced parentheses, not a raw SBCL backtrace
+      (ok (search "unbalanced parentheses" result)
+          "message should mention unbalanced parentheses")
+      ;; Should NOT contain backtrace noise
+      (ok (not (search "SB-INT" result))
+          "no SBCL internal frames in output")
+      (ok (not (search "Backtrace" result))
+          "no backtrace header in output")))
+  (testing "deeply nested unbalanced form also gives clean error"
+    (let ((result (repl-eval "(let ((x 1)) (when x (list 1 2 3)")))
+      (ok (search "unbalanced parentheses" result))))
+  (testing "runtime EOF from user code is NOT rewritten as unbalanced-paren hint"
+    ;; (read) on an empty stream is a legitimate runtime error, not a
+    ;; parse mistake.  It must produce a real error with backtrace context.
+    (let ((result (repl-eval "(with-input-from-string (s \"\") (read s))")))
+      (ok (not (search "unbalanced parentheses" result))
+          "runtime EOF should not claim unbalanced parentheses"))))
