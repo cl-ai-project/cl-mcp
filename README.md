@@ -331,7 +331,8 @@ Inputs:
   it matches, the full form is expanded. For non-Lisp files, this triggers a
   grep-like text filter with ±5 lines of context.
 - `offset` / `limit` (integer, optional): slice window used when `collapsed` is
-  `false`; defaults to `offset=0`, `limit=2000` lines.
+  `false`; defaults to `offset=0`, `limit=500` lines. When truncated, a
+  `[Showing lines A-B of N. Use offset=B to read more.]` footer is appended.
 
 Output fields:
 - `content`: formatted text (collapsed Lisp view, raw slice, or filtered text).

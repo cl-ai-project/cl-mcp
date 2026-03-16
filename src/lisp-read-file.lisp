@@ -14,7 +14,7 @@
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paths
@@ -30,16 +30,13 @@
   (:export #:lisp-read-file
            #:lisp-source-path-p))
 
-
-
-
 (in-package #:cl-mcp/src/lisp-read-file)
 
 (defparameter *lisp-source-extensions*
   '("lisp" "lsp" "cl" "asd" "ros")
   "File extensions treated as Lisp source.")
 
-(defparameter *default-line-limit* 2000
+(defparameter *default-line-limit* 500
   "Default maximum number of lines to return when LIMIT is not supplied.")
 
 (defparameter *text-context-lines* 5
@@ -52,11 +49,16 @@
     (and type (member (string-downcase type) *lisp-source-extensions*
                       :test #'string=))))
 
-(defun %compile-scanner (pattern)
-  (when pattern
-    (unless (stringp pattern)
-      (error "Pattern must be a string or NIL"))
-    (create-scanner pattern)))
+(defun %compile-scanner (pattern param-name)
+  "Compile PATTERN into a CL-PPCRE scanner.
+Returns NIL for NIL or empty PATTERN.  Raises ARG-VALIDATION-ERROR when
+PATTERN is a non-empty string that is not valid regex syntax."
+  (when (and (stringp pattern) (plusp (length pattern)))
+    (handler-case (create-scanner pattern)
+      (ppcre:ppcre-syntax-error (e)
+        (error 'arg-validation-error
+               :arg-name param-name
+               :message (format nil "invalid regex: ~A" e))))))
 
 (defun %docstring-first-line (string)
   (when (stringp string)
@@ -76,8 +78,10 @@
   (when (consp form)
     (let ((head (car form))
           (name (second form)))
-      (when (member head '(defun defmacro defvar defparameter defconstant defclass
-                           defstruct defgeneric defmethod defpackage))
+      (when (and (symbolp head)
+                 (let ((n (symbol-name head)))
+                   (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
+                       (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
         (list (string-downcase (prin1-to-string name)))))))
 
 (defun %form->string (form)
@@ -260,7 +264,6 @@ For defmethod, includes qualifiers like :before, :after, :around."
               (let ((meta (make-hash-table :test #'equal)))
                 (setf (gethash "total_forms" meta) total-forms
                       (gethash "expanded_forms" meta) expanded
-                      (gethash "truncated" meta) nil
                       (gethash "comment_lines" meta) comment-lines
                       (gethash "blank_lines" meta) blank-lines
                       (gethash "source_lines" meta) source-lines-count)
@@ -284,13 +287,11 @@ For defmethod, includes qualifiers like :before, :after, :around."
                   (return)))
               (incf line-idx))
       (when hit-limit
+        (incf line-idx)
         (loop for line = (read-line in nil :eof)
               until (eq line :eof) do (incf line-idx)))
-      (let ((total line-idx)
-            (truncated (or (> offset 0)
-                           (and limit hit-limit))))
+      (let ((total line-idx))
         (values (format nil "~{~A~%~}" (nreverse lines))
-                truncated
                 total)))))
 
 (defun %text-filter-with-context (pathname scanner limit)
@@ -322,18 +323,36 @@ For defmethod, includes qualifiers like :before, :after, :around."
   (cond
     ((and collapsed (lisp-source-path-p resolved))
      (let ((text (fs-read-file resolved)))
-       (multiple-value-bind (display meta-table)
-           (%format-lisp-file text name-scanner content-scanner include-comments comment-context
-                              :source-path resolved
-                              :readtable readtable)
-         (values display meta-table "lisp-collapsed"))))
+       (handler-case
+           (multiple-value-bind (display meta-table)
+               (%format-lisp-file text name-scanner content-scanner include-comments comment-context
+                                  :source-path resolved
+                                  :readtable readtable)
+             (values display meta-table "lisp-collapsed"))
+         (end-of-file ()
+           (error "Unexpected end of file while parsing ~A; ~
+                   check for unbalanced parentheses (use lisp-check-parens)"
+                  (file-namestring resolved))))))
     ((not collapsed)
-     (multiple-value-bind (text truncated total)
+     (multiple-value-bind (text total)
          (%read-lines-slice resolved (or offset 0) line-limit)
-       (let ((meta (make-hash-table :test #'equal)))
-         (setf (gethash "truncated" meta) truncated
+       (let* ((meta (make-hash-table :test #'equal))
+              (start-line (1+ (or offset 0)))
+              (end-line (min (+ (or offset 0) line-limit) total))
+              (footer (when (< end-line total)
+                        (format nil "[Showing lines ~D-~D of ~D. ~
+                                     Use offset=~D to read more.]~%"
+                                start-line end-line total end-line)))
+              (eof-msg (when (and (string= text "") (> (or offset 0) 0))
+                         (format nil "[Offset ~D is past end of file (~D total line~:P).]~%"
+                                 (or offset 0) total)))
+              (content (cond
+                         (footer (concatenate 'string text footer))
+                         (eof-msg eof-msg)
+                         (t text))))
+         (setf (gethash "truncated" meta) (if footer t nil)
                (gethash "total_lines" meta) total)
-         (values text meta "raw"))))
+         (values content meta "raw"))))
     ((and content-scanner (not (lisp-source-path-p resolved)))
      (multiple-value-bind (text truncated)
          (%text-filter-with-context resolved content-scanner line-limit)
@@ -341,12 +360,21 @@ For defmethod, includes qualifiers like :before, :after, :around."
          (setf (gethash "truncated" meta) truncated)
          (values text meta "text-filtered"))))
     (t
-     (multiple-value-bind (text truncated total)
-         (%read-lines-slice resolved 0 line-limit)
-       (let ((meta (make-hash-table :test #'equal)))
-         (setf (gethash "truncated" meta) truncated
+     (multiple-value-bind (text total)
+         (%read-lines-slice resolved (or offset 0) line-limit)
+       (let* ((meta (make-hash-table :test #'equal))
+              (start-line (1+ (or offset 0)))
+              (end-line (min (+ (or offset 0) line-limit) total))
+              (footer (when (< end-line total)
+                        (format nil "[Showing lines ~D-~D of ~D. ~
+                                     Use offset=~D to read more.]~%"
+                                start-line end-line total end-line)))
+              (content (if footer
+                           (concatenate 'string text footer)
+                           text)))
+         (setf (gethash "truncated" meta) (if footer t nil)
                (gethash "total_lines" meta) total)
-         (values text meta
+         (values content meta
                  (if (lisp-source-path-p resolved)
                      "lisp-snippet"
                      "text-snippet")))))))
@@ -364,23 +392,32 @@ without an explicit IN-READTABLE form.
 
 Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"meta\"."
   (unless (stringp path)
-    (error "path must be a string"))
+    (error 'arg-validation-error :arg-name "path" :message "path must be a string"))
+  (when (zerop (length path))
+    (error 'arg-validation-error :arg-name "path" :message "path must not be empty"))
   (unless (member collapsed '(t nil))
-    (error "collapsed must be boolean"))
+    (error 'arg-validation-error :arg-name "collapsed" :message "collapsed must be boolean"))
   (unless (member include-comments '(t nil))
-    (error "include-comments must be boolean"))
+    (error 'arg-validation-error :arg-name "include_comments"
+           :message "include-comments must be boolean"))
   (unless (member comment-context '("preceding" "all" "none") :test #'string=)
-    (error "comment-context must be \"preceding\", \"all\", or \"none\""))
+    (error 'arg-validation-error :arg-name "comment_context"
+           :message "comment-context must be \"preceding\", \"all\", or \"none\""))
   (when (and offset (not (integerp offset)))
-    (error "offset must be an integer when provided"))
+    (error 'arg-validation-error :arg-name "offset"
+           :message "offset must be an integer when provided"))
   (when (and offset (< offset 0))
-    (error "offset must be non-negative"))
+    (error 'arg-validation-error :arg-name "offset" :message "offset must be non-negative"))
   (when (and limit (not (integerp limit)))
-    (error "limit must be an integer when provided"))
+    (error 'arg-validation-error :arg-name "limit"
+           :message "limit must be an integer when provided"))
+  (when (and limit (<= limit 0))
+    (error 'arg-validation-error :arg-name "limit"
+           :message "limit must be a positive integer when provided"))
   (let ((resolved (fs-resolve-read-path path))
         (line-limit (or limit *default-line-limit*))
-        (name-scanner (%compile-scanner name-pattern))
-        (content-scanner (%compile-scanner content-pattern)))
+        (name-scanner (%compile-scanner name-pattern "name_pattern"))
+        (content-scanner (%compile-scanner content-pattern "content_pattern")))
     (multiple-value-bind (content meta mode)
         (%lisp-read-file-content resolved collapsed name-scanner content-scanner
                                  offset line-limit include-comments comment-context
@@ -399,7 +436,10 @@ unless you need exact raw bytes.
 Use 'name_pattern' to locate specific definitions (e.g., functions, classes)
 without reading the entire file.
 Use 'collapsed=true' (default) to see only signatures, or 'collapsed=false'
-for full source."
+for full source.
+When reading in raw mode (collapsed=false) and output is truncated, a
+'[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
+to guide pagination. Use the suggested offset value in a follow-up call."
   :args ((path :type :string :required t
                :description "Path to read; absolute inside project or registered ASDF system,
 or relative to project root")
@@ -412,7 +452,7 @@ or relative to project root")
          (offset :type :integer
                  :description "0-based line offset when collapsed=false (raw mode only)")
          (limit :type :integer
-                :description "Maximum lines to return; defaults to 2000")
+                :description "Maximum lines to return; defaults to 500")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style

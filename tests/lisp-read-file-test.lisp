@@ -48,7 +48,11 @@
            (content (gethash "content" result)))
       (ok (stringp content))
       (ok (search "+server-version+" content))
-      (ok (search ": (defun version" content))
+      ;; Symbol print form depends on whether cl-mcp/src/core package is loaded.
+      ;; If not preloaded, the temporary package is deleted after parsing, making
+      ;; symbols uninterned so write prints them as #:version.
+      (ok (or (search ": (defun version" content)
+              (search ": (defun #:version" content)))
       (ok (not (search "(defun version () ...)" content))))))
 
 (deftest lisp-read-file-raw-text-mode
@@ -332,3 +336,136 @@
               (ignore-errors (delete-package test-pkg-name)))))
       (error (e)
         (skip (format nil "Test dependencies not available: ~A" e))))))
+
+(deftest lisp-read-file-raw-truncated-footer
+  (testing "appends footer when content is truncated in raw mode"
+    (with-temp-lisp-file "tests/tmp/footer-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 20 collect i))
+      (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :limit 5))
+              (content (gethash "content" result)))
+         (ok (search "[Showing lines 1-5 of 20." content)
+             "footer should show range and total")
+         (ok (search "Use offset=5 to read more.]" content)
+             "footer should include next offset"))))))
+
+(deftest lisp-read-file-raw-truncated-footer-with-offset
+  (testing "footer reflects correct range when offset is used"
+    (with-temp-lisp-file "tests/tmp/footer-offset-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 30 collect i))
+      (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 10 :limit 5))
+              (content (gethash "content" result)))
+         (ok (search "[Showing lines 11-15 of 30." content)
+             "footer should show offset-adjusted range")
+         (ok (search "Use offset=15 to read more.]" content)
+             "footer should include correct next offset"))))))
+
+(deftest lisp-read-file-raw-no-footer-when-complete
+  (testing "no footer when entire file fits within limit"
+    (with-temp-lisp-file "tests/tmp/no-footer-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 5 collect i))
+      (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :limit 100))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer when not truncated"))))))
+
+(deftest lisp-read-file-default-limit-is-500
+  (testing "default limit is 500 lines (not 2000)"
+    (with-temp-lisp-file "tests/tmp/default-limit-test.lisp"
+        (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 600 collect i))
+      (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil))
+              (content (gethash "content" result)))
+         (ok (search "[Showing lines 1-500 of 600." content)
+             "default limit should be 500"))))))
+
+(deftest lisp-read-file-raw-no-footer-on-last-chunk
+  (testing "no footer when last paginated chunk exhausts the file"
+    (with-temp-lisp-file
+     "tests/tmp/last-chunk-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 1200 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 1000 :limit 500))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer on last chunk when remaining lines fit within limit"))))))
+
+(deftest lisp-read-file-raw-no-footer-on-exact-size
+  (testing "no footer when file is exactly limit lines"
+    (with-temp-lisp-file
+     "tests/tmp/exact-size-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 500 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no footer when file is exactly 500 lines (= default limit"))))))
+
+(deftest lisp-read-file-raw-no-footer-offset-beyond-eof
+  (testing "no footer when offset is beyond end of file"
+    (with-temp-lisp-file
+     "tests/tmp/beyond-eof-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 10 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 9999))
+              (content (gethash "content" result)))
+         (ok (not (search "[Showing lines" content))
+             "no pagination footer when offset is beyond EOF")
+         (ok (search "[Offset" content)
+             "EOF message is shown when offset is beyond EOF"))))))
+
+(deftest lisp-read-file-raw-limit-zero-signals-error
+  (testing "limit=0 signals an error"
+    (with-temp-lisp-file
+     "tests/tmp/limit-zero-test.lisp"
+     ";;; test"
+     (lambda (path)
+       (let ((e (handler-case (lisp-read-file path :collapsed nil :limit 0)
+                  (error (e) e))))
+         (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+             "limit=0 should signal arg-validation-error, not a generic internal error"))))))
+
+(deftest lisp-read-file-raw-eof-offset-message
+  (testing "EOF message content when offset is past end of file"
+    (with-temp-lisp-file
+     "tests/tmp/eof-msg-test.lisp"
+     (format nil "~{;;; line ~A~%~}" (loop for i from 1 to 10 collect i))
+     (lambda (path)
+       (let* ((result (lisp-read-file path :collapsed nil :offset 20))
+              (content (gethash "content" result)))
+         (ok (search "Offset 20" content)
+             "EOF message should include the requested offset")
+         (ok (search "10 total line" content)
+             "EOF message should include the total line count"))))))
+
+(deftest lisp-read-file-invalid-name-pattern-signals-error
+  (testing "invalid regex in name_pattern signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "src/core.lisp" :name-pattern "(")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "invalid name_pattern regex should signal arg-validation-error")))
+  (testing "invalid regex in content_pattern signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "src/core.lisp" :content-pattern "[unclosed")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "invalid content_pattern regex should signal arg-validation-error"))))
+
+(deftest lisp-read-file-empty-path-signals-error
+  (testing "empty string path signals arg-validation-error"
+    (let ((e (handler-case (lisp-read-file "")
+               (cl-mcp/src/tools/helpers:arg-validation-error (e) e))))
+      (ok (typep e 'cl-mcp/src/tools/helpers:arg-validation-error)
+          "empty path should signal arg-validation-error, not a filesystem error"))))
+
+(deftest lisp-read-file-unbalanced-parens-helpful-error
+  (testing "unbalanced parens produce a message mentioning lisp-check-parens"
+    (with-temp-lisp-file "tests/tmp/unbalanced-parens.lisp"
+        "(defun broken ("
+      (lambda (path)
+        (let ((msg (handler-case (lisp-read-file path)
+                     (error (e) (format nil "~A" e)))))
+          (ok msg "should signal an error on unbalanced parens")
+          (ok (search "lisp-check-parens" msg)
+              "error message should mention lisp-check-parens"))))))
