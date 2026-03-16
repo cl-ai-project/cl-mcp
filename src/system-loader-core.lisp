@@ -151,7 +151,18 @@ or NIL (no timeout). Default is 120 seconds."
         (%load-with-timeout
          (lambda ()
            (when (and force (asdf:find-system system-name nil))
-             (asdf:clear-system system-name))
+             ;; Save the .asd path before clearing: locally-registered
+             ;; systems (loaded via asdf:load-asd, not on the standard
+             ;; search path) are removed from the in-memory registry by
+             ;; clear-system and cannot be rediscovered automatically.
+             (let ((asd-src
+                     (ignore-errors
+                       (asdf:system-source-file
+                        (asdf:find-system system-name nil)))))
+               (asdf:clear-system system-name)
+               ;; If ASDF can no longer find the system, re-register it.
+               (when (and asd-src (not (asdf:find-system system-name nil)))
+                 (ignore-errors (asdf:load-asd asd-src)))))
            (%call-with-suppressed-output
             (lambda ()
               (asdf:load-system system-name :force clear-fasls))))

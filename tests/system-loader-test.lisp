@@ -87,3 +87,36 @@
       (ok (not timed-out-p) "completed work should not be reported as timeout")
       (ok (not errored-p))
       (ok (equal result-list '(:done))))))
+
+(deftest load-system-force-preserves-local-asd-registration
+  (testing "force=true re-registers locally-loaded systems after clear-system"
+    ;; Simulate a system registered only via asdf:load-asd (not on any
+    ;; standard search path).  Without the fix, clear-system drops it from
+    ;; the in-memory registry and the subsequent load-system errors with
+    ;; "System definition for ... not found".
+    (let* ((tmp-dir (uiop:ensure-directory-pathname
+                     (uiop:merge-pathnames*
+                      (format nil "cl-mcp-test-local-~A/" (get-universal-time))
+                      (uiop:temporary-directory))))
+           (asd-path (uiop:merge-pathnames* "cl-mcp-test-local.asd" tmp-dir))
+           (system-name "cl-mcp-test-local"))
+      (unwind-protect
+           (progn
+             ;; Create a minimal .asd file in a fresh temp directory.
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output
+                                         :if-exists :supersede)
+               (format s "(asdf:defsystem ~S :description \"test\" :components ())~%"
+                       system-name))
+             ;; Register it locally (not on ASDF search path).
+             (asdf:load-asd asd-path)
+             (ok (asdf:find-system system-name nil)
+                 "system should be registered after load-asd")
+             ;; Reload with force=t — this is the scenario that used to fail.
+             (let ((ht (load-system system-name :force t)))
+               (ok (hash-table-p ht))
+               (ok (string= "loaded" (gethash "status" ht))
+                   "force=true should not lose local .asd registration")))
+        ;; Cleanup: remove from registry and delete temp files.
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
