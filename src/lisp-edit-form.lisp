@@ -330,7 +330,10 @@ safety and structure preservation."
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
-e.g., \"print-object ((obj my-class) stream)\"")
+e.g., \"print-object ((obj my-class) stream)\". For defstruct with
+options \"(defstruct (name opts...) ...)\", use just the bare struct name.
+Reader macro prefixes #: and : are stripped automatically, so
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
          (operation :type :string :required t
                     :enum ("replace" "insert_before" "insert_after")
                     :description "Operation to perform")

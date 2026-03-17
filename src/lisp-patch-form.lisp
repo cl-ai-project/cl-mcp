@@ -201,7 +201,10 @@ Use 'lisp-edit-form' instead when replacing or inserting entire forms."
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
-e.g., \"print-object ((obj my-class) stream)\"")
+e.g., \"print-object ((obj my-class) stream)\". For defstruct with
+options \"(defstruct (name opts...) ...)\", use just the bare struct name.
+Reader macro prefixes #: and : are stripped automatically, so
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
          (old_text :type :string :required t
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
