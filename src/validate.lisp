@@ -315,7 +315,13 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
 Use this to DIAGNOSE syntax errors in existing files or validate code snippets
 before/after editing. Returns the first mismatch position if unbalanced, or
 success if balanced. Unbalanced delimiter results include guidance to use
-lisp-edit-form for existing Lisp files."
+lisp-edit-form for existing Lisp files.
+
+Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
+when *read-eval* is nil) even when parentheses are balanced. In that case the
+result has kind: \"reader-error\" and a message field describing the error,
+instead of expected/found fields. Files using named-readtables:in-readtable are
+exempt from reader checking to avoid false positives."
   :args ((path :type :string
                :description "Absolute path inside project or registered ASDF system
 (mutually exclusive with code)")
