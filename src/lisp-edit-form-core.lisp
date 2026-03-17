@@ -171,6 +171,9 @@ If multiple matches exist without an index, signals an error with candidate info
             (values form-name nil)))
     (let ((target (string-downcase (%strip-name-prefix base-name)))
           (matches nil))
+      (when (zerop (length target))
+        (error "form_name resolved to empty string after prefix stripping; ~
+provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
       (loop for node in nodes
             when (and (typep node 'cst-node)
                       (eq (cst-node-kind node) :expr))

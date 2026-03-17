@@ -1370,6 +1370,36 @@
                      "bare form_name without prefix must still match")))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-lisp-edit-form-empty-form-name-after-prefix
+  (testing "lisp-edit-form with form_name '#:' returns helpful error mentioning 'empty'"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/hash-colon-guard-test.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial "(defun my-fn () nil)\n"))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((req (format nil
+                            (concatenate
+                             'string
+                             "{\"jsonrpc\":\"2.0\",\"id\":5010,\"method\":\"tools/call\","
+                             "\"params\":{\"name\":\"lisp-edit-form\","
+                             "\"arguments\":{\"file_path\":\"~A\","
+                             "\"form_type\":\"defun\","
+                             "\"form_name\":\"#:\","
+                             "\"operation\":\"replace\","
+                             "\"dry_run\":true,"
+                             "\"content\":\"(defun my-fn () :replaced)\"}}}") tmp-path))
+                    (resp (%pjl req))
+                    (obj (yason:parse resp))
+                    (msg (%tool-call-message obj)))
+               (ok (%tool-call-failed-p obj)
+                   "form_name '#:' should produce an error")
+               (ok (and (stringp msg) (search "empty" (string-downcase msg)))
+                   "error message should mention 'empty'"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-lisp-check-parens-reader-error
   (testing "lisp-check-parens detects reader error when parens are balanced"
     ;; #. triggers a reader-error when *read-eval* is nil.
