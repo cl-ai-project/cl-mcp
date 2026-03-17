@@ -169,16 +169,40 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
           (vector "file_path" "form_type" "form_name" "operation" "content")))
   result)
 
+(defun %custom-readtable-p (text)
+  "Return T if TEXT contains a named-readtable activation.
+When a custom readtable is active, the standard CL reader would produce
+false-positive reader errors on valid custom syntax."
+  (not (null (search "in-readtable" text))))
+
 (defun %try-reader-check (text base-offset)
   "Attempt to fully read TEXT using the standard CL reader with *READ-EVAL* nil.
-Returns a plist with reader error info if any error is detected, or NIL if clean.
-The plist has keys: :KIND \"reader-error\", :MESSAGE string, :OFFSET integer,
-:LINE integer-or-nil, :COLUMN integer-or-nil."
+Returns a plist with reader error info if a genuine syntax error is detected,
+or NIL if the text is clean (or if checking is skipped for known safe reasons).
+
+Plist keys when non-nil: :KIND \"reader-error\", :MESSAGE string,
+:OFFSET integer, :LINE integer-or-nil, :COLUMN integer-or-nil.
+
+Skips the reader check (returns NIL) when TEXT contains \"in-readtable\",
+because the standard CL reader does not know about custom readtables and would
+produce false positives on valid custom syntax (e.g. cl-interpol #?\"...\").
+
+Also returns NIL for package-not-found errors: a missing package is not a
+syntax error in the file itself."
+  ;; Skip reader check for files using custom readtables.
+  (when (%custom-readtable-p text)
+    (return-from %try-reader-check nil))
   (with-input-from-string (stream text)
     (handler-case
         (let ((*read-eval* nil))
           (loop (when (eq :eof (read stream nil :eof)) (return nil))))
       (reader-error (e)
+        ;; SB-INT:SIMPLE-READER-PACKAGE-ERROR is a subtype of both
+        ;; reader-error and package-error in SBCL, so it arrives here
+        ;; before the package-error clause below can fire.
+        ;; Treat it the same way: a missing package is not a file syntax error.
+        (when (typep e 'package-error)
+          (return-from %try-reader-check nil))
         (let* ((pos       (or (ignore-errors (file-position stream)) 0))
                (safe-pos  (min pos (length text)))
                (pre       (subseq text 0 safe-pos))
@@ -191,8 +215,30 @@ The plist has keys: :KIND \"reader-error\", :MESSAGE string, :OFFSET integer,
                 :offset  (+ base-offset pos)
                 :line    line
                 :column  col)))
+      (end-of-file (e)
+        ;; end-of-file is NOT a subtype of reader-error in SBCL.
+        ;; Capture stream position to give an accurate error location.
+        (declare (ignore e))
+        (let* ((pos      (or (ignore-errors (file-position stream)) (length text)))
+               (safe-pos (min pos (length text)))
+               (pre      (subseq text 0 safe-pos))
+               (line     (1+ (count #\Newline pre)))
+               (nl-pos   (position #\Newline pre :from-end t))
+               (col      (- safe-pos (or nl-pos -1))))
+          (list :kind    "reader-error"
+                :message "unexpected end of file while reading"
+                :offset  (+ base-offset pos)
+                :line    line
+                :column  col)))
+      (package-error (e)
+        ;; Package-not-found is not a syntax error in the file.
+        ;; Return NIL to avoid false positives on valid files that reference
+        ;; packages not loaded in the current image.
+        (declare (ignore e))
+        nil)
       (error (e)
-        ;; Non-reader-error (e.g. package does not exist): report without position
+        ;; Catch-all for unexpected non-reader errors.
+        ;; Report without position since we have no reliable stream position.
         (list :kind    "reader-error"
               :message (format nil "~A" e)
               :offset  base-offset
@@ -252,10 +298,12 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
              (setf (gethash "ok" h) nil
                    (gethash "kind" h) (getf reader-info :kind)
                    (gethash "message" h) (getf reader-info :message))
-             (let ((pos (make-hash-table :test #'equal)))
-               (setf (gethash "offset" pos) (getf reader-info :offset)
-                     (gethash "line" pos) (getf reader-info :line)
-                     (gethash "column" pos) (getf reader-info :column))
+             (let ((pos (make-hash-table :test #'equal))
+                   (r-line (getf reader-info :line))
+                   (r-col  (getf reader-info :column)))
+               (setf (gethash "offset" pos) (getf reader-info :offset))
+               (when r-line   (setf (gethash "line" pos) r-line))
+               (when r-col    (setf (gethash "column" pos) r-col))
                (setf (gethash "position" h) pos)))
             (t
              ;; Both checks passed
