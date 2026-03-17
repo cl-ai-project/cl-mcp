@@ -1480,3 +1480,24 @@
           "should return a result (not a JSON-RPC error)")
       (ok (%tool-call-failed-p obj)
           "result should indicate failure"))))
+
+(deftest tools-call-lisp-check-parens-ok-is-json-false-not-null
+  (testing "lisp-check-parens protocol response has ok=false (not null) for errors"
+    ;; Bug: validate.lisp was using raw Lisp nil for ok=false; YASON serializes
+    ;; nil as JSON null instead of false.  json-bool converts nil -> yason:false
+    ;; in the define-tool body.  After parsing the JSON response, YASON maps
+    ;; JSON false -> nil and JSON null -> nil (both become nil in parsed hash
+    ;; tables), so we verify through the raw JSON string that "ok":false appears,
+    ;; not "ok":null.
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":5007,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"lisp-check-parens\","
+                  "\"arguments\":{\"code\":\"(+ 1 2))\"}}}"
+                  ))
+           (resp (%pjl req)))
+      ;; The raw JSON response string must contain "ok":false, not "ok":null.
+      (ok (search "\"ok\":false" resp)
+          (format nil "response JSON must contain \"ok\":false but got: ~S"
+                  (subseq resp 0 (min 200 (length resp)))))
+      (ok (not (search "\"ok\":null" resp))
+          "response JSON must not contain \"ok\":null"))))

@@ -209,3 +209,19 @@
           (format nil "fixed summary should contain message, got: ~S" summary-fixed))
       (ok (not (search "NIL" summary-fixed))
           (format nil "fixed summary must not contain NIL, got: ~S" summary-fixed)))))
+
+(deftest lisp-check-parens-ok-field-is-json-bool
+  (testing "ok field is strictly t for success and nil for errors (json-bool applied in MCP layer)"
+    ;; The raw lisp-check-parens function returns Lisp nil/t.
+    ;; json-bool is applied in the define-tool body to convert nil -> yason:false
+    ;; so the MCP response has JSON false (not null).
+    ;; This test verifies the raw function returns the expected raw booleans;
+    ;; the protocol-level json-bool test lives in tools-test.lisp.
+    (let ((res-err (lisp-check-parens :code "(+ 1 2))")))
+      (ok (not (%ok? res-err)) "ok should be falsy for error")
+      (ok (null (gethash "ok" res-err))
+          "raw ok for error must be nil (define-tool applies json-bool for serialization)"))
+    (let ((res-ok (lisp-check-parens :code "(+ 1 2)")))
+      (ok (%ok? res-ok) "ok should be truthy for success")
+      (ok (eq t (gethash "ok" res-ok))
+          "ok for success must be t"))))

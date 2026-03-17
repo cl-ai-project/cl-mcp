@@ -6,7 +6,7 @@
                 #:fs-read-file)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
-                #:arg-validation-error)
+                #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export #:lisp-check-parens
@@ -404,7 +404,7 @@ exempt from reader checking to avoid false positives."
                  (position (gethash "position" check-result))
                  (payload
                     (make-ht "content" (text-content summary)
-                             "ok" ok
+                             "ok" (json-bool ok)
                              "kind" kind))
                  (fix-code (gethash "fix_code" check-result))
                  (required-args (gethash "required_args" check-result)))
