@@ -1283,3 +1283,38 @@
               (if errors
                   (format nil "fs/root concurrency errors: ~{~A~^, ~}" (nreverse errors))
                   "no fs/root concurrency errors")))))))
+
+(deftest tools-call-lisp-edit-form-defstruct-with-options
+  (testing "lisp-edit-form matches defstruct with (name options...) syntax"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/defstruct-options.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial "(in-package #:cl-user)
+
+(defstruct (my-node (:print-object t))
+  value
+  children)
+"))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((req (format nil
+                           (concatenate
+                            'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":5001,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"lisp-edit-form\","
+                            "\"arguments\":{\"file_path\":\"~A\","
+                            "\"form_type\":\"defstruct\","
+                            "\"form_name\":\"my-node\","
+                            "\"operation\":\"replace\","
+                            "\"dry_run\":true,"
+                            "\"content\":\"(defstruct (my-node (:print-object t)) value children next)\"}}}") tmp-path))
+                    (resp (%pjl req))
+                    (obj (yason:parse resp))
+                    (result (gethash "result" obj)))
+               (ok (not (%tool-call-failed-p obj))
+                   "defstruct with options syntax should be found")
+               (ok (eql t (gethash "would_change" result))
+                   "replacement content differs so would_change should be true"))
+          (ignore-errors (delete-file abs-path)))))))

@@ -90,6 +90,11 @@ Candidates are generated in order of specificity:
        (%defmethod-candidates form))
       ((symbolp name)
        (list (%normalize-string name)))
+      ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
+      ((string= form-type "defstruct")
+       (if (and (listp name) (symbolp (car name)))
+           (list (%normalize-string (car name)))
+           (list (%normalize-string name))))
       (t (list (%normalize-string name))))))
 
 (defun %whitespace-char-p (ch)
