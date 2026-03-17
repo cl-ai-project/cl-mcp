@@ -648,8 +648,9 @@ When primary tools fail or are insufficient:
    {"path": "src/file.lisp", "collapsed": true}
    ```
 2. **Check specializers:** For methods, include the full lambda-list: `"form_name": "my-method ((s string))"`
-3. **Check package context:** Ensure the form is in the expected file
-4. **Use exact form type:** Use `defun`, not `function` or `def`
+3. **`(setf name)` functions:** Use the full list as the form name including parentheses: `"form_name": "(setf my-accessor)"`. The `#:` reader prefix is stripped automatically, so `"form_name": "#:my-package"` and `"form_name": "my-package"` are equivalent.
+4. **Check package context:** Ensure the form is in the expected file
+5. **Use exact form type:** Use `defun`, not `function` or `def`
 
 ### Read/Write Permission Errors
 **Symptom:** File operations fail with permission or path errors
