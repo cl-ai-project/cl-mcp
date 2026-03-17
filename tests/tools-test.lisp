@@ -1369,3 +1369,41 @@
                  (ok (not (%tool-call-failed-p obj2))
                      "bare form_name without prefix must still match")))
           (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-check-parens-reader-error
+  (testing "lisp-check-parens detects reader error when parens are balanced"
+    ;; #. triggers a reader-error when *read-eval* is nil.
+    ;; The parens in (+ 1 #.(+ 1 2)) are balanced, so the paren scan passes.
+    ;; The reader check should catch the #. and return ok: false, kind: "reader-error".
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":5004,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp-check-parens\","
+                 "\"arguments\":{\"code\":\"(defun foo () nil)\\n(+ 1 #.(+ 1 2))\"}}}")))
+      (let* ((resp (%pjl req))
+             (obj (yason:parse resp))
+             (result (gethash "result" obj))
+             (pos (gethash "position" result)))
+        (ok (not (gethash "ok" result))
+            "ok should be false for reader error")
+        (ok (string= (gethash "kind" result) "reader-error")
+            "kind should be reader-error")
+        (ok (stringp (gethash "message" result))
+            "message field should be a string describing the error")
+        (ok (hash-table-p pos)
+            "position should be a hash table")
+        (ok (and pos (integerp (gethash "line" pos)))
+            "position.line should be an integer")
+        (ok (>= (gethash "line" pos) 2)
+            "error should be on line 2 or later (second form)")))))
+
+(deftest tools-call-lisp-check-parens-ok-no-reader-error
+  (testing "lisp-check-parens still returns ok: true for valid Lisp with no reader errors"
+    (let ((req (concatenate 'string
+                 "{\"jsonrpc\":\"2.0\",\"id\":5005,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"lisp-check-parens\","
+                 "\"arguments\":{\"code\":\"(defun foo (x) (* x 2))\"}}}")))
+      (let* ((resp (%pjl req))
+             (obj (yason:parse resp))
+             (result (gethash "result" obj)))
+        (ok (eql t (gethash "ok" result))
+            "ok should be true for valid code")))))

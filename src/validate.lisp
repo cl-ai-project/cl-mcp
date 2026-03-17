@@ -169,12 +169,43 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
           (vector "file_path" "form_type" "form_name" "operation" "content")))
   result)
 
-
+(defun %try-reader-check (text base-offset)
+  "Attempt to fully read TEXT using the standard CL reader with *READ-EVAL* nil.
+Returns a plist with reader error info if any error is detected, or NIL if clean.
+The plist has keys: :KIND \"reader-error\", :MESSAGE string, :OFFSET integer,
+:LINE integer-or-nil, :COLUMN integer-or-nil."
+  (with-input-from-string (stream text)
+    (handler-case
+        (let ((*read-eval* nil))
+          (loop (when (eq :eof (read stream nil :eof)) (return nil))))
+      (reader-error (e)
+        (let* ((pos       (or (ignore-errors (file-position stream)) 0))
+               (safe-pos  (min pos (length text)))
+               (pre       (subseq text 0 safe-pos))
+               (line      (1+ (count #\Newline pre)))
+               (nl-pos    (position #\Newline pre :from-end t))
+               (col-start (or nl-pos -1))
+               (col       (- safe-pos col-start)))
+          (list :kind    "reader-error"
+                :message (format nil "~A" e)
+                :offset  (+ base-offset pos)
+                :line    line
+                :column  col)))
+      (error (e)
+        ;; Non-reader-error (e.g. package does not exist): report without position
+        (list :kind    "reader-error"
+              :message (format nil "~A" e)
+              :offset  base-offset
+              :line    nil
+              :column  nil)))))
 
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
-Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
-\"found\", and \"position\"."
+Also checks for reader errors (e.g. unknown dispatch characters, #. with
+*read-eval* nil) even when parentheses are balanced.
+Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
+either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
+plus a \"position\" hash with \"line\", \"column\", \"offset\"."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -197,21 +228,39 @@ Returns a hash table with keys \"ok\" and, when not ok, \"kind\", \"expected\",
                 (gethash "column" pos) 1)
           (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
-    (destructuring-bind (&key ok kind expected found offset line column)
-        (%scan-parens text :base-offset base-off)
-      (let ((h (make-hash-table :test #'equal)))
-        (setf (gethash "ok" h) (and ok t))
-        (unless ok
-          (setf (gethash "kind" h) kind
-                (gethash "expected" h) expected
-                (gethash "found" h) found)
-          (let ((pos (make-hash-table :test #'equal)))
-            (setf (gethash "offset" pos) offset
-                  (gethash "line" pos) line
-                  (gethash "column" pos) column)
-            (setf (gethash "position" h) pos))
-          (%maybe-add-lisp-edit-guidance h kind))
-        h))))
+    (let ((paren-result (%scan-parens text :base-offset base-off))
+          (reader-info  (%try-reader-check text base-off)))
+      (destructuring-bind (&key ok kind expected found
+                                (offset base-off) (line 1) (column 1))
+          paren-result
+        (let ((h (make-hash-table :test #'equal)))
+          (cond
+            ((not ok)
+             ;; Paren error takes priority
+             (setf (gethash "ok" h) nil
+                   (gethash "kind" h) kind
+                   (gethash "expected" h) expected
+                   (gethash "found" h) found)
+             (let ((pos (make-hash-table :test #'equal)))
+               (setf (gethash "offset" pos) offset
+                     (gethash "line" pos) line
+                     (gethash "column" pos) column)
+               (setf (gethash "position" h) pos))
+             (%maybe-add-lisp-edit-guidance h kind))
+            (reader-info
+             ;; Parens OK but reader error detected
+             (setf (gethash "ok" h) nil
+                   (gethash "kind" h) (getf reader-info :kind)
+                   (gethash "message" h) (getf reader-info :message))
+             (let ((pos (make-hash-table :test #'equal)))
+               (setf (gethash "offset" pos) (getf reader-info :offset)
+                     (gethash "line" pos) (getf reader-info :line)
+                     (gethash "column" pos) (getf reader-info :column))
+               (setf (gethash "position" h) pos)))
+            (t
+             ;; Both checks passed
+             (setf (gethash "ok" h) t)))
+          h)))))
 
 (define-tool "lisp-check-parens"
   :description "Check balanced parentheses/brackets in a file slice or provided code.
@@ -247,24 +296,29 @@ lisp-edit-form for existing Lisp files."
            (summary
             (if ok
                 "Parentheses are balanced"
-                (let* ((kind (gethash "kind" check-result))
+                (let* ((kind     (gethash "kind" check-result))
+                       (message  (gethash "message" check-result))
                        (expected (gethash "expected" check-result))
-                       (found (gethash "found" check-result))
-                       (pos (gethash "position" check-result))
-                       (line (and pos (gethash "line" pos)))
-                       (col (and pos (gethash "column" pos))))
-                  (format nil
-                          "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
-                          kind expected found line col
-                          (if next-tool
-                              " Use lisp-edit-form for existing Lisp files."
-                              ""))))))
+                       (found    (gethash "found" check-result))
+                       (pos      (gethash "position" check-result))
+                       (line     (and pos (gethash "line" pos)))
+                       (col      (and pos (gethash "column" pos))))
+                  (if (string= kind "reader-error")
+                      (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
+                              line col (or message "unknown"))
+                      (format nil
+                              "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
+                              kind expected found line col
+                              (if next-tool
+                                  " Use lisp-edit-form for existing Lisp files."
+                                  "")))))))
       (let ((payload
                (make-ht "content" (text-content summary)
                         "ok" ok
                         "kind" (gethash "kind" check-result)
                         "expected" (gethash "expected" check-result)
                         "found" (gethash "found" check-result)
+                        "message" (gethash "message" check-result)
                         "position" (gethash "position" check-result)))
              (fix-code (gethash "fix_code" check-result))
              (required-args (gethash "required_args" check-result)))
