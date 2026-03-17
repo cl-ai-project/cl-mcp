@@ -1370,6 +1370,36 @@
                      "bare form_name without prefix must still match")))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-lisp-patch-form-hash-colon-prefix
+  (testing "lisp-patch-form resolves #: prefix in form_name (regression)"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-patch-hash-colon-fixture.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial "(defpackage #:test-patch-pkg (:use #:cl))\n"))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((req (format nil
+                            (concatenate
+                             'string
+                             "{\"jsonrpc\":\"2.0\",\"id\":5020,\"method\":\"tools/call\","
+                             "\"params\":{\"name\":\"lisp-patch-form\","
+                             "\"arguments\":{\"file_path\":\"~A\","
+                             "\"form_type\":\"defpackage\","
+                             "\"form_name\":\"#:test-patch-pkg\","
+                             "\"old_text\":\"(:use #:cl)\","
+                             "\"new_text\":\"(:use #:cl) (:export #:my-sym)\","
+                             "\"dry_run\":true}}}") tmp-path))
+                    (resp (%pjl req))
+                    (obj (yason:parse resp))
+                    (result (gethash "result" obj)))
+               (ok (not (%tool-call-failed-p obj))
+                   "lisp-patch-form with #: prefix form_name should succeed")
+               (ok (eql t (gethash "would_change" result))
+                   "dry_run result should indicate the patch would change the form"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-lisp-edit-form-empty-form-name-after-prefix
   (testing "lisp-edit-form with form_name '#:' returns helpful error mentioning 'empty'"
     (with-test-project-root
