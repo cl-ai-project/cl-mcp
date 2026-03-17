@@ -335,45 +335,49 @@ lisp-edit-form for existing Lisp files."
       (error 'arg-validation-error
              :arg-name "path/code"
              :message "Either path or code is required"))
-    (let* ((check-result (lisp-check-parens :path path
-                                            :code code
-                                            :offset offset
-                                            :limit limit))
-           (ok (gethash "ok" check-result))
-           (next-tool (gethash "next_tool" check-result))
-           (summary
-            (if ok
-                "Parentheses are balanced"
-                (let* ((kind     (gethash "kind" check-result))
-                       (message  (gethash "message" check-result))
-                       (expected (gethash "expected" check-result))
-                       (found    (gethash "found" check-result))
-                       (pos      (gethash "position" check-result))
-                       (line     (and pos (gethash "line" pos)))
-                       (col      (and pos (gethash "column" pos))))
-                  (if (string= kind "reader-error")
-                      (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
-                              line col (or message "unknown"))
-                      (format nil
-                              "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
-                              kind expected found line col
-                              (if next-tool
-                                  " Use lisp-edit-form for existing Lisp files."
-                                  "")))))))
-      (let ((payload
-               (make-ht "content" (text-content summary)
-                        "ok" ok
-                        "kind" (gethash "kind" check-result)
-                        "expected" (gethash "expected" check-result)
-                        "found" (gethash "found" check-result)
-                        "message" (gethash "message" check-result)
-                        "position" (gethash "position" check-result)))
-             (fix-code (gethash "fix_code" check-result))
-             (required-args (gethash "required_args" check-result)))
-        (when fix-code
-          (setf (gethash "fix_code" payload) fix-code))
-        (when next-tool
-          (setf (gethash "next_tool" payload) next-tool))
-        (when required-args
-          (setf (gethash "required_args" payload) required-args))
-        (result id payload)))))
+    (handler-case
+        (let* ((check-result (lisp-check-parens :path path
+                                                :code code
+                                                :offset offset
+                                                :limit limit))
+               (ok (gethash "ok" check-result))
+               (next-tool (gethash "next_tool" check-result))
+               (summary
+                (if ok
+                    "Parentheses are balanced"
+                    (let* ((kind     (gethash "kind" check-result))
+                           (message  (gethash "message" check-result))
+                           (expected (gethash "expected" check-result))
+                           (found    (gethash "found" check-result))
+                           (pos      (gethash "position" check-result))
+                           (line     (and pos (gethash "line" pos)))
+                           (col      (and pos (gethash "column" pos))))
+                      (if (string= kind "reader-error")
+                          (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
+                                  line col (or message "unknown"))
+                          (format nil
+                                  "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
+                                  kind expected found line col
+                                  (if next-tool
+                                      " Use lisp-edit-form for existing Lisp files."
+                                      "")))))))
+          (let ((payload
+                   (make-ht "content" (text-content summary)
+                            "ok" ok
+                            "kind" (gethash "kind" check-result)
+                            "expected" (gethash "expected" check-result)
+                            "found" (gethash "found" check-result)
+                            "message" (gethash "message" check-result)
+                            "position" (gethash "position" check-result)))
+                 (fix-code (gethash "fix_code" check-result))
+                 (required-args (gethash "required_args" check-result)))
+            (when fix-code
+              (setf (gethash "fix_code" payload) fix-code))
+            (when next-tool
+              (setf (gethash "next_tool" payload) next-tool))
+            (when required-args
+              (setf (gethash "required_args" payload) required-args))
+            (result id payload)))
+      (error (e)
+        (result id (make-ht "content" (text-content (format nil "Error: ~A" e))
+                            "isError" t))))))
