@@ -32,6 +32,7 @@
            #:%defmethod-candidates
            #:%definition-candidates
            #:%normalize-paths
+           #:%strip-name-prefix
            #:%find-target
            #:%resolve-named-readtable
            #:%parse-readtable-designator
@@ -145,6 +146,20 @@ Returns NIL if READTABLE-STRING is NIL."
           (intern (string-upcase (string-left-trim ":" readtable-string))
                   :keyword)))))
 
+(defun %strip-name-prefix (name)
+  "Strip reader macro prefixes (#: : \"...\") from NAME for form-name matching.
+Handles uninterned symbols (#:pkg), keywords (:pkg), and string literals (\"pkg\")."
+  (cond
+    ((and (>= (length name) 2) (string= (subseq name 0 2) "#:"))
+     (subseq name 2))
+    ((and (plusp (length name)) (char= (char name 0) #\:))
+     (subseq name 1))
+    ((and (>= (length name) 2)
+          (char= (char name 0) #\")
+          (char= (char name (1- (length name))) #\"))
+     (subseq name 1 (1- (length name))))
+    (t name)))
+
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.
 If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
@@ -154,7 +169,7 @@ If multiple matches exist without an index, signals an error with candidate info
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let ((target (string-downcase base-name))
+    (let ((target (string-downcase (%strip-name-prefix base-name)))
           (matches nil))
       (loop for node in nodes
             when (and (typep node 'cst-node)

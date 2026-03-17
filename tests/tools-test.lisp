@@ -1318,3 +1318,54 @@
                (ok (eql t (gethash "would_change" result))
                    "replacement content differs so would_change should be true"))
           (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-edit-form-defpackage-hash-colon-prefix
+  (testing "lisp-edit-form form_name with #: prefix matches defpackage"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/defpkg-hash-colon.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial "(defpackage #:test-hash-colon-pkg
+  (:use #:cl))
+
+(in-package #:test-hash-colon-pkg)
+"))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (progn
+               ;; #: prefix: should match
+               (let* ((req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":5002,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"lisp-edit-form\","
+                               "\"arguments\":{\"file_path\":\"~A\","
+                               "\"form_type\":\"defpackage\","
+                               "\"form_name\":\"#:test-hash-colon-pkg\","
+                               "\"operation\":\"replace\","
+                               "\"dry_run\":true,"
+                               "\"content\":\"(defpackage #:test-hash-colon-pkg (:use #:cl) (:export #:hello))\"}}}") tmp-path))
+                      (resp (%pjl req))
+                      (obj (yason:parse resp))
+                      (result (gethash "result" obj)))
+                 (ok (not (%tool-call-failed-p obj))
+                     "form_name with #: prefix should match defpackage")
+                 (ok (eql t (gethash "would_change" result))))
+               ;; bare name: must still work (regression)
+               (let* ((req2 (format nil
+                               (concatenate
+                                'string
+                                "{\"jsonrpc\":\"2.0\",\"id\":5003,\"method\":\"tools/call\","
+                                "\"params\":{\"name\":\"lisp-edit-form\","
+                                "\"arguments\":{\"file_path\":\"~A\","
+                                "\"form_type\":\"defpackage\","
+                                "\"form_name\":\"test-hash-colon-pkg\","
+                                "\"operation\":\"replace\","
+                                "\"dry_run\":true,"
+                                "\"content\":\"(defpackage #:test-hash-colon-pkg (:use #:cl) (:export #:hello))\"}}}") tmp-path))
+                      (resp2 (%pjl req2))
+                      (obj2 (yason:parse resp2)))
+                 (ok (not (%tool-call-failed-p obj2))
+                     "bare form_name without prefix must still match")))
+          (ignore-errors (delete-file abs-path)))))))
