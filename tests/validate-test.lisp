@@ -102,3 +102,26 @@
       (ok (not (%ok? res)) "ok should be false")
       (ok (integerp (%pos res "line")) "position.line must be integer")
       (ok (integerp (%pos res "column")) "position.column must be integer"))))
+
+(deftest lisp-check-parens-paren-error-no-null-message
+  (testing "paren error response omits message key (not null)"
+    (let ((res (lisp-check-parens :code "(+ 1 2))")))
+      (ok (not (%ok? res)) "should be not-ok")
+      (multiple-value-bind (val presentp)
+          (gethash "message" res)
+        (declare (ignore val))
+        (ok (not presentp) "message key should be absent for paren errors")))))
+
+(deftest lisp-check-parens-reader-error-no-null-expected-found
+  (testing "reader error response omits expected/found keys (not null)"
+    (let ((res (lisp-check-parens :code "(foo) #@")))
+      (ok (not (%ok? res)) "should be not-ok")
+      (ok (string= (%kind res) "reader-error") "kind should be reader-error")
+      (multiple-value-bind (val presentp)
+          (gethash "expected" res)
+        (declare (ignore val))
+        (ok (not presentp) "expected key should be absent for reader errors"))
+      (multiple-value-bind (val presentp)
+          (gethash "found" res)
+        (declare (ignore val))
+        (ok (not presentp) "found key should be absent for reader errors")))))

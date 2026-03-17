@@ -367,16 +367,21 @@ exempt from reader checking to avoid false positives."
                                   (if next-tool
                                       " Use lisp-edit-form for existing Lisp files."
                                       "")))))))
-          (let ((payload
-                   (make-ht "content" (text-content summary)
-                            "ok" ok
-                            "kind" (gethash "kind" check-result)
-                            "expected" (gethash "expected" check-result)
-                            "found" (gethash "found" check-result)
-                            "message" (gethash "message" check-result)
-                            "position" (gethash "position" check-result)))
+          (let* ((kind     (gethash "kind" check-result))
+                 (expected (gethash "expected" check-result))
+                 (found    (gethash "found" check-result))
+                 (message  (gethash "message" check-result))
+                 (position (gethash "position" check-result))
+                 (payload
+                    (make-ht "content" (text-content summary)
+                             "ok" ok
+                             "kind" kind))
                  (fix-code (gethash "fix_code" check-result))
                  (required-args (gethash "required_args" check-result)))
+            (when expected (setf (gethash "expected" payload) expected))
+            (when found    (setf (gethash "found" payload) found))
+            (when message  (setf (gethash "message" payload) message))
+            (when position (setf (gethash "position" payload) position))
             (when fix-code
               (setf (gethash "fix_code" payload) fix-code))
             (when next-tool
