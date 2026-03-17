@@ -1407,3 +1407,16 @@
              (result (gethash "result" obj)))
         (ok (eql t (gethash "ok" result))
             "ok should be true for valid code")))))
+
+(deftest tools-call-lisp-check-parens-file-not-found
+  (testing "lisp-check-parens returns error result for nonexistent path, not crash"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":5006,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"lisp-check-parens\","
+                  "\"arguments\":{\"path\":\"/nonexistent/does-not-exist.lisp\"}}}"))
+           (resp (%pjl req))
+           (obj  (yason:parse resp)))
+      (ok (hash-table-p (gethash "result" obj))
+          "should return a result (not a JSON-RPC error)")
+      (ok (%tool-call-failed-p obj)
+          "result should indicate failure"))))

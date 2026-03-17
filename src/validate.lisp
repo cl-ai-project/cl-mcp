@@ -169,16 +169,40 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
           (vector "file_path" "form_type" "form_name" "operation" "content")))
   result)
 
+(defun %custom-readtable-p (text)
+  "Return T if TEXT contains a named-readtable activation.
+When a custom readtable is active, the standard CL reader would produce
+false-positive reader errors on valid custom syntax."
+  (not (null (search "in-readtable" text))))
+
 (defun %try-reader-check (text base-offset)
   "Attempt to fully read TEXT using the standard CL reader with *READ-EVAL* nil.
-Returns a plist with reader error info if any error is detected, or NIL if clean.
-The plist has keys: :KIND \"reader-error\", :MESSAGE string, :OFFSET integer,
-:LINE integer-or-nil, :COLUMN integer-or-nil."
+Returns a plist with reader error info if a genuine syntax error is detected,
+or NIL if the text is clean (or if checking is skipped for known safe reasons).
+
+Plist keys when non-nil: :KIND \"reader-error\", :MESSAGE string,
+:OFFSET integer, :LINE integer-or-nil, :COLUMN integer-or-nil.
+
+Skips the reader check (returns NIL) when TEXT contains \"in-readtable\",
+because the standard CL reader does not know about custom readtables and would
+produce false positives on valid custom syntax (e.g. cl-interpol #?\"...\").
+
+Also returns NIL for package-not-found errors: a missing package is not a
+syntax error in the file itself."
+  ;; Skip reader check for files using custom readtables.
+  (when (%custom-readtable-p text)
+    (return-from %try-reader-check nil))
   (with-input-from-string (stream text)
     (handler-case
         (let ((*read-eval* nil))
           (loop (when (eq :eof (read stream nil :eof)) (return nil))))
       (reader-error (e)
+        ;; SB-INT:SIMPLE-READER-PACKAGE-ERROR is a subtype of both
+        ;; reader-error and package-error in SBCL, so it arrives here
+        ;; before the package-error clause below can fire.
+        ;; Treat it the same way: a missing package is not a file syntax error.
+        (when (typep e 'package-error)
+          (return-from %try-reader-check nil))
         (let* ((pos       (or (ignore-errors (file-position stream)) 0))
                (safe-pos  (min pos (length text)))
                (pre       (subseq text 0 safe-pos))
@@ -191,8 +215,30 @@ The plist has keys: :KIND \"reader-error\", :MESSAGE string, :OFFSET integer,
                 :offset  (+ base-offset pos)
                 :line    line
                 :column  col)))
+      (end-of-file (e)
+        ;; end-of-file is NOT a subtype of reader-error in SBCL.
+        ;; Capture stream position to give an accurate error location.
+        (declare (ignore e))
+        (let* ((pos      (or (ignore-errors (file-position stream)) (length text)))
+               (safe-pos (min pos (length text)))
+               (pre      (subseq text 0 safe-pos))
+               (line     (1+ (count #\Newline pre)))
+               (nl-pos   (position #\Newline pre :from-end t))
+               (col      (- safe-pos (or nl-pos -1))))
+          (list :kind    "reader-error"
+                :message "unexpected end of file while reading"
+                :offset  (+ base-offset pos)
+                :line    line
+                :column  col)))
+      (package-error (e)
+        ;; Package-not-found is not a syntax error in the file.
+        ;; Return NIL to avoid false positives on valid files that reference
+        ;; packages not loaded in the current image.
+        (declare (ignore e))
+        nil)
       (error (e)
-        ;; Non-reader-error (e.g. package does not exist): report without position
+        ;; Catch-all for unexpected non-reader errors.
+        ;; Report without position since we have no reliable stream position.
         (list :kind    "reader-error"
               :message (format nil "~A" e)
               :offset  base-offset
@@ -252,10 +298,12 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
              (setf (gethash "ok" h) nil
                    (gethash "kind" h) (getf reader-info :kind)
                    (gethash "message" h) (getf reader-info :message))
-             (let ((pos (make-hash-table :test #'equal)))
-               (setf (gethash "offset" pos) (getf reader-info :offset)
-                     (gethash "line" pos) (getf reader-info :line)
-                     (gethash "column" pos) (getf reader-info :column))
+             (let ((pos (make-hash-table :test #'equal))
+                   (r-line (getf reader-info :line))
+                   (r-col  (getf reader-info :column)))
+               (setf (gethash "offset" pos) (getf reader-info :offset))
+               (when r-line   (setf (gethash "line" pos) r-line))
+               (when r-col    (setf (gethash "column" pos) r-col))
                (setf (gethash "position" h) pos)))
             (t
              ;; Both checks passed
@@ -267,7 +315,13 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
 Use this to DIAGNOSE syntax errors in existing files or validate code snippets
 before/after editing. Returns the first mismatch position if unbalanced, or
 success if balanced. Unbalanced delimiter results include guidance to use
-lisp-edit-form for existing Lisp files."
+lisp-edit-form for existing Lisp files.
+
+Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
+when *read-eval* is nil) even when parentheses are balanced. In that case the
+result has kind: \"reader-error\" and a message field describing the error,
+instead of expected/found fields. Files using named-readtables:in-readtable are
+exempt from reader checking to avoid false positives."
   :args ((path :type :string
                :description "Absolute path inside project or registered ASDF system
 (mutually exclusive with code)")
@@ -287,45 +341,49 @@ lisp-edit-form for existing Lisp files."
       (error 'arg-validation-error
              :arg-name "path/code"
              :message "Either path or code is required"))
-    (let* ((check-result (lisp-check-parens :path path
-                                            :code code
-                                            :offset offset
-                                            :limit limit))
-           (ok (gethash "ok" check-result))
-           (next-tool (gethash "next_tool" check-result))
-           (summary
-            (if ok
-                "Parentheses are balanced"
-                (let* ((kind     (gethash "kind" check-result))
-                       (message  (gethash "message" check-result))
-                       (expected (gethash "expected" check-result))
-                       (found    (gethash "found" check-result))
-                       (pos      (gethash "position" check-result))
-                       (line     (and pos (gethash "line" pos)))
-                       (col      (and pos (gethash "column" pos))))
-                  (if (string= kind "reader-error")
-                      (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
-                              line col (or message "unknown"))
-                      (format nil
-                              "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
-                              kind expected found line col
-                              (if next-tool
-                                  " Use lisp-edit-form for existing Lisp files."
-                                  "")))))))
-      (let ((payload
-               (make-ht "content" (text-content summary)
-                        "ok" ok
-                        "kind" (gethash "kind" check-result)
-                        "expected" (gethash "expected" check-result)
-                        "found" (gethash "found" check-result)
-                        "message" (gethash "message" check-result)
-                        "position" (gethash "position" check-result)))
-             (fix-code (gethash "fix_code" check-result))
-             (required-args (gethash "required_args" check-result)))
-        (when fix-code
-          (setf (gethash "fix_code" payload) fix-code))
-        (when next-tool
-          (setf (gethash "next_tool" payload) next-tool))
-        (when required-args
-          (setf (gethash "required_args" payload) required-args))
-        (result id payload)))))
+    (handler-case
+        (let* ((check-result (lisp-check-parens :path path
+                                                :code code
+                                                :offset offset
+                                                :limit limit))
+               (ok (gethash "ok" check-result))
+               (next-tool (gethash "next_tool" check-result))
+               (summary
+                (if ok
+                    "Parentheses are balanced"
+                    (let* ((kind     (gethash "kind" check-result))
+                           (message  (gethash "message" check-result))
+                           (expected (gethash "expected" check-result))
+                           (found    (gethash "found" check-result))
+                           (pos      (gethash "position" check-result))
+                           (line     (and pos (gethash "line" pos)))
+                           (col      (and pos (gethash "column" pos))))
+                      (if (string= kind "reader-error")
+                          (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
+                                  line col (or message "unknown"))
+                          (format nil
+                                  "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
+                                  kind expected found line col
+                                  (if next-tool
+                                      " Use lisp-edit-form for existing Lisp files."
+                                      "")))))))
+          (let ((payload
+                   (make-ht "content" (text-content summary)
+                            "ok" ok
+                            "kind" (gethash "kind" check-result)
+                            "expected" (gethash "expected" check-result)
+                            "found" (gethash "found" check-result)
+                            "message" (gethash "message" check-result)
+                            "position" (gethash "position" check-result)))
+                 (fix-code (gethash "fix_code" check-result))
+                 (required-args (gethash "required_args" check-result)))
+            (when fix-code
+              (setf (gethash "fix_code" payload) fix-code))
+            (when next-tool
+              (setf (gethash "next_tool" payload) next-tool))
+            (when required-args
+              (setf (gethash "required_args" payload) required-args))
+            (result id payload)))
+      (error (e)
+        (result id (make-ht "content" (text-content (format nil "Error: ~A" e))
+                            "isError" t))))))
