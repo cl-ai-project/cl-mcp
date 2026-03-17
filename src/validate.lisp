@@ -194,6 +194,14 @@ When a custom readtable is active, the standard CL reader would produce
 false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
 
+(defun %truncate-message (condition)
+  "Extract condition message string, truncating to 200 chars to prevent
+SBCL stream representation leakage (e.g. reader-error ~A includes stream content)."
+  (let ((msg (format nil "~A" condition)))
+    (if (> (length msg) 200)
+        (concatenate 'string (subseq msg 0 197) "...")
+        msg)))
+
 (defun %try-reader-check (text base-offset)
   "Attempt to fully read TEXT using the standard CL reader with *READ-EVAL* nil.
 Returns a plist with reader error info if a genuine syntax error is detected,
@@ -230,7 +238,7 @@ syntax error in the file itself."
                (col-start (or nl-pos -1))
                (col       (- safe-pos col-start)))
           (list :kind    "reader-error"
-                :message (format nil "~A" e)
+                :message (%truncate-message e)
                 :offset  (+ base-offset pos)
                 :line    line
                 :column  col)))
@@ -259,7 +267,7 @@ syntax error in the file itself."
         ;; Catch-all for unexpected non-reader errors.
         ;; Report without position since we have no reliable stream position.
         (list :kind    "reader-error"
-              :message (format nil "~A" e)
+              :message (%truncate-message e)
               :offset  base-offset
               :line    nil
               :column  nil)))))

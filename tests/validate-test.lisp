@@ -132,3 +132,17 @@
       (ok (not (%ok? res)) "ok should be false")
       (ok (string= (%kind res) "unclosed-block-comment")
           "kind should be unclosed-block-comment"))))
+
+(deftest lisp-check-parens-reader-error-message-truncated
+  (testing "reader error message is truncated to 200 chars max"
+    ;; Build an input with a long filler that could be echoed in the error message.
+    ;; SBCL's reader-error includes a stream repr in ~A rendering; we verify that
+    ;; %try-reader-check never exposes more than 200 chars regardless of input length.
+    (let* ((filler (make-string 300 :initial-element #\x))
+           (code (concatenate 'string "(foo) #@ " filler))
+           (res (lisp-check-parens :code code)))
+      (ok (not (%ok? res)) "ok should be false")
+      (ok (string= (%kind res) "reader-error") "kind should be reader-error")
+      (let ((msg (gethash "message" res)))
+        (ok (stringp msg) "message should be a string")
+        (ok (<= (length msg) 200) "message should be at most 200 chars")))))
