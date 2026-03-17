@@ -71,3 +71,34 @@
         (ok (null (%ok? res)))
         (ok (not (eq (%ok? res) :false)))
         (ok (string= (%kind res) "too-large"))))))
+
+(deftest lisp-check-parens-eof-reader-error-has-position
+  (testing "incomplete dispatch #X gives reader-error with non-nil position"
+    ;; M1: end-of-file from incomplete #, should NOT report offset 0 / line nil
+    (let ((res (lisp-check-parens :code "(valid-form) #")))
+      (ok (not (%ok? res)) "ok should be false")
+      (ok (string= (%kind res) "reader-error") "kind should be reader-error")
+      (ok (integerp (%pos res "line")) "line must be an integer, not nil")
+      (ok (>= (%pos res "offset") 12) "offset must be past the valid form"))))
+
+(deftest lisp-check-parens-package-error-no-false-positive
+  (testing "package-qualified symbol for unloaded package is not a reader error"
+    ;; M2: package-error on unloaded package should return ok: true
+    (let ((res (lisp-check-parens :code "(nonexistent-package::my-sym arg)")))
+      (ok (%ok? res) "valid file using unloaded package must return ok: true"))))
+
+(deftest lisp-check-parens-in-readtable-no-false-positive
+  (testing "file with in-readtable declaration is not falsely flagged"
+    ;; M3: in-readtable present => skip reader check => ok: true
+    (let ((res (lisp-check-parens
+                :code "(named-readtables:in-readtable :interpol-syntax)
+(defun greet (x) x)")))
+      (ok (%ok? res) "file with in-readtable should return ok: true"))))
+
+(deftest lisp-check-parens-eof-position-not-null
+  (testing "position hash for EOF-type reader error has non-null line and column"
+    ;; M6: position hash must not have nil line/column for EOF errors
+    (let ((res (lisp-check-parens :code "(foo) #")))
+      (ok (not (%ok? res)) "ok should be false")
+      (ok (integerp (%pos res "line")) "position.line must be integer")
+      (ok (integerp (%pos res "column")) "position.column must be integer"))))
