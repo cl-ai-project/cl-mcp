@@ -146,3 +146,66 @@
       (let ((msg (gethash "message" res)))
         (ok (stringp msg) "message should be a string")
         (ok (<= (length msg) 200) "message should be at most 200 chars")))))
+
+(deftest lisp-check-parens-extra-close-summary-line-col
+  (testing "extra-close summary text has correct line and column (not garbled)"
+    ;; Bug M-C3-1: when expected=nil, the ~@[ (expected ~A, found ~A)~] directive
+    ;; consumes expected as the condition arg (false) and skips the body, but
+    ;; found/line/col then shift into the wrong ~D/~A slots, garbling the output.
+    ;; After the fix, the summary should correctly show "line 1" and "column 8".
+    (let* ((res      (lisp-check-parens :code "(+ 1 2))"))
+           (kind     (gethash "kind" res))
+           (pos      (gethash "position" res))
+           (line     (and pos (gethash "line" pos)))
+           (col      (and pos (gethash "column" pos)))
+           (next-tool (gethash "next_tool" res))
+           (expected  (gethash "expected" res))
+           (found     (gethash "found" res))
+           ;; Reproduce the FIXED define-tool summary-building expression.
+           ;; The old broken form used ~@[ (expected ~A, found ~A)~] which
+           ;; consumed expected as the condition arg and shifted remaining args.
+           ;; The fix pre-computes the ef fragment and uses plain ~A.
+           (ef (if (and expected found)
+                   (format nil " (expected ~A, found ~A)" expected found)
+                   ""))
+           (summary
+            (format nil
+                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
+                    kind ef line col
+                    (if next-tool
+                        " Use lisp-edit-form for existing Lisp files."
+                        ""))))
+      (ok (not (%ok? res)) "should not be ok")
+      (ok (string= kind "extra-close") "kind should be extra-close")
+      (ok (eql line 1) "underlying line should be 1")
+      (ok (eql col 8)  "underlying col should be 8")
+      ;; With the fix, expected=nil means ef="" and line/col bind correctly.
+      (ok (search "line 1" summary)
+          (format nil "summary should contain 'line 1' but got: ~S" summary))
+      (ok (search "column 8" summary)
+          (format nil "summary should contain 'column 8' but got: ~S" summary)))))
+
+(deftest lisp-check-parens-reader-error-nil-line-summary
+  (testing "reader-error summary with nil line/col shows message not nil"
+    ;; Bug M-C3-2: when line=nil, ~@[ at line ~D, column ~D~] consumes line as
+    ;; condition (false), skips the body, then ~A picks up col (nil) instead of
+    ;; message. Before fix: "Reader error: NIL". After fix: "Reader error: <msg>".
+    (let* ((line    nil)
+           (col     nil)
+           (message "something went wrong")
+           ;; Reproduce the BROKEN define-tool format string:
+           (summary-broken
+            (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
+                    line col (or message "unknown")))
+           ;; Reproduce the FIXED format string (two independent ~@[ directives):
+           (summary-fixed
+            (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
+                    line col (or message "unknown"))))
+      ;; Confirm the bug is present in the broken form (documents the problem):
+      (ok (search "NIL" summary-broken)
+          (format nil "broken format should show NIL, got: ~S" summary-broken))
+      ;; Confirm the fix works:
+      (ok (search "something went wrong" summary-fixed)
+          (format nil "fixed summary should contain message, got: ~S" summary-fixed))
+      (ok (not (search "NIL" summary-fixed))
+          (format nil "fixed summary must not contain NIL, got: ~S" summary-fixed)))))

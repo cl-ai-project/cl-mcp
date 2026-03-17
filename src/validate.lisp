@@ -386,14 +386,17 @@ exempt from reader checking to avoid false positives."
                            (line     (and pos (gethash "line" pos)))
                            (col      (and pos (gethash "column" pos))))
                       (if (string= kind "reader-error")
-                          (format nil "Reader error~@[ at line ~D, column ~D~]: ~A"
+                          (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
                                   line col (or message "unknown"))
-                          (format nil
-                                  "Unbalanced parentheses: ~A~@[ (expected ~A, found ~A)~] at line ~D, column ~D~A"
-                                  kind expected found line col
-                                  (if next-tool
-                                      " Use lisp-edit-form for existing Lisp files."
-                                      "")))))))
+                          (let ((ef (if (and expected found)
+                                        (format nil " (expected ~A, found ~A)" expected found)
+                                        "")))
+                            (format nil
+                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
+                                    kind ef line col
+                                    (if next-tool
+                                        " Use lisp-edit-form for existing Lisp files."
+                                        ""))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))
                  (found    (gethash "found" check-result))
