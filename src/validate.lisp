@@ -57,7 +57,8 @@
   (in-string nil :type boolean)
   (escape nil :type boolean)
   (line-comment nil :type boolean)
-  (block-depth 0 :type fixnum))
+  (block-depth 0 :type fixnum)
+  (block-open-pos 0 :type fixnum))
 
 (defun %scan-handle-line-comment (state ch)
   (when (char= ch #\Newline)
@@ -98,7 +99,10 @@ indicating how many additional characters past CH were consumed."
                   do (incf skip)))))
       (values nil skip)))
    ((and (char= ch #\#) next (char= next #\|))
-    (incf (scan-state-block-depth state)) (values nil 1))
+    (when (zerop (scan-state-block-depth state))
+      (setf (scan-state-block-open-pos state) (+ base-offset idx)))
+    (incf (scan-state-block-depth state))
+    (values nil 1))
    ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
     (setf (scan-state-stack state)
             (%scan-parens-push-open (scan-state-stack state)
@@ -148,6 +152,21 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                      (incf idx n)
                      (incf (scan-state-col state) n))))))
             (%scan-advance-position state ch))
+    (when (plusp (scan-state-block-depth state))
+      (let* ((open-pos  (scan-state-block-open-pos state))
+             (local-pos (- open-pos base-offset))
+             (pre       (subseq text 0 (min local-pos (length text))))
+             (r-line    (1+ (count #\Newline pre)))
+             (col-start (or (position #\Newline pre :from-end t) -1))
+             (r-col     (- local-pos col-start)))
+        (return-from %scan-parens
+          (list :ok nil
+                :kind "unclosed-block-comment"
+                :expected nil
+                :found nil
+                :offset open-pos
+                :line r-line
+                :column r-col))))
     (when (scan-state-stack state)
       (destructuring-bind (ch l c off) (pop (scan-state-stack state))
         (return-from %scan-parens

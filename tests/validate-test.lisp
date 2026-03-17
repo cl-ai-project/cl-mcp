@@ -125,3 +125,10 @@
           (gethash "found" res)
         (declare (ignore val))
         (ok (not presentp) "found key should be absent for reader errors")))))
+
+(deftest lisp-check-parens-unclosed-block-comment
+  (testing "unclosed block comment at end returns unclosed-block-comment kind"
+    (let ((res (lisp-check-parens :code "(foo) #|")))
+      (ok (not (%ok? res)) "ok should be false")
+      (ok (string= (%kind res) "unclosed-block-comment")
+          "kind should be unclosed-block-comment"))))
