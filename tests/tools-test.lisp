@@ -1492,8 +1492,7 @@
     (let* ((req (concatenate 'string
                   "{\"jsonrpc\":\"2.0\",\"id\":5007,\"method\":\"tools/call\","
                   "\"params\":{\"name\":\"lisp-check-parens\","
-                  "\"arguments\":{\"code\":\"(+ 1 2))\"}}}"
-                  ))
+                  "\"arguments\":{\"code\":\"(+ 1 2))\"}}}"))
            (resp (%pjl req)))
       ;; The raw JSON response string must contain "ok":false, not "ok":null.
       (ok (search "\"ok\":false" resp)
