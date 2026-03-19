@@ -137,8 +137,12 @@ result_preview, and error_context."
                         :test test
                         :tests tests)))
       (let ((test-result (if timeout
-                             (sb-ext:with-timeout timeout
-                               (do-run))
+                             (handler-case
+                                 (sb-ext:with-timeout timeout
+                                   (do-run))
+                               (sb-ext:timeout ()
+                                 (make-ht "error" t
+                                          "message" (format nil "Tests timed out after ~A seconds" timeout))))
                              (do-run))))
         (build-run-tests-response test-result)))))
 
@@ -216,8 +220,6 @@ Returns a success payload."
   (let ((path (gethash "path" params)))
     (unless path
       (error "path is required"))
-    (when (member path '("/" "//" "///") :test #'string=)
-      (error "Cannot set project root to filesystem root"))
     (let ((dir-path (uiop/pathname:ensure-directory-pathname path)))
       (unless (uiop/filesystem:directory-exists-p dir-path)
         (error "Directory does not exist: ~A" path))
@@ -225,6 +227,10 @@ Returns a success payload."
       (let ((resolved (truename dir-path)))
         (when resolved
           (setf dir-path resolved)))
+      ;; Reject overly broad roots (same policy as fs-set-project-root)
+      (let ((root-str (namestring dir-path)))
+        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
+          (error "Refusing to set project root to ~A -- too broad" root-str)))
       (setf *project-root* dir-path)
       (uiop/os:chdir dir-path)
       (log-event :info "worker.project-root.set" "path" (namestring dir-path))
