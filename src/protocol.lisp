@@ -24,7 +24,10 @@
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:*project-root-lock*)
+  (:import-from #:bordeaux-threads
+                #:with-lock-held)
   (:import-from #:cl-mcp/src/pool
                 #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/proxy
@@ -69,7 +72,12 @@ Walks hash-tables, vectors, lists, and strings. Converts non-serializable
 leaf objects to their string representation. Depth-limited to 20 levels.
 Collections are capped at +sanitize-max-elements+ to guard against
 cyclic or extremely large structures."
-  (when (> depth 20) (return-from %sanitize-for-encoding obj))
+  (when (> depth 20)
+    (return-from %sanitize-for-encoding
+      (typecase obj
+        (string (sanitize-for-json obj))
+        ((or number (member t nil)) obj)
+        (t (or (ignore-errors (princ-to-string obj)) "#<depth-limit>")))))
   (typecase obj
     (string (sanitize-for-json obj))
     (hash-table
@@ -182,8 +190,10 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                 "path" root-str
                                 "reason" "too broad"))
                     (t
-                     (setf *project-root* root-dir)
-                     (uiop/os:chdir root-dir)
+                     (with-lock-held (*project-root-lock*)
+                       (setf *project-root* root-dir)
+                       (uiop/os:chdir root-dir)
+                       (setf *default-pathname-defaults* root-dir))
                      ;; Propagate root to this session's worker only
                      (ignore-errors
                        (send-root-to-session-worker *current-session-id* root-dir))
@@ -307,7 +317,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                  (error (e)
                    (ignore-errors
                      (log-event :warn "rpc.parse-error"
-                                "line" trimmed
+                                "bytes" (length trimmed)
                                 "error" (princ-to-string e)))
                    (return-from process-json-line
                      (%encode-json (rpc-error nil -32700 "Parse error")))))))
