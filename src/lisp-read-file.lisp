@@ -297,22 +297,23 @@ For defmethod, includes qualifiers like :before, :after, :around."
 (defun %text-filter-with-context (pathname scanner limit)
   "Return two values: filtered text and truncated flag."
   (with-open-file (in pathname :direction :input :element-type 'character)
-    (let ((lines (loop for line = (read-line in nil :eof)
-                       until (eq line :eof)
-                       collect line)))
+    (let ((lines (coerce (loop for line = (read-line in nil :eof)
+                               until (eq line :eof)
+                               collect line)
+                         'vector)))
       (let ((len (length lines))
             (context *text-context-lines*)
             (selected '())
             (seen (make-hash-table :test #'eql))
             (truncated nil))
         (loop for idx from 0 below len
-              for line in lines do
+              for line = (aref lines idx) do
                 (when (and (not truncated) (scan scanner line))
                   (loop for j from (max 0 (- idx context))
                         below (min len (+ idx context 1)) do
                           (unless (gethash j seen)
                             (setf (gethash j seen) t)
-                            (push (format nil "~4D: ~A" (1+ j) (nth j lines)) selected)
+                            (push (format nil "~4D: ~A" (1+ j) (aref lines j)) selected)
                             (when (and limit (>= (length selected) limit))
                               (setf truncated t)
                               (return))))))
