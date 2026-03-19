@@ -128,11 +128,13 @@ indicating how many additional characters past CH were consumed."
 (defun %scan-parens (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column."
-  (let ((state (make-scan-state)))
-    (loop for idx from 0 below (length text)
+  (let ((state (make-scan-state))
+        (len (length text))
+        (idx 0))
+    (loop while (< idx len)
           for ch = (char text idx)
-          for next = (and (< (1+ idx) (length text))
-                          (char text (1+ idx))) do
+          for next = (and (< (1+ idx) len) (char text (1+ idx)))
+          do
             (cond
               ((scan-state-line-comment state)
                (%scan-handle-line-comment state ch))
@@ -151,7 +153,8 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                    (let ((n (if (integerp consumed) consumed 1)))
                      (incf idx n)
                      (incf (scan-state-col state) n))))))
-            (%scan-advance-position state ch))
+            (%scan-advance-position state ch)
+            (incf idx))
     (when (plusp (scan-state-block-depth state))
       (let* ((open-pos  (scan-state-block-open-pos state))
              (local-pos (- open-pos base-offset))
