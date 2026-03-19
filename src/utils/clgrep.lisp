@@ -497,56 +497,132 @@
                (incf current-line)))
     current-package))
 
-(defun search-in-file (filepath pattern &key case-insensitive form-types (include-form t))
+(defun %build-package-map (content)
+  "Build a sorted alist of (line-number . package-name) from in-package forms.
+Pre-computes the package context for the entire file in a single pass."
+  (let ((map nil)
+        (current-line 1))
+    (with-input-from-string (stream content)
+      (loop for line = (read-line stream nil nil)
+            while line
+            do (let ((trimmed (string-trim '(#\Space #\Tab) line)))
+                 (unless (and (> (length trimmed) 0) (char= (char trimmed 0) #\;))
+                   (multiple-value-bind (match groups)
+                       (cl-ppcre:scan-to-strings
+                        "^\\(in-package\\s+[:#]?['\"]?([^)\\s'\"]+)" trimmed)
+                     (when match
+                       (push (cons current-line
+                                   (string-upcase
+                                    (string-left-trim ":#" (aref groups 0))))
+                             map)))))
+               (incf current-line)))
+    (nreverse map)))
+
+(defun %find-package-for-line (package-map line-number)
+  "Find the active package at LINE-NUMBER using the pre-built PACKAGE-MAP.
+Returns the package name string or NIL."
+  (let ((result nil))
+    (dolist (entry package-map)
+      (if (<= (car entry) line-number)
+          (setf result (cdr entry))
+          (return)))
+    result))
+
+(defun %find-form-for-line (forms-cache content target-line-number
+                            &optional (context-lines 5))
+  "Find the toplevel form containing TARGET-LINE-NUMBER from pre-computed FORMS-CACHE.
+Returns an alist like extract-toplevel-form, or NIL."
+  (dolist (form forms-cache)
+    (when (and (>= target-line-number (toplevel-form-start-line form))
+               (<= target-line-number (toplevel-form-end-line form)))
+      (let ((form-text (subseq content
+                               (toplevel-form-start-pos form)
+                               (toplevel-form-end-pos form))))
+        (return-from %find-form-for-line
+          (list (cons :text (truncate-form form-text target-line-number
+                                           (toplevel-form-start-line form)
+                                           context-lines))
+                (cons :start-line (toplevel-form-start-line form))
+                (cons :end-line (toplevel-form-end-line form))
+                (cons :start-byte (toplevel-form-start-pos form))
+                (cons :end-byte (toplevel-form-end-pos form)))))))
+  nil)
+
+(defun search-in-file
+       (filepath pattern &key case-insensitive form-types (include-form t))
   "Search for PATTERN in FILEPATH and return a list of match results.
    If CASE-INSENSITIVE is true, perform case-insensitive matching.
    If FORM-TYPES is a list of strings (e.g., '(\"defun\" \"defmethod\")),
    only include results where the form type matches.
    If INCLUDE-FORM is NIL, omit the :form field from results (saves tokens).
-   Each result is an alist with file, line, match, package, signature, and optionally form."
+   Each result is an alist with file, line, match, package, signature, and optionally form.
+
+   Pre-computes toplevel form map and package map once per file for O(n)
+   performance instead of O(n*m) where m is the number of matches."
   (let ((results nil))
     (handler-case
-        (let ((content (uiop:read-file-string filepath))
-               (scanner (if case-insensitive
-                            (cl-ppcre:create-scanner pattern :case-insensitive-mode t)
-                            pattern)))
-          (with-input-from-string (stream content)
-            (loop for line = (read-line stream nil nil)
-                  for line-number from 1
-                  while line
-                  when (cl-ppcre:scan scanner line)
-                  do (let ((package (extract-package-for-line content line-number))
-                           (form-info (extract-toplevel-form content line-number)))
-                       (when form-info
-                         (let* ((full-form-text (subseq content
-                                                        (cdr (assoc :start-byte form-info))
-                                                        (cdr (assoc :end-byte form-info))))
-                                (type-info (extract-form-type-and-name full-form-text))
-                                (form-type (cdr (assoc :type type-info)))
-                                (form-name (cdr (assoc :name type-info)))
-                                (signature (extract-form-signature full-form-text)))
-                           ;; Apply form-type filter if specified
-                           (when (or (null form-types)
-                                     (member form-type form-types :test #'string-equal))
-                             (let ((result (list (cons :file (namestring filepath))
-                                                 (cons :line line-number)
-                                                 (cons :match line)
-                                                 (cons :package (or package "UNKNOWN"))
-                                                 (cons :form-type form-type)
-                                                 (cons :form-name form-name)
-                                                 (cons :signature signature)
-                                                 (cons :form-start-line (cdr (assoc :start-line form-info)))
-                                                 (cons :form-end-line (cdr (assoc :end-line form-info)))
-                                                 (cons :form-start-byte (cdr (assoc :start-byte form-info)))
-                                                 (cons :form-end-byte (cdr (assoc :end-byte form-info))))))
-                               ;; Conditionally add :form
-                               (when include-form
-                                 (setf result (append result
-                                                      (list (cons :form (cdr (assoc :text form-info)))))))
-                               (push result results)))))))))
-      (error (condition)
-        (format *error-output* "Warning: Could not read ~A: ~A~%"
-                filepath condition)))
+     (let ((content (uiop/stream:read-file-string filepath))
+           (scanner
+            (if case-insensitive
+                (cl-ppcre:create-scanner pattern :case-insensitive-mode t)
+                pattern)))
+       ;; Pre-compute caches once per file (avoids O(n*m) re-scanning)
+       (let ((forms-cache (scan-toplevel-forms content))
+             (package-map (%build-package-map content)))
+         (with-input-from-string (stream content)
+           (loop for line = (read-line stream nil nil)
+                 for line-number from 1
+                 while line
+                 when (scan scanner line)
+                 do (let ((package (%find-package-for-line package-map line-number))
+                          (form-info (%find-form-for-line
+                                      forms-cache content line-number)))
+                      (when form-info
+                        (let* ((full-form-text
+                                (subseq content
+                                        (cdr (assoc :start-byte form-info))
+                                        (cdr (assoc :end-byte form-info))))
+                               (type-info
+                                (extract-form-type-and-name full-form-text))
+                               (form-type (cdr (assoc :type type-info)))
+                               (form-name (cdr (assoc :name type-info)))
+                               (signature
+                                (extract-form-signature full-form-text)))
+                          (when
+                              (or (null form-types)
+                                  (member form-type form-types :test
+                                          #'string-equal))
+                            (let ((result
+                                   (list (cons :file (namestring filepath))
+                                         (cons :line line-number)
+                                         (cons :match line)
+                                         (cons :package (or package "UNKNOWN"))
+                                         (cons :form-type form-type)
+                                         (cons :form-name form-name)
+                                         (cons :signature signature)
+                                         (cons :form-start-line
+                                               (cdr
+                                                (assoc :start-line form-info)))
+                                         (cons :form-end-line
+                                               (cdr (assoc :end-line form-info)))
+                                         (cons :form-start-byte
+                                               (cdr
+                                                (assoc :start-byte form-info)))
+                                         (cons :form-end-byte
+                                               (cdr
+                                                (assoc :end-byte form-info))))))
+                              (when include-form
+                                (setf result
+                                        (append result
+                                                (list
+                                                 (cons :form
+                                                       (cdr
+                                                        (assoc :text
+                                                               form-info)))))))
+                              (push result results))))))))))
+     (error (condition)
+            (format *error-output* "Warning: Could not read ~A: ~A~%" filepath
+                    condition)))
     (nreverse results)))
 
 (defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t) limit)
