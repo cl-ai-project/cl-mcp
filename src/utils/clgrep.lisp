@@ -603,9 +603,8 @@
                 (return))
               (push result all-results)
               (incf count))
-            ;; Without limit: add all results
-            (setf all-results (append all-results file-results)))))
-    (if limit
-        (nreverse all-results)
-        all-results)))
+            ;; Without limit: collect via push (O(n) instead of O(n^2) append)
+            (dolist (result file-results)
+              (push result all-results)))))
+    (nreverse all-results)))
 
