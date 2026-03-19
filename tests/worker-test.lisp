@@ -380,7 +380,7 @@ Cleans up server and socket on exit."
   (testing "worker/set-project-root updates *project-root*"
     (with-handler-server (stream)
       (let ((params (make-hash-table :test 'equal)))
-        (setf (gethash "path" params) "/tmp")
+        (setf (gethash "path" params) "/var/tmp")
         (let* ((response (%send-and-receive stream 300 "worker/set-project-root" params))
                (result (%result-of response)))
           (ok result "response has result")
@@ -832,9 +832,9 @@ Cleans up server and socket on exit."
                           stream 400 "worker/set-project-root" params))
                (err (gethash "error" response)))
           (ok err "response has error for filesystem root")
-          (ok (search "filesystem root"
+          (ok (search "too broad"
                       (gethash "message" err))
-              "error mentions filesystem root"))))))
+              "error mentions too broad"))))))
 
 (deftest handshake-output-uses-nil-not-keyword-null
   (testing "handshake JSON uses nil (not :null) for absent swank_port — works on all YASON versions"

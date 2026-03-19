@@ -919,7 +919,7 @@ in the cleanup form regardless of success or failure."
         (ok w1 "first worker assigned")
         (ok w2 "second worker assigned")
         ;; Broadcast /tmp as the new root
-        (broadcast-root-to-workers "/tmp")
+        (broadcast-root-to-workers "/var/tmp")
         ;; Verify each worker got the update by evaluating *project-root*
         (let ((params (make-hash-table :test 'equal)))
           (setf (gethash "code" params)
@@ -932,8 +932,8 @@ in the cleanup form regardless of success or failure."
                    (text (when (and (vectorp content)
                                     (plusp (length content)))
                            (gethash "text" (aref content 0)))))
-              (ok (and (stringp text) (search "/tmp" text))
-                  (format nil "worker ~A root contains /tmp"
+              (ok (and (stringp text) (search "/var/tmp" text))
+                  (format nil "worker ~A root contains /var/tmp"
                           (worker-id w))))))))))
 
 ;;; ---------------------------------------------------------------------------
