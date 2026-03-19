@@ -62,103 +62,88 @@
 
 (defun scan-toplevel-forms (content)
   "Scan CONTENT and return a list of TOPLEVEL-FORM structs.
-   Handles strings, comments, character literals, and escape sequences correctly."
+   Handles strings, comments, character literals, nested block comments,
+   and escape sequences correctly."
   (let ((forms nil)
         (state :normal)
         (paren-depth 0)
+        (block-comment-depth 0)
         (current-line 1)
         (form-start-pos nil)
         (form-start-line nil)
         (pos 0)
         (len (length content)))
-
     (loop while (< pos len)
           for char = (char content pos)
           do (case state
                (:normal
                 (cond
-                  ;; Character literal #\x - skip the next character
-                  ((and (char= char #\#)
-                        (< (1+ pos) len)
-                        (char= (char content (1+ pos)) #\\))
-                   ;; Skip #\ and the following character
-                   (incf pos 2)
-                   (when (< pos len)
-                     (when (char= (char content pos) #\Newline)
-                       (incf current-line))
-                     (incf pos))
-                   ;; Continue to next iteration without incrementing pos again
-                   (decf pos))
-
-                  ;; String literal starts
-                  ((char= char #\")
-                   (setf state :string))
-
-                  ;; Line comment starts
-                  ((char= char #\;)
-                   (setf state :comment))
-
-                  ;; Block comment starts #|
-                  ((and (char= char #\#)
-                        (< (1+ pos) len)
-                        (char= (char content (1+ pos)) #\|))
-                   (setf state :block-comment)
-                   (incf pos))
-
-                  ;; Opening paren
-                  ((char= char #\()
-                   (when (zerop paren-depth)
-                     (setf form-start-pos pos
-                           form-start-line current-line))
-                   (incf paren-depth))
-
-                  ;; Closing paren
-                  ((char= char #\))
-                   (when (plusp paren-depth)
-                     (decf paren-depth)
-                     (when (zerop paren-depth)
-                       (push (make-toplevel-form
-                              :start-pos form-start-pos
-                              :end-pos (1+ pos)
-                              :start-line form-start-line
-                              :end-line current-line)
-                             forms)
-                       (setf form-start-pos nil
-                             form-start-line nil))))))
-
+                 ;; Character literal #\x
+                 ((and (char= char #\#)
+                       (< (1+ pos) len)
+                       (char= (char content (1+ pos)) #\\))
+                  (incf pos 2)
+                  (when (< pos len)
+                    (when (char= (char content pos) #\Newline)
+                      (incf current-line))
+                    (incf pos))
+                  (decf pos))
+                 ;; String start
+                 ((char= char #\") (setf state :string))
+                 ;; Line comment
+                 ((char= char #\;) (setf state :comment))
+                 ;; Block comment start #|
+                 ((and (char= char #\#)
+                       (< (1+ pos) len)
+                       (char= (char content (1+ pos)) #\|))
+                  (setf state :block-comment)
+                  (setf block-comment-depth 1)
+                  (incf pos))
+                 ;; Open paren
+                 ((char= char #\()
+                  (when (zerop paren-depth)
+                    (setf form-start-pos pos
+                          form-start-line current-line))
+                  (incf paren-depth))
+                 ;; Close paren
+                 ((char= char #\))
+                  (when (plusp paren-depth)
+                    (decf paren-depth)
+                    (when (zerop paren-depth)
+                      (push
+                       (make-toplevel-form :start-pos form-start-pos
+                                           :end-pos (1+ pos)
+                                           :start-line form-start-line
+                                           :end-line current-line)
+                       forms)
+                      (setf form-start-pos nil
+                            form-start-line nil))))))
                (:string
                 (cond
-                  ;; Escape sequence in string
-                  ((char= char #\\)
-                   (setf state :escape))
-
-                  ;; String literal ends
-                  ((char= char #\")
-                   (setf state :normal))))
-
-               (:escape
-                ;; After escape, return to string
-                (setf state :string))
-
+                 ((char= char #\\) (setf state :escape))
+                 ((char= char #\") (setf state :normal))))
+               (:escape (setf state :string))
                (:comment
-                ;; Comment ends at newline
-                (when (char= char #\Newline)
-                  (setf state :normal)))
-
+                (when (char= char #\Newline) (setf state :normal)))
                (:block-comment
-                ;; Block comment ends with |#
-                (when (and (char= char #\|)
-                           (< (1+ pos) len)
-                           (char= (char content (1+ pos)) #\#))
-                  (setf state :normal)
-                  (incf pos))))
-
-             ;; Track line numbers
+                (cond
+                 ;; Nested block comment start #|
+                 ((and (char= char #\#)
+                       (< (1+ pos) len)
+                       (char= (char content (1+ pos)) #\|))
+                  (incf block-comment-depth)
+                  (incf pos))
+                 ;; Block comment end |#
+                 ((and (char= char #\|)
+                       (< (1+ pos) len)
+                       (char= (char content (1+ pos)) #\#))
+                  (decf block-comment-depth)
+                  (when (zerop block-comment-depth)
+                    (setf state :normal))
+                  (incf pos)))))
              (when (char= char #\Newline)
                (incf current-line))
-
              (incf pos))
-
     (nreverse forms)))
 
 (defun split-lines (text)
