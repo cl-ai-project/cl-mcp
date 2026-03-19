@@ -62,9 +62,18 @@ Examples:
                                    "timeout_seconds" timeout-seconds))
     (let ((effective-timeout (or timeout-seconds 300)))
       (let ((test-result
-              (sb-ext:with-timeout effective-timeout
-                (run-tests system
-                           :framework framework
-                           :test test
-                           :tests tests))))
+              (handler-case
+                  (sb-ext:with-timeout effective-timeout
+                    (run-tests system
+                               :framework framework
+                               :test test
+                               :tests tests))
+                (sb-ext:timeout ()
+                  (make-ht "passed" 0
+                           "failed" 1
+                           "framework" "timeout"
+                           "duration_ms" (round (* effective-timeout 1000))
+                           "failed_tests" (vector
+                                           (make-ht "test_name" "TIMEOUT"
+                                                    "reason" (format nil "Tests timed out after ~A seconds" effective-timeout))))))))
         (result id (build-run-tests-response test-result))))))

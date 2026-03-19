@@ -141,8 +141,13 @@ result_preview, and error_context."
                                  (sb-ext:with-timeout timeout
                                    (do-run))
                                (sb-ext:timeout ()
-                                 (make-ht "error" t
-                                          "message" (format nil "Tests timed out after ~A seconds" timeout))))
+                                 (make-ht "passed" 0
+                                          "failed" 1
+                                          "framework" "timeout"
+                                          "duration_ms" (round (* timeout 1000))
+                                          "failed_tests" (vector
+                                                          (make-ht "test_name" "TIMEOUT"
+                                                                   "reason" (format nil "Tests timed out after ~A seconds" timeout))))))
                              (do-run))))
         (build-run-tests-response test-result)))))
 

@@ -101,9 +101,26 @@ cyclic or extremely large structures."
                       (%sanitize-for-encoding (aref obj i) (1+ depth))))
        result))
     (cons
-     (loop for elt in obj
-           for i below +sanitize-max-elements+
-           collect (%sanitize-for-encoding elt (1+ depth))))
+     ;; Manual CDR-walk: handles dotted pairs and detects circular CDR chains.
+     (let ((seen (make-hash-table :test #'eq))
+           (result nil)
+           (tail obj)
+           (count 0))
+       (loop
+         (when (>= count +sanitize-max-elements+) (return))
+         (when (null tail) (return))
+         (unless (consp tail)
+           ;; Dotted tail — sanitize the atom and stop
+           (push (%sanitize-for-encoding tail (1+ depth)) result)
+           (return))
+         (when (gethash tail seen)
+           ;; Circular CDR chain detected — stop
+           (return))
+         (setf (gethash tail seen) t)
+         (push (%sanitize-for-encoding (car tail) (1+ depth)) result)
+         (setf tail (cdr tail))
+         (incf count))
+       (nreverse result)))
     (t (cond
          ((or (numberp obj) (eq obj t) (null obj)) obj)
          (t (or (ignore-errors (princ-to-string obj))
@@ -355,4 +372,10 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                          "id" id
                          "method" method
                          "error" (princ-to-string e)))
-            (%encode-json (rpc-error id -32603 "Internal error"))))))))
+            ;; Coerce id to a JSON-RPC-safe type before building error
+            ;; response. Non-standard id types (float, boolean, array)
+            ;; would cause a cascading TYPE-ERROR in rpc-error.
+            (let ((safe-id (typecase id
+                             ((or null string integer) id)
+                             (t nil))))
+              (%encode-json (rpc-error safe-id -32603 "Internal error")))))))))

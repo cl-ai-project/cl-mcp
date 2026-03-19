@@ -131,7 +131,9 @@ successfully started, or NIL if the start attempt failed."
     (when *tcp-listener*
       (ignore-errors (usocket:socket-close *tcp-listener*)))
     (when *tcp-server-thread*
-      (bordeaux-threads:join-thread *tcp-server-thread*)
+      (handler-case
+          (bordeaux-threads:join-thread *tcp-server-thread*)
+        (error () nil))
       (when (bordeaux-threads:thread-alive-p *tcp-server-thread*)
         ;; Fall back to destroy-thread if it refused to stop.
         (bordeaux-threads:destroy-thread *tcp-server-thread*)))
