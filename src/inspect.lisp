@@ -98,36 +98,45 @@ Returns either a primitive value representation, an object-ref, or a circular-re
 
 ;;; Type-specific inspection functions
 
-(defun %inspect-cons (object seen-table active-table depth max-depth max-elements)
-  "Inspect a cons/list."
-  (let ((elements '())
+(defun %inspect-cons
+       (object seen-table active-table depth max-depth max-elements)
+  "Inspect a cons/list.  Detects circular CDR chains to prevent infinite loops."
+  (let ((elements nil)
         (count 0)
         (truncated nil)
-        (current object))
-    ;; Handle proper lists and dotted lists
+        (current object)
+        (cdr-seen (make-hash-table :test #'eq)))
+    (setf (gethash object cdr-seen) t)
     (loop while (consp current)
           do (if (>= count max-elements)
-                 (progn (setf truncated t)
-                        (return))
+                 (progn (setf truncated t) (return))
                  (progn
-                   (push (%value-repr (car current) seen-table active-table
-                                      depth max-depth max-elements)
-                         elements)
-                   (incf count)
-                   (setf current (cdr current)))))
-    ;; Handle dotted list tail
+                  (push
+                   (%value-repr (car current) seen-table active-table depth
+                                max-depth max-elements)
+                   elements)
+                  (incf count)
+                  (setf current (cdr current))
+                  (when (and (consp current) (gethash current cdr-seen))
+                    (setf truncated t)
+                    (return))
+                  (when (consp current)
+                    (setf (gethash current cdr-seen) t)))))
     (when (and current (not truncated))
-      (push (make-ht "kind" "dotted-tail"
-                     "value" (%value-repr current seen-table active-table
-                                          depth max-depth max-elements))
-            elements))
-    (let ((ht (make-ht "kind" "list"
-                       "summary" (safe-prin1 object)
-                       "elements" (nreverse elements))))
+      (push
+       (make-ht "kind" "dotted-tail" "value"
+                (%value-repr current seen-table active-table depth max-depth
+                             max-elements))
+       elements))
+    (let ((ht
+           (make-ht "kind" "list" "summary" (safe-prin1 object) "elements"
+                    (nreverse elements))))
       (setf (gethash "meta" ht)
-            (make-ht "length" (if truncated (format nil ">~A" max-elements) count)
-                     "truncated" truncated
-                     "max_elements" max-elements))
+              (make-ht "length"
+                       (if truncated
+                           (format nil ">~A" max-elements)
+                           count)
+                       "truncated" truncated "max_elements" max-elements))
       ht)))
 
 (defun %inspect-vector (object seen-table active-table depth max-depth max-elements)
