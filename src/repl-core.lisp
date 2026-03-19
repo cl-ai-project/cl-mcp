@@ -253,6 +253,15 @@ the result as success -- completed work is never discarded as a timeout."
            (values-list result-box))
           (t
            (ignore-errors (bordeaux-threads:destroy-thread worker))
+           ;; Verify thread actually died; log if it leaked
+           (loop repeat 20
+                 while (bordeaux-threads:thread-alive-p worker)
+                 do (sleep 0.05d0))
+           (when (bordeaux-threads:thread-alive-p worker)
+             (ignore-errors
+              (cl-mcp/src/log:log-event :warn "repl.timeout.thread-leaked"
+                                        "name" "mcp-repl-eval"
+                                        "timeout" timeout-seconds)))
            (values
             (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
             :timeout "" "" nil))))
