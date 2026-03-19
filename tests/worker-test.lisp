@@ -904,3 +904,30 @@ Cleans up server and socket on exit."
                (ok (not stale)
                    "inherited MCP_PARENT_PID=99999 is stripped from env")))
         (%restore-env "MCP_PARENT_PID" prev)))))
+
+(deftest worker-build-env-uses-allowlist
+  (testing "%build-environment only includes allowlisted env vars, not secrets"
+    (let ((prev-fake (uiop/os:getenv "FAKE_API_KEY_FOR_TEST")))
+      (unwind-protect
+          (progn
+            (setf (uiop/os:getenv "FAKE_API_KEY_FOR_TEST") "super-secret-123")
+            (let ((env (cl-mcp/src/worker-client::%build-environment "sec" "id1")))
+              ;; MCP vars should be present
+              (ok (find-if (lambda (s) (search "MCP_WORKER_SECRET=sec" s)) env)
+                  "MCP_WORKER_SECRET is set")
+              (ok (find-if (lambda (s) (search "MCP_WORKER_ID=id1" s)) env)
+                  "MCP_WORKER_ID is set")
+              (ok (find-if (lambda (s) (search "MCP_NO_WORKER_POOL=1" s)) env)
+                  "MCP_NO_WORKER_POOL is set")
+              ;; PATH should be present (allowlisted)
+              (ok (find-if (lambda (s)
+                             (and (>= (length s) 5)
+                                  (string= "PATH=" s :end2 5)))
+                           env)
+                  "PATH is inherited (allowlisted)")
+              ;; Fake API key should NOT be present
+              (ok (not (find-if (lambda (s)
+                                  (search "FAKE_API_KEY_FOR_TEST" s))
+                                env))
+                  "Non-allowlisted env var is excluded")))
+        (%restore-env "FAKE_API_KEY_FOR_TEST" prev-fake)))))

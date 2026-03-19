@@ -169,37 +169,37 @@ Handles both LF and CRLF line endings."
 ;;; Internal helpers — environment
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *worker-env-allowlist*
+  '("PATH" "HOME" "USER" "LANG" "TERM" "SHELL" "DISPLAY"
+    "SBCL_HOME" "CL_SOURCE_REGISTRY" "ASDF_OUTPUT_TRANSLATIONS"
+    "QUICKLISP_HOME" "QLOT_HOME" "ROSWELL_HOME"
+    "XDG_CONFIG_HOME" "XDG_DATA_HOME" "XDG_CACHE_HOME"
+    "LD_LIBRARY_PATH" "LIBRARY_PATH" "PKG_CONFIG_PATH"
+    "TMPDIR" "TZ" "LC_ALL" "LC_CTYPE")
+  "Environment variables safe to pass to worker processes.
+Only these variables (plus MCP_* overrides) are inherited by workers.
+Sensitive variables like API keys, tokens, and credentials are excluded.")
+
 (defun %build-environment (secret id)
-  "Build an environment list for the child process.
-Inherits the parent environment, sets MCP_PROJECT_ROOT to the
-current *project-root* value, passes the shared secret for
-TCP authentication, and sets MCP_WORKER_ID for log context."
-  (let* ((current-env (sb-ext:posix-environ))
-         (filtered
-          (remove-if
-           (lambda (s)
-             (or
-              (and (>= (length s) 17) (string= "MCP_PROJECT_ROOT=" s :end2 17))
-              (and (>= (length s) 18)
-                   (string= "MCP_WORKER_SECRET=" s :end2 18))
-              (and (>= (length s) 20)
-                   (string= "MCP_NO_WORKER_POOL=" s :end2 20))
-              (and (>= (length s) 14)
-                   (string= "MCP_WORKER_ID=" s :end2 14))
-              (and (>= (length s) 13)
-                   (string= "MCP_LOG_FILE=" s :end2 13))
-              (and (>= (length s) 16)
-                   (string= "MCP_PARENT_PID=" s :end2 15))))
-           current-env)))
-    (let ((env
-           (list* (format nil "MCP_WORKER_SECRET=~A" secret)
-                  (format nil "MCP_WORKER_ID=~A" id)
-                  (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
-                  "MCP_NO_WORKER_POOL=1" filtered)))
-      (if *project-root*
-          (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
-                env)
-          env))))
+  "Build a minimal environment for worker processes using an allowlist.
+Only variables listed in *worker-env-allowlist* are inherited from the
+parent environment. MCP-specific variables are set explicitly.
+This prevents accidental leakage of API keys, tokens, and credentials."
+  (let ((env (list (format nil "MCP_WORKER_SECRET=~A" secret)
+                   (format nil "MCP_WORKER_ID=~A" id)
+                   (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
+                   "MCP_NO_WORKER_POOL=1")))
+    (when *project-root*
+      (push (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
+            env))
+    ;; Copy only allowlisted variables from parent environment
+    (dolist (entry (sb-ext:posix-environ))
+      (let ((eq-pos (position #\= entry)))
+        (when eq-pos
+          (let ((name (subseq entry 0 eq-pos)))
+            (when (member name *worker-env-allowlist* :test #'string=)
+              (push entry env))))))
+    env))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — process launch
