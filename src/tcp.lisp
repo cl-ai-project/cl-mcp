@@ -178,9 +178,16 @@ successfully started, or NIL if the start attempt failed."
                     (log-event :debug "tcp.write"
                                "conn" conn-id
                                "resp" resp)
-                    (write-line resp stream)
-                    (finish-output stream)
-                    (log-event :debug "tcp.flushed" "conn" conn-id))))))))))
+                    (handler-case
+                        (progn
+                          (write-line resp stream)
+                          (finish-output stream)
+                          (log-event :debug "tcp.flushed" "conn" conn-id))
+                      (stream-error (e)
+                        (log-event :warn "tcp.write.error"
+                                   "conn" conn-id
+                                   "error" (princ-to-string e))
+                        (return))))))))))))
 
 (defun %tcp-accept-client (listener)
   (handler-case

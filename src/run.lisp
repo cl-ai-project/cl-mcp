@@ -40,8 +40,14 @@ This is a minimal loop for E2E bring-up; full transport features come later."
                  until (eq line :eof)
                  do (let ((resp (process-json-line line state)))
                       (when resp
-                        (write-line resp out)
-                        (force-output out))))
+                        (handler-case
+                            (progn
+                              (write-line resp out)
+                              (force-output out))
+                          (stream-error (e)
+                            (log-event :warn "stdio.write.error"
+                                       "error" (princ-to-string e))
+                            (return))))))
            (log-event :info "stdio.stop")
            t)
        (when *use-worker-pool* (ignore-errors (shutdown-pool)))))
