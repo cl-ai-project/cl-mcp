@@ -8,9 +8,13 @@
 (in-package #:cl-mcp/src/parinfer)
 
 (defstruct (state (:constructor %make-state))
-  (stack nil :type list)        ; indentation levels of open forms
-  (in-string nil :type boolean) ; currently inside a string?
-  (escape nil :type boolean))   ; previous char was backslash?
+  (stack nil :type list)
+  (in-string nil :type boolean)
+  (escape nil :type boolean)
+  (sharp-seen nil :type boolean)
+  (char-literal nil :type boolean))
+
+; previous char was backslash?
 
 (defun %count-leading-spaces (line)
   (loop for ch across line
@@ -40,40 +44,59 @@
   processed-lines)
 
 (defun %process-line-characters (line state)
+  "Process characters in LINE tracking parens, strings, comments, and char literals.
+Handles #\\( and #\\) character literals so they are not counted as real parens."
   (let ((output (make-string-output-stream)))
     (loop for ch across line
           for col from 0
           do (cond
+               ;; Skip the character after #\ (it's a char literal, not a paren)
+               ((state-char-literal state)
+                (write-char ch output)
+                (setf (state-char-literal state) nil))
+               ;; Previous char was # outside string: check for \
+               ((state-sharp-seen state)
+                (write-char ch output)
+                (setf (state-sharp-seen state) nil)
+                (when (char= ch #\\)
+                  (setf (state-char-literal state) t)))
+               ;; Escape in string
                ((state-escape state)
                 (write-char ch output)
                 (setf (state-escape state) nil))
-               ((char= ch #\\)
+               ;; Backslash in string
+               ((and (state-in-string state) (char= ch #\\))
                 (write-char ch output)
                 (setf (state-escape state) t))
+               ;; String delimiter
                ((char= ch #\")
                 (write-char ch output)
-                (setf (state-in-string state)
-                      (not (state-in-string state))))
+                (setf (state-in-string state) (not (state-in-string state))))
+               ;; # outside string: set flag for next char
+               ((and (not (state-in-string state)) (char= ch #\#))
+                (write-char ch output)
+                (setf (state-sharp-seen state) t))
+               ;; Comment
                ((and (not (state-in-string state)) (char= ch #\;))
-                ;; Comment: output rest of line and stop
                 (loop for i from col below (length line)
                       do (write-char (char line i) output))
                 (return))
+               ;; Open paren (outside string)
                ((and (not (state-in-string state)) (char= ch #\())
                 (write-char ch output)
-                ;; Push the expected minimum indent for content inside this paren
-                ;; which is col + 1 (next column after the opening paren)
                 (push (1+ col) (state-stack state)))
+               ;; Close paren (outside string)
                ((and (not (state-in-string state)) (char= ch #\)))
-                ;; Only output closing paren if stack is not empty
                 (cond
                   ((state-stack state)
                    (pop (state-stack state))
                    (write-char ch output))
                   (t nil)))
-               (t
-                (write-char ch output))))
-    (setf (state-escape state) nil)
+               (t (write-char ch output))))
+    ;; Reset per-line transient flags (sharp-seen carries across chars, not lines)
+    (setf (state-escape state) nil
+          (state-sharp-seen state) nil
+          (state-char-literal state) nil)
     (get-output-stream-string output)))
 
 (defun %append-remaining-closes (state processed-lines)
