@@ -11,6 +11,8 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
+  (:import-from #:cl-mcp/src/worker-client
+                #:%read-line-limited #:+max-json-line-bytes+)
   (:import-from #:usocket)
   (:export
    #:*tcp-server-thread*
@@ -158,7 +160,7 @@ successfully started, or NIL if the start attempt failed."
              (t
               ;; Data available, proceed to read
               (let ((line (handler-case
-                              (read-line stream nil :eof)
+                              (%read-line-limited stream :eof +max-json-line-bytes+)
                             (error (e)
                               (log-event :warn "tcp.read.error"
                                          "conn" conn-id

@@ -7,6 +7,8 @@
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/pool #:initialize-pool #:shutdown-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
+  (:import-from #:cl-mcp/src/worker-client
+                #:%read-line-limited #:+max-json-line-bytes+)
   (:export #:run))
 
 (in-package #:cl-mcp/src/run)
@@ -34,7 +36,7 @@ This is a minimal loop for E2E bring-up; full transport features come later."
          (let ((state (make-state))
                (cl-mcp/src/protocol:*current-session-id* "stdio"))
            (log-event :info "stdio.start")
-           (loop for line = (read-line in nil :eof)
+           (loop for line = (%read-line-limited in :eof +max-json-line-bytes+)
                  until (eq line :eof)
                  do (let ((resp (process-json-line line state)))
                       (when resp
