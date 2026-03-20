@@ -334,7 +334,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                  (error (e)
                    (ignore-errors
                      (log-event :warn "rpc.parse-error"
-                                "bytes" (length trimmed)
+                                "line" trimmed
                                 "error" (princ-to-string e)))
                    (return-from process-json-line
                      (%encode-json (rpc-error nil -32700 "Parse error")))))))

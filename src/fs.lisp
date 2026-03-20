@@ -52,7 +52,10 @@
   "Maximum number of characters allowed for fs-read-file when LIMIT is provided.")
 
 (defun %read-file-string (pn offset limit)
-  "Read file PN honoring OFFSET and LIMIT (both may be NIL)."
+  "Read file PN honoring OFFSET and LIMIT (both may be NIL).
+Returns (VALUES content-string truncated-p file-length).
+TRUNCATED-P is T when the file was larger than the effective read cap.
+FILE-LENGTH is the total size of the file (NIL if unknown)."
   (when (and offset (< offset 0))
     (error "offset must be non-negative"))
   (when (and limit (< limit 0))
@@ -61,11 +64,14 @@
     (error "limit ~D exceeds maximum ~D" limit *fs-read-max-bytes*))
   (with-open-file (in pn :direction :input :element-type 'character)
     (when offset (file-position in offset))
-    (let* ((len (min (or limit (ignore-errors (file-length in)) *fs-read-max-bytes*)
-                      *fs-read-max-bytes*))
-           (buf (make-string len))
-           (count (read-sequence buf in :end len)))
-      (subseq buf 0 count))))
+    (let* ((raw-len (ignore-errors (file-length in)))
+           (effective (or limit raw-len *fs-read-max-bytes*))
+           (capped (min effective *fs-read-max-bytes*))
+           (buf (make-string capped))
+           (count (read-sequence buf in :end capped))
+           (text (subseq buf 0 count))
+           (truncated (and raw-len (> effective capped))))
+      (values text truncated raw-len))))
 
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
@@ -77,7 +83,7 @@ Signals an error when PATH is outside the allow-list."
 
 (defun fs-read-file (path &key offset limit)
   "Read text file PATH with optional OFFSET and LIMIT.
-Returns the content string."
+Returns (VALUES content-string truncated-p file-length)."
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
@@ -90,11 +96,12 @@ Returns the content string."
                "offset" offset
                "limit" limit
                "fd" (fd-count))
-    (let ((text (%read-file-string pn offset limit)))
+    (multiple-value-bind (text truncated file-length)
+        (%read-file-string pn offset limit)
       (log-event :debug "fs.read.close"
                  "path" (namestring pn)
                  "fd" (fd-count))
-      text)))
+      (values text truncated file-length))))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
@@ -287,13 +294,22 @@ collapsed signatures view that saves ~70% of context window tokens."
          (limit :type :integer
                 :description "Maximum characters to return; omit to read to end"))
   :body
-  (let ((content-string (fs-read-file path :offset offset :limit limit)))
-    (result id
-            (make-ht "content" (text-content content-string)
-                     "text" content-string
-                     "path" path
-                     "offset" offset
-                     "limit" limit))))
+  (multiple-value-bind (content-string truncated file-length)
+      (fs-read-file path :offset offset :limit limit)
+    (let ((ht (make-ht "content" (text-content
+                                  (if truncated
+                                      (format nil "~A~%~%[TRUNCATED: file is ~:D chars, showing first ~:D. Use offset=~D to read more.]"
+                                              content-string file-length (length content-string) (length content-string))
+                                      content-string))
+                       "text" content-string
+                       "path" path
+                       "offset" offset
+                       "limit" limit)))
+      (when truncated
+        (setf (gethash "truncated" ht) t
+              (gethash "file_length" ht) file-length
+              (gethash "read_length" ht) (length content-string)))
+      (result id ht))))
 
 (define-tool "fs-write-file"
   :description "Write text content to a file relative to project root.
