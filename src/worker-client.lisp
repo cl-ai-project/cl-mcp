@@ -17,6 +17,7 @@
   (:import-from #:cl-mcp/src/log #:log-event #:*log-stream* #:*log-lock*)
   (:import-from #:usocket)
   (:import-from #:yason)
+  (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
   (:export #:worker
            #:make-worker
            #:spawn-worker
@@ -448,13 +449,8 @@ can clean it up."
                    :name (format nil "worker-stderr-~A" wid))))))))
 
 (defun %generate-worker-secret ()
-  "Generate a random shared secret for worker TCP authentication.
-Reads 32 bytes from /dev/urandom and returns them as a 64-character
-lowercase hex string."
-  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
-    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
-      (read-sequence buf s)
-      (format nil "~{~(~2,'0x~)~}" (coerce buf 'list)))))
+  "Generate a random shared secret for worker TCP authentication."
+  (generate-random-hex-string 32))
 
 (defun spawn-worker ()
   "Launch a worker child process and return a WORKER struct.
