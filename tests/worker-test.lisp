@@ -905,8 +905,8 @@ Cleans up server and socket on exit."
                    "inherited MCP_PARENT_PID=99999 is stripped from env")))
         (%restore-env "MCP_PARENT_PID" prev)))))
 
-(deftest worker-build-env-uses-allowlist
-  (testing "%build-environment only includes allowlisted env vars, not secrets"
+(deftest worker-build-env-inherits-parent-env
+  (testing "%build-environment inherits parent env vars (local-only tool)"
     (let ((prev-fake (uiop/os:getenv "FAKE_API_KEY_FOR_TEST")))
       (unwind-protect
           (progn
@@ -919,15 +919,20 @@ Cleans up server and socket on exit."
                   "MCP_WORKER_ID is set")
               (ok (find-if (lambda (s) (search "MCP_NO_WORKER_POOL=1" s)) env)
                   "MCP_NO_WORKER_POOL is set")
-              ;; PATH should be present (allowlisted)
+              ;; PATH should be present (inherited)
               (ok (find-if (lambda (s)
                              (and (>= (length s) 5)
                                   (string= "PATH=" s :end2 5)))
                            env)
-                  "PATH is inherited (allowlisted)")
-              ;; Fake API key should NOT be present
+                  "PATH is inherited")
+              ;; Parent env vars ARE inherited (this is a local-only tool)
+              (ok (find-if (lambda (s)
+                              (search "FAKE_API_KEY_FOR_TEST" s))
+                            env)
+                  "Parent env var is inherited (local-only tool)")
+              ;; Denylisted vars should NOT appear as inherited duplicates
               (ok (not (find-if (lambda (s)
-                                  (search "FAKE_API_KEY_FOR_TEST" s))
+                                  (search "MCP_LOG_FILE=" s))
                                 env))
-                  "Non-allowlisted env var is excluded")))
+                  "MCP_LOG_FILE is excluded (denylisted)")))
         (%restore-env "FAKE_API_KEY_FOR_TEST" prev-fake)))))

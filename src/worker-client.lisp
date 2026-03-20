@@ -169,22 +169,17 @@ Handles both LF and CRLF line endings."
 ;;; Internal helpers — environment
 ;;; ---------------------------------------------------------------------------
 
-(defparameter *worker-env-allowlist*
-  '("PATH" "HOME" "USER" "LANG" "TERM" "SHELL" "DISPLAY"
-    "SBCL_HOME" "CL_SOURCE_REGISTRY" "ASDF_OUTPUT_TRANSLATIONS"
-    "QUICKLISP_HOME" "QLOT_HOME" "ROSWELL_HOME"
-    "XDG_CONFIG_HOME" "XDG_DATA_HOME" "XDG_CACHE_HOME"
-    "LD_LIBRARY_PATH" "LIBRARY_PATH" "PKG_CONFIG_PATH"
-    "TMPDIR" "TZ" "LC_ALL" "LC_CTYPE")
-  "Environment variables safe to pass to worker processes.
-Only these variables (plus MCP_* overrides) are inherited by workers.
-Sensitive variables like API keys, tokens, and credentials are excluded.")
+(defparameter *worker-env-denylist*
+  '("MCP_WORKER_SECRET" "MCP_WORKER_ID" "MCP_PARENT_PID" "MCP_LOG_FILE")
+  "Environment variables that must NOT be inherited from the parent.
+MCP_WORKER_SECRET/ID/PARENT_PID are set explicitly per-worker.
+MCP_LOG_FILE is excluded so workers don't write to the parent's log file.")
 
 (defun %build-environment (secret id)
-  "Build a minimal environment for worker processes using an allowlist.
-Only variables listed in *worker-env-allowlist* are inherited from the
-parent environment. MCP-specific variables are set explicitly.
-This prevents accidental leakage of API keys, tokens, and credentials."
+  "Build the environment for worker processes.
+Inherits the parent's full environment (this is a local-only dev tool),
+adding MCP-specific variables and excluding only those that would
+conflict with per-worker overrides."
   (let ((env (list (format nil "MCP_WORKER_SECRET=~A" secret)
                    (format nil "MCP_WORKER_ID=~A" id)
                    (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
@@ -192,12 +187,16 @@ This prevents accidental leakage of API keys, tokens, and credentials."
     (when *project-root*
       (push (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
             env))
-    ;; Copy only allowlisted variables from parent environment
+    ;; Inherit all parent environment variables except those that
+    ;; conflict with per-worker overrides set above.
     (dolist (entry (sb-ext:posix-environ))
       (let ((eq-pos (position #\= entry)))
         (when eq-pos
           (let ((name (subseq entry 0 eq-pos)))
-            (when (member name *worker-env-allowlist* :test #'string=)
+            (unless (or (member name *worker-env-denylist* :test #'string=)
+                        ;; Also skip variables we set explicitly above
+                        (string= name "MCP_NO_WORKER_POOL")
+                        (string= name "MCP_PROJECT_ROOT"))
               (push entry env))))))
     env))
 
