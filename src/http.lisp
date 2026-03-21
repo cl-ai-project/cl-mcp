@@ -11,6 +11,7 @@
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
+  (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
   (:export
    #:*http-server*
    #:*http-server-port*
@@ -65,18 +66,12 @@ to disable timeout (not recommended — leaked sessions consume
   (active-requests-lock (bordeaux-threads:make-lock "active-requests")))
 
 (defun generate-session-id ()
-  "Generate a cryptographically random session ID using /dev/urandom."
-  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
-    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
-      (read-sequence buf s)
-      (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
+  "Generate a random session ID as a 64-character hex string."
+  (generate-random-hex-string 32))
 
 (defun %generate-auth-token ()
-  "Generate a cryptographically random auth token using /dev/urandom."
-  (with-open-file (s #P"/dev/urandom" :element-type '(unsigned-byte 8))
-    (let ((buf (make-array 32 :element-type '(unsigned-byte 8))))
-      (read-sequence buf s)
-      (format nil "~{~(~2,'0X~)~}" (coerce buf 'list)))))
+  "Generate a random auth token as a 64-character hex string."
+  (generate-random-hex-string 32))
 
 (defun %check-auth ()
   "Validate the Authorization: Bearer header against *http-auth-token*.
