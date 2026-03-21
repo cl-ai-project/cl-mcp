@@ -380,7 +380,7 @@ Cleans up server and socket on exit."
   (testing "worker/set-project-root updates *project-root*"
     (with-handler-server (stream)
       (let ((params (make-hash-table :test 'equal)))
-        (setf (gethash "path" params) "/tmp")
+        (setf (gethash "path" params) "/var/tmp")
         (let* ((response (%send-and-receive stream 300 "worker/set-project-root" params))
                (result (%result-of response)))
           (ok result "response has result")
@@ -832,9 +832,9 @@ Cleans up server and socket on exit."
                           stream 400 "worker/set-project-root" params))
                (err (gethash "error" response)))
           (ok err "response has error for filesystem root")
-          (ok (search "filesystem root"
+          (ok (search "too broad"
                       (gethash "message" err))
-              "error mentions filesystem root"))))))
+              "error mentions too broad"))))))
 
 (deftest handshake-output-uses-nil-not-keyword-null
   (testing "handshake JSON uses nil (not :null) for absent swank_port — works on all YASON versions"
@@ -904,3 +904,35 @@ Cleans up server and socket on exit."
                (ok (not stale)
                    "inherited MCP_PARENT_PID=99999 is stripped from env")))
         (%restore-env "MCP_PARENT_PID" prev)))))
+
+(deftest worker-build-env-inherits-parent-env
+  (testing "%build-environment inherits parent env vars (local-only tool)"
+    (let ((prev-fake (uiop/os:getenv "FAKE_API_KEY_FOR_TEST")))
+      (unwind-protect
+          (progn
+            (setf (uiop/os:getenv "FAKE_API_KEY_FOR_TEST") "super-secret-123")
+            (let ((env (cl-mcp/src/worker-client::%build-environment "sec" "id1")))
+              ;; MCP vars should be present
+              (ok (find-if (lambda (s) (search "MCP_WORKER_SECRET=sec" s)) env)
+                  "MCP_WORKER_SECRET is set")
+              (ok (find-if (lambda (s) (search "MCP_WORKER_ID=id1" s)) env)
+                  "MCP_WORKER_ID is set")
+              (ok (find-if (lambda (s) (search "MCP_NO_WORKER_POOL=1" s)) env)
+                  "MCP_NO_WORKER_POOL is set")
+              ;; PATH should be present (inherited)
+              (ok (find-if (lambda (s)
+                             (and (>= (length s) 5)
+                                  (string= "PATH=" s :end2 5)))
+                           env)
+                  "PATH is inherited")
+              ;; Parent env vars ARE inherited (this is a local-only tool)
+              (ok (find-if (lambda (s)
+                              (search "FAKE_API_KEY_FOR_TEST" s))
+                            env)
+                  "Parent env var is inherited (local-only tool)")
+              ;; Denylisted vars should NOT appear as inherited duplicates
+              (ok (not (find-if (lambda (s)
+                                  (search "MCP_LOG_FILE=" s))
+                                env))
+                  "MCP_LOG_FILE is excluded (denylisted)")))
+        (%restore-env "FAKE_API_KEY_FOR_TEST" prev-fake)))))

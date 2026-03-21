@@ -40,6 +40,7 @@
            #:worker-spawn-failed
            #:+max-json-line-bytes+
            #:%read-line-limited
+           #:line-too-long
            #:worker-crash-history-pushed-p
            #:*reaper-threads*
            #:*reaper-threads-lock*
@@ -105,6 +106,14 @@ Each thread terminates and self-removes after reaping its process.")
 Distinct from protocol errors (parse failure, ID mismatch) which
 indicate stream corruption and require marking the worker crashed."))
 
+(define-condition line-too-long (error)
+  ((limit :initarg :limit :reader line-too-long-limit))
+  (:report (lambda (c s)
+             (format s "JSON-RPC line exceeds ~D byte limit"
+                     (line-too-long-limit c))))
+  (:documentation "Signaled by %READ-LINE-LIMITED when input exceeds the byte limit.
+Allows callers to distinguish size-limit violations from other I/O errors."))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Message size limit
 ;;; ---------------------------------------------------------------------------
@@ -133,7 +142,7 @@ Handles both LF and CRLF line endings."
               (t
                (incf count)
                (when (> count limit)
-                 (error "JSON-RPC line exceeds ~D byte limit" limit))
+                 (error 'line-too-long :limit limit))
                (vector-push-extend ch buf)))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -170,37 +179,36 @@ Handles both LF and CRLF line endings."
 ;;; Internal helpers — environment
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *worker-env-denylist*
+  '("MCP_WORKER_SECRET" "MCP_WORKER_ID" "MCP_PARENT_PID" "MCP_LOG_FILE")
+  "Environment variables that must NOT be inherited from the parent.
+MCP_WORKER_SECRET/ID/PARENT_PID are set explicitly per-worker.
+MCP_LOG_FILE is excluded so workers don't write to the parent's log file.")
+
 (defun %build-environment (secret id)
-  "Build an environment list for the child process.
-Inherits the parent environment, sets MCP_PROJECT_ROOT to the
-current *project-root* value, passes the shared secret for
-TCP authentication, and sets MCP_WORKER_ID for log context."
-  (let* ((current-env (sb-ext:posix-environ))
-         (filtered
-          (remove-if
-           (lambda (s)
-             (or
-              (and (>= (length s) 17) (string= "MCP_PROJECT_ROOT=" s :end2 17))
-              (and (>= (length s) 18)
-                   (string= "MCP_WORKER_SECRET=" s :end2 18))
-              (and (>= (length s) 20)
-                   (string= "MCP_NO_WORKER_POOL=" s :end2 20))
-              (and (>= (length s) 14)
-                   (string= "MCP_WORKER_ID=" s :end2 14))
-              (and (>= (length s) 13)
-                   (string= "MCP_LOG_FILE=" s :end2 13))
-              (and (>= (length s) 16)
-                   (string= "MCP_PARENT_PID=" s :end2 15))))
-           current-env)))
-    (let ((env
-           (list* (format nil "MCP_WORKER_SECRET=~A" secret)
-                  (format nil "MCP_WORKER_ID=~A" id)
-                  (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
-                  "MCP_NO_WORKER_POOL=1" filtered)))
-      (if *project-root*
-          (cons (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
-                env)
-          env))))
+  "Build the environment for worker processes.
+Inherits the parent's full environment (this is a local-only dev tool),
+adding MCP-specific variables and excluding only those that would
+conflict with per-worker overrides."
+  (let ((env (list (format nil "MCP_WORKER_SECRET=~A" secret)
+                   (format nil "MCP_WORKER_ID=~A" id)
+                   (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
+                   "MCP_NO_WORKER_POOL=1")))
+    (when *project-root*
+      (push (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
+            env))
+    ;; Inherit all parent environment variables except those that
+    ;; conflict with per-worker overrides set above.
+    (dolist (entry (sb-ext:posix-environ))
+      (let ((eq-pos (position #\= entry)))
+        (when eq-pos
+          (let ((name (subseq entry 0 eq-pos)))
+            (unless (or (member name *worker-env-denylist* :test #'string=)
+                        ;; Also skip variables we set explicitly above
+                        (string= name "MCP_NO_WORKER_POOL")
+                        (string= name "MCP_PROJECT_ROOT"))
+              (push entry env))))))
+    env))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — process launch

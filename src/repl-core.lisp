@@ -28,12 +28,14 @@ Prevents unbounded output from consuming excessive memory or bandwidth.")
 (declaim (inline %read-all))
 
 (defun %read-all (string allow-read-eval)
-  "Read all top-level forms from STRING and return them as a list."
+  "Read all top-level forms from STRING and return them as a list.
+Uses a gensym sentinel to avoid collision with user input of :eof."
   (let ((*readtable* (copy-readtable))
-        (*read-eval* allow-read-eval))
+        (*read-eval* allow-read-eval)
+        (eof-sentinel (gensym "EOF")))
     (with-input-from-string (in string)
-      (loop for form = (read in nil :eof)
-            until (eq form :eof)
+      (loop for form = (read in nil eof-sentinel)
+            until (eq form eof-sentinel)
             collect form))))
 
 (declaim (ftype (function (string
@@ -251,6 +253,15 @@ the result as success -- completed work is never discarded as a timeout."
            (values-list result-box))
           (t
            (ignore-errors (bordeaux-threads:destroy-thread worker))
+           ;; Verify thread actually died; log if it leaked
+           (loop repeat 20
+                 while (bordeaux-threads:thread-alive-p worker)
+                 do (sleep 0.05d0))
+           (when (bordeaux-threads:thread-alive-p worker)
+             (ignore-errors
+              (cl-mcp/src/log:log-event :warn "repl.timeout.thread-leaked"
+                                        "name" "mcp-repl-eval"
+                                        "timeout" timeout-seconds)))
            (values
             (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
             :timeout "" "" nil))))

@@ -11,6 +11,9 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
+  (:import-from #:cl-mcp/src/worker-client
+                #:%read-line-limited #:+max-json-line-bytes+
+                #:line-too-long)
   (:import-from #:usocket)
   (:export
    #:*tcp-server-thread*
@@ -129,7 +132,9 @@ successfully started, or NIL if the start attempt failed."
     (when *tcp-listener*
       (ignore-errors (usocket:socket-close *tcp-listener*)))
     (when *tcp-server-thread*
-      (bordeaux-threads:join-thread *tcp-server-thread*)
+      (handler-case
+          (bordeaux-threads:join-thread *tcp-server-thread*)
+        (error () nil))
       (when (bordeaux-threads:thread-alive-p *tcp-server-thread*)
         ;; Fall back to destroy-thread if it refused to stop.
         (bordeaux-threads:destroy-thread *tcp-server-thread*)))
@@ -158,27 +163,53 @@ successfully started, or NIL if the start attempt failed."
              (t
               ;; Data available, proceed to read
               (let ((line (handler-case
-                              (read-line stream nil :eof)
-                            (error (e)
-                              (log-event :warn "tcp.read.error"
+                              (%read-line-limited stream :eof +max-json-line-bytes+)
+                            (line-too-long (e)
+                              (log-event :warn "tcp.read.line-too-long"
                                          "conn" conn-id
                                          "error" (princ-to-string e))
-                              :eof))))
-                (when (eq line :eof)
-                  (log-event :info "tcp.read.eof" "conn" conn-id)
-                  (return))
-                (log-event :debug "tcp.read" "conn" conn-id "line" line)
-                (let ((resp (process-json-line line state)))
-                  (log-event :debug "tcp.response"
-                             "conn" conn-id
-                             "resp-nil" (null resp))
-                  (when resp
-                    (log-event :debug "tcp.write"
-                               "conn" conn-id
-                               "resp" resp)
-                    (write-line resp stream)
-                    (finish-output stream)
-                    (log-event :debug "tcp.flushed" "conn" conn-id))))))))))
+                              ;; Drain remaining bytes on the current line
+                              ;; so the next read starts fresh.
+                              (loop for ch = (read-char stream nil nil)
+                                    while (and ch (not (char= ch #\Newline))))
+                              :read-error))))
+                (cond
+                  ((eq line :eof)
+                   (log-event :info "tcp.read.eof" "conn" conn-id)
+                   (return))
+                  ((eq line :read-error)
+                   ;; Return JSON-RPC error and continue the connection
+                   (handler-case
+                       (progn
+                         (write-line
+                          "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
+                          stream)
+                         (finish-output stream))
+                     (stream-error (e)
+                       (log-event :warn "tcp.write.error"
+                                  "conn" conn-id
+                                  "error" (princ-to-string e))
+                       (return))))
+                  (t
+                   (log-event :debug "tcp.read" "conn" conn-id "line" line)
+                   (let ((resp (process-json-line line state)))
+                     (log-event :debug "tcp.response"
+                                "conn" conn-id
+                                "resp-nil" (null resp))
+                     (when resp
+                       (log-event :debug "tcp.write"
+                                  "conn" conn-id
+                                  "resp" resp)
+                       (handler-case
+                           (progn
+                             (write-line resp stream)
+                             (finish-output stream)
+                             (log-event :debug "tcp.flushed" "conn" conn-id))
+                         (stream-error (e)
+                           (log-event :warn "tcp.write.error"
+                                      "conn" conn-id
+                                      "error" (princ-to-string e))
+                           (return))))))))))))))
 
 (defun %tcp-accept-client (listener)
   (handler-case

@@ -14,7 +14,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
                 #:allowed-read-path
-                #:ensure-write-path)
+                #:ensure-write-path
+                #:broad-root-p)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
   (:import-from #:uiop
@@ -52,7 +53,10 @@
   "Maximum number of characters allowed for fs-read-file when LIMIT is provided.")
 
 (defun %read-file-string (pn offset limit)
-  "Read file PN honoring OFFSET and LIMIT (both may be NIL)."
+  "Read file PN honoring OFFSET and LIMIT (both may be NIL).
+Returns (VALUES content-string truncated-p file-length).
+TRUNCATED-P is T when the file was larger than the effective read cap.
+FILE-LENGTH is the total size of the file (NIL if unknown)."
   (when (and offset (< offset 0))
     (error "offset must be non-negative"))
   (when (and limit (< limit 0))
@@ -61,10 +65,15 @@
     (error "limit ~D exceeds maximum ~D" limit *fs-read-max-bytes*))
   (with-open-file (in pn :direction :input :element-type 'character)
     (when offset (file-position in offset))
-    (let* ((len (or limit (ignore-errors (file-length in)) *fs-read-max-bytes*))
-           (buf (make-string len))
-           (count (read-sequence buf in :end len)))
-      (subseq buf 0 count))))
+    (let* ((raw-len (ignore-errors (file-length in)))
+           (remaining (and raw-len (max 0 (- raw-len (or offset 0)))))
+           (effective (or limit remaining *fs-read-max-bytes*))
+           (capped (min effective *fs-read-max-bytes*))
+           (buf (make-string capped))
+           (count (read-sequence buf in :end capped))
+           (text (subseq buf 0 count))
+           (truncated (and raw-len (> effective capped))))
+      (values text truncated raw-len))))
 
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
@@ -76,7 +85,7 @@ Signals an error when PATH is outside the allow-list."
 
 (defun fs-read-file (path &key offset limit)
   "Read text file PATH with optional OFFSET and LIMIT.
-Returns the content string."
+Returns (VALUES content-string truncated-p file-length)."
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
@@ -89,11 +98,12 @@ Returns the content string."
                "offset" offset
                "limit" limit
                "fd" (fd-count))
-    (let ((text (%read-file-string pn offset limit)))
+    (multiple-value-bind (text truncated file-length)
+        (%read-file-string pn offset limit)
       (log-event :debug "fs.read.close"
                  "path" (namestring pn)
                  "fd" (fd-count))
-      text)))
+      (values text truncated file-length))))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
@@ -241,11 +251,11 @@ Returns a hash-table with updated path information:
               (uiop/pathname:merge-pathnames* requested base))))
     (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
+    ;; C2: Reject overly broad roots that would disable the security sandbox.
+    (when (broad-root-p temp-root)
+      (error "Refusing to set project root to ~A — too broad"
+             (namestring temp-root)))
     (let ((new-root (truename temp-root)))
-      ;; C2: Reject overly broad roots that would disable the security sandbox
-      (let ((root-str (namestring new-root)))
-        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
-          (error "Refusing to set project root to ~A — too broad" root-str)))
       ;; C3: Atomic multi-step mutation under lock
       (bt:with-lock-held (*project-root-lock*)
         (setf *project-root* new-root)
@@ -286,13 +296,23 @@ collapsed signatures view that saves ~70% of context window tokens."
          (limit :type :integer
                 :description "Maximum characters to return; omit to read to end"))
   :body
-  (let ((content-string (fs-read-file path :offset offset :limit limit)))
-    (result id
-            (make-ht "content" (text-content content-string)
-                     "text" content-string
-                     "path" path
-                     "offset" offset
-                     "limit" limit))))
+  (multiple-value-bind (content-string truncated file-length)
+      (fs-read-file path :offset offset :limit limit)
+    (let ((ht (make-ht "content" (text-content
+                                  (if truncated
+                                      (let ((next-offset (+ (or offset 0) (length content-string))))
+                                        (format nil "~A~%~%[TRUNCATED: file is ~:D chars, showing ~:D from offset ~:D. Use offset=~D to read more.]"
+                                                content-string file-length (length content-string) (or offset 0) next-offset))
+                                      content-string))
+                       "text" content-string
+                       "path" path
+                       "offset" offset
+                       "limit" limit)))
+      (when truncated
+        (setf (gethash "truncated" ht) t
+              (gethash "file_length" ht) file-length
+              (gethash "read_length" ht) (length content-string)))
+      (result id ht))))
 
 (define-tool "fs-write-file"
   :description "Write text content to a file relative to project root.

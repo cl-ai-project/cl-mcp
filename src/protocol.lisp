@@ -24,13 +24,18 @@
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:*project-root-lock*)
+  (:import-from #:bordeaux-threads
+                #:with-lock-held)
   (:import-from #:cl-mcp/src/pool
                 #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/proxy
                 #:cancel-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:broad-root-p)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -69,7 +74,12 @@ Walks hash-tables, vectors, lists, and strings. Converts non-serializable
 leaf objects to their string representation. Depth-limited to 20 levels.
 Collections are capped at +sanitize-max-elements+ to guard against
 cyclic or extremely large structures."
-  (when (> depth 20) (return-from %sanitize-for-encoding obj))
+  (when (> depth 20)
+    (return-from %sanitize-for-encoding
+      (typecase obj
+        (string (sanitize-for-json obj))
+        ((or number (member t nil)) obj)
+        (t (or (ignore-errors (princ-to-string obj)) "#<depth-limit>")))))
   (typecase obj
     (string (sanitize-for-json obj))
     (hash-table
@@ -93,9 +103,26 @@ cyclic or extremely large structures."
                       (%sanitize-for-encoding (aref obj i) (1+ depth))))
        result))
     (cons
-     (loop for elt in obj
-           for i below +sanitize-max-elements+
-           collect (%sanitize-for-encoding elt (1+ depth))))
+     ;; Manual CDR-walk: handles dotted pairs and detects circular CDR chains.
+     (let ((seen (make-hash-table :test #'eq))
+           (result nil)
+           (tail obj)
+           (count 0))
+       (loop
+         (when (>= count +sanitize-max-elements+) (return))
+         (when (null tail) (return))
+         (unless (consp tail)
+           ;; Dotted tail — sanitize the atom and stop
+           (push (%sanitize-for-encoding tail (1+ depth)) result)
+           (return))
+         (when (gethash tail seen)
+           ;; Circular CDR chain detected — stop
+           (return))
+         (setf (gethash tail seen) t)
+         (push (%sanitize-for-encoding (car tail) (1+ depth)) result)
+         (setf tail (cdr tail))
+         (incf count))
+       (nreverse result)))
     (t (cond
          ((or (numberp obj) (eq obj t) (null obj)) obj)
          (t (or (ignore-errors (princ-to-string obj))
@@ -172,18 +199,19 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                (let ((root-str (namestring (truename root-dir))))
+                (let ((broad-p (broad-root-p root-dir)))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
                     ;; Skip root application but continue initialization normally
-                    ((member root-str '("/" "/tmp/" "/home/")
-                             :test #'string=)
+                    (broad-p
                      (log-event :warn "initialize.sync-root.rejected"
-                                "path" root-str
+                                "path" (namestring root-dir)
                                 "reason" "too broad"))
                     (t
-                     (setf *project-root* root-dir)
-                     (uiop/os:chdir root-dir)
+                     (with-lock-held (*project-root-lock*)
+                       (setf *project-root* root-dir)
+                       (uiop/os:chdir root-dir)
+                       (setf *default-pathname-defaults* root-dir))
                      ;; Propagate root to this session's worker only
                      (ignore-errors
                        (send-root-to-session-worker *current-session-id* root-dir))
@@ -345,4 +373,11 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                          "id" id
                          "method" method
                          "error" (princ-to-string e)))
-            (%encode-json (rpc-error id -32603 "Internal error"))))))))
+            ;; Coerce id to a safe type before building the error response.
+            ;; JSON-RPC 2.0 says ids SHOULD NOT have fractional parts,
+            ;; so we accept only integer, string, or null.  Floats,
+            ;; booleans, and arrays are dropped to nil.
+            (let ((safe-id (typecase id
+                             ((or null string integer) id)
+                             (t nil))))
+              (%encode-json (rpc-error safe-id -32603 "Internal error")))))))))

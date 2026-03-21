@@ -122,3 +122,20 @@
       (ok (search "(inner" output))
       (ok (search "content)" output) "Closes inner form on dedent")
       (ok (search "more)" output) "Closes outer form"))))
+
+(deftest indent-mode-character-literals
+  (testing "Character literal #\\( should not be counted as an opening paren"
+    (let* ((input "(list #\\()")
+           (output (apply-indent-mode input)))
+      ;; Input is balanced: (list ...).  #\( is a char literal, not an open paren.
+      ;; Without fix, #\( would be counted as open paren and parinfer would add
+      ;; a spurious close.
+      (ok (equal output input)
+          "Balanced input with #\\( should be unchanged")))
+  (testing "Character literal #\\) should not be counted as a closing paren"
+    (let* ((input "(list #\\))")
+           (output (apply-indent-mode input)))
+      ;; Input is balanced: (list ...).  #\) is a char literal, not a close paren.
+      ;; Without fix, #\) would prematurely close (list and drop the real close.
+      (ok (equal output input)
+          "Balanced input with #\\) should be unchanged"))))

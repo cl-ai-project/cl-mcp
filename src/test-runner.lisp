@@ -51,7 +51,7 @@ Examples:
                :description "Run only this specific test (fully qualified: 'package::test-name')")
          (tests :type :array :required nil
                 :description "Run only these specific tests (array of 'package::test-name')")
-         (timeout_seconds :type :number :required nil
+         (timeout-seconds :type :number :json-name "timeout_seconds" :required nil
                           :description "Maximum seconds to wait for the test run to complete (default: 300). Increase for large test suites."))
   :body
   (with-proxy-dispatch (id "worker/run-tests"
@@ -59,12 +59,21 @@ Examples:
                                    "framework" framework
                                    "test" test
                                    "tests" tests
-                                   "timeout_seconds" timeout_seconds))
-    (let ((effective-timeout (or timeout_seconds 300)))
+                                   "timeout_seconds" timeout-seconds))
+    (let ((effective-timeout (or timeout-seconds 300)))
       (let ((test-result
-              (sb-ext:with-timeout effective-timeout
-                (run-tests system
-                           :framework framework
-                           :test test
-                           :tests tests))))
+              (handler-case
+                  (sb-ext:with-timeout effective-timeout
+                    (run-tests system
+                               :framework framework
+                               :test test
+                               :tests tests))
+                (sb-ext:timeout ()
+                  (make-ht "passed" 0
+                           "failed" 1
+                           "framework" "timeout"
+                           "duration_ms" (round (* effective-timeout 1000))
+                           "failed_tests" (vector
+                                           (make-ht "test_name" "TIMEOUT"
+                                                    "reason" (format nil "Tests timed out after ~A seconds" effective-timeout))))))))
         (result id (build-run-tests-response test-result))))))
