@@ -1,5 +1,6 @@
 # cl-mcp
 [![CI](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml)
+[![Lint](https://github.com/cl-ai-project/cl-mcp/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/lint.yml)
 
 A Model Context Protocol (MCP) server for Common Lisp, providing JSON-RPC 2.0
 over stdio, TCP, and HTTP (Streamable HTTP). It enables AI agents to interact
