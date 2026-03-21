@@ -65,7 +65,7 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
   (with-open-file (in pn :direction :input :element-type 'character)
     (when offset (file-position in offset))
     (let* ((raw-len (ignore-errors (file-length in)))
-           (remaining (and raw-len (- raw-len (or offset 0))))
+           (remaining (and raw-len (max 0 (- raw-len (or offset 0)))))
            (effective (or limit remaining *fs-read-max-bytes*))
            (capped (min effective *fs-read-max-bytes*))
            (buf (make-string capped))
@@ -250,8 +250,13 @@ Returns a hash-table with updated path information:
               (uiop/pathname:merge-pathnames* requested base))))
     (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
+    ;; C2: Reject overly broad roots that would disable the security sandbox.
+    ;; Check the raw path BEFORE truename so that symlinks (e.g. macOS
+    ;; /tmp → /private/tmp/) cannot bypass the deny list.
+    (let ((raw-str (namestring temp-root)))
+      (when (member raw-str '("/" "/tmp/" "/home/") :test #'string=)
+        (error "Refusing to set project root to ~A — too broad" raw-str)))
     (let ((new-root (truename temp-root)))
-      ;; C2: Reject overly broad roots that would disable the security sandbox
       (let ((root-str (namestring new-root)))
         (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
           (error "Refusing to set project root to ~A — too broad" root-str)))

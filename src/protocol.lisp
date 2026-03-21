@@ -197,14 +197,20 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                (let ((root-str (namestring (truename root-dir))))
+                ;; Check raw path BEFORE truename so symlinks
+                ;; (e.g. macOS /tmp → /private/tmp/) are caught.
+                (let* ((raw-str (namestring root-dir))
+                       (resolved-str (namestring (truename root-dir)))
+                       (broad-p (or (member raw-str '("/" "/tmp/" "/home/")
+                                            :test #'string=)
+                                    (member resolved-str '("/" "/tmp/" "/home/")
+                                            :test #'string=))))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
                     ;; Skip root application but continue initialization normally
-                    ((member root-str '("/" "/tmp/" "/home/")
-                             :test #'string=)
+                    (broad-p
                      (log-event :warn "initialize.sync-root.rejected"
-                                "path" root-str
+                                "path" (or raw-str resolved-str)
                                 "reason" "too broad"))
                     (t
                      (with-lock-held (*project-root-lock*)
@@ -376,6 +382,6 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
             ;; response. Non-standard id types (float, boolean, array)
             ;; would cause a cascading TYPE-ERROR in rpc-error.
             (let ((safe-id (typecase id
-                             ((or null string integer) id)
+                             ((or null string number) id)
                              (t nil))))
               (%encode-json (rpc-error safe-id -32603 "Internal error")))))))))
