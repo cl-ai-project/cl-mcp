@@ -13,7 +13,8 @@
            #:allowed-read-path
            #:ensure-write-path
            #:resolve-path-in-project
-           #:normalize-path-for-display))
+           #:normalize-path-for-display
+           #:broad-root-p))
 
 (in-package #:cl-mcp/src/utils/paths)
 
@@ -152,6 +153,30 @@ Signals an error if PATH is outside project root."
 
 (declaim (ftype (function ((or null string pathname)) (or null string))
                 normalize-path-for-display))
+
+(defparameter *broad-root-deny-list*
+  '("/" "/tmp/" "/home/")
+  "Directory namestrings that are too broad for a project root.
+Checked against both the raw path and its truename to prevent
+symlink bypass (e.g. macOS /tmp -> /private/tmp/).")
+
+(declaim (ftype (function ((or string pathname)) boolean) broad-root-p))
+
+(defun broad-root-p (dir-path)
+  "Return T when DIR-PATH is too broad to be used as a project root.
+Checks both the raw namestring and the truename-resolved namestring
+against *broad-root-deny-list* to prevent symlink bypass."
+  (let ((raw-str (namestring (uiop/pathname:ensure-directory-pathname dir-path))))
+    (when (member raw-str *broad-root-deny-list* :test #'string=)
+      (return-from broad-root-p t))
+    (let ((resolved (ignore-errors
+                      (namestring
+                       (uiop/pathname:ensure-directory-pathname
+                        (truename dir-path))))))
+      (when (and resolved (member resolved *broad-root-deny-list* :test #'string=))
+        (return-from broad-root-p t)))
+    nil))
+
 (defun normalize-path-for-display (pathname)
   "Return a namestring for PATHNAME, relative to *project-root* when possible.
 Falls back to CWD, then cl-mcp system source directory, else absolute.

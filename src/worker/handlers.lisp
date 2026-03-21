@@ -24,6 +24,8 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:broad-root-p)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:text-content)
@@ -228,14 +230,14 @@ Returns a success payload."
     (let ((dir-path (uiop/pathname:ensure-directory-pathname path)))
       (unless (uiop/filesystem:directory-exists-p dir-path)
         (error "Directory does not exist: ~A" path))
+      ;; Reject overly broad roots (same policy as fs-set-project-root)
+      (when (broad-root-p dir-path)
+        (error "Refusing to set project root to ~A -- too broad"
+               (namestring dir-path)))
       ;; Resolve symlinks for a canonical path
       (let ((resolved (truename dir-path)))
         (when resolved
           (setf dir-path resolved)))
-      ;; Reject overly broad roots (same policy as fs-set-project-root)
-      (let ((root-str (namestring dir-path)))
-        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
-          (error "Refusing to set project root to ~A -- too broad" root-str)))
       (setf *project-root* dir-path)
       (uiop/os:chdir dir-path)
       (log-event :info "worker.project-root.set" "path" (namestring dir-path))

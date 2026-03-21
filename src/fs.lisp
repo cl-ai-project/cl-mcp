@@ -14,7 +14,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
                 #:allowed-read-path
-                #:ensure-write-path)
+                #:ensure-write-path
+                #:broad-root-p)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
   (:import-from #:uiop
@@ -251,15 +252,10 @@ Returns a hash-table with updated path information:
     (unless (uiop/filesystem:directory-exists-p temp-root)
       (error "Directory ~A does not exist" path))
     ;; C2: Reject overly broad roots that would disable the security sandbox.
-    ;; Check the raw path BEFORE truename so that symlinks (e.g. macOS
-    ;; /tmp → /private/tmp/) cannot bypass the deny list.
-    (let ((raw-str (namestring temp-root)))
-      (when (member raw-str '("/" "/tmp/" "/home/") :test #'string=)
-        (error "Refusing to set project root to ~A — too broad" raw-str)))
+    (when (broad-root-p temp-root)
+      (error "Refusing to set project root to ~A — too broad"
+             (namestring temp-root)))
     (let ((new-root (truename temp-root)))
-      (let ((root-str (namestring new-root)))
-        (when (member root-str '("/" "/tmp/" "/home/") :test #'string=)
-          (error "Refusing to set project root to ~A — too broad" root-str)))
       ;; C3: Atomic multi-step mutation under lock
       (bt:with-lock-held (*project-root-lock*)
         (setf *project-root* new-root)

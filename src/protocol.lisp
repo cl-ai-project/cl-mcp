@@ -34,6 +34,8 @@
                 #:cancel-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:broad-root-p)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -197,14 +199,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
         (handler-case
             (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
               (when (uiop/filesystem:directory-exists-p root-dir)
-                ;; Check raw path BEFORE truename so symlinks
-                ;; (e.g. macOS /tmp → /private/tmp/) are caught.
-                (let* ((raw-str (namestring root-dir))
-                       (resolved-str (namestring (truename root-dir)))
-                       (broad-p (or (member raw-str '("/" "/tmp/" "/home/")
-                                            :test #'string=)
-                                    (member resolved-str '("/" "/tmp/" "/home/")
-                                            :test #'string=))))
+                (let ((broad-p (broad-root-p root-dir)))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
                     ;; Skip root application but continue initialization normally
@@ -378,10 +373,11 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
                          "id" id
                          "method" method
                          "error" (princ-to-string e)))
-            ;; Coerce id to a JSON-RPC-safe type before building error
-            ;; response. Non-standard id types (float, boolean, array)
-            ;; would cause a cascading TYPE-ERROR in rpc-error.
+            ;; Coerce id to a safe type before building the error response.
+            ;; JSON-RPC 2.0 says ids SHOULD NOT have fractional parts,
+            ;; so we accept only integer, string, or null.  Floats,
+            ;; booleans, and arrays are dropped to nil.
             (let ((safe-id (typecase id
-                             ((or null string number) id)
+                             ((or null string integer) id)
                              (t nil))))
               (%encode-json (rpc-error safe-id -32603 "Internal error")))))))))
