@@ -65,7 +65,8 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
   (with-open-file (in pn :direction :input :element-type 'character)
     (when offset (file-position in offset))
     (let* ((raw-len (ignore-errors (file-length in)))
-           (effective (or limit raw-len *fs-read-max-bytes*))
+           (remaining (and raw-len (- raw-len (or offset 0))))
+           (effective (or limit remaining *fs-read-max-bytes*))
            (capped (min effective *fs-read-max-bytes*))
            (buf (make-string capped))
            (count (read-sequence buf in :end capped))
@@ -298,8 +299,9 @@ collapsed signatures view that saves ~70% of context window tokens."
       (fs-read-file path :offset offset :limit limit)
     (let ((ht (make-ht "content" (text-content
                                   (if truncated
-                                      (format nil "~A~%~%[TRUNCATED: file is ~:D chars, showing first ~:D. Use offset=~D to read more.]"
-                                              content-string file-length (length content-string) (length content-string))
+                                      (let ((next-offset (+ (or offset 0) (length content-string))))
+                                        (format nil "~A~%~%[TRUNCATED: file is ~:D chars, showing ~:D from offset ~:D. Use offset=~D to read more.]"
+                                                content-string file-length (length content-string) (or offset 0) next-offset))
                                       content-string))
                        "text" content-string
                        "path" path
