@@ -205,7 +205,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                     ;; Skip root application but continue initialization normally
                     (broad-p
                      (log-event :warn "initialize.sync-root.rejected"
-                                "path" (or raw-str resolved-str)
+                                "path" (namestring root-dir)
                                 "reason" "too broad"))
                     (t
                      (with-lock-held (*project-root-lock*)

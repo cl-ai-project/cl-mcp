@@ -8,7 +8,8 @@
   (:import-from #:cl-mcp/src/pool #:initialize-pool #:shutdown-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
   (:import-from #:cl-mcp/src/worker-client
-                #:%read-line-limited #:+max-json-line-bytes+)
+                #:%read-line-limited #:+max-json-line-bytes+
+                #:line-too-long)
   (:export #:run))
 
 (in-package #:cl-mcp/src/run)
@@ -38,8 +39,8 @@ This is a minimal loop for E2E bring-up; full transport features come later."
            (log-event :info "stdio.start")
            (loop for line = (handler-case
                                  (%read-line-limited in :eof +max-json-line-bytes+)
-                               (error (e)
-                                 (log-event :warn "stdio.read.error"
+                               (line-too-long (e)
+                                 (log-event :warn "stdio.read.line-too-long"
                                             "error" (princ-to-string e))
                                  ;; Drain remaining bytes on the current line
                                  ;; so the next read-line starts fresh.

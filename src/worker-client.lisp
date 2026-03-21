@@ -39,6 +39,7 @@
            #:worker-spawn-failed
            #:+max-json-line-bytes+
            #:%read-line-limited
+           #:line-too-long
            #:worker-crash-history-pushed-p
            #:*reaper-threads*
            #:*reaper-threads-lock*
@@ -104,6 +105,14 @@ Each thread terminates and self-removes after reaping its process.")
 Distinct from protocol errors (parse failure, ID mismatch) which
 indicate stream corruption and require marking the worker crashed."))
 
+(define-condition line-too-long (error)
+  ((limit :initarg :limit :reader line-too-long-limit))
+  (:report (lambda (c s)
+             (format s "JSON-RPC line exceeds ~D byte limit"
+                     (line-too-long-limit c))))
+  (:documentation "Signaled by %READ-LINE-LIMITED when input exceeds the byte limit.
+Allows callers to distinguish size-limit violations from other I/O errors."))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Message size limit
 ;;; ---------------------------------------------------------------------------
@@ -132,7 +141,7 @@ Handles both LF and CRLF line endings."
               (t
                (incf count)
                (when (> count limit)
-                 (error "JSON-RPC line exceeds ~D byte limit" limit))
+                 (error 'line-too-long :limit limit))
                (vector-push-extend ch buf)))))))
 
 ;;; ---------------------------------------------------------------------------

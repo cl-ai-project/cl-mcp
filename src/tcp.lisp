@@ -12,7 +12,8 @@
                 #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:cl-mcp/src/worker-client
-                #:%read-line-limited #:+max-json-line-bytes+)
+                #:%read-line-limited #:+max-json-line-bytes+
+                #:line-too-long)
   (:import-from #:usocket)
   (:export
    #:*tcp-server-thread*
@@ -163,8 +164,8 @@ successfully started, or NIL if the start attempt failed."
               ;; Data available, proceed to read
               (let ((line (handler-case
                               (%read-line-limited stream :eof +max-json-line-bytes+)
-                            (error (e)
-                              (log-event :warn "tcp.read.error"
+                            (line-too-long (e)
+                              (log-event :warn "tcp.read.line-too-long"
                                          "conn" conn-id
                                          "error" (princ-to-string e))
                               ;; Drain remaining bytes on the current line
