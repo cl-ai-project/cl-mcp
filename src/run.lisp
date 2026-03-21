@@ -36,18 +36,41 @@ This is a minimal loop for E2E bring-up; full transport features come later."
          (let ((state (make-state))
                (cl-mcp/src/protocol:*current-session-id* "stdio"))
            (log-event :info "stdio.start")
-           (loop for line = (%read-line-limited in :eof +max-json-line-bytes+)
+           (loop for line = (handler-case
+                                 (%read-line-limited in :eof +max-json-line-bytes+)
+                               (error (e)
+                                 (log-event :warn "stdio.read.error"
+                                            "error" (princ-to-string e))
+                                 ;; Drain remaining bytes on the current line
+                                 ;; so the next read-line starts fresh.
+                                 (loop for ch = (read-char in nil nil)
+                                       while (and ch (not (char= ch #\Newline))))
+                                 :read-error))
                  until (eq line :eof)
-                 do (let ((resp (process-json-line line state)))
-                      (when resp
-                        (handler-case
-                            (progn
-                              (write-line resp out)
-                              (force-output out))
-                          (stream-error (e)
-                            (log-event :warn "stdio.write.error"
-                                       "error" (princ-to-string e))
-                            (return))))))
+                 do (cond
+                      ((eq line :read-error)
+                       ;; Return JSON-RPC error for the oversized line
+                       (handler-case
+                           (progn
+                             (write-line
+                              "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
+                              out)
+                             (force-output out))
+                         (stream-error (e)
+                           (log-event :warn "stdio.write.error"
+                                      "error" (princ-to-string e))
+                           (return))))
+                      (t
+                       (let ((resp (process-json-line line state)))
+                         (when resp
+                           (handler-case
+                               (progn
+                                 (write-line resp out)
+                                 (force-output out))
+                             (stream-error (e)
+                               (log-event :warn "stdio.write.error"
+                                          "error" (princ-to-string e))
+                               (return))))))))
            (log-event :info "stdio.stop")
            t)
        (when *use-worker-pool* (ignore-errors (shutdown-pool)))))

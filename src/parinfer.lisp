@@ -14,7 +14,6 @@
   (sharp-seen nil :type boolean)
   (char-literal nil :type boolean))
 
-; previous char was backslash?
 
 (defun %count-leading-spaces (line)
   (loop for ch across line
@@ -55,11 +54,34 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
                 (write-char ch output)
                 (setf (state-char-literal state) nil))
                ;; Previous char was # outside string: check for \
-               ((state-sharp-seen state)
+               ((and (state-sharp-seen state) (char= ch #\\))
                 (write-char ch output)
                 (setf (state-sharp-seen state) nil)
-                (when (char= ch #\\)
-                  (setf (state-char-literal state) t)))
+                (setf (state-char-literal state) t))
+               ;; Previous char was # but next is not \: reset flag and
+               ;; fall through to normal processing (e.g. #( vector literals
+               ;; must still push onto the paren stack).
+               ((state-sharp-seen state)
+                (setf (state-sharp-seen state) nil)
+                ;; Re-process this character through normal branches
+                (cond
+                  ((char= ch #\")
+                   (write-char ch output)
+                   (setf (state-in-string state) (not (state-in-string state))))
+                  ((char= ch #\;)
+                   (loop for i from col below (length line)
+                         do (write-char (char line i) output))
+                   (return))
+                  ((char= ch #\()
+                   (write-char ch output)
+                   (push (1+ col) (state-stack state)))
+                  ((char= ch #\))
+                   (cond
+                     ((state-stack state)
+                      (pop (state-stack state))
+                      (write-char ch output))
+                     (t nil)))
+                  (t (write-char ch output))))
                ;; Escape in string
                ((state-escape state)
                 (write-char ch output)
@@ -93,7 +115,7 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
                    (write-char ch output))
                   (t nil)))
                (t (write-char ch output))))
-    ;; Reset per-line transient flags (sharp-seen carries across chars, not lines)
+    ;; Reset per-line transient flags
     (setf (state-escape state) nil
           (state-sharp-seen state) nil
           (state-char-literal state) nil)
