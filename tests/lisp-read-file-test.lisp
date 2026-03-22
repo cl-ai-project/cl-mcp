@@ -13,7 +13,9 @@
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
-                #:ensure-directory-pathname))
+                #:ensure-directory-pathname)
+  (:import-from #:cl-ppcre
+                #:scan))
 
 (in-package #:cl-mcp/tests/lisp-read-file-test)
 
@@ -34,7 +36,8 @@
            (meta (gethash "meta" result)))
       (ok (string= (gethash "mode" result) "lisp-collapsed"))
       (ok (stringp content))
-      (ok (search "(defun version () ..." content))
+      ;; Collapsed forms now include line numbers: "  N: (defun version () ..."
+      (ok (cl-ppcre:scan "\\d+: \\(defun version \\(\\)" content))
       (ok (hash-table-p meta))
       (ok (>= (gethash "total_forms" meta) 3))
       (ok (>= (gethash "expanded_forms" meta) 1))
@@ -112,6 +115,36 @@
           (ok colon)
           (ok (every #'digit-char-p (subseq line 0 colon)))
           (ok (search "(defun target" line)))))))
+
+(deftest lisp-read-file-collapsed-forms-have-line-numbers
+  (testing "collapsed (non-expanded) forms include line numbers"
+    (with-temp-lisp-file "tests/tmp/lisp-read-collapsed-lineno.lisp"
+        (format nil "(in-package :cl-user)~%~%(defun alpha ()~%  :a)~%~%(defvar *beta* 42)~%~%(defclass gamma () ())~%")
+      (lambda (path)
+        (let* ((content (gethash "content"
+                                 (lisp-read-file path :collapsed t)))
+               (lines (with-input-from-string (s content)
+                        (loop for line = (read-line s nil nil)
+                              while line collect line))))
+          ;; in-package is always expanded (with line numbers via %add-line-numbers)
+          (ok (find-if (lambda (l) (search "(in-package" l)) lines)
+              "in-package present")
+          ;; All def-forms should have line numbers in collapsed mode
+          (ok (find-if (lambda (l)
+                         (and (search "(defun alpha" l)
+                              (scan "^\\s*\\d+:" l)))
+                       lines)
+              "defun alpha should have line number")
+          (ok (find-if (lambda (l)
+                         (and (search "(defvar" l)
+                              (scan "^\\s*\\d+:" l)))
+                       lines)
+              "defvar should have line number")
+          (ok (find-if (lambda (l)
+                         (and (search "(defclass" l)
+                              (scan "^\\s*\\d+:" l)))
+                       lines)
+              "defclass should have line number"))))))
 
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."

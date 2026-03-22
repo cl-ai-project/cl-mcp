@@ -107,17 +107,18 @@ all unresolvable symbols."
       (error "Proxy binding verification failed:~%~{  - ~A~%~}" failures)))
   t)
 
-(defun %crash-notification-result ()
-  "Return a tool result hash-table with the crash notification message."
+(defun %crash-notification-result (&optional reason)
+  "Return a tool result hash-table with the crash notification message.
+When REASON is provided, it is included in the message for diagnostics."
   (let ((ht (make-ht)))
     (setf (gethash "content" ht)
-          (text-content
-           (concatenate 'string
-                        "Worker process crashed and was restarted. "
-                        "All Lisp state (loaded systems, defined "
-                        "functions, package state) has been reset. "
-                        "Please run load-system again to restore "
-                        "your environment."))
+            (text-content
+             (format nil "Worker process crashed~@[ (~A)~] and was restarted. ~
+                          All Lisp state (loaded systems, defined ~
+                          functions, package state) has been reset. ~
+                          Please run load-system again to restore ~
+                          your environment."
+                     reason))
           (gethash "isError" ht) t)
     ht))
 
@@ -258,7 +259,8 @@ TOCTOU race with concurrent requests for the same session."
                                         "session" session-id
                                         "method" method
                                         "error" (princ-to-string e))
-                             (%crash-notification-result)))))
+                             (%crash-notification-result
+                              (or reason "unknown"))))))
                        (t
                         (log-event :debug "proxy.worker-rpc-error"
                                    "session" session-id
