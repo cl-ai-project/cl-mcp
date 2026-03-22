@@ -6,7 +6,6 @@
 
 (defpackage #:cl-mcp/src/repl-core
   (:use #:cl)
-  (:import-from #:uiop #:print-backtrace)
   (:import-from #:bordeaux-threads
                 #:thread-alive-p
                 #:make-thread
@@ -21,7 +20,7 @@
 (defparameter *default-eval-package* (find-package :cl-user)
   "Default package in which `repl-eval` evaluates forms.")
 
-(defvar *default-max-output-length* 100000
+(defvar *default-max-output-length* 50000
   "Default maximum characters for repl-eval output when not specified by caller.
 Prevents unbounded output from consuming excessive memory or bandwidth.")
 
@@ -191,13 +190,9 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                                          :preview-max-depth (or locals-preview-max-depth 1)
                                                          :preview-max-elements (or locals-preview-max-elements 5)
                                                          :locals-preview-skip-internal locals-preview-skip-internal))
-                            ;; Also keep text representation for backward compatibility
                             (setf last-value
-                                  (with-output-to-string (out)
-                                    (let ((*print-readably* nil))
-                                      (format out "~A~%" e)
-                                      (uiop:print-backtrace :stream out
-                                                            :condition e))))
+                                  (let ((*print-readably* nil))
+                                    (format nil "~A" e)))
                             (return-from %do-repl-eval
                               (values (%truncate-output last-value max-output-length)
                                       last-value

@@ -164,17 +164,19 @@ For defmethod, includes qualifiers like :before, :after, :around."
                                              (setf full-string (%form->string form)))))
                                (scan content-scanner repr))))
          (expand? (or name-match content-match (eq head 'in-package)))
+         (start-line (cst-node-start-line node))
          (display (cond
                     (expand?
                      (%add-line-numbers (or full-string (%form->string form))
-                                        (cst-node-start-line node)
-                                        line-width))
+                                        start-line line-width))
                     ((member head '(defun defmacro defvar defparameter defconstant defclass
                                      defstruct defgeneric defmethod))
-                     (%collapse-def-form form))
+                     (format nil "~VD: ~A" line-width start-line
+                             (%collapse-def-form form)))
                     ((eq head 'in-package)
                      (%form->string form))
-                    (t (%collapse-generic form)))))
+                    (t (format nil "~VD: ~A" line-width start-line
+                               (%collapse-generic form))))))
     (values display expand?)))
 
 (defun %line-stats (text)
