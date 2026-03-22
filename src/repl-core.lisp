@@ -192,7 +192,10 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                                          :locals-preview-skip-internal locals-preview-skip-internal))
                             (setf last-value
                                   (let ((*print-readably* nil))
-                                    (format nil "~A" e)))
+                                    (handler-case (format nil "~A" e)
+                                      (error ()
+                                        (format nil "<error formatting ~A>"
+                                                (type-of e))))))
                             (return-from %do-repl-eval
                               (values (%truncate-output last-value max-output-length)
                                       last-value
