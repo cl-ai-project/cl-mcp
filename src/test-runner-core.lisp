@@ -272,16 +272,20 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
          (start-time (get-internal-real-time))
+         (stdout-stream (make-string-output-stream))
+         (stderr-stream (make-string-output-stream))
          successp results)
     ;; Run with suppressed output using rove:run (triggers :around methods)
     (setf (values successp results)
           (funcall
            (compile nil
-                    `(lambda (run-fn system-key)
+                    `(lambda (run-fn system-key stdout-s stderr-s)
                        (let ((,report-stream-sym (make-broadcast-stream))
-                             (*standard-output* (make-broadcast-stream)))
+                             (*standard-output* stdout-s)
+                             (*error-output* stderr-s))
                          (funcall run-fn system-key))))
-           run-fn (intern (string-upcase system-name) :keyword)))
+           run-fn (intern (string-upcase system-name) :keyword)
+           stdout-stream stderr-stream))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
@@ -316,12 +320,17 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
                      :test-name (princ-to-string fail)
                      :reason "Test failed (see rove output for details)")
                     failure-details)))))
-      (make-test-result :passed passed
-                        :failed failed
-                        :pending pending
-                        :failed-tests (nreverse failure-details)
-                        :framework :rove
-                        :duration duration-ms))))
+      (let ((ht (make-test-result :passed passed
+                                  :failed failed
+                                  :pending pending
+                                  :failed-tests (nreverse failure-details)
+                                  :framework :rove
+                                  :duration duration-ms))
+            (stdout (get-output-stream-string stdout-stream))
+            (stderr (get-output-stream-string stderr-stream)))
+        (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+        (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+        ht))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ASDF Fallback (text capture)
