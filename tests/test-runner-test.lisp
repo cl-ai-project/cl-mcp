@@ -223,3 +223,18 @@
       (ok (or (null (gethash "reason" failure))
               (stringp (gethash "reason" failure)))
           "reason should be nil or a string"))))
+
+(deftest run-tests-handles-direct-assertion-failures
+  (testing "run-tests handles failures from direct assertions without (testing ...) wrapper"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-direct-assertion"))
+           (failures (gethash "failed_tests" result)))
+      (ok (> (gethash "failed" result) 0) "Should have failures")
+      (ok (> (length failures) 0) "Should have failure details")
+      (let ((failure (aref failures 0)))
+        (ok (gethash "test_name" failure) "Should have test_name")
+        (let ((desc (gethash "description" failure)))
+          (ok (stringp desc) "Should include assertion description")
+          (ok (search "3 should equal 4" desc)
+              "Description should contain the ok message"))
+        (let ((form (gethash "form" failure)))
+          (ok (stringp form) "Should include assertion form"))))))
