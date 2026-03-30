@@ -277,6 +277,8 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
          (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
          (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
+         (test-name-fn (fdefinition (find-symbol "TEST-NAME" result-pkg)))
+         (test-failed-fn (fdefinition (find-symbol "TEST-FAILED-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
          (start-time (get-internal-real-time))
@@ -323,11 +325,15 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
         (dolist (suite-result suite-results)
           (dolist (pkg-result (append (funcall passed-tests-fn suite-result)
                                       (funcall failed-tests-fn suite-result)))
-            (dolist (fail (funcall failed-tests-fn pkg-result))
-              (push (make-failure-detail
-                     :test-name (princ-to-string fail)
-                     :reason "Test failed (see rove output for details)")
-                    failure-details)))))
+            (dolist (test-fail (funcall failed-tests-fn pkg-result))
+              (let ((test-name (funcall test-name-fn test-fail)))
+                (dolist (testing-fail (funcall test-failed-fn test-fail))
+                  (let ((testing-desc (funcall test-name-fn testing-fail))
+                        (assertions (%rove-extract-assertions testing-fail)))
+                    (dolist (a assertions)
+                      (setf (gethash "test_name" a)
+                            (format nil "~A / ~A" test-name testing-desc))
+                      (push a failure-details)))))))))
       (let ((ht (make-test-result :passed passed
                                   :failed failed
                                   :pending pending
