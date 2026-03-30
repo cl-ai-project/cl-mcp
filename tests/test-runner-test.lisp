@@ -202,3 +202,21 @@
   (testing "run-tests rejects NIL entries in :tests"
     (ok (signals (run-tests "cl-mcp/tests/clhs-test"
                             :tests '(nil))))))
+
+(deftest run-tests-failure-includes-assertion-details
+  (testing "run-tests includes description, form, and values in failure details"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-failures"))
+           (failures (gethash "failed_tests" result))
+           (failure (aref failures 0)))
+      (ok (> (length failures) 0) "Should have failures")
+      (ok (gethash "test_name" failure) "Should have test_name")
+      ;; These come from (ok (= 1 2) "1 should equal 2") in the helper
+      (let ((desc (gethash "description" failure)))
+        (ok (stringp desc) "Should include assertion description")
+        (ok (search "1 should equal 2" desc)
+            "Description should contain the ok message"))
+      (let ((form (gethash "form" failure)))
+        (ok (stringp form) "Should include assertion form")
+        (ok (search "= 1 2" form)
+            "Form should contain the assertion expression"))
+      (ok (gethash "reason" failure) "Should have a reason string"))))
