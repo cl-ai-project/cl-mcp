@@ -70,6 +70,16 @@
         (ok (search "DEBUG-MARKER-12345" stdout)
             "stdout should contain the debug output from the test")))))
 
+(deftest run-tests-selected-captures-stdout
+  (testing "run-tests with :test captures stdout"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-stdout"
+                             :test "cl-mcp/tests/test-runner-test-stdout::stdout-capture-test")))
+      (ok (= 0 (gethash "failed" result)))
+      (let ((stdout (gethash "stdout" result)))
+        (ok (stringp stdout) "stdout should be present")
+        (ok (search "DEBUG-MARKER-12345" stdout)
+            "stdout should contain the debug output")))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Failure Details Tests
 ;;; ---------------------------------------------------------------------------

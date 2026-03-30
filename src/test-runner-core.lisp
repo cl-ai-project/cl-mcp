@@ -222,17 +222,20 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (start-time (get-internal-real-time))
+         (stdout-stream (make-string-output-stream))
+         (stderr-stream (make-string-output-stream))
          successp
          results)
     (declare (ignore successp))
     (setf (values successp results)
           (funcall
            (compile nil
-                    `(lambda (run-tests-fn tests)
+                    `(lambda (run-tests-fn tests stdout-s stderr-s)
                        (let ((,report-stream-sym (make-broadcast-stream))
-                             (*standard-output* (make-broadcast-stream)))
+                             (*standard-output* stdout-s)
+                             (*error-output* stderr-s))
                          (funcall run-tests-fn tests))))
-           run-tests-fn test-symbols))
+           run-tests-fn test-symbols stdout-stream stderr-stream))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000
                                   (/ (- end-time start-time)
@@ -244,13 +247,18 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
         (incf passed (length (funcall passed-tests-fn test-result)))
         (incf failed (length (funcall failed-tests-fn test-result)))
         (incf pending (length (funcall pending-tests-fn test-result))))
-      (make-test-result :passed passed
-                        :failed failed
-                        :pending pending
-                        :failed-tests (when (plusp failed)
-                                        (%rove-extract-selected-failures results))
-                        :framework :rove
-                        :duration duration-ms))))
+      (let ((ht (make-test-result :passed passed
+                                   :failed failed
+                                   :pending pending
+                                   :failed-tests (when (plusp failed)
+                                                   (%rove-extract-selected-failures results))
+                                   :framework :rove
+                                   :duration duration-ms))
+            (stdout (get-output-stream-string stdout-stream))
+            (stderr (get-output-stream-string stderr-stream)))
+        (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+        (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+        ht))))
 
 (defun run-rove-single-test (test-name)
   "Run a single Rove test by name and return structured results.
