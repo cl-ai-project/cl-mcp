@@ -61,6 +61,15 @@
       (ok (>= (gethash "passed" result) 0))
       (ok (= 0 (gethash "failed" result))))))
 
+(deftest run-tests-captures-stdout
+  (testing "run-tests includes stdout from test execution"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-stdout")))
+      (ok (= 0 (gethash "failed" result)) "Helper test should pass")
+      (let ((stdout (gethash "stdout" result)))
+        (ok (stringp stdout) "stdout should be present as a string")
+        (ok (search "DEBUG-MARKER-12345" stdout)
+            "stdout should contain the debug output from the test")))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Failure Details Tests
 ;;; ---------------------------------------------------------------------------
