@@ -157,7 +157,13 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 **Preferred: `run-tests` tool** for structured results (pass/fail counts, failure details).
 - Run system: `{"system": "my-system/tests"}`
 - Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (package must be loaded first)
-- Failure details: `failed_tests` array with `test_name`, `form`, `reason`, `source`
+- Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
+- Response includes `stdout`/`stderr` fields (structured data only, NOT shown in summary text)
+- **Print debugging**: `format t` output goes to `stdout` (not visible in summary). To see debug prints in the summary, write to `*test-debug-output*`:
+  ```lisp
+  (format cl-mcp/src/test-runner-core:*test-debug-output* "debug: ~A~%" value)
+  ```
+  Output from this stream appears in both the `debug_output` field and the content text summary.
 
 **Fallback via `repl-eval`**: `(rove:run :my-system/tests)` after `load-system`.
 

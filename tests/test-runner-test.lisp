@@ -10,7 +10,9 @@
   ;; Load clhs-test system so we can use it as a test subject
   ;; NOTE: Do NOT import from helper test packages (test-runner-test-failures, etc.)
   ;; as that would register their intentionally-failing tests with Rove
-  (:import-from #:cl-mcp/tests/clhs-test))
+  (:import-from #:cl-mcp/tests/clhs-test)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-run-tests-response))
 
 (in-package #:cl-mcp/tests/test-runner-test)
 
@@ -60,6 +62,62 @@
       ;; clhs-test should pass
       (ok (>= (gethash "passed" result) 0))
       (ok (= 0 (gethash "failed" result))))))
+
+(deftest run-tests-captures-stdout
+  (testing "run-tests includes stdout from test execution"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-stdout")))
+      (ok (= 0 (gethash "failed" result)) "Helper test should pass")
+      (let ((stdout (gethash "stdout" result)))
+        (ok (stringp stdout) "stdout should be present as a string")
+        (ok (search "DEBUG-MARKER-12345" stdout)
+            "stdout should contain the debug output from the test")))))
+
+(deftest run-tests-selected-captures-stdout
+  (testing "run-tests with :test captures stdout"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-stdout"
+                             :test "cl-mcp/tests/test-runner-test-stdout::stdout-capture-test")))
+      (ok (= 0 (gethash "failed" result)))
+      (let ((stdout (gethash "stdout" result)))
+        (ok (stringp stdout) "stdout should be present")
+        (ok (search "DEBUG-MARKER-12345" stdout)
+            "stdout should contain the debug output")))))
+
+(deftest run-tests-captures-debug-output
+  (testing "run-tests includes debug_output from *test-debug-output* stream"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output")))
+      (ok (= 0 (gethash "failed" result)) "Helper test should pass")
+      (let ((debug-out (gethash "debug_output" result)))
+        (ok (stringp debug-out) "debug_output should be present as a string")
+        (ok (search "DEBUG-STREAM-MARKER-98765" debug-out)
+            "debug_output should contain the debug stream output")))))
+
+(deftest run-tests-selected-captures-debug-output
+  (testing "run-tests with :test captures debug_output"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output"
+                             :test "cl-mcp/tests/test-runner-test-debug-output::debug-output-capture-test")))
+      (ok (= 0 (gethash "failed" result)))
+      (let ((debug-out (gethash "debug_output" result)))
+        (ok (stringp debug-out) "debug_output should be present")
+        (ok (search "DEBUG-STREAM-MARKER-98765" debug-out)
+            "debug_output should contain the debug stream output")))))
+
+(deftest run-tests-content-text-excludes-stdout
+  (testing "content text does not contain raw stdout (kept in structured field only)"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-stdout"))
+           (resp (build-run-tests-response result))
+           (text (gethash "text" (aref (gethash "content" resp) 0))))
+      (ok (search "DEBUG-MARKER-12345" (gethash "stdout" resp))
+          "stdout structured field should contain the marker")
+      (ok (not (search "DEBUG-MARKER-12345" text))
+          "content text should not contain raw stdout"))))
+
+(deftest run-tests-content-text-includes-debug-output
+  (testing "content text includes debug_output from *test-debug-output*"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output"))
+           (resp (build-run-tests-response result))
+           (text (gethash "text" (aref (gethash "content" resp) 0))))
+      (ok (search "DEBUG-STREAM-MARKER-98765" text)
+          "content text should include debug output"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Failure Details Tests
@@ -183,3 +241,39 @@
   (testing "run-tests rejects NIL entries in :tests"
     (ok (signals (run-tests "cl-mcp/tests/clhs-test"
                             :tests '(nil))))))
+
+(deftest run-tests-failure-includes-assertion-details
+  (testing "run-tests includes description, form, and values in failure details"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-failures"))
+           (failures (gethash "failed_tests" result))
+           (failure (aref failures 0)))
+      (ok (> (length failures) 0) "Should have failures")
+      (ok (gethash "test_name" failure) "Should have test_name")
+      ;; These come from (ok (= 1 2) "1 should equal 2") in the helper
+      (let ((desc (gethash "description" failure)))
+        (ok (stringp desc) "Should include assertion description")
+        (ok (search "1 should equal 2" desc)
+            "Description should contain the ok message"))
+      (let ((form (gethash "form" failure)))
+        (ok (stringp form) "Should include assertion form")
+        (ok (search "= 1 2" form)
+            "Form should contain the assertion expression"))
+      ;; reason may be NIL for simple (ok ...) assertions; just check it doesn't error
+      (ok (or (null (gethash "reason" failure))
+              (stringp (gethash "reason" failure)))
+          "reason should be nil or a string"))))
+
+(deftest run-tests-handles-direct-assertion-failures
+  (testing "run-tests handles failures from direct assertions without (testing ...) wrapper"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-direct-assertion"))
+           (failures (gethash "failed_tests" result)))
+      (ok (> (gethash "failed" result) 0) "Should have failures")
+      (ok (> (length failures) 0) "Should have failure details")
+      (let ((failure (aref failures 0)))
+        (ok (gethash "test_name" failure) "Should have test_name")
+        (let ((desc (gethash "description" failure)))
+          (ok (stringp desc) "Should include assertion description")
+          (ok (search "3 should equal 4" desc)
+              "Description should contain the ok message"))
+        (let ((form (gethash "form" failure)))
+          (ok (stringp form) "Should include assertion form"))))))

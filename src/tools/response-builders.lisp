@@ -153,44 +153,57 @@ key with a human-readable summary and returns the same HT."
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
-Returns a new hash-table with content, counts, and failure details."
+Returns a new hash-table with content, counts, and failure details.
+Includes rich failure details (description, form, values) and debug output
+in the summary text so MCP clients rendering only content[].text see them.
+Raw stdout/stderr are kept in structured fields only (not in content text)."
   (let* ((passed (gethash "passed" test-result 0))
          (failed (gethash "failed" test-result 0))
          (pending (gethash "pending" test-result 0))
          (framework-name (or (gethash "framework" test-result) "unknown"))
          (duration (gethash "duration_ms" test-result 0))
          (failed-tests (gethash "failed_tests" test-result))
-         (failed-tests-vector (if (vectorp failed-tests)
-                                  failed-tests
-                                  (coerce (or failed-tests '()) 'vector)))
+         (failed-tests-vector
+          (if (vectorp failed-tests)
+              failed-tests
+              (coerce (or failed-tests 'nil) 'vector)))
+         (debug-output-str (gethash "debug_output" test-result))
          (summary
-           (with-output-to-string (s)
-             (format s "~A~%"
-                     (if (zerop failed) "✓ PASS" "✗ FAIL"))
-             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%"
-                     passed failed (when (plusp pending) pending))
-             (format s "Duration: ~Dms~%" duration)
-             (when (plusp (length failed-tests-vector))
-               (format s "~%Failures:~%")
-               (loop for fail across failed-tests-vector
-                     for i from 1
-                     do (format s "  ~D. ~A~%"
-                                i (gethash "test_name" fail))
-                        (when (gethash "reason" fail)
-                          (format s "     Reason: ~A~%"
-                                  (gethash "reason" fail))))))))
-    (let ((response (make-ht "content" (text-content summary)
-                             "passed" passed
-                             "failed" failed
-                             "pending" pending
-                             "framework" framework-name
-                             "duration_ms" duration
-                             "failed_tests" failed-tests-vector)))
-      (dolist (field '("success" "stdout" "stderr" "passed_tests"))
+          (with-output-to-string (s)
+            (format s "~A~%"
+                    (if (zerop failed)
+                        "✓ PASS"
+                        "✗ FAIL"))
+            (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
+                    failed (when (plusp pending) pending))
+            (format s "Duration: ~Dms~%" duration)
+            (when (plusp (length failed-tests-vector))
+              (format s "~%Failures:~%")
+              (loop for fail across failed-tests-vector
+                    for i from 1
+                    do (format s "  ~D. ~A~%" i (gethash "test_name" fail))
+                       (when (gethash "description" fail)
+                         (format s "     ~A~%" (gethash "description" fail)))
+                       (when (gethash "form" fail)
+                         (format s "     Form: ~A~%" (gethash "form" fail)))
+                       (when (gethash "values" fail)
+                         (let ((vals (gethash "values" fail)))
+                           (when (plusp (length vals))
+                             (format s "     Got: ~{~A~^, ~}~%"
+                                     (coerce vals 'list)))))
+                       (when (gethash "reason" fail)
+                         (format s "     Reason: ~A~%"
+                                 (gethash "reason" fail)))))
+            (when (and debug-output-str (plusp (length debug-output-str)))
+              (format s "~%;; debug output~%~A" debug-output-str)))))
+    (let ((response
+           (make-ht "content" (text-content summary) "passed" passed "failed"
+                    failed "pending" pending "framework" framework-name
+                    "duration_ms" duration "failed_tests" failed-tests-vector)))
+      (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"))
         (multiple-value-bind (value presentp)
             (gethash field test-result)
-          (when presentp
-            (setf (gethash field response) value))))
+          (when presentp (setf (gethash field response) value))))
       response)))
 
 (defun build-code-find-response (symbol path line)

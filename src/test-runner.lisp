@@ -37,7 +37,19 @@ Returns:
 - pending (integer)
 - framework (string)
 - duration_ms (integer)
-- failed_tests (array of objects)
+- stdout (string, present when non-empty) — captured test standard output
+- stderr (string, present when non-empty) — captured test error output
+- debug_output (string, present when non-empty) — output written to *test-debug-output* stream
+NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
+To include debug prints in the visible summary, write to *test-debug-output*:
+  (format cl-mcp/src/test-runner-core:*test-debug-output* \"debug: ~A~%\" value)
+- failed_tests (array of objects with fields:)
+  - test_name (string) — name of the failing test
+  - description (string) — assertion description message
+  - form (string) — the assertion form expression
+  - values (array of strings) — evaluated argument values
+  - reason (string) — error reason or condition message
+  - source (object) — source location with file and line
 
 Examples:
   Run all tests: system='cl-mcp/tests/clhs-test'

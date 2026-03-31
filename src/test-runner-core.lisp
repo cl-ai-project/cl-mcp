@@ -9,9 +9,29 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
   (:export #:run-tests
-           #:detect-test-framework))
+           #:detect-test-framework
+           #:*test-debug-output*
+           #:*max-test-output-length*))
 
 (in-package #:cl-mcp/src/test-runner-core)
+
+(defvar *test-debug-output* (make-broadcast-stream)
+  "Stream for intentional debug output during test execution.
+Test code can write to this stream via (format cl-mcp/src/test-runner-core:*test-debug-output* ...).
+Output is captured and included in the run-tests response content text.
+Outside of test execution, this is a broadcast-stream (output discarded).")
+
+(defvar *max-test-output-length* 50000
+  "Maximum characters for stdout/stderr captured during test execution.
+Matches *default-max-output-length* from repl-core.")
+
+(defun %truncate-test-output (string)
+  "Truncate STRING to *max-test-output-length* if it exceeds the limit."
+  (if (> (length string) *max-test-output-length*)
+      (format nil "~A~%... (truncated, ~D total chars)"
+              (subseq string 0 *max-test-output-length*)
+              (length string))
+      string))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Detection
@@ -193,24 +213,42 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
       (error "Failed to load test system ~A: ~A" system-name c))))
 
 (defun %rove-extract-selected-failures (results)
-  "Extract failure details from selected test RESULTS returned by rove:run-tests."
+  "Extract failure details from selected test RESULTS returned by rove:run-tests.
+Handles test nodes (with TEST-NAME) containing (testing ...) blocks.
+Also includes defensive handling for bare FAILED-ASSERTION objects in case
+a future Rove version returns them directly instead of crashing."
   (let* ((pkg (find-package :rove/core/result))
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" pkg)))
-         (test-failed-fn (fdefinition (find-symbol "TEST-FAILED-TESTS" pkg)))
+         (failed-assertion-class (find-symbol "FAILED-ASSERTION" pkg))
+         (assertion-form-fn (fdefinition (find-symbol "ASSERTION-FORM" pkg)))
+         (assertion-desc-fn (fdefinition (find-symbol "ASSERTION-DESCRIPTION" pkg)))
+         (assertion-reason-fn (fdefinition (find-symbol "ASSERTION-REASON" pkg)))
+         (assertion-values-fn (fdefinition (find-symbol "ASSERTION-VALUES" pkg)))
+         (assertion-source-fn (fdefinition (find-symbol "ASSERTION-SOURCE-LOCATION" pkg)))
          (failure-details nil))
     (dolist (test-result results)
-      (let ((test-name (funcall test-name-fn test-result)))
-        (dolist (testing-fail (funcall test-failed-fn test-result))
-          (let ((testing-desc (funcall test-name-fn testing-fail))
-                 (assertions (%rove-extract-assertions testing-fail)))
+      (if (typep test-result failed-assertion-class)
+          ;; Direct assertion in deftest body (no testing wrapper)
+          (push (make-failure-detail
+                 :test-name (princ-to-string test-result)
+                 :form (funcall assertion-form-fn test-result)
+                 :description (funcall assertion-desc-fn test-result)
+                 :reason (funcall assertion-reason-fn test-result)
+                 :values (funcall assertion-values-fn test-result)
+                 :source (funcall assertion-source-fn test-result))
+                failure-details)
+          ;; Test node — recurse via %rove-extract-assertions
+          (let ((test-name (princ-to-string (funcall test-name-fn test-result)))
+                (assertions (%rove-extract-assertions test-result)))
             (dolist (assertion assertions)
-              (setf (gethash "test_name" assertion)
-                    (format nil "~A / ~A" test-name testing-desc))
-              (push assertion failure-details))))))
+              (setf (gethash "test_name" assertion) test-name)
+              (push assertion failure-details)))))
     (nreverse failure-details)))
 
 (defun run-rove-selected-tests (test-symbols)
-  "Run Rove TEST-SYMBOLS and return structured results."
+  "Run Rove TEST-SYMBOLS and return structured results.
+Wraps rove:run-tests with error handling for Rove bugs (e.g., direct assertions
+without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
   (log-event :info "test-runner" "framework" "rove" "selected_tests"
              (format nil "~{~A~^, ~}" test-symbols))
   (let* ((result-pkg (find-package :rove/core/result))
@@ -222,35 +260,70 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (start-time (get-internal-real-time))
+         (stdout-stream (make-string-output-stream))
+         (stderr-stream (make-string-output-stream))
+         (debug-stream (make-string-output-stream))
          successp
-         results)
+         results
+         rove-error)
     (declare (ignore successp))
-    (setf (values successp results)
-          (funcall
-           (compile nil
-                    `(lambda (run-tests-fn tests)
-                       (let ((,report-stream-sym (make-broadcast-stream))
-                             (*standard-output* (make-broadcast-stream)))
-                         (funcall run-tests-fn tests))))
-           run-tests-fn test-symbols))
+    (handler-case
+        (setf (values successp results)
+              (funcall
+               (compile nil
+                        `(lambda (run-tests-fn tests stdout-s stderr-s debug-s)
+                           (let ((,report-stream-sym (make-broadcast-stream))
+                                 (*standard-output* stdout-s)
+                                 (*error-output* stderr-s)
+                                 (*test-debug-output* debug-s))
+                             (funcall run-tests-fn tests))))
+               run-tests-fn test-symbols stdout-stream stderr-stream
+               debug-stream))
+      (error (c)
+        (setf rove-error (princ-to-string c))
+        (log-event :error "test-runner" "message"
+                   "rove:run-tests crashed" "error" rove-error)))
     (let* ((end-time (get-internal-real-time))
-           (duration-ms (round (* 1000
-                                  (/ (- end-time start-time)
-                                     internal-time-units-per-second))))
-           (passed 0)
-           (failed 0)
-           (pending 0))
-      (dolist (test-result results)
-        (incf passed (length (funcall passed-tests-fn test-result)))
-        (incf failed (length (funcall failed-tests-fn test-result)))
-        (incf pending (length (funcall pending-tests-fn test-result))))
-      (make-test-result :passed passed
-                        :failed failed
-                        :pending pending
-                        :failed-tests (when (plusp failed)
-                                        (%rove-extract-selected-failures results))
-                        :framework :rove
-                        :duration duration-ms))))
+           (duration-ms
+            (round
+             (* 1000
+                (/ (- end-time start-time) internal-time-units-per-second))))
+           (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
+           (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
+           (debug-output (get-output-stream-string debug-stream)))
+      (if rove-error
+          ;; Rove crashed (e.g., direct assertions without testing wrapper)
+          (let ((ht (make-test-result
+                     :passed 0 :failed (length test-symbols)
+                     :failed-tests
+                     (mapcar (lambda (sym)
+                               (make-failure-detail
+                                :test-name (princ-to-string sym)
+                                :reason (format nil "Test runner crashed: ~A" rove-error)))
+                             test-symbols)
+                     :framework :rove :duration duration-ms)))
+            (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+            (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+            (when (plusp (length debug-output))
+              (setf (gethash "debug_output" ht) debug-output))
+            ht)
+          ;; Normal path
+          (let ((passed 0) (failed 0) (pending 0))
+            (dolist (test-result results)
+              (incf passed (length (funcall passed-tests-fn test-result)))
+              (incf failed (length (funcall failed-tests-fn test-result)))
+              (incf pending (length (funcall pending-tests-fn test-result))))
+            (let ((ht (make-test-result
+                       :passed passed :failed failed :pending pending
+                       :failed-tests
+                       (when (plusp failed)
+                         (%rove-extract-selected-failures results))
+                       :framework :rove :duration duration-ms)))
+              (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+              (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+              (when (plusp (length debug-output))
+                (setf (gethash "debug_output" ht) debug-output))
+              ht))))))
 
 (defun run-rove-single-test (test-name)
   "Run a single Rove test by name and return structured results.
@@ -266,62 +339,97 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
          (reporter-pkg (find-package :rove/reporter))
          (rove-pkg (find-package :rove))
          (run-fn (fdefinition (find-symbol "RUN" rove-pkg)))
-         (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
-         (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
-         (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
+         (passed-tests-fn
+          (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
+         (failed-tests-fn
+          (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
+         (pending-tests-fn
+          (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
+         (test-name-fn (fdefinition (find-symbol "TEST-NAME" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
          (start-time (get-internal-real-time))
-         successp results)
-    ;; Run with suppressed output using rove:run (triggers :around methods)
-    (setf (values successp results)
-          (funcall
-           (compile nil
-                    `(lambda (run-fn system-key)
-                       (let ((,report-stream-sym (make-broadcast-stream))
-                             (*standard-output* (make-broadcast-stream)))
-                         (funcall run-fn system-key))))
-           run-fn (intern (string-upcase system-name) :keyword)))
+         (stdout-stream (make-string-output-stream))
+         (stderr-stream (make-string-output-stream))
+         (debug-stream (make-string-output-stream))
+         successp
+         results
+         rove-error)
+    (handler-case
+     (setf (values successp results)
+             (funcall
+              (compile nil
+                       `(lambda (run-fn system-key stdout-s stderr-s debug-s)
+                          (let ((,report-stream-sym
+                                 (make-broadcast-stream))
+                                (*standard-output* stdout-s)
+                                (*error-output* stderr-s)
+                                (*test-debug-output* debug-s))
+                            (funcall run-fn system-key))))
+              run-fn (intern (string-upcase system-name) :keyword) stdout-stream
+              stderr-stream debug-stream))
+     (error (c) (setf rove-error (princ-to-string c))
+            (log-event :error "test-runner" "message" "rove:run crashed"
+                       "error" rove-error)))
     (let* ((end-time (get-internal-real-time))
-           (duration-ms (round (* 1000 (/ (- end-time start-time)
-                                          internal-time-units-per-second))))
-           ;; Get stats from *last-suite-report*
-           (suite-results (symbol-value last-report-sym))
-           (passed 0)
-           (failed 0)
-           (pending 0)
-           (failure-details nil))
-      ;; Count passed/failed/pending from results
-      ;; Structure: suite-results -> package-results -> deftest-results
-      ;; We need to count at the deftest level (3rd level)
-      (dolist (suite-result suite-results)
-        ;; Level 2: package results (passed/failed packages)
-        (dolist (pkg-result (funcall passed-tests-fn suite-result))
-          ;; Level 3: deftest results
-          (incf passed (length (funcall passed-tests-fn pkg-result)))
-          (incf failed (length (funcall failed-tests-fn pkg-result)))
-          (incf pending (length (funcall pending-tests-fn pkg-result))))
-        ;; Also count from failed packages
-        (dolist (pkg-result (funcall failed-tests-fn suite-result))
-          (incf passed (length (funcall passed-tests-fn pkg-result)))
-          (incf failed (length (funcall failed-tests-fn pkg-result)))
-          (incf pending (length (funcall pending-tests-fn pkg-result)))))
-      ;; Extract failure details if any
-      (when (plusp failed)
-        (dolist (suite-result suite-results)
-          (dolist (pkg-result (append (funcall passed-tests-fn suite-result)
-                                      (funcall failed-tests-fn suite-result)))
-            (dolist (fail (funcall failed-tests-fn pkg-result))
-              (push (make-failure-detail
-                     :test-name (princ-to-string fail)
-                     :reason "Test failed (see rove output for details)")
-                    failure-details)))))
-      (make-test-result :passed passed
-                        :failed failed
-                        :pending pending
-                        :failed-tests (nreverse failure-details)
-                        :framework :rove
-                        :duration duration-ms))))
+           (duration-ms
+            (round
+             (* 1000
+                (/ (- end-time start-time) internal-time-units-per-second))))
+           (stdout
+            (%truncate-test-output (get-output-stream-string stdout-stream)))
+           (stderr
+            (%truncate-test-output (get-output-stream-string stderr-stream)))
+           (debug-output (get-output-stream-string debug-stream)))
+      (if rove-error
+          (let ((ht
+                 (make-test-result :passed 0 :failed 1
+                                   :failed-tests
+                                   (list
+                                    (make-failure-detail
+                                     :test-name system-name
+                                     :reason (format nil "Test runner crashed: ~A" rove-error)))
+                                   :framework :rove :duration duration-ms)))
+            (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+            (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+            (when (plusp (length debug-output))
+              (setf (gethash "debug_output" ht) debug-output))
+            ht)
+          (let ((suite-results (symbol-value last-report-sym))
+                (passed 0)
+                (failed 0)
+                (pending 0)
+                (failure-details nil))
+            (dolist (suite-result suite-results)
+              (dolist (pkg-result (funcall passed-tests-fn suite-result))
+                (incf passed (length (funcall passed-tests-fn pkg-result)))
+                (incf failed (length (funcall failed-tests-fn pkg-result)))
+                (incf pending (length (funcall pending-tests-fn pkg-result))))
+              (dolist (pkg-result (funcall failed-tests-fn suite-result))
+                (incf passed (length (funcall passed-tests-fn pkg-result)))
+                (incf failed (length (funcall failed-tests-fn pkg-result)))
+                (incf pending (length (funcall pending-tests-fn pkg-result)))))
+            (when (plusp failed)
+              (dolist (suite-result suite-results)
+                (dolist
+                    (pkg-result
+                     (append (funcall passed-tests-fn suite-result)
+                             (funcall failed-tests-fn suite-result)))
+                  (dolist (test-fail (funcall failed-tests-fn pkg-result))
+                    (let ((test-name (funcall test-name-fn test-fail))
+                          (assertions (%rove-extract-assertions test-fail)))
+                      (dolist (a assertions)
+                        (setf (gethash "test_name" a) (princ-to-string test-name))
+                        (push a failure-details)))))))
+            (let ((ht
+                   (make-test-result :passed passed :failed failed :pending pending
+                                     :failed-tests (nreverse failure-details)
+                                     :framework :rove :duration duration-ms)))
+              (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+              (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+              (when (plusp (length debug-output))
+                (setf (gethash "debug_output" ht) debug-output))
+              ht))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ASDF Fallback (text capture)
@@ -332,13 +440,15 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
   (log-event :info "test-runner" "framework" "asdf-fallback" "system" system-name)
   (let ((output (make-string-output-stream))
         (error-output (make-string-output-stream))
+        (debug-stream (make-string-output-stream))
         (start-time (get-internal-real-time))
         (success nil)
         (condition-message nil))
     (handler-case
         (progn
           (let ((*standard-output* output)
-                (*error-output* error-output))
+                (*error-output* error-output)
+                (*test-debug-output* debug-stream))
             (asdf:test-system system-name))
           (setf success t))
       (error (c)
@@ -347,8 +457,8 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
-           (stdout (get-output-stream-string output))
-           (stderr (get-output-stream-string error-output))
+           (stdout (%truncate-test-output (get-output-stream-string output)))
+           (stderr (%truncate-test-output (get-output-stream-string error-output)))
            (failure-reason (or condition-message
                                (and (plusp (length stderr)) stderr)
                                "asdf:test-system failed"))
@@ -368,6 +478,9 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
+      (let ((debug-output (get-output-stream-string debug-stream)))
+        (when (plusp (length debug-output))
+          (setf (gethash "debug_output" ht) debug-output)))
       ht)))
 
 ;;; ---------------------------------------------------------------------------
