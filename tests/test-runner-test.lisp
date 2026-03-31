@@ -10,7 +10,9 @@
   ;; Load clhs-test system so we can use it as a test subject
   ;; NOTE: Do NOT import from helper test packages (test-runner-test-failures, etc.)
   ;; as that would register their intentionally-failing tests with Rove
-  (:import-from #:cl-mcp/tests/clhs-test))
+  (:import-from #:cl-mcp/tests/clhs-test)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-run-tests-response))
 
 (in-package #:cl-mcp/tests/test-runner-test)
 
@@ -79,6 +81,43 @@
         (ok (stringp stdout) "stdout should be present")
         (ok (search "DEBUG-MARKER-12345" stdout)
             "stdout should contain the debug output")))))
+
+(deftest run-tests-captures-debug-output
+  (testing "run-tests includes debug_output from *test-debug-output* stream"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output")))
+      (ok (= 0 (gethash "failed" result)) "Helper test should pass")
+      (let ((debug-out (gethash "debug_output" result)))
+        (ok (stringp debug-out) "debug_output should be present as a string")
+        (ok (search "DEBUG-STREAM-MARKER-98765" debug-out)
+            "debug_output should contain the debug stream output")))))
+
+(deftest run-tests-selected-captures-debug-output
+  (testing "run-tests with :test captures debug_output"
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output"
+                             :test "cl-mcp/tests/test-runner-test-debug-output::debug-output-capture-test")))
+      (ok (= 0 (gethash "failed" result)))
+      (let ((debug-out (gethash "debug_output" result)))
+        (ok (stringp debug-out) "debug_output should be present")
+        (ok (search "DEBUG-STREAM-MARKER-98765" debug-out)
+            "debug_output should contain the debug stream output")))))
+
+(deftest run-tests-content-text-excludes-stdout
+  (testing "content text does not contain raw stdout (kept in structured field only)"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-stdout"))
+           (resp (build-run-tests-response result))
+           (text (gethash "text" (aref (gethash "content" resp) 0))))
+      (ok (search "DEBUG-MARKER-12345" (gethash "stdout" resp))
+          "stdout structured field should contain the marker")
+      (ok (not (search "DEBUG-MARKER-12345" text))
+          "content text should not contain raw stdout"))))
+
+(deftest run-tests-content-text-includes-debug-output
+  (testing "content text includes debug_output from *test-debug-output*"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-debug-output"))
+           (resp (build-run-tests-response result))
+           (text (gethash "text" (aref (gethash "content" resp) 0))))
+      (ok (search "DEBUG-STREAM-MARKER-98765" text)
+          "content text should include debug output"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Failure Details Tests

@@ -9,9 +9,29 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
   (:export #:run-tests
-           #:detect-test-framework))
+           #:detect-test-framework
+           #:*test-debug-output*
+           #:*max-test-output-length*))
 
 (in-package #:cl-mcp/src/test-runner-core)
+
+(defvar *test-debug-output* (make-broadcast-stream)
+  "Stream for intentional debug output during test execution.
+Test code can write to this stream via (format cl-mcp/src/test-runner-core:*test-debug-output* ...).
+Output is captured and included in the run-tests response content text.
+Outside of test execution, this is a broadcast-stream (output discarded).")
+
+(defvar *max-test-output-length* 50000
+  "Maximum characters for stdout/stderr captured during test execution.
+Matches *default-max-output-length* from repl-core.")
+
+(defun %truncate-test-output (string)
+  "Truncate STRING to *max-test-output-length* if it exceeds the limit."
+  (if (> (length string) *max-test-output-length*)
+      (format nil "~A~%... (truncated, ~D total chars)"
+              (subseq string 0 *max-test-output-length*)
+              (length string))
+      string))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Detection
@@ -242,6 +262,7 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          (start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
+         (debug-stream (make-string-output-stream))
          successp
          results
          rove-error)
@@ -250,12 +271,14 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
         (setf (values successp results)
               (funcall
                (compile nil
-                        `(lambda (run-tests-fn tests stdout-s stderr-s)
+                        `(lambda (run-tests-fn tests stdout-s stderr-s debug-s)
                            (let ((,report-stream-sym (make-broadcast-stream))
                                  (*standard-output* stdout-s)
-                                 (*error-output* stderr-s))
+                                 (*error-output* stderr-s)
+                                 (*test-debug-output* debug-s))
                              (funcall run-tests-fn tests))))
-               run-tests-fn test-symbols stdout-stream stderr-stream))
+               run-tests-fn test-symbols stdout-stream stderr-stream
+               debug-stream))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test-runner" "message"
@@ -265,8 +288,9 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
             (round
              (* 1000
                 (/ (- end-time start-time) internal-time-units-per-second))))
-           (stdout (get-output-stream-string stdout-stream))
-           (stderr (get-output-stream-string stderr-stream)))
+           (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
+           (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
+           (debug-output (get-output-stream-string debug-stream)))
       (if rove-error
           ;; Rove crashed (e.g., direct assertions without testing wrapper)
           (let ((ht (make-test-result
@@ -280,6 +304,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                      :framework :rove :duration duration-ms)))
             (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
             (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+            (when (plusp (length debug-output))
+              (setf (gethash "debug_output" ht) debug-output))
             ht)
           ;; Normal path
           (let ((passed 0) (failed 0) (pending 0))
@@ -295,6 +321,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                        :framework :rove :duration duration-ms)))
               (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
               (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+              (when (plusp (length debug-output))
+                (setf (gethash "debug_output" ht) debug-output))
               ht))))))
 
 (defun run-rove-single-test (test-name)
@@ -320,18 +348,20 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
          (start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
+         (debug-stream (make-string-output-stream))
          successp results)
     ;; Run with suppressed output using rove:run (triggers :around methods)
     (setf (values successp results)
           (funcall
            (compile nil
-                    `(lambda (run-fn system-key stdout-s stderr-s)
+                    `(lambda (run-fn system-key stdout-s stderr-s debug-s)
                        (let ((,report-stream-sym (make-broadcast-stream))
                              (*standard-output* stdout-s)
-                             (*error-output* stderr-s))
+                             (*error-output* stderr-s)
+                             (*test-debug-output* debug-s))
                          (funcall run-fn system-key))))
            run-fn (intern (string-upcase system-name) :keyword)
-           stdout-stream stderr-stream))
+           stdout-stream stderr-stream debug-stream))
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
@@ -373,10 +403,13 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
                                   :failed-tests (nreverse failure-details)
                                   :framework :rove
                                   :duration duration-ms))
-            (stdout (get-output-stream-string stdout-stream))
-            (stderr (get-output-stream-string stderr-stream)))
+            (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
+            (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
+            (debug-output (get-output-stream-string debug-stream)))
         (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
         (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+        (when (plusp (length debug-output))
+          (setf (gethash "debug_output" ht) debug-output))
         ht))))
 
 ;;; ---------------------------------------------------------------------------
@@ -388,13 +421,15 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
   (log-event :info "test-runner" "framework" "asdf-fallback" "system" system-name)
   (let ((output (make-string-output-stream))
         (error-output (make-string-output-stream))
+        (debug-stream (make-string-output-stream))
         (start-time (get-internal-real-time))
         (success nil)
         (condition-message nil))
     (handler-case
         (progn
           (let ((*standard-output* output)
-                (*error-output* error-output))
+                (*error-output* error-output)
+                (*test-debug-output* debug-stream))
             (asdf:test-system system-name))
           (setf success t))
       (error (c)
@@ -403,8 +438,8 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
-           (stdout (get-output-stream-string output))
-           (stderr (get-output-stream-string error-output))
+           (stdout (%truncate-test-output (get-output-stream-string output)))
+           (stderr (%truncate-test-output (get-output-stream-string error-output)))
            (failure-reason (or condition-message
                                (and (plusp (length stderr)) stderr)
                                "asdf:test-system failed"))
@@ -424,6 +459,9 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
+      (let ((debug-output (get-output-stream-string debug-stream)))
+        (when (plusp (length debug-output))
+          (setf (gethash "debug_output" ht) debug-output)))
       ht)))
 
 ;;; ---------------------------------------------------------------------------
