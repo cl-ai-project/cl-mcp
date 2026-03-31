@@ -157,7 +157,10 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 **Preferred: `run-tests` tool** for structured results (pass/fail counts, failure details).
 - Run system: `{"system": "my-system/tests"}`
 - Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (package must be loaded first)
-- Failure details: `failed_tests` array with `test_name`, `form`, `reason`, `source`
+- Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
+- Response includes `stdout`/`stderr` fields (structured data only, not in content text)
+- Response includes `debug_output` field with output from `*test-debug-output*` stream (also appended to content text)
+- Test code can write intentional debug output to `*test-debug-output*` stream for inclusion in results
 
 **Fallback via `repl-eval`**: `(rove:run :my-system/tests)` after `load-system`.
 
