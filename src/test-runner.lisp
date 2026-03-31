@@ -40,6 +40,9 @@ Returns:
 - stdout (string, present when non-empty) — captured test standard output
 - stderr (string, present when non-empty) — captured test error output
 - debug_output (string, present when non-empty) — output written to *test-debug-output* stream
+NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
+To include debug prints in the visible summary, write to *test-debug-output*:
+  (format cl-mcp/src/test-runner-core:*test-debug-output* \"debug: ~A~%\" value)
 - failed_tests (array of objects with fields:)
   - test_name (string) — name of the failing test
   - description (string) — assertion description message
