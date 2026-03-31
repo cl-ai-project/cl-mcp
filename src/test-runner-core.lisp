@@ -359,14 +359,13 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
      (setf (values successp results)
              (funcall
               (compile nil
-                       (eclector.reader:quasiquote
-                        (lambda (run-fn system-key stdout-s stderr-s debug-s)
-                          (let (((eclector.reader:unquote report-stream-sym)
+                       `(lambda (run-fn system-key stdout-s stderr-s debug-s)
+                          (let ((,report-stream-sym
                                  (make-broadcast-stream))
                                 (*standard-output* stdout-s)
                                 (*error-output* stderr-s)
                                 (*test-debug-output* debug-s))
-                            (funcall run-fn system-key)))))
+                            (funcall run-fn system-key))))
               run-fn (intern (string-upcase system-name) :keyword) stdout-stream
               stderr-stream debug-stream))
      (error (c) (setf rove-error (princ-to-string c))
