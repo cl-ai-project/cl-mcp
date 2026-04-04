@@ -34,6 +34,9 @@
                 #:worker-pid #:worker-id
                 #:worker-process-info
                 #:worker-crash-history-pushed-p
+                #:worker-last-crash-reason
+                #:worker-last-exit-status
+                #:worker-last-exit-code
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/proxy
@@ -415,7 +418,10 @@ to prevent recovery threads from spawning orphan workers."
                  (worker-id crashed-worker) "session" session-id
                  "was_standby" was-standby
                  "exit_status" (or exit-status "unknown")
-                 "exit_code" (or exit-code "unknown")))
+                 "exit_code" (or exit-code "unknown"))
+      (setf (worker-last-crash-reason crashed-worker) "process-died"
+            (worker-last-exit-status crashed-worker) (or exit-status "unknown")
+            (worker-last-exit-code crashed-worker) (or exit-code "unknown")))
     (ignore-errors (kill-worker crashed-worker))
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.
@@ -461,6 +467,12 @@ to prevent recovery threads from spawning orphan workers."
                    (setf (worker-state new-worker) :bound)
                    (setf (worker-session-id new-worker) session-id)
                    (setf (worker-needs-reset-notification new-worker) t)
+                   (setf (worker-last-crash-reason new-worker)
+                           (worker-last-crash-reason crashed-worker)
+                         (worker-last-exit-status new-worker)
+                           (worker-last-exit-status crashed-worker)
+                         (worker-last-exit-code new-worker)
+                           (worker-last-exit-code crashed-worker))
                    (bordeaux-threads:with-lock-held (*pool-lock*)
                      (cond
                        ((not *pool-running*)

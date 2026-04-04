@@ -85,7 +85,10 @@ arguments hash-table.  ID is the JSON-RPC request id."
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON")
     ("CL-MCP/SRC/WORKER-CLIENT" . "KILL-WORKER")
-    ("CL-MCP/SRC/WORKER-CLIENT" . "SIGNAL-WORKER-TERMINATE"))
+    ("CL-MCP/SRC/WORKER-CLIENT" . "SIGNAL-WORKER-TERMINATE")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-LAST-CRASH-REASON")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-LAST-EXIT-STATUS")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-LAST-EXIT-CODE"))
   "Package/symbol pairs used by proxy-to-worker at runtime.
 Verified at pool initialization to detect stale strings early.")
 
@@ -107,10 +110,20 @@ all unresolvable symbols."
       (error "Proxy binding verification failed:~%~{  - ~A~%~}" failures)))
   t)
 
-(defun %crash-notification-result (&optional reason)
+(defun %crash-notification-result (&key reason exit-status exit-code)
   "Return a tool result hash-table with the crash notification message.
-When REASON is provided, it is included in the message for diagnostics."
-  (let ((ht (make-ht)))
+When crash details are provided, they are included for diagnostics."
+  (let* ((detail-parts
+          (remove nil
+                  (list (when (and reason (not (equal reason "unknown")))
+                          reason)
+                        (when (and exit-status (not (equal exit-status "unknown")))
+                          (format nil "exit_status=~A" exit-status))
+                        (when (and exit-code (not (equal exit-code "unknown")))
+                          (format nil "exit_code=~A" exit-code)))))
+         (detail (when detail-parts
+                   (format nil "~{~A~^, ~}" detail-parts)))
+         (ht (make-ht)))
     (setf (gethash "content" ht)
             (text-content
              (format nil "Worker process crashed~@[ (~A)~] and was restarted. ~
@@ -118,7 +131,7 @@ When REASON is provided, it is included in the message for diagnostics."
                           functions, package state) has been reset. ~
                           Please run load-system again to restore ~
                           your environment."
-                     reason))
+                     detail))
           (gethash "isError" ht) t)
     ht))
 
@@ -143,6 +156,15 @@ When REASON is provided, it is included in the message for diagnostics."
 (defvar %cached-signal-worker-terminate% nil
   "Cached fdefinition for WORKER-CLIENT:SIGNAL-WORKER-TERMINATE.")
 
+(defvar %cached-worker-last-crash-reason% ()
+  "Cached fdefinition for WORKER-CLIENT:WORKER-LAST-CRASH-REASON.")
+
+(defvar %cached-worker-last-exit-status% ()
+  "Cached fdefinition for WORKER-CLIENT:WORKER-LAST-EXIT-STATUS.")
+
+(defvar %cached-worker-last-exit-code% ()
+  "Cached fdefinition for WORKER-CLIENT:WORKER-LAST-EXIT-CODE.")
+
 (defun %ensure-cached-bindings ()
   "Populate the cached function bindings on first use.  Called once
 per image after verify-proxy-bindings has validated the symbols."
@@ -165,7 +187,16 @@ per image after verify-proxy-bindings has validated the symbols."
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "KILL-WORKER"))
           %cached-signal-worker-terminate%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
-                                 "SIGNAL-WORKER-TERMINATE")))))
+                                 "SIGNAL-WORKER-TERMINATE"))
+          %cached-worker-last-crash-reason%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "WORKER-LAST-CRASH-REASON"))
+          %cached-worker-last-exit-status%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "WORKER-LAST-EXIT-STATUS"))
+          %cached-worker-last-exit-code%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "WORKER-LAST-EXIT-CODE")))))
 
 (defun %invalidate-proxy-cache ()
   "Reset all cached late-bound function references to NIL.
@@ -178,7 +209,10 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-crashed-sym% nil
         %cached-worker-crashed-reason% nil
         %cached-kill-worker% nil
-        %cached-signal-worker-terminate% nil))
+        %cached-signal-worker-terminate% nil
+        %cached-worker-last-crash-reason% nil
+        %cached-worker-last-exit-status% nil
+        %cached-worker-last-exit-code% nil))
 
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.
@@ -213,10 +247,19 @@ TOCTOU race with concurrent requests for the same session."
                  (worker-crashed-sym %cached-worker-crashed-sym%))
             (cond
               ((funcall %cached-check-and-clear% worker)
-               (log-event :info "proxy.crash-notification"
-                          "session" session-id
-                          "method" method)
-               (%crash-notification-result))
+               (let ((cr-reason (ignore-errors
+                                  (funcall %cached-worker-last-crash-reason% worker)))
+                     (cr-exit-status (ignore-errors
+                                      (funcall %cached-worker-last-exit-status% worker)))
+                     (cr-exit-code (ignore-errors
+                                    (funcall %cached-worker-last-exit-code% worker))))
+                 (log-event :info "proxy.crash-notification"
+                            "session" session-id
+                            "method" method "reason" cr-reason
+                            "exit_status" cr-exit-status "exit_code" cr-exit-code)
+                 (%crash-notification-result :reason cr-reason
+                                             :exit-status cr-exit-status
+                                             :exit-code cr-exit-code)))
               (t
                (log-event :debug "proxy.forward"
                           "session" session-id
@@ -260,7 +303,7 @@ TOCTOU race with concurrent requests for the same session."
                                         "method" method
                                         "error" (princ-to-string e))
                              (%crash-notification-result
-                              (or reason "unknown"))))))
+                              :reason (or reason "unknown"))))))
                        (t
                         (log-event :debug "proxy.worker-rpc-error"
                                    "session" session-id
