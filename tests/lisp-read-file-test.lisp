@@ -69,11 +69,14 @@
 
 (deftest lisp-read-file-content-pattern
   (testing "content-pattern filters non-Lisp text with context"
-    (let* ((result (lisp-read-file "README.md" :content-pattern "lisp-read-file"))
-           (content (gethash "content" result)))
-      (ok (string= (gethash "mode" result) "text-filtered"))
-      (ok (stringp content))
-      (ok (search "lisp-read-file" content)))))
+    (with-temp-lisp-file "tests/tmp/content-pattern-test.txt"
+        (format nil "line one~%this has search-target in it~%line three~%")
+      (lambda (path)
+        (let* ((result (lisp-read-file path :content-pattern "search-target"))
+               (content (gethash "content" result)))
+          (ok (string= (gethash "mode" result) "text-filtered"))
+          (ok (stringp content))
+          (ok (search "search-target" content)))))))
 
 (deftest lisp-read-file-includes-preceding-comments
   (testing "include-comments surfaces leading comments in collapsed output"
