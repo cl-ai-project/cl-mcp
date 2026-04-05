@@ -3,7 +3,7 @@
 ## Agent Guidelines
 
 @prompts/repl-driven-development.md
-@agents/common-lisp-expert.md
+@prompts/common-lisp-expert.md
 
 ## Project Overview
 
@@ -67,6 +67,5 @@ mallet src/*.lisp
 src/          Core implementation (protocol, tools, transports)
 tests/        Rove test suites (mirrored naming: *-test.lisp)
 scripts/      Helper clients and stdio<->TCP bridge
-prompts/      System prompts for AI agents (repl-driven-development.md)
-agents/       Agent persona guidelines (common-lisp-expert.md)
+prompts/      System prompts for AI agents
 ```
