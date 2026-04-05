@@ -25,25 +25,44 @@ For the full list of tools with input/output schemas, see [docs/tools.md](docs/t
 
 ## Quick Start
 
+### Install
+
+```bash
+# Install from Roswell
+ros install cl-ai-project/cl-mcp
+
+# or fetch from GitHub
+cd ~/common-lisp
+git clone https://github.com/cl-ai-project/cl-mcp.git
+```
 Load and run from an existing REPL:
 
 ```lisp
 (asdf:load-system :cl-mcp)  ; or (ql:quickload :cl-mcp) if using Quicklisp
 
-;; Start TCP transport on port 12345 in a new thread.
+;; Start HTTP server on port 12345
+(cl-mcp:start-http-server :port 12345)
+
+;; Start TCP transport on port 12345
 (cl-mcp:start-tcp-server-thread :port 12345)
 ```
 
 Or run a minimal stdio loop (one JSON-RPC line per request):
 
 ```bash
+;; When use with Roswell
 ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
+
+;; When use plain sbcl command
+sbcl --eval '(require :asdf)' \
+     --eval '(asdf:load-system :cl-mcp)' \
+     --eval '(cl-mcp:run :transport :stdio)'
 ```
 
-**Project root**: When `MCP_PROJECT_ROOT` is not set, the server uses the
-directory where the MCP client (Claude Code, Codex, etc.) was launched as
-the project root. You can also set it explicitly via the environment variable
-or by calling the `fs-set-project-root` tool after connecting.
+**Project root**: File operations require a project root to be set. If
+`MCP_PROJECT_ROOT` is not set, the first file access will return an error
+prompting you to call `fs-set-project-root`. AI agents handle this
+automatically by setting it to their working directory.
 
 ### Claude Code
 
