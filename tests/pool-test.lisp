@@ -128,7 +128,18 @@ in the cleanup form regardless of success or failure."
       (ok (search "crashed" text)
           "generic message still present")
       (ok (not (search "exit_status" text))
-          "no exit_status when not provided"))))
+          "no exit_status when not provided")))
+  (testing "empty strings are filtered out"
+    (let* ((result (cl-mcp/src/proxy::%crash-notification-result
+                    :reason "" :exit-status "" :exit-code ""))
+           (content (gethash "content" result))
+           (text (gethash "text" (aref content 0))))
+      (ok (not (search "exit_status=" text))
+          "empty exit_status filtered")
+      (ok (not (search "exit_code=" text))
+          "empty exit_code filtered")
+      (ok (not (search "()" text))
+          "no empty parens in message"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Integration tests — spawn, RPC, kill (require ros)

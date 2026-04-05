@@ -115,11 +115,20 @@ all unresolvable symbols."
 When crash details are provided, they are included for diagnostics."
   (let* ((detail-parts
           (remove nil
-                  (list (when (and reason (not (equal reason "unknown")))
+                  (list (when (and reason
+                              (not (equal reason "unknown"))
+                              (or (not (stringp reason))
+                                  (plusp (length reason))))
                           reason)
-                        (when (and exit-status (not (equal exit-status "unknown")))
+                        (when (and exit-status
+                                   (not (equal exit-status "unknown"))
+                                   (or (not (stringp exit-status))
+                                       (plusp (length exit-status))))
                           (format nil "exit_status=~A" exit-status))
-                        (when (and exit-code (not (equal exit-code "unknown")))
+                        (when (and exit-code
+                                   (not (equal exit-code "unknown"))
+                                   (or (not (stringp exit-code))
+                                       (plusp (length exit-code))))
                           (format nil "exit_code=~A" exit-code)))))
          (detail (when detail-parts
                    (format nil "~{~A~^, ~}" detail-parts)))
@@ -297,13 +306,25 @@ TOCTOU race with concurrent requests for the same session."
                                          "your environment."))
                                       "isError" t))
                             (t
-                             (log-event :warn
-                                        "proxy.worker-crashed-mid-request"
-                                        "session" session-id
-                                        "method" method
-                                        "error" (princ-to-string e))
-                             (%crash-notification-result
-                              :reason (or reason "unknown"))))))
+                             (let ((cr-exit-status
+                                    (ignore-errors
+                                      (funcall %cached-worker-last-exit-status%
+                                               worker)))
+                                   (cr-exit-code
+                                    (ignore-errors
+                                      (funcall %cached-worker-last-exit-code%
+                                               worker))))
+                               (log-event :warn
+                                          "proxy.worker-crashed-mid-request"
+                                          "session" session-id
+                                          "method" method
+                                          "error" (princ-to-string e)
+                                          "exit_status" cr-exit-status
+                                          "exit_code" cr-exit-code)
+                               (%crash-notification-result
+                                :reason (or reason "unknown")
+                                :exit-status cr-exit-status
+                                :exit-code cr-exit-code))))))
                        (t
                         (log-event :debug "proxy.worker-rpc-error"
                                    "session" session-id
