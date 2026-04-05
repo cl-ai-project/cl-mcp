@@ -20,16 +20,22 @@
 (declaim (ftype (function (&key (:transport (member :stdio :tcp))
                                 (:in stream) (:out stream)
                                 (:host string) (:port (or integer null))
-                                (:accept-once t) (:on-listening function))
+                                (:accept-once t) (:on-listening function)
+                                (:worker-pool t))
                           (values boolean &optional))
                 run))
 
 (defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
-                 (host "127.0.0.1") (port 0) (accept-once t) on-listening)
+                 (host "127.0.0.1") (port 0) (accept-once t) on-listening
+                 (worker-pool nil worker-pool-supplied-p))
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
 and writes responses to OUT. Returns T when input is exhausted (EOF).
 
-This is a minimal loop for E2E bring-up; full transport features come later."
+WORKER-POOL controls process isolation: T enables the worker pool (default),
+NIL runs all tools in-process.  When not supplied, the current value of
+*use-worker-pool* is used (which defaults to T unless MCP_NO_WORKER_POOL=1)."
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (ecase transport
     (:stdio
      (when *use-worker-pool* (initialize-pool))
