@@ -670,17 +670,6 @@ What’s covered:
 - Worker pool lifecycle, crash recovery, circuit breaker, and pool-status
 - Request cancellation (`notifications/cancelled`) with worker termination
 
-Note: Running tests compiles FASLs into `~/.cache/...`. Ensure your environment
-allows writing there or configure SBCL’s cache directory accordingly.
-
-## Project Layout
-- `src/` — core implementation (protocol, tools, transports)
-  - `src/worker/` — child worker process entry point (server, handlers, main)
-- `tests/` — Rove test suites invoked by ASDF `test-op`
-- `scripts/` — helper clients and a stdio↔TCP bridge
-- `prompts/` — system prompts for AI agents
-- `cl-mcp.asd` — main and test systems (delegates `test-op` to Rove)
-
 ## Security Model
 
 **cl-mcp is a trusted, local-only development tool.** It is designed to run
@@ -720,16 +709,6 @@ enforce security. They are all trivially bypassable via `repl-eval`:
   a dedicated child SBCL process, providing OS-level process isolation.
   This is a resource management and stability mechanism (a crash in one
   session's worker does not affect others), not a security boundary.
-
-## Troubleshooting
-- Bridge exits after a few seconds of inactivity: ensure you’re using the
-  bundled `scripts/stdio_tcp_bridge.py` (it disables read timeouts after
-  connect) and that your stdin remains open.
-- Permission errors compiling FASLs during tests: allow writes under `~/.cache`
-  or reconfigure SBCL’s cache path.
-- No output on stdio: remember the protocol is one JSON‑RPC message per line.
-  Each request must end with a newline and the server will answer with exactly
-  one line (or nothing for notifications).
 
 ## Recommended System Prompts
 
