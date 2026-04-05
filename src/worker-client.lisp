@@ -44,7 +44,10 @@
            #:worker-crash-history-pushed-p
            #:*reaper-threads*
            #:*reaper-threads-lock*
-           #:signal-worker-terminate))
+           #:signal-worker-terminate
+           #:worker-last-crash-reason
+           #:worker-last-exit-status
+           #:worker-last-exit-code))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -164,7 +167,10 @@ Handles both LF and CRLF line endings."
   (session-id nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
-  (crash-history-pushed-p nil :type boolean))
+  (crash-history-pushed-p nil :type boolean)
+  (last-crash-reason nil)
+  (last-exit-status nil)
+  (last-exit-code nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers — ID generation
@@ -579,6 +585,9 @@ Returns nothing."
           (setf exit-status (string-downcase (symbol-name status)))
           (when (member status '(:exited :signaled))
             (setf exit-code (sb-ext:process-exit-code process)))))
+      (setf (worker-last-crash-reason worker) reason
+            (worker-last-exit-status worker) (or exit-status "unknown")
+            (worker-last-exit-code worker) (or exit-code "unknown"))
       ;; Reap the OS process in a background thread to avoid blocking
       ;; the caller.  process-close calls waitpid internally, which
       ;; blocks if the worker process is still alive.

@@ -17,7 +17,10 @@
                 #:worker-id #:worker-session-id
                 #:worker-needs-reset-notification
                 #:worker-crash-history-pushed-p
-                #:clear-reset-notification)
+                #:clear-reset-notification
+                #:worker-last-crash-reason
+                #:worker-last-exit-status
+                #:worker-last-exit-code)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*
                 #:proxy-to-worker)
@@ -72,6 +75,12 @@ in the cleanup form regardless of success or failure."
           "session-id is nil by default")
       (ok (null (worker-needs-reset-notification w))
           "needs-reset-notification is nil by default")
+      (ok (null (worker-last-crash-reason w))
+          "last-crash-reason is nil by default")
+      (ok (null (worker-last-exit-status w))
+          "last-exit-status is nil by default")
+      (ok (null (worker-last-exit-code w))
+          "last-exit-code is nil by default")
       (ok (zerop (cl-mcp/src/worker-client::worker-request-counter w))
           "request-counter is 0 by default"))))
 
@@ -84,6 +93,53 @@ in the cleanup form regardless of success or failure."
       (clear-reset-notification w)
       (ok (null (worker-needs-reset-notification w))
           "flag is nil after clearing"))))
+
+(deftest crash-details-stored-on-worker
+  (testing "make-worker with crash details stores them correctly"
+    (let ((w (cl-mcp/src/worker-client:make-worker
+              :last-crash-reason "eof"
+              :last-exit-status "signaled"
+              :last-exit-code 11)))
+      (ok (equal "eof" (worker-last-crash-reason w))
+          "crash reason stored")
+      (ok (equal "signaled" (worker-last-exit-status w))
+          "exit status stored")
+      (ok (equal 11 (worker-last-exit-code w))
+          "exit code stored"))))
+
+(deftest crash-notification-includes-details
+  (testing "crash notification message includes reason and exit info"
+    (let* ((result (cl-mcp/src/proxy::%crash-notification-result
+                    :reason "eof"
+                    :exit-status "signaled"
+                    :exit-code 11))
+           (content (gethash "content" result))
+           (text (gethash "text" (aref content 0))))
+      (ok (search "eof" text)
+          "message includes crash reason")
+      (ok (search "exit_status=signaled" text)
+          "message includes exit status")
+      (ok (search "exit_code=11" text)
+          "message includes exit code")))
+  (testing "crash notification with no details still works"
+    (let* ((result (cl-mcp/src/proxy::%crash-notification-result))
+           (content (gethash "content" result))
+           (text (gethash "text" (aref content 0))))
+      (ok (search "crashed" text)
+          "generic message still present")
+      (ok (not (search "exit_status" text))
+          "no exit_status when not provided")))
+  (testing "empty strings are filtered out"
+    (let* ((result (cl-mcp/src/proxy::%crash-notification-result
+                    :reason "" :exit-status "" :exit-code ""))
+           (content (gethash "content" result))
+           (text (gethash "text" (aref content 0))))
+      (ok (not (search "exit_status=" text))
+          "empty exit_status filtered")
+      (ok (not (search "exit_code=" text))
+          "empty exit_code filtered")
+      (ok (not (search "()" text))
+          "no empty parens in message"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Integration tests — spawn, RPC, kill (require ros)
