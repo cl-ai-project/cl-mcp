@@ -462,7 +462,8 @@ attacks like localhost.evil.com."
                                ;; binds to 127.0.0.1. Network-facing auth
                                ;; is out of scope. Do NOT change this
                                ;; default to :GENERATE or a token string.
-                               (token nil))
+                               (token nil)
+                               (worker-pool nil worker-pool-supplied-p))
   "Start the MCP HTTP server.
 TOKEN controls authentication:
   NIL (default)       - no authentication (local development tool)
@@ -470,7 +471,11 @@ TOKEN controls authentication:
   \"<string>\"        - use the given string as the Bearer token
 When a token is active, all requests (except OPTIONS) must include
 an Authorization: Bearer <token> header.
+WORKER-POOL controls process isolation: T enables the worker pool,
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
 Returns the acceptor instance and port number."
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (when (http-server-running-p)
     (log-event :info "http.already-running" "port" *http-server-port*)
     (return-from start-http-server (values *http-server* *http-server-port*)))

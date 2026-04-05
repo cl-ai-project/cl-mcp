@@ -56,13 +56,19 @@ Does not disconnect on timeout to allow idle clients (e.g. AI agents thinking)."
        (bordeaux-threads:thread-alive-p *tcp-server-thread*)))
 
 (declaim (ftype (function (&key (:host string) (:port (or integer null))
-                                (:accept-once t) (:on-listening (or null function)))
+                                (:accept-once t) (:on-listening (or null function))
+                                (:worker-pool t))
                           (values t (or integer null) &optional))
                 start-tcp-server-thread))
 (defun start-tcp-server-thread (&key (host "127.0.0.1") (port 0)
-                                     (accept-once t) on-listening)
+                                     (accept-once t) on-listening
+                                     (worker-pool nil worker-pool-supplied-p))
   "Start the TCP MCP server on a dedicated thread.
-Returns the thread object and the bound PORT once the listener is up."
+Returns the thread object and the bound PORT once the listener is up.
+WORKER-POOL controls process isolation: T enables the worker pool,
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (when (and *tcp-server-thread*
              (not (bordeaux-threads:thread-alive-p *tcp-server-thread*)))
     (setf *tcp-server-thread* nil
@@ -93,14 +99,20 @@ Returns the thread object and the bound PORT once the listener is up."
 (declaim (ftype (function (&key (:host string)
                                 (:port (or integer null))
                                 (:accept-once t)
-                                (:on-listening (or null function)))
+                                (:on-listening (or null function))
+                                (:worker-pool t))
                           (values (member :already-running :started nil) &optional))
                 ensure-tcp-server-thread))
 (defun ensure-tcp-server-thread (&key (host "127.0.0.1") (port 0)
-                                      (accept-once nil) on-listening)
+                                      (accept-once nil) on-listening
+                                      (worker-pool nil worker-pool-supplied-p))
   "Ensure a background TCP server thread is running.
 Returns :already-running when one is alive, :started when a new one was
-successfully started, or NIL if the start attempt failed."
+successfully started, or NIL if the start attempt failed.
+WORKER-POOL controls process isolation: T enables the worker pool,
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (cond
     ((tcp-server-running-p)
      (when (and on-listening *tcp-server-port*)
@@ -267,11 +279,15 @@ successfully started, or NIL if the start attempt failed."
                     (log-event :warn "tcp.accept.error" "error"
                                (princ-to-string e)))))))))
 
-(defun serve-tcp (&key (host "127.0.0.1") (port 0) (accept-once t) on-listening)
+(defun serve-tcp (&key (host "127.0.0.1") (port 0) (accept-once t) on-listening
+                       (worker-pool nil worker-pool-supplied-p))
   "Serve MCP over TCP. If PORT is 0, an ephemeral port is chosen.
 Calls ON-LISTENING with the actual port when ready. If ACCEPT-ONCE is T,
 accepts a single connection and returns T after the client closes.
-Initializes the worker pool if *use-worker-pool* is true."
+WORKER-POOL controls process isolation: T enables the worker pool,
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (let ((listener nil)
         (pool-initialized nil))
     (setf *tcp-stop-flag* nil)
