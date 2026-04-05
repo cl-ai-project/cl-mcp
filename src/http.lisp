@@ -474,11 +474,12 @@ an Authorization: Bearer <token> header.
 WORKER-POOL controls process isolation: T enables the worker pool,
 NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
 Returns the acceptor instance and port number."
-  (when worker-pool-supplied-p
-    (setf *use-worker-pool* worker-pool))
   (when (http-server-running-p)
     (log-event :info "http.already-running" "port" *http-server-port*)
     (return-from start-http-server (values *http-server* *http-server-port*)))
+
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
 
   ;; Configure authentication
   (setf *http-auth-token*

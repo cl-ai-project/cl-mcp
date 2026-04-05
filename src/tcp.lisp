@@ -67,8 +67,6 @@ Does not disconnect on timeout to allow idle clients (e.g. AI agents thinking)."
 Returns the thread object and the bound PORT once the listener is up.
 WORKER-POOL controls process isolation: T enables the worker pool,
 NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
-  (when worker-pool-supplied-p
-    (setf *use-worker-pool* worker-pool))
   (when (and *tcp-server-thread*
              (not (bordeaux-threads:thread-alive-p *tcp-server-thread*)))
     (setf *tcp-server-thread* nil
@@ -76,6 +74,8 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
   (when (tcp-server-running-p)
     (log-event :info "tcp.thread.already-running" "port" *tcp-server-port*)
     (return-from start-tcp-server-thread (values *tcp-server-thread* *tcp-server-port*)))
+  (when worker-pool-supplied-p
+    (setf *use-worker-pool* worker-pool))
   (let ((actual-port nil))
     (setf *tcp-stop-flag* nil)
     (log-event :info "tcp.thread.start" "host" host "port" port "accept-once" accept-once)
@@ -111,14 +111,14 @@ Returns :already-running when one is alive, :started when a new one was
 successfully started, or NIL if the start attempt failed.
 WORKER-POOL controls process isolation: T enables the worker pool,
 NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
-  (when worker-pool-supplied-p
-    (setf *use-worker-pool* worker-pool))
   (cond
     ((tcp-server-running-p)
      (when (and on-listening *tcp-server-port*)
        (funcall on-listening *tcp-server-port*))
      :already-running)
     (t
+     (when worker-pool-supplied-p
+       (setf *use-worker-pool* worker-pool))
      (multiple-value-bind (thr started-port)
          (start-tcp-server-thread :host host :port port
                                   :accept-once accept-once
