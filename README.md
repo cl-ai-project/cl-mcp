@@ -7,75 +7,15 @@ over stdio, TCP, and HTTP (Streamable HTTP). It enables AI agents to interact
 with Common Lisp environments through structured tools for REPL evaluation,
 system loading, file operations, code introspection, and structure-aware editing.
 
-This repo is test-first and designed for editor/agent clients to drive Common
-Lisp development via MCP.
-
 ## Features
-- JSON‑RPC 2.0 request/response framing (one message per line)
-- MCP initialize handshake with capability discovery
-- `notifications/cancelled` support for cooperative request cancellation
-- **Worker pool isolation** — eval-dependent tools run in an isolated child SBCL process, separating the MCP server from potentially crashing evaluations. Features automatic crash recovery, circuit breaker, and per-session affinity for multi-client setups
-- Tools API
-  - `repl-eval` — evaluate forms (returns `result_object_id` for non-primitive results)
-  - `load-system` — load ASDF systems with force-reload, output suppression, and timeout support
-  - `inspect-object` — drill down into complex objects (CLOS instances, hash-tables, lists, arrays) by ID
-  - `fs-read-file` / `fs-write-file` / `fs-list-directory` — project-scoped file access with allow‑list
-  - `fs-get-project-info` — report project root and cwd info for path normalization
-  - `fs-set-project-root` — set the server's project root and working directory
-  - `lisp-read-file` — Lisp-aware file viewer with collapsed/expanded modes
-  - `code-find` / `code-describe` / `code-find-references` — sb-introspect based symbol lookup/metadata/xref
-  - `lisp-edit-form` — structure-aware edits to top-level forms (replace/insert) using Eclector CST
-  - `lisp-patch-form` — scoped text replacement within a matched form (token-efficient small edits)
-  - `lisp-check-parens` — detect mismatched delimiters in code slices
-  - `clgrep-search` — semantic grep for Lisp files with structure awareness
-  - `clhs-lookup` ��� Common Lisp HyperSpec reference (symbols and sections)
-  - `run-tests` — unified test runner with structured results (Rove, ASDF fallback)
-  - `pool-status` — worker pool diagnostics (worker counts, states, pool health)
-  - `pool-kill-worker` — kill and optionally reset the session's worker process
-- Transports: `:stdio`, `:tcp`, and `:http` (Streamable HTTP for Claude Code)
-- Structured JSON logs with level control via env var
-- Rove test suite wired through ASDF `test-op`
-
-For detailed tool input/output schemas and examples, see [docs/tools.md](docs/tools.md).
-
-## Protocol Support
-- Protocol versions recognized: `2025-06-18`, `2025-03-26`, `2024-11-05`
-  - On `initialize`, if the client's `protocolVersion` is supported it is echoed
-    back; if it is **not** supported the server returns `error.code = -32602`
-    with `data.supportedVersions`.
-
-## Worker Pool Isolation
-
-Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-find`,
-`code-describe`, `code-find-references`, `inspect-object`) run in **isolated
-child SBCL processes** rather than the parent MCP server image.
-
-- **Per-session affinity** — each MCP session is bound to a dedicated worker
-  process. The worker persists for the session lifetime, preserving loaded
-  systems and REPL state.
-- **Automatic crash recovery** — if a worker crashes, a replacement is spawned
-  and re-bound to the same session automatically.
-- **Circuit breaker** — if a session's worker crashes repeatedly (3 times
-  within 5 minutes by default), the pool stops respawning and reports the
-  failure to the client.
-- **Warm standby pool** — pre-spawned workers reduce first-request latency.
-- **Dual launcher** — workers can be spawned via Roswell (`ros`) or bare SBCL,
-  auto-detected at startup.
-
-File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`,
-`clgrep-search`, `clhs-lookup`) continue to run inline in the parent process.
-
-Disable the worker pool to run all tools inline in the parent process
-(single-image mode):
-
-- **Environment variable**: `MCP_NO_WORKER_POOL=1` (applies at image load time)
-- **Keyword argument**: all startup functions accept `:worker-pool`
-  ```lisp
-  (cl-mcp:run :transport :stdio :worker-pool nil)
-  (cl-mcp:start-http-server :port 3000 :worker-pool nil)
-  ```
-  When `:worker-pool` is supplied it takes precedence over the environment variable.
-  When omitted, the existing setting is used.
+- **REPL evaluation with object inspection** — evaluate forms, drill down into complex results (CLOS instances, hash-tables, etc.), and capture structured error context with stack frames and local variables
+- **Sandboxed file operations** — read/write/list files restricted to the project root and ASDF system source directories, preventing accidental access outside the project
+- **Structure-aware Lisp editing** — replace, insert, and patch top-level forms using Eclector CST parsing with automatic parinfer repair, preserving formatting and comments
+- **Code intelligence** — symbol lookup, metadata, and cross-references via `sb-introspect`; Lisp-aware file viewing with collapsed signatures and pattern-based expansion
+- **Structured test runner** — run Rove tests with pass/fail counts, failure details, and source locations
+- **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with automatic crash recovery, circuit breaker, and per-session affinity
+- **Three transports** — stdio, TCP (multi-client), and Streamable HTTP (for Claude Code)
+- **MCP protocol** — JSON-RPC 2.0 framing, capability discovery, cooperative request cancellation
 
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
@@ -93,7 +33,7 @@ Load and run from an existing REPL:
 (cl-mcp:start-tcp-server-thread :port 12345)
 ```
 
-Or run a minimal stdio loop (one JSON‑RPC line per request):
+Or run a minimal stdio loop (one JSON-RPC line per request):
 
 ```bash
 ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
@@ -216,13 +156,74 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
   python3 scripts/stdio_tcp_bridge.py --host 127.0.0.1 --port 12345
 ```
 
+## Worker Pool Isolation
+
+Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-find`,
+`code-describe`, `code-find-references`, `inspect-object`) run in **isolated
+child SBCL processes** rather than the parent MCP server image.
+
+- **Per-session affinity** — each MCP session is bound to a dedicated worker
+  process. The worker persists for the session lifetime, preserving loaded
+  systems and REPL state.
+- **Automatic crash recovery** — if a worker crashes, a replacement is spawned
+  and re-bound to the same session automatically.
+- **Circuit breaker** — if a session's worker crashes repeatedly (3 times
+  within 5 minutes by default), the pool stops respawning and reports the
+  failure to the client.
+- **Warm standby pool** — pre-spawned workers reduce first-request latency.
+- **Dual launcher** — workers can be spawned via Roswell (`ros`) or bare SBCL,
+  auto-detected at startup.
+
+File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`,
+`clgrep-search`, `clhs-lookup`) continue to run inline in the parent process.
+
+Disable the worker pool to run all tools inline in the parent process
+(single-image mode):
+
+- **Environment variable**: `MCP_NO_WORKER_POOL=1` (applies at image load time)
+- **Keyword argument**: all startup functions accept `:worker-pool`
+  ```lisp
+  (cl-mcp:run :transport :stdio :worker-pool nil)
+  (cl-mcp:start-http-server :port 3000 :worker-pool nil)
+  ```
+  When `:worker-pool` is supplied it takes precedence over the environment variable.
+  When omitted, the existing setting is used.
+
+## Tools
+
+All tools are self-describing via the MCP `tools/list` response.
+For detailed input/output schemas and examples, see [docs/tools.md](docs/tools.md).
+
+| Tool | Description |
+|------|-------------|
+| `repl-eval` | Evaluate forms with package context, print controls, and timeout |
+| `load-system` | Load ASDF systems with force-reload and output suppression |
+| `inspect-object` | Drill down into non-primitive objects by ID |
+| `fs-read-file` | Read files within project root or ASDF system directories |
+| `fs-write-file` | Write files under the project root |
+| `fs-list-directory` | List directory entries (skips hidden/build artifacts) |
+| `fs-get-project-info` | Report project root and working directory |
+| `fs-set-project-root` | Set the server's project root |
+| `lisp-read-file` | Lisp-aware file viewer with collapsed signatures |
+| `lisp-edit-form` | Structure-aware form replace/insert via Eclector CST |
+| `lisp-patch-form` | Scoped text replacement within a matched form |
+| `lisp-check-parens` | Detect mismatched delimiters |
+| `clgrep-search` | Semantic grep for Lisp files |
+| `clhs-lookup` | Common Lisp HyperSpec reference |
+| `code-find` | Find symbol definition location via sb-introspect |
+| `code-describe` | Symbol metadata (type, arglist, documentation) |
+| `code-find-references` | Cross-references for a symbol |
+| `run-tests` | Structured test runner (Rove, ASDF fallback) |
+| `pool-status` | Worker pool diagnostics |
+| `pool-kill-worker` | Kill and optionally reset the session's worker |
+
 ## Environment Variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MCP_PROJECT_ROOT` | Project root directory for file operations | client working directory |
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-| `MCP_LOG_FILE` | Log to file (timestamped with PID, e.g., `/tmp/cl-mcp.log` → `/tmp/cl-mcp-2026-03-01T09-15-30-12345.log`) | (stderr only) |
+| `MCP_LOG_FILE` | Log to file (timestamped with PID) | (stderr only) |
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
 
 ## Logging
@@ -238,6 +239,12 @@ Example:
 ```bash
 MCP_LOG_LEVEL=debug MCP_LOG_FILE=/tmp/cl-mcp.log sbcl --eval '(asdf:load-system :cl-mcp)' ...
 ```
+
+## Protocol Support
+- Protocol versions recognized: `2025-06-18`, `2025-03-26`, `2024-11-05`
+  - On `initialize`, if the client's `protocolVersion` is supported it is echoed
+    back; if it is **not** supported the server returns `error.code = -32602`
+    with `data.supportedVersions`.
 
 ## Running Tests
 
