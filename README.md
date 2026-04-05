@@ -120,19 +120,16 @@ making manual intervention from SLIME or another REPL difficult.
 
 ### Codex
 
+Configure in `~/.codex/config.toml`.
+
 #### Stdio transport
 
 The simplest setup — Codex spawns and manages the server process:
 
-```json
-{
-  "mcpServers": {
-    "cl-mcp": {
-      "command": "ros",
-      "args": ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"]
-    }
-  }
-}
+```toml
+[mcp_servers.cl-mcp]
+command = "ros"
+args = ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"]
 ```
 
 As with Claude Code's stdio mode, the Lisp process is owned by Codex and
@@ -149,15 +146,10 @@ Python bridge that translates stdio ↔ TCP:
 (cl-mcp:start-tcp-server-thread :port 12345)
 ```
 
-```json
-{
-  "mcpServers": {
-    "cl-mcp": {
-      "command": "python3",
-      "args": ["scripts/stdio_tcp_bridge.py", "--host", "127.0.0.1", "--port", "12345"]
-    }
-  }
-}
+```toml
+[mcp_servers.cl-mcp]
+command = "python3"
+args = ["scripts/stdio_tcp_bridge.py", "--host", "127.0.0.1", "--port", "12345"]
 ```
 
 This gives you the same shared-REPL workflow as Claude Code's HTTP mode —
