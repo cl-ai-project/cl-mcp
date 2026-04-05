@@ -63,8 +63,17 @@ child SBCL processes** rather than the parent MCP server image.
 File-system tools (`fs-*`, `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`,
 `clgrep-search`, `clhs-lookup`) continue to run inline in the parent process.
 
-Disable the worker pool by setting `MCP_NO_WORKER_POOL=1`. When disabled, all
-tools run inline in the parent process (single-image mode).
+Disable the worker pool to run all tools inline in the parent process
+(single-image mode):
+
+- **Environment variable**: `MCP_NO_WORKER_POOL=1` (applies at image load time)
+- **Keyword argument**: all startup functions accept `:worker-pool`
+  ```lisp
+  (cl-mcp:run :transport :stdio :worker-pool nil)
+  (cl-mcp:start-http-server :port 3000 :worker-pool nil)
+  ```
+  When `:worker-pool` is supplied it takes precedence over the environment variable.
+  When omitted, the existing setting is used.
 
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
@@ -72,12 +81,6 @@ tools run inline in the parent process (single-image mode).
 - Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `clhs` (loaded on-demand by `clhs-lookup` tool).
 
 ## Quick Start
-
-**IMPORTANT**: Set the `MCP_PROJECT_ROOT` environment variable before starting:
-
-```bash
-export MCP_PROJECT_ROOT=/path/to/your/project
-```
 
 Load and run from an existing REPL:
 
@@ -91,17 +94,19 @@ Load and run from an existing REPL:
 Or run a minimal stdio loop (one JSON‑RPC line per request):
 
 ```bash
-# With environment variable
-export MCP_PROJECT_ROOT=$(pwd)
 ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
 ```
 
-**Alternative**: If you don't set `MCP_PROJECT_ROOT`, you must call `fs-set-project-root`
-tool immediately after connecting to initialize the project root.
+**Project root**: When `MCP_PROJECT_ROOT` is not set, the server uses the
+directory where the MCP client (Claude Code, Codex, etc.) was launched as
+the project root. You can also set it explicitly via the environment variable
+or by calling the `fs-set-project-root` tool after connecting.
 
-### HTTP Transport (for Claude Code)
+### Claude Code
 
-Start the HTTP server and continue using your REPL:
+#### HTTP transport (recommended)
+
+Start the HTTP server from your REPL and keep using it alongside Claude Code:
 
 ```lisp
 (asdf:load-system :cl-mcp)  ; or (ql:quickload :cl-mcp)
@@ -130,34 +135,90 @@ Configure Claude Code to connect (in `~/.claude/settings.json` or project `.mcp.
 }
 ```
 
-This is the recommended approach for Common Lisp development:
-1. Start your REPL as usual
-2. Load cl-mcp and start the HTTP server
-3. Configure Claude Code to connect
-4. Both you and Claude Code can use the same Lisp runtime simultaneously
+This approach lets both you and Claude Code share the same Lisp runtime.
+You can inspect state from SLIME/Sly while Claude Code works through MCP.
 
-### Try it with the bundled clients
-- Python TCP one‑shot client (initialize):
+#### Stdio transport
 
-```bash
-python3 scripts/client_init.py --host 127.0.0.1 --port 12345 --method initialize --id 1
+For a simpler setup where Claude Code manages the server process directly:
+
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "ros",
+      "args": ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"]
+    }
+  }
+}
 ```
 
-- Stdio↔TCP bridge (connect editor’s stdio to the TCP server):
+Stdio is easy to configure but the Lisp process is owned by Claude Code,
+making manual intervention from SLIME or another REPL difficult.
+
+### Codex
+
+#### Stdio transport
+
+The simplest setup — Codex spawns and manages the server process:
+
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "ros",
+      "args": ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"]
+    }
+  }
+}
+```
+
+As with Claude Code’s stdio mode, the Lisp process is owned by Codex and
+not easily accessible from SLIME or another REPL.
+
+#### TCP transport with stdio bridge
+
+Start a TCP server from your REPL, then point Codex at it via the bundled
+Python bridge that translates stdio ↔ TCP:
+
+```lisp
+;; In your REPL
+(asdf:load-system :cl-mcp)
+(cl-mcp:start-tcp-server-thread :port 12345)
+```
+
+```json
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "python3",
+      "args": ["scripts/stdio_tcp_bridge.py", "--host", "127.0.0.1", "--port", "12345"]
+    }
+  }
+}
+```
+
+This gives you the same shared-REPL workflow as Claude Code’s HTTP mode —
+you keep your SLIME/Sly session while Codex works through the bridge.
+
+### Bundled test clients
+
+For manual testing and debugging:
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
+# Python TCP one-shot client (initialize)
+python3 scripts/client_init.py --host 127.0.0.1 --port 12345 --method initialize --id 1
+
+# Stdio↔TCP bridge (pipe JSON-RPC to TCP)
+echo ‘{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}’ | \
   python3 scripts/stdio_tcp_bridge.py --host 127.0.0.1 --port 12345
 ```
-
-The bridge uses a bounded connect timeout but disables read timeouts after
-connecting, so it can stay idle indefinitely (until stdin closes).
 
 ## Environment Variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MCP_PROJECT_ROOT` | Project root directory for file operations | (required) |
+| `MCP_PROJECT_ROOT` | Project root directory for file operations | client working directory |
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `MCP_LOG_FILE` | Log to file (timestamped with PID, e.g., `/tmp/cl-mcp.log` → `/tmp/cl-mcp-2026-03-01T09-15-30-12345.log`) | (stderr only) |
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
@@ -617,8 +678,7 @@ allows writing there or configure SBCL’s cache directory accordingly.
   - `src/worker/` — child worker process entry point (server, handlers, main)
 - `tests/` — Rove test suites invoked by ASDF `test-op`
 - `scripts/` — helper clients and a stdio↔TCP bridge
-- `prompts/` — system prompts for AI agents (repl-driven-development.md)
-- `agents/` — agent persona guidelines (common-lisp-expert.md)
+- `prompts/` — system prompts for AI agents
 - `cl-mcp.asd` — main and test systems (delegates `test-op` to Rove)
 
 ## Security Model
@@ -710,43 +770,6 @@ This comprehensive guide teaches AI agents how to effectively use cl-mcp's tools
    ```
 
 The prompt is designed to help AI agents make optimal use of cl-mcp's structural editing and introspection capabilities, avoiding common pitfalls like overwriting files or working in the wrong package context.
-
-## AI Agent Configuration
-
-When using cl-mcp with AI agents like Claude Code, you should configure the agent to
-synchronize the project root at the start of each session.
-
-### Recommended Setup
-
-Add server-specific instructions to your MCP client configuration. For Claude Code,
-edit your `mcp.json` or configuration file:
-
-```json
-{
-  "mcpServers": {
-    "cl-mcp": {
-      "command": "ros",
-      "args": ["run", "-l", "cl-mcp", "-e", "(cl-mcp:run)"],
-      "env": {
-        "MCP_PROJECT_ROOT": "${workspaceFolder}"
-      },
-      "instructions": "IMPORTANT: At the start of your session, call fs-set-project-root with the absolute path of your current working directory (e.g., /home/user/project) to synchronize the server's project root. This ensures all file operations work correctly."
-    }
-  }
-}
-```
-
-### Alternative: Environment Variable
-
-You can also set `MCP_PROJECT_ROOT` environment variable before starting the server:
-
-```bash
-export MCP_PROJECT_ROOT=/path/to/your/project
-ros run -s cl-mcp -e "(cl-mcp:run)"
-```
-
-The server will use this path during initialization, though calling `fs-set-project-root`
-explicitly is still recommended for dynamic project switching.
 
 ## License
 MIT
