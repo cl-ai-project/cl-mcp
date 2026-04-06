@@ -277,3 +277,14 @@
               "Description should contain the ok message"))
         (let ((form (gethash "form" failure)))
           (ok (stringp form) "Should include assertion form"))))))
+
+(deftest ensure-system-loaded-reloads-system
+  (testing "%%ensure-system-loaded clears and reloads so ASDF re-checks timestamps"
+    (let ((system-name "cl-mcp/tests/clhs-test"))
+      ;; Ensure the system is loaded first
+      (asdf:load-system system-name)
+      ;; Call the function under test — it should clear+load without error
+      (cl-mcp/src/test-runner-core::%ensure-system-loaded system-name)
+      ;; System should still be findable after the clear+load cycle
+      (ok (asdf:find-system system-name nil)
+          "System is loaded after %%ensure-system-loaded"))))
