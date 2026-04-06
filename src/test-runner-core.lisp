@@ -523,8 +523,7 @@ Returns a hash table with structured results."
                          (t "all")))
     (case fw
       (:rove
-       (when selective-requested-p
-         (%ensure-system-loaded system-name))
+       ;; System already force-reloaded above; no second load needed.
        (if (find-package :rove)
            (if selective-requested-p
                (let ((selected-tests (if test
