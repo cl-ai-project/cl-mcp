@@ -53,7 +53,7 @@ Tools run in two process types when the worker pool is enabled (default):
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).
 - **Crash recovery**: Replacement auto-spawned; next call returns one-time crash notification. Re-issue `load-system`.
-- **File edits not auto-loaded**: `lisp-edit-form` writes to disk in parent. Worker sees changes only after `load-system` or `(load "path")`.
+- **File edits and test reload**: `lisp-edit-form` writes to disk in parent. `run-tests` automatically force-reloads the test system before execution, so edited files are picked up. For `repl-eval` or `code-*` tools, you still need `load-system` or `(load "path")` to see changes.
 
 ## Shell Command Policy
 
