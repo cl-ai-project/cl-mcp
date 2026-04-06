@@ -206,9 +206,22 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
      (error "framework must be a string or symbol: ~S" framework))))
 
 (defun %ensure-system-loaded (system-name)
-  "Load SYSTEM-NAME to make test packages available for selective execution."
+  "Force-reload SYSTEM-NAME so tests always run against the latest source.
+Clears ASDF's loaded state for the system, then reloads.  This ensures
+that files edited on disk (e.g., via lisp-edit-form in the parent process)
+are recompiled before tests execute.  Dependencies whose source files
+have not changed are skipped by ASDF's timestamp check (negligible overhead)."
   (handler-case
-      (asdf:load-system system-name)
+      (progn
+        (when (asdf:find-system system-name nil)
+          (let ((asd-src
+                  (ignore-errors
+                    (asdf:system-source-file
+                     (asdf:find-system system-name nil)))))
+            (asdf:clear-system system-name)
+            (when (and asd-src (not (asdf:find-system system-name nil)))
+              (ignore-errors (asdf:load-asd asd-src)))))
+        (asdf:load-system system-name))
     (error (c)
       (error "Failed to load test system ~A: ~A" system-name c))))
 
