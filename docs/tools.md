@@ -358,6 +358,7 @@ Example requests:
 ```
 
 Notes:
+- **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
 - Auto-detects Rove framework when loaded; falls back to ASDF `test-system` for text capture
 - Single test execution requires the test package to be loaded first
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
