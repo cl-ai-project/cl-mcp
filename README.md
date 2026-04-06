@@ -64,6 +64,26 @@ sbcl --eval '(require :asdf)' \
 prompting you to call `fs-set-project-root`. AI agents handle this
 automatically by setting it to their working directory.
 
+### System Prompts
+
+The `prompts/` directory contains system prompts that teach AI agents how to
+use cl-mcp tools effectively:
+
+- **`repl-driven-development.md`** — Tool selection guide, REPL-driven workflow
+  (explore → experiment → persist → verify), editing patterns, and
+  troubleshooting recipes
+- **`common-lisp-expert.md`** — Production-quality Common Lisp coding standards,
+  CLOS/conditions/restarts conventions, and TDD with Rove
+
+Reference them from your project's `CLAUDE.md` (or equivalent) so the agent
+loads them at conversation start:
+
+```markdown
+# CLAUDE.md
+@prompts/repl-driven-development.md
+@prompts/common-lisp-expert.md
+```
+
 ### Claude Code
 
 #### HTTP transport (recommended)
