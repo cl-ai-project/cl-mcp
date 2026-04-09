@@ -7,6 +7,12 @@
 
 (defpackage #:cl-mcp/src/project-scaffold
   (:use #:cl)
+  (:import-from #:cl-mcp/src/tools/define-tool
+                #:define-tool)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht
+                #:result
+                #:text-content)
   (:import-from #:cl-mcp/src/project-scaffold-core
                 #:validate-project-name
                 #:validate-destination
@@ -18,7 +24,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
                 #:path-inside-p)
-  (:export #:write-scaffold))
+  (:export #:project-scaffold
+           #:write-scaffold))
 
 (in-package #:cl-mcp/src/project-scaffold)
 
@@ -107,3 +114,73 @@ underlying error after cleaning up the temp directory."
           (when (uiop:directory-exists-p temp-dir)
             (ignore-errors
              (uiop:delete-directory-tree temp-dir :validate t))))))))
+
+(define-tool "project-scaffold"
+  :description
+  "Generate a minimal Common Lisp project skeleton under the project root.
+
+The generated project uses package-inferred-system + Rove and ships with
+CLAUDE.md/AGENTS.md templates referencing cl-mcp's existing prompts via
+relative @-include paths. On success, returns the list of created files and
+a 'next_steps' array with concrete REPL commands the agent can invoke to
+register the project with ASDF and run its tests.
+
+Fails if the target directory already exists; choose a unique 'name' per
+generation. Intended for creating throwaway sample projects to exercise
+cl-mcp's tool surface."
+  :args
+  ((name :type :string :required t :description
+         "Project name in lisp-case (e.g. foo-lib). Must match ^[a-z][a-z0-9-]*$ and be 1-64 chars.")
+   (description :type :string :description
+                "One-line project description for .asd and README. No newlines.")
+   (author :type :string :description
+           "Author string for .asd :author. No newlines.")
+   (license :type :string :description
+            "License string for .asd :license. No newlines.")
+   (destination :type :string :description
+                "Relative parent directory under project root where <name>/ is created. Default: scaffolds."))
+  :body
+  (handler-case
+      (let* ((result-plist
+              (write-scaffold
+               :name name
+               :description (or description "A Common Lisp project scaffolded by cl-mcp.")
+               :author (or author "Unknown")
+               :license (or license "MIT")
+               :destination (or destination "scaffolds")))
+             (target-dir (getf result-plist :target-dir))
+             (relative (getf result-plist :relative-path))
+             (files (getf result-plist :files))
+             (abs-asd (namestring
+                       (merge-pathnames (format nil "~A.asd" name) target-dir)))
+             (next-steps
+              (vector
+               (format nil
+                       "To register with ASDF: run repl-eval with (asdf:load-asd ~S)"
+                       abs-asd)
+               (format nil
+                       "To load: run load-system with {\"system\": ~S}"
+                       name)
+               (format nil
+                       "To test: run run-tests with {\"system\": ~S}"
+                       (format nil "~A/tests" name))
+               (format nil
+                       "To edit: use lisp-edit-form with paths under ~A"
+                       relative))))
+        (result id
+                (make-ht
+                 "created" t
+                 "path" relative
+                 "absolute_path" (namestring target-dir)
+                 "files" (coerce files 'vector)
+                 "next_steps" next-steps
+                 "content"
+                 (text-content
+                  (format nil "Scaffolded ~A at ~A (~D files)"
+                          name relative (length files))))))
+    (invalid-argument-error (e)
+      (result id
+              (make-ht
+               "created" nil
+               "error" (princ-to-string e)
+               "content" (text-content (princ-to-string e)))))))

@@ -48,7 +48,9 @@
   (:import-from #:cl-mcp/src/tools/pool-status
                 #:pool-status)
   (:import-from #:cl-mcp/src/tools/pool-kill-worker
-                #:pool-kill-worker))
+                #:pool-kill-worker)
+  (:import-from #:cl-mcp/src/project-scaffold
+                #:project-scaffold))
 
 (in-package #:cl-mcp/src/tools/all)
 
