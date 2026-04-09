@@ -10,11 +10,20 @@
   (:import-from #:cl-ppcre
                 #:scan
                 #:regex-replace-all)
+  (:import-from #:cl-mcp/src/project-scaffold-templates
+                #:+asd-template+
+                #:+claude-md-template+
+                #:+agents-md-template+
+                #:+readme-template+
+                #:+gitignore-template+
+                #:+main-lisp-template+
+                #:+main-test-template+)
   (:export #:validate-project-name
            #:validate-destination
            #:validate-text-field
            #:render-template
            #:compute-parent-prompts-path
+           #:plan-scaffold
            #:invalid-argument-error
            #:invalid-argument-field
            #:invalid-argument-value
@@ -131,3 +140,24 @@ NAME, then descends into 'prompts'."
                   (declare (ignore i))
                   (write-string "../" s)))))
     (concatenate 'string ups "prompts")))
+
+(defun plan-scaffold (&key name description author license destination)
+  "Return an alist of (RELATIVE-PATH . CONTENT) for the scaffold manifest.
+Applies all template substitutions but performs no I/O. Callers are
+responsible for input validation before calling this function; plan-scaffold
+assumes its arguments are already normalized strings."
+  (let* ((parent-prompts (compute-parent-prompts-path destination name))
+         (bindings `(("name" . ,name)
+                     ("description" . ,description)
+                     ("author" . ,author)
+                     ("license" . ,license)
+                     ("parent-prompts" . ,parent-prompts)))
+         (render (lambda (tpl) (render-template tpl bindings))))
+    (list
+     (cons (format nil "~A.asd" name)  (funcall render +asd-template+))
+     (cons "CLAUDE.md"                 (funcall render +claude-md-template+))
+     (cons "AGENTS.md"                 (funcall render +agents-md-template+))
+     (cons "README.md"                 (funcall render +readme-template+))
+     (cons ".gitignore"                (funcall render +gitignore-template+))
+     (cons "src/main.lisp"             (funcall render +main-lisp-template+))
+     (cons "tests/main-test.lisp"      (funcall render +main-test-template+)))))

@@ -123,3 +123,53 @@
     (ok (equal "../../../../prompts"
                (cl-mcp/src/project-scaffold-core:compute-parent-prompts-path
                 "a/b/c" "foo-lib")))))
+
+(deftest plan-scaffold
+  (let ((plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+               :name "foo-lib"
+               :description "A demo library"
+               :author "Ada Lovelace"
+               :license "MIT"
+               :destination "scaffolds")))
+    (testing "returns seven entries"
+      (ok (= 7 (length plan))))
+    (testing "each entry is (relative-path . content) of strings"
+      (ok (every (lambda (entry)
+                   (and (consp entry)
+                        (stringp (car entry))
+                        (stringp (cdr entry))))
+                 plan)))
+    (testing "asd file is keyed by <name>.asd and has substitutions"
+      (let ((asd (cdr (assoc "foo-lib.asd" plan :test #'string=))))
+        (ok asd)
+        (ok (search "foo-lib" asd))
+        (ok (search "Ada Lovelace" asd))
+        (ok (search "A demo library" asd))
+        (ok (search "MIT" asd))))
+    (testing "CLAUDE.md has resolved parent-prompts path"
+      (let ((md (cdr (assoc "CLAUDE.md" plan :test #'string=))))
+        (ok md)
+        (ok (search "../../prompts/repl-driven-development.md" md))))
+    (testing "main.lisp uses the project-qualified package name"
+      (let ((src (cdr (assoc "src/main.lisp" plan :test #'string=))))
+        (ok src)
+        (ok (search "#:foo-lib/src/main" src))))
+    (testing "main-test.lisp imports the greet symbol"
+      (let ((test (cdr (assoc "tests/main-test.lisp" plan :test #'string=))))
+        (ok test)
+        (ok (search "#:foo-lib/src/main" test))
+        (ok (search "#:greet" test))))
+    (testing "no unresolved placeholders remain"
+      (dolist (entry plan)
+        (ok (null (search "{{" (cdr entry))))))))
+
+(deftest plan-scaffold-deeper-destination
+  (let ((plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+               :name "demo"
+               :description "d"
+               :author "a"
+               :license "MIT"
+               :destination "work/samples")))
+    (testing "parent-prompts resolves with extra ../"
+      (let ((md (cdr (assoc "CLAUDE.md" plan :test #'string=))))
+        (ok (search "../../../prompts/repl-driven-development.md" md))))))
