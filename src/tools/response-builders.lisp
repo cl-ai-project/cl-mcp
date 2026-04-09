@@ -131,7 +131,10 @@ so that MCP clients rendering only content[].text still see them."
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
 HT is the hash-table returned by load-system core.  Adds a content
-key with a human-readable summary and returns the same HT."
+key with a human-readable summary and returns the same HT.
+When warnings were captured, includes the warning text in the summary
+(truncated at ~2KB) so MCP clients rendering only content[].text can
+still see what was warned about."
   (let* ((status (gethash "status" ht))
          (summary
            (with-output-to-string (s)
@@ -139,9 +142,21 @@ key with a human-readable summary and returns the same HT."
                ((string= status "loaded")
                 (format s "System ~A loaded successfully in ~Dms"
                         system (gethash "duration_ms" ht))
-                (let ((wc (gethash "warnings" ht 0)))
+                (let ((wc (gethash "warnings" ht 0))
+                      (wd (gethash "warning_details" ht)))
                   (when (plusp wc)
-                    (format s " (~D warning~:P)" wc))))
+                    (format s " (~D warning~:P)" wc)
+                    (when (and (stringp wd) (plusp (length wd)))
+                      (let* ((limit 2048)
+                             (truncated-p (> (length wd) limit))
+                             (body (if truncated-p
+                                       (concatenate 'string
+                                                    (subseq wd 0 limit)
+                                                    (format nil
+                                                            "~%... [~D more characters truncated]"
+                                                            (- (length wd) limit)))
+                                       wd)))
+                        (format s "~%~A" (string-right-trim '(#\Newline) body)))))))
                ((string= status "timeout")
                 (format s "~A" (gethash "message" ht)))
                ((string= status "error")

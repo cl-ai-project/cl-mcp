@@ -51,12 +51,37 @@
            (content (gethash "content" result)))
       (ok (stringp content))
       (ok (search "+server-version+" content))
-      ;; Symbol print form depends on whether cl-mcp/src/core package is loaded.
-      ;; If not preloaded, the temporary package is deleted after parsing, making
-      ;; symbols uninterned so write prints them as #:version.
-      (ok (or (search ": (defun version" content)
-              (search ": (defun #:version" content)))
+      ;; Symbols from packages synthesized during parsing may become
+      ;; homeless after the temporary package is deleted. The display
+      ;; suppresses the `#:' prefix via *PRINT-GENSYM* so output is
+      ;; consistent regardless of whether the package is preloaded.
+      (ok (search ": (defun version" content))
+      (ok (not (search "#:version" content)))
       (ok (not (search "(defun version () ...)" content))))))
+
+(deftest lisp-read-file-no-hash-colon-prefix-pollution
+  (testing "expanded body text has no bogus #: prefixes on normal symbols"
+    (with-temp-lisp-file
+     "tests/tmp/hash-colon-dogfood.lisp"
+     (format nil "~A~%~A~%~A~%~A~%"
+             "(defpackage #:dogfood-hash-colon-scratch (:use #:cl))"
+             "(in-package #:dogfood-hash-colon-scratch)"
+             "(defun demo (x y)"
+             "  (loop for i from 0 below x always (< i y)))")
+     (lambda (path)
+       (let* ((result (lisp-read-file path :name-pattern "demo"))
+              (content (gethash "content" result)))
+         (ok (stringp content))
+         (ok (search "(defun demo" content))
+         ;; Body references (loop, for, always, i, x, y) must NOT be
+         ;; rendered with a spurious `#:' prefix, even though the
+         ;; synthesized dogfood-hash-colon-scratch package has been
+         ;; deleted by the unwind-protect in call-with-package-context.
+         (ok (not (search "#:for" content)))
+         (ok (not (search "#:always" content)))
+         (ok (not (search "#:demo" content)))
+         (ok (not (search "#:x" content)))
+         (ok (not (search "#:i" content))))))))
 
 (deftest lisp-read-file-raw-text-mode
   (testing "raw mode slices text by offset and limit"

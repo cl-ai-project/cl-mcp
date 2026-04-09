@@ -85,16 +85,24 @@ PATTERN is a non-empty string that is not valid regex syntax."
         (list (string-downcase (prin1-to-string name)))))))
 
 (defun %form->string (form)
+  "Return FORM printed as Lisp source text for display.
+Binds *PRINT-GENSYM* to NIL so that symbols that were interned into a
+synthesized package which has since been deleted (leaving them homeless)
+do not acquire a spurious `#:' prefix in the output."
   (let ((*print-pretty* t)
         (*print-case* :downcase)
-        (*print-right-margin* 80))
+        (*print-right-margin* 80)
+        (*print-gensym* nil))
     (with-output-to-string (out)
       (write form :stream out :pretty t :right-margin 80))))
 
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
-For defmethod, includes qualifiers like :before, :after, :around."
+For defmethod, includes qualifiers like :before, :after, :around.
+Binds *PRINT-GENSYM* to NIL so symbols from synthesized-and-deleted
+packages print without a spurious `#:' prefix."
   (let* ((*print-case* :downcase)
+         (*print-gensym* nil)
          (head (car form))
          (name (second form))
          (qualifiers

@@ -242,6 +242,99 @@ instead of just an opaque COMPILE-FILE-ERROR."
         (format nil "Failed to load test system ~A: ~A"
                 system-name condition))))
 
+(defun %extract-defpackage-names-from-file (pathname)
+  "Return a list of package names mentioned in `(defpackage ...)' forms
+of the Lisp source file at PATHNAME. Silently returns NIL on any error."
+  (handler-case
+      (with-open-file (stream pathname :direction :input)
+        (let ((*read-eval* nil)
+              (*package* (find-package :cl-user))
+              (names nil))
+          (loop
+           (let ((form (handler-case (read stream nil :eof)
+                         (error () :eof))))
+             (when (eq form :eof) (return))
+             (when (and (consp form)
+                        (symbolp (car form))
+                        (or (string= (symbol-name (car form)) "DEFPACKAGE")
+                            (string= (symbol-name (car form)) "DEFINE-PACKAGE"))
+                        (consp (cdr form)))
+               (let ((name-form (second form)))
+                 (push
+                  (cond
+                    ((stringp name-form) name-form)
+                    ((symbolp name-form) (symbol-name name-form))
+                    (t nil))
+                  names)))))
+          (remove-if-not #'stringp (nreverse names))))
+    (error () nil)))
+
+(defun %rove-purge-ghost-suites (system-name)
+  "Remove Rove suite entries for every test package associated with
+SYSTEM-NAME. This prevents `ghost deftests' — tests that were deleted
+from source on disk but are still remembered by Rove's in-image
+registry and therefore keep running (and possibly failing) after a
+reload.
+
+Rove stores its per-package suite in a hash-table keyed by package
+object: ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*. Clearing the entry
+for a package makes Rove rebuild the suite from scratch on the next
+deftest load, so forms that no longer exist in source disappear.
+
+Two discovery strategies are combined to cover both
+package-inferred-system and classic ASDF layouts:
+
+  1. **Dependency names**: for package-inferred systems, every
+     sub-system name like `foo/tests/bar-test' is also the package
+     name it defines. Walk SYSTEM-NAME's transitive dependency list
+     and clear packages matching each string name.
+  2. **Component source files**: recursively walk the ASDF component
+     tree under SYSTEM-NAME, read each source file, and clear
+     packages named in its `(defpackage ...)' forms. Catches classic
+     defsystems where the package name does not match any ASDF
+     sub-system name."
+  (let ((pkgs-var (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
+    (when (and pkgs-var (boundp pkgs-var)
+               (hash-table-p (symbol-value pkgs-var)))
+      (let ((suites (symbol-value pkgs-var))
+            (visited-systems (make-hash-table :test #'equal))
+            (visited-files (make-hash-table :test #'equal)))
+        (labels ((clear-pkg (pkg-name)
+                   (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
+                     (when pkg (remhash pkg suites))))
+                 (walk-components (component)
+                   (when component
+                     (cond
+                       ((typep component 'asdf:cl-source-file)
+                        (let ((path (ignore-errors
+                                      (asdf:component-pathname component))))
+                          (when (and path
+                                     (not (gethash (namestring path)
+                                                   visited-files))
+                                     (probe-file path))
+                            (setf (gethash (namestring path) visited-files) t)
+                            (dolist (pkg-name
+                                     (%extract-defpackage-names-from-file path))
+                              (clear-pkg pkg-name)))))
+                       ((ignore-errors (asdf:component-children component))
+                        (dolist (child (asdf:component-children component))
+                          (walk-components child))))))
+                 (walk-system (name)
+                   (when (and (stringp name)
+                              (not (gethash name visited-systems)))
+                     (setf (gethash name visited-systems) t)
+                     (clear-pkg name)
+                     (let ((sys (ignore-errors (asdf:find-system name nil))))
+                       (when sys
+                         (walk-components sys)
+                         (dolist (dep (ignore-errors
+                                        (asdf:system-depends-on sys)))
+                           (cond
+                             ((stringp dep) (walk-system dep))
+                             ((and (consp dep) (stringp (second dep)))
+                              (walk-system (second dep))))))))))
+          (walk-system system-name))))))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
@@ -275,6 +368,10 @@ COMPILE-FILE-ERROR."
                       (ignore-errors
                         (asdf:system-source-file
                          (asdf:find-system system-name nil)))))
+                ;; Purge Rove suite registry BEFORE clearing the system,
+                ;; so any deftest forms deleted from source since the
+                ;; previous load do not linger as ghost tests.
+                (ignore-errors (%rove-purge-ghost-suites system-name))
                 (asdf:clear-system system-name)
                 (when (and asd-src (not (asdf:find-system system-name nil)))
                   (ignore-errors (asdf:load-asd asd-src)))))
