@@ -51,12 +51,67 @@
            (content (gethash "content" result)))
       (ok (stringp content))
       (ok (search "+server-version+" content))
-      ;; Symbol print form depends on whether cl-mcp/src/core package is loaded.
-      ;; If not preloaded, the temporary package is deleted after parsing, making
-      ;; symbols uninterned so write prints them as #:version.
-      (ok (or (search ": (defun version" content)
-              (search ": (defun #:version" content)))
+      ;; Symbols from packages synthesized during parsing may become
+      ;; homeless after the temporary package is deleted. The display
+      ;; suppresses the `#:' prefix via *PRINT-GENSYM* so output is
+      ;; consistent regardless of whether the package is preloaded.
+      (ok (search ": (defun version" content))
+      (ok (not (search "#:version" content)))
       (ok (not (search "(defun version () ...)" content))))))
+
+(deftest lisp-read-file-no-hash-colon-prefix-pollution
+  (testing "expanded body text has no bogus #: prefixes on normal symbols"
+    (with-temp-lisp-file
+     "tests/tmp/hash-colon-dogfood.lisp"
+     (format nil "~A~%~A~%~A~%~A~%"
+             "(defpackage #:dogfood-hash-colon-scratch (:use #:cl))"
+             "(in-package #:dogfood-hash-colon-scratch)"
+             "(defun demo (x y)"
+             "  (loop for i from 0 below x always (< i y)))")
+     (lambda (path)
+       (let* ((result (lisp-read-file path :name-pattern "demo"))
+              (content (gethash "content" result)))
+         (ok (stringp content))
+         (ok (search "(defun demo" content))
+         ;; Body references (loop, for, always, i, x, y) must NOT be
+         ;; rendered with a spurious `#:' prefix, even though the
+         ;; synthesized dogfood-hash-colon-scratch package has been
+         ;; deleted by the unwind-protect in call-with-package-context.
+         (ok (not (search "#:for" content)))
+         (ok (not (search "#:always" content)))
+         (ok (not (search "#:demo" content)))
+         (ok (not (search "#:x" content)))
+         (ok (not (search "#:i" content))))))))
+
+(deftest lisp-read-file-preserves-genuinely-uninterned-symbols
+  (testing "#:foo in source survives as #:foo in expanded output"
+    (with-temp-lisp-file
+     "tests/tmp/dogfood-hash-colon-preserve.lisp"
+     (format nil "~A~%~A~%~A~%~A~%~A~%~A~%"
+             ";; A defpackage with #: prefixes uses uninterned symbols"
+             "(defpackage #:dogfood-preserve-pkg"
+             "  (:use #:cl)"
+             "  (:export #:greet))"
+             "(in-package #:dogfood-preserve-pkg)"
+             "(defun greet (who) (format nil \"Hello, ~A\" who))")
+     (lambda (path)
+       (let* ((result (lisp-read-file path
+                                      :name-pattern "greet"
+                                      :content-pattern "dogfood-preserve-pkg"))
+              (content (gethash "content" result)))
+         (ok (stringp content))
+         ;; Genuine #: symbols from source must survive as #: in display.
+         (ok (search "#:dogfood-preserve-pkg" content)
+             "genuinely uninterned package name should keep #: prefix")
+         (ok (search "#:cl" content)
+             "#:cl in :use should keep #: prefix")
+         (ok (search "#:greet" content)
+             "#:greet in :export should keep #: prefix")
+         ;; But symbols that became homeless by teardown should NOT have it.
+         (ok (not (search "#:who" content))
+             "greet parameter 'who' should NOT acquire a spurious #: prefix")
+         (ok (search "(defun greet" content)
+             "defun name should render without #: prefix"))))))
 
 (deftest lisp-read-file-raw-text-mode
   (testing "raw mode slices text by offset and limit"

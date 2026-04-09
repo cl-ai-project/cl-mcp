@@ -13,7 +13,8 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages
-                #:call-with-managed-packages)
+                #:call-with-managed-packages
+                #:record-homeless-on-teardown)
   (:import-from #:uiop
                 #:directory-files
                 #:ensure-directory-pathname
@@ -293,10 +294,14 @@ have begun, to avoid descending into the rest of the file."
        :created-packages (nreverse (car created-packages-cell))))))
 
 (defun %cleanup-synthesized-package-context (context)
-  "Delete temporary packages created for CONTEXT."
+  "Delete temporary packages created for CONTEXT. Before deletion, the
+symbols that each package currently owns are recorded as becoming
+homeless-due-to-teardown so downstream display code can normalize
+them without affecting genuinely uninterned symbols."
   (dolist (pkg (reverse (synthesized-package-context-created-packages context)))
     (let ((name (ignore-errors (package-name pkg))))
       (when (and name (find-package name))
+        (ignore-errors (record-homeless-on-teardown pkg))
         (ignore-errors (delete-package pkg))))))
 
 (defun call-with-package-context (package-name thunk &key source-path)

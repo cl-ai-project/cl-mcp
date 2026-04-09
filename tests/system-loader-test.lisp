@@ -66,6 +66,47 @@
       ;; No warning_details key when warnings are zero
       (ok (null (gethash "warning_details" ht))))))
 
+(deftest load-system-response-includes-warning-text
+  (testing "build-load-system-response inlines warning_details in content text"
+    ;; Build a fake load-system core result with warnings captured.
+    ;; build-load-system-response should render them into content[].text
+    ;; (the only field MCP clients display), not just the structured
+    ;; warning_details field.
+    (let ((ht (make-hash-table :test #'equal)))
+      (setf (gethash "status" ht) "loaded"
+            (gethash "system" ht) "fake-system"
+            (gethash "duration_ms" ht) 42
+            (gethash "warnings" ht) 1
+            (gethash "warning_details" ht)
+            "redefining FOO in DEFUN")
+      (let* ((built (cl-mcp/src/tools/response-builders:build-load-system-response
+                     "fake-system" ht))
+             (content (gethash "content" built))
+             (text (and (vectorp content)
+                        (plusp (length content))
+                        (gethash "text" (aref content 0)))))
+        (ok (stringp text))
+        (ok (search "System fake-system loaded successfully" text))
+        (ok (search "(1 warning)" text))
+        ;; The actual warning message must now be visible in content text.
+        (ok (search "redefining FOO" text))))))
+
+(deftest load-system-response-truncates-long-warnings
+  (testing "warning text longer than the cap is truncated with a marker"
+    (let ((ht (make-hash-table :test #'equal))
+          (long-text (make-string 3000 :initial-element #\W)))
+      (setf (gethash "status" ht) "loaded"
+            (gethash "system" ht) "fake-system"
+            (gethash "duration_ms" ht) 1
+            (gethash "warnings" ht) 1
+            (gethash "warning_details" ht) long-text)
+      (let* ((built (cl-mcp/src/tools/response-builders:build-load-system-response
+                     "fake-system" ht))
+             (content (gethash "content" built))
+             (text (gethash "text" (aref content 0))))
+        (ok (stringp text))
+        (ok (search "more characters truncated" text))))))
+
 (deftest load-system-force-false-no-clear
   (testing "force=false skips clearing and uses quickload"
     (let ((ht (load-system "cl-mcp" :force nil)))

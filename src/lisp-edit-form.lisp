@@ -105,12 +105,32 @@ blank line. For EOF boundary use a single newline."
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
 using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
-Unknown package prefixes are handled leniently via stub packages."
+Unknown package prefixes are handled leniently via stub packages.
+
+As a convenience, CONTENT consisting entirely of comments (and whitespace)
+is accepted verbatim. This allows `replace' to delete a form by replacing
+it with a `;; removed' comment marker, and `insert_*' to place bare
+comments near a target form."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable* (if custom-rt custom-rt (copy-readtable nil))))
     (labels ((whitespace-char-p (ch)
                (member ch '(#\Space #\Tab #\Newline #\Return)))
+             (comment-only-p (text)
+               ;; Return T when TEXT contains at least one `;' line comment
+               ;; or `#|...|#' block comment and NO readable forms.
+               (and (stringp text)
+                    (some (lambda (ch) (not (whitespace-char-p ch))) text)
+                    (handler-case
+                        (multiple-value-bind (form pos)
+                            (read-from-string text nil :eof)
+                          (declare (ignore pos))
+                          (eq form :eof))
+                      (error () nil))
+                    ;; Require that a `;' or `#|' token is actually present
+                    ;; so that mis-balanced junk doesn't accidentally pass.
+                    (or (find #\; text)
+                        (search "#|" text))))
              (rest-parses-as-complete-forms-p (text start)
                (let ((len (length text)))
                  (handler-case
@@ -138,7 +158,9 @@ Unknown package prefixes are handled leniently via stub packages."
                       (multiple-value-bind (form pos)
                           (read-from-string text nil :eof)
                         (when (eq form :eof)
-                          (error "content is empty"))
+                          (if (comment-only-p text)
+                              (return-from try-parse text)
+                              (error "content is empty")))
                         (let* ((len (length text))
                                (rest-start
                                  (or (position-if-not #'whitespace-char-p
@@ -153,6 +175,8 @@ Unknown package prefixes are handled leniently via stub packages."
                     :source-path source-path)
                  (error (e)
                    (values nil e)))))
+      (when (comment-only-p content)
+        (return-from %validate-and-repair-content (values content nil)))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result

@@ -56,6 +56,58 @@ then clean up."
           (ok (search "(* x 2)" updated))
           (ok (null (search "(+ x 1)" updated))))))))
 
+(deftest lisp-edit-form-replace-with-comment-only
+  (testing "replace accepts comment-only content as a deletion marker"
+    (with-temp-file "tests/tmp/edit-form-replace-comment.lisp"
+        "(defun keep (x) x)
+
+(defun to-delete () :gone)
+
+(defun also-keep () :ok)
+"
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "to-delete"
+                        :operation "replace"
+                        :content ";; to-delete was removed by dogfooding cleanup")
+        (let ((updated (fs-read-file path)))
+          (ok (search ";; to-delete was removed" updated))
+          (ok (null (search "(defun to-delete" updated)))
+          (ok (search "(defun keep" updated))
+          (ok (search "(defun also-keep" updated)))))))
+
+(deftest lisp-edit-form-insert-after-comment-only
+  (testing "insert_after accepts a bare comment as content"
+    (with-temp-file "tests/tmp/edit-form-insert-comment.lisp"
+        "(defun keep (x) x)
+"
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "keep"
+                        :operation "insert_after"
+                        :content ";; TODO: add more helpers below")
+        (let ((updated (fs-read-file path)))
+          (ok (search ";; TODO: add more helpers below" updated))
+          (ok (search "(defun keep" updated)))))))
+
+(deftest lisp-edit-form-rejects-truly-empty-content
+  (testing "whitespace-only content is still rejected"
+    (with-temp-file "tests/tmp/edit-form-empty.lisp"
+        "(defun target () :ok)
+"
+      (lambda (path)
+        (let ((raised nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "   ~%  "))
+            (error () (setf raised t)))
+          (ok raised))))))
+
 (deftest lisp-edit-form-dry-run-preview
   (testing "dry-run returns preview without writing the file"
     (with-temp-file "tests/tmp/edit-form-dry-run.lisp"

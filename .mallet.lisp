@@ -1,6 +1,6 @@
 (:mallet-config
  (:extends :default)
- (:disable :eval-usage)
- (:disable :ignore-errors-usage)
+ (:disable :no-eval)
+ (:disable :no-ignore-errors)
  (:for-paths ("src/utils/lenient-read.lisp")
    (:disable :double-colon-access)))
