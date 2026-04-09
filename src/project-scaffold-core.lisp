@@ -43,6 +43,15 @@
              (invalid-argument-value condition)
              (invalid-argument-reason condition)))))
 
+(setf (documentation 'invalid-argument-field 'function)
+      "Return the name of the offending field from an INVALID-ARGUMENT-ERROR.")
+
+(setf (documentation 'invalid-argument-value 'function)
+      "Return the rejected value from an INVALID-ARGUMENT-ERROR.")
+
+(setf (documentation 'invalid-argument-reason 'function)
+      "Return the human-readable reason string from an INVALID-ARGUMENT-ERROR.")
+
 (defparameter *project-name-regex* "^[a-z][a-z0-9-]*$"
   "Regular expression that valid project names must fully match.")
 
@@ -128,11 +137,19 @@ cl-ppcre's :simple-calls replacement callback."
 (defun compute-parent-prompts-path (destination)
   "Return the relative path from DESTINATION/<name> back to <root>/prompts.
 DESTINATION is a slash-separated relative directory (e.g. \"scaffolds\",
-\"work/samples\"). The returned path goes up by one '..' for every path
-segment in DESTINATION plus one for the project directory itself, then
-descends into 'prompts'."
-  (let* ((segments (remove-if (lambda (s) (zerop (length s)))
-                              (uiop:split-string destination :separator "/")))
+\"work/samples\"). The returned path goes up by one '..' for every real
+path segment in DESTINATION plus one for the project directory itself,
+then descends into 'prompts'.
+
+Empty segments (from consecutive slashes) and '.' segments are skipped
+when counting depth, because they do not contribute a directory level
+on disk. '..' segments are rejected upstream by VALIDATE-DESTINATION,
+so they never reach this function."
+  (let* ((raw-segments (uiop:split-string destination :separator "/"))
+         (segments (remove-if (lambda (s)
+                                (or (zerop (length s))
+                                    (string= s ".")))
+                              raw-segments))
          (depth (1+ (length segments)))
          (ups (with-output-to-string (s)
                 (dotimes (i depth)

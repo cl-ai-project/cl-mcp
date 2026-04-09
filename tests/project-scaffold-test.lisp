@@ -280,9 +280,9 @@ callers do not need to reference it."
      :author "Test"
      :license "MIT"
      :destination "scaffolds")
-    (let* ((asd-path (merge-pathnames "scaffolds/foo-lib-e2e/foo-lib-e2e.asd" root))
-           (system-name "foo-lib-e2e")
-           (test-system-name "foo-lib-e2e/tests"))
+    (let ((asd-path (merge-pathnames "scaffolds/foo-lib-e2e/foo-lib-e2e.asd" root))
+          (system-name "foo-lib-e2e")
+          (test-system-name "foo-lib-e2e/tests"))
       (unwind-protect
            (progn
              (testing "asd is loadable"
@@ -306,9 +306,9 @@ callers do not need to reference it."
     (let ((asd-path (merge-pathnames "scaffolds/readable-asd/readable-asd.asd" root)))
       (testing "both defsystem forms parse via CL reader"
         (with-open-file (in asd-path :direction :input)
-          (let* ((form1 (read in nil nil))
-                 (form2 (read in nil nil))
-                 (form3 (read in nil nil)))
+          (let ((form1 (read in nil nil))
+                (form2 (read in nil nil))
+                (form3 (read in nil nil)))
             (ok (and (consp form1) (eq (first form1) 'asdf:defsystem)))
             (ok (and (consp form2) (eq (first form2) 'asdf:defsystem)))
             (ok (null form3))))))))
@@ -332,8 +332,8 @@ callers do not need to reference it."
 (deftest scaffold-tool-response-shape
   (with-temp-project-root (root)
     (declare (ignorable root))
-    (let* ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
-           (args (make-hash-table :test #'equal)))
+    (let ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
+          (args (make-hash-table :test #'equal)))
       (setf (gethash "name" args) "shape-test")
       (setf (gethash "description" args) "tool response shape test")
       (setf (gethash "author" args) "Shape")

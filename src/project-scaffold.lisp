@@ -19,6 +19,8 @@
                 #:validate-text-field
                 #:plan-scaffold
                 #:invalid-argument-error)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-write-file)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
@@ -52,26 +54,58 @@ collisions between concurrent calls."
                      dest-dir))))
     (values target-dir temp-dir)))
 
+(defun %resolve-deepest-existing (pathname)
+  "Return the deepest existing ancestor of PATHNAME as a resolved truename.
+Walks up parent-by-parent through PATHNAME's directory components until
+TRUENAME succeeds, then returns that ancestor as a directory pathname.
+Used to detect symlink-based path traversal before any filesystem write:
+even when the target itself does not exist yet, its deepest existing
+ancestor must still resolve inside *PROJECT-ROOT*."
+  (labels ((walk (dir)
+             (or (ignore-errors
+                  (uiop/pathname:ensure-directory-pathname (truename dir)))
+                 (let ((parent (uiop/pathname:pathname-parent-directory-pathname
+                                dir)))
+                   (cond
+                     ((null parent) nil)
+                     ((equal parent dir) nil)
+                     (t (walk parent)))))))
+    (walk (uiop/pathname:ensure-directory-pathname pathname))))
+
 (defun %assert-within-project-root (pathname)
-  "Signal error if PATHNAME is not inside *project-root*."
-  (unless (path-inside-p pathname *project-root*)
-    (error 'invalid-argument-error
-           :field "destination" :value (namestring pathname)
-           :reason "resolves outside project root")))
+  "Signal error if PATHNAME cannot be resolved inside *PROJECT-ROOT*.
+Resolves the deepest existing ancestor of PATHNAME via TRUENAME to
+neutralize symlinks planted anywhere along the path. Even if PATHNAME
+itself does not exist yet, its nearest existing ancestor must be inside
+the truenamed *PROJECT-ROOT* or this function signals
+INVALID-ARGUMENT-ERROR."
+  (let ((resolved-ancestor (%resolve-deepest-existing pathname))
+        (resolved-root
+         (or (ignore-errors
+              (uiop/pathname:ensure-directory-pathname
+               (truename *project-root*)))
+             *project-root*)))
+    (unless (and resolved-ancestor
+                 (path-inside-p resolved-ancestor resolved-root))
+      (error 'invalid-argument-error
+             :field "destination"
+             :value (namestring pathname)
+             :reason "resolves outside project root"))))
 
 (defun %write-files-to-temp (temp-dir plan)
-  "Write all PLAN entries into TEMP-DIR. Caller cleans up on error."
+  "Write all PLAN entries into TEMP-DIR via FS-WRITE-FILE.
+TEMP-DIR must already be inside *PROJECT-ROOT*; the caller is
+responsible for that containment check. Using FS-WRITE-FILE keeps the
+file-write path inside the same sandbox wrapper as the other MCP file
+tools, so scaffold writes go through ENSURE-WRITE-PATH validation and
+atomic write-to-temp-then-rename for each file. Caller cleans up
+TEMP-DIR if any intermediate write fails."
   (ensure-directories-exist temp-dir)
-  (dolist (entry plan)
-    (let* ((rel (car entry))
-           (content (cdr entry))
-           (abs (merge-pathnames rel temp-dir)))
-      (ensure-directories-exist abs)
-      (with-open-file (out abs :direction :output
-                               :if-exists :error
-                               :if-does-not-exist :create
-                               :element-type 'character)
-        (write-sequence content out)))))
+  (let ((temp-relative (enough-namestring temp-dir *project-root*)))
+    (dolist (entry plan)
+      (let ((rel (car entry))
+            (content (cdr entry)))
+        (fs-write-file (concatenate 'string temp-relative rel) content)))))
 
 (defun write-scaffold (&key name description author license destination)
   "Generate the scaffold project atomically. Returns a plist with:
