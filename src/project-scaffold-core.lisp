@@ -14,6 +14,7 @@
            #:validate-destination
            #:validate-text-field
            #:render-template
+           #:compute-parent-prompts-path
            #:invalid-argument-error
            #:invalid-argument-field
            #:invalid-argument-value
@@ -114,3 +115,19 @@ cl-ppcre's :simple-calls replacement callback."
            (cdr entry)
            (format nil "{{~A}}" key))))
    :simple-calls t))
+
+(defun compute-parent-prompts-path (destination name)
+  "Return the relative path from DESTINATION/NAME back to <root>/prompts.
+DESTINATION is a slash-separated relative directory (e.g. \"scaffolds\",
+\"work/samples\"), NAME is the project directory name. The returned path
+goes up by one '..' for every path segment in DESTINATION plus one for
+NAME, then descends into 'prompts'."
+  (declare (ignore name))
+  (let* ((segments (remove-if (lambda (s) (zerop (length s)))
+                              (uiop:split-string destination :separator "/")))
+         (depth (1+ (length segments)))
+         (ups (with-output-to-string (s)
+                (dotimes (i depth)
+                  (declare (ignore i))
+                  (write-string "../" s)))))
+    (concatenate 'string ups "prompts")))

@@ -109,3 +109,17 @@
     (ok (equal "value: $1.00"
                (cl-mcp/src/project-scaffold-core:render-template
                 "value: {{v}}" '(("v" . "$1.00")))))))
+
+(deftest compute-parent-prompts-path
+  (testing "scaffolds destination with plain name"
+    (ok (equal "../../prompts"
+               (cl-mcp/src/project-scaffold-core:compute-parent-prompts-path
+                "scaffolds" "foo-lib"))))
+  (testing "two-segment destination"
+    (ok (equal "../../../prompts"
+               (cl-mcp/src/project-scaffold-core:compute-parent-prompts-path
+                "work/samples" "foo-lib"))))
+  (testing "three-segment destination"
+    (ok (equal "../../../../prompts"
+               (cl-mcp/src/project-scaffold-core:compute-parent-prompts-path
+                "a/b/c" "foo-lib")))))
