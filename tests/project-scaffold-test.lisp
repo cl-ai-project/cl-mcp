@@ -2,7 +2,9 @@
 
 (defpackage #:cl-mcp/tests/project-scaffold-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/project-scaffold-core))
+  (:import-from #:cl-mcp/src/project-scaffold-core)
+  (:import-from #:cl-mcp/src/project-scaffold)
+  (:import-from #:cl-mcp/src/project-root))
 
 (in-package #:cl-mcp/tests/project-scaffold-test)
 
@@ -173,3 +175,80 @@
     (testing "parent-prompts resolves with extra ../"
       (let ((md (cdr (assoc "CLAUDE.md" plan :test #'string=))))
         (ok (search "../../../prompts/repl-driven-development.md" md))))))
+
+(defmacro with-temp-project-root ((root-var) &body body)
+  "Bind cl-mcp/src/project-root:*project-root* to a fresh temp directory.
+Deletes the directory on exit. ROOT-VAR is always declared IGNORABLE so
+callers do not need to reference it."
+  `(let* ((,root-var
+           (uiop:ensure-directory-pathname
+            (uiop:merge-pathnames*
+             (format nil "cl-mcp-scaffold-test-~A/" (random #xFFFFFFFF))
+             (uiop:temporary-directory)))))
+     (declare (ignorable ,root-var))
+     (ensure-directories-exist ,root-var)
+     (unwind-protect
+          (let ((cl-mcp/src/project-root:*project-root* ,root-var))
+            ,@body)
+       (ignore-errors (uiop:delete-directory-tree ,root-var :validate t)))))
+
+(deftest write-scaffold-creates-all-files
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "foo-lib"
+     :description "demo"
+     :author "Ada"
+     :license "MIT"
+     :destination "scaffolds")
+    (let ((target (uiop:merge-pathnames* "scaffolds/foo-lib/" root)))
+      (testing "target directory exists"
+        (ok (uiop:directory-exists-p target)))
+      (testing "all seven files exist"
+        (dolist (rel '("foo-lib.asd" "CLAUDE.md" "AGENTS.md" "README.md"
+                       ".gitignore" "src/main.lisp" "tests/main-test.lisp"))
+          (ok (probe-file (uiop:merge-pathnames* rel target))))))))
+
+(deftest write-scaffold-rejects-existing-target
+  (with-temp-project-root (root)
+    (let ((target (uiop:merge-pathnames* "scaffolds/foo-lib/" root)))
+      (ensure-directories-exist target)
+      (testing "generating into existing dir errors"
+        (ok (signals
+             (cl-mcp/src/project-scaffold:write-scaffold
+              :name "foo-lib" :description "d" :author "a" :license "MIT"
+              :destination "scaffolds")
+             'cl-mcp/src/project-scaffold-core:invalid-argument-error))))))
+
+(deftest write-scaffold-validates-inputs
+  (with-temp-project-root (root)
+    (testing "invalid name errors"
+      (ok (signals
+           (cl-mcp/src/project-scaffold:write-scaffold
+            :name "BadName" :description "d" :author "a" :license "MIT"
+            :destination "scaffolds")
+           'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+    (testing "newline in author errors"
+      (ok (signals
+           (cl-mcp/src/project-scaffold:write-scaffold
+            :name "ok" :description "d" :author (format nil "a~%b") :license "MIT"
+            :destination "scaffolds")
+           'cl-mcp/src/project-scaffold-core:invalid-argument-error)))))
+
+(deftest write-scaffold-no-temp-dir-on-failure
+  (with-temp-project-root (root)
+    (ignore-errors
+     (cl-mcp/src/project-scaffold:write-scaffold
+      :name "BadName" :description "d" :author "a" :license "MIT"
+      :destination "scaffolds"))
+    (let ((scaffolds (uiop:merge-pathnames* "scaffolds/" root)))
+      (testing "no .tmp-project-scaffold-* directory remains"
+        (let ((remnants
+               (when (uiop:directory-exists-p scaffolds)
+                 (remove-if-not
+                  (lambda (p)
+                    (let ((last-seg (car (last (pathname-directory p)))))
+                      (and (stringp last-seg)
+                           (uiop:string-prefix-p ".tmp-project-scaffold-"
+                                                 last-seg))))
+                  (uiop:subdirectories scaffolds)))))
+          (ok (null remnants)))))))
