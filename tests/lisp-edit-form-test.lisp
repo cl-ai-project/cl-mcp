@@ -604,6 +604,61 @@ then clean up."
           ;; Verify the primary method is untouched
           (ok (search "(slot-value s 'size)" updated)))))))
 
+(deftest lisp-edit-form-defmethod-uninterned-specializer
+  (testing "defmethod with #: uninterned symbols in specializer matches plain form-name"
+    (with-temp-file "tests/tmp/edit-form-uninterned.lisp"
+        (format nil
+                "(defmethod evaluate ((#:e #:binary-op-expr))~%  :binary)~%~%(defmethod evaluate ((#:e #:num-expr))~%  :num)~%")
+      (lambda (path)
+        ;; User typed form_name without #: prefixes, as in ordinary source
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "evaluate ((e binary-op-expr))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod evaluate ((e binary-op-expr))~%  :binary-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":binary-replaced" updated))
+          (ok (null (search ":binary)" updated)))
+          (ok (search ":num)" updated))))))
+  (testing "defmethod with #: also matches when form-name is written with #:"
+    (with-temp-file "tests/tmp/edit-form-uninterned-hash.lisp"
+        (format nil
+                "(defmethod evaluate ((#:e #:binary-op-expr))~%  :binary)~%~%(defmethod evaluate ((#:e #:num-expr))~%  :num)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "evaluate ((#:e #:num-expr))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod evaluate ((e num-expr))~%  :num-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":num-replaced" updated))
+          (ok (null (search ":num)" updated)))
+          (ok (search ":binary)" updated)))))))
+
+(deftest lisp-edit-form-defmethod-preserves-hash-colon-in-strings
+  (testing "#: inside an EQL string specializer is not stripped by the normalizer"
+    (with-temp-file "tests/tmp/edit-form-string-hash-colon.lisp"
+        (format nil
+                "(defmethod tag ((x (eql \"#:keep\")))~%  :hash-keep)~%~%(defmethod tag ((x (eql \"keep\")))~%  :plain-keep)~%")
+      (lambda (path)
+        ;; Two methods with EQL string specializers differ only by whether
+        ;; the literal begins with #:. If %strip-hash-colon blindly removes
+        ;; every '#:' substring the two candidates collide and lisp-edit-form
+        ;; cannot target either one unambiguously. Matching the quoted form
+        ;; exactly must resolve to the '#:keep' variant only.
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "tag ((x (eql \"#:keep\")))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod tag ((x (eql \"#:keep\")))~%  :hash-keep-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":hash-keep-replaced" updated))
+          (ok (null (search ":hash-keep)" updated)))
+          ;; The plain "keep" method must be untouched.
+          (ok (search ":plain-keep" updated)))))))
 
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"

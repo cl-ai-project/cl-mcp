@@ -175,37 +175,49 @@ New Lisp source file creation is allowed."
                (leaf (car (last dir))))
           (and leaf (string leaf))))))
 
-(defun %should-skip-entry-p (path)
-  (let ((name (%entry-name path))
-        (type (pathname-type path)))
+(defun %should-skip-entry-p (path &key show-hidden)
+  "Return T when PATH should be omitted from a directory listing.
+Build artifacts (fasl and related extensions) are always filtered.
+Dotfiles and other entries matching *HIDDEN-PREFIXES* are filtered
+unless SHOW-HIDDEN is non-nil."
+  (let ((name (%entry-name path)) (type (pathname-type path)))
     (or (null name)
-        (some (lambda (pref) (uiop:string-prefix-p pref name)) *hidden-prefixes*)
-        (and type (member (string-downcase type) *skip-extensions* :test #'string=)))))
+        (and (not show-hidden)
+             (some (lambda (pref) (string-prefix-p pref name))
+                   *hidden-prefixes*))
+        (and type
+             (member (string-downcase type) *skip-extensions* :test
+                     #'string=)))))
 
-(defun fs-list-directory (path)
+(defun fs-list-directory (path &key show-hidden)
   "List directory entries at PATH respecting read allow-list.
-Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory)."
+Returns a vector of hash-tables with keys \"name\" and \"type\" (file|directory).
+When SHOW-HIDDEN is nil (default), dotfiles and entries matching
+*HIDDEN-PREFIXES* are omitted. When SHOW-HIDDEN is non-nil, those are
+included, but build artifacts (fasl family) remain filtered so that
+listings stay useful."
   (let ((pn (allowed-read-path path)))
-    (unless pn
-      (error "Read not permitted for path ~A" path))
-    (unless (uiop:directory-exists-p pn)
+    (unless pn (error "Read not permitted for path ~A" path))
+    (unless (directory-exists-p pn)
       (error "Directory ~A (resolved to ~A) does not exist or is not readable"
              path (namestring pn)))
     (let* ((patterns (list #P"*" #P"*.*"))
-           (entries (loop for pat in patterns
-                          append (directory (uiop:merge-pathnames* pat pn))))
+           (entries
+            (loop for pat in patterns
+                  append (directory (merge-pathnames* pat pn))))
            (seen (make-hash-table :test #'equal))
-           (results '()))
+           (results 'nil))
       (dolist (p entries)
-        (unless (%should-skip-entry-p p)
+        (unless (%should-skip-entry-p p :show-hidden show-hidden)
           (let ((key (namestring p)))
             (unless (gethash key seen)
               (setf (gethash key seen) t)
-              (let ((h (make-hash-table :test #'equal))
-                    (name (%entry-name p)))
+              (let ((h (make-hash-table :test #'equal)) (name (%entry-name p)))
                 (setf (gethash "name" h) name
                       (gethash "type" h)
-                      (if (uiop:directory-pathname-p p) "directory" "file"))
+                        (if (uiop/pathname:directory-pathname-p p)
+                            "directory"
+                            "file"))
                 (push h results))))))
       (coerce (nreverse results) 'vector))))
 
@@ -337,12 +349,18 @@ to preserve structure and comments."
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.
-Use absolute paths inside the project or an ASDF system."
+Use absolute paths inside the project or an ASDF system.
+
+Dotfiles (names starting with '.' such as .gitignore) are omitted by
+default. Pass show_hidden=true to include them. Build artifacts (fasl
+family) are always filtered so listings stay useful."
   :args ((path :type :string :required t
                :description "Absolute directory path under the project root or a registered
-ASDF system"))
+ASDF system")
+         (show-hidden :type :boolean :default nil
+                      :description "Include dotfiles and entries that would normally be hidden."))
   :body
-  (let ((entries (fs-list-directory path)))
+  (let ((entries (fs-list-directory path :show-hidden show-hidden)))
     (result id
             (make-ht "content" (text-content
                                 (with-output-to-string (s)
@@ -355,7 +373,8 @@ ASDF system"))
                                                      (gethash "name" e))
                                              (format s "~A~%" e)))))
                      "entries" entries
-                     "path" path))))
+                     "path" path
+                     "show_hidden" show-hidden))))
 
 (define-tool "fs-get-project-info"
   :description "Get project root and current working directory information for

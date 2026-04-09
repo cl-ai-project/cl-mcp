@@ -77,3 +77,19 @@
               (ok (stringp (gethash "path" first)))
               (ok (integerp (gethash "line" first)))
               (ok (stringp (gethash "type" first)))))))))
+
+(deftest code-find-references-includes-caller
+  (testing "each reference has a caller field identifying the enclosing function"
+    (if (uiop/os:os-macosx-p)
+        (skip "XREF tests are unstable on macOS")
+        (multiple-value-bind (refs count)
+            (code-find-references "cl-mcp:process-json-line")
+          (when (> count 0)
+            (let ((first (aref refs 0)))
+              (ok (hash-table-p first))
+              ;; New field added in P1#3 fix: every reference carries
+              ;; the caller's fully-qualified name so users can locate
+              ;; the actual usage even when xref's line number points
+              ;; at the enclosing form's start.
+              (ok (stringp (gethash "caller" first)))
+              (ok (plusp (length (gethash "caller" first))))))))))

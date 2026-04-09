@@ -234,15 +234,23 @@ NIL the symbol was not found and an isError payload is returned."
                               name type arglist doc path line))))
 
 (defun build-code-find-references-response (symbol refs count project-only)
-  "Build the standard code-find-references response hash-table."
+  "Build the standard code-find-references response hash-table.
+Summary text shows each reference as \"<path> (used in <caller>) [type]\"
+so users see the enclosing function name instead of a potentially
+misleading line snippet. The raw path, line, type, caller, and context
+fields remain in the structured \"refs\" payload for programmatic use."
   (let* ((summary-lines
            (map 'list
                 (lambda (h)
-                  (format nil "~A:~D ~A ~A"
-                          (gethash "path" h)
-                          (gethash "line" h)
-                          (gethash "type" h)
-                          (gethash "context" h)))
+                  (let ((path (gethash "path" h))
+                        (caller (gethash "caller" h))
+                        (type (gethash "type" h))
+                        (line (gethash "line" h)))
+                    (cond
+                      ((and caller (plusp (length caller)))
+                       (format nil "~A (used in ~A) [~A]" path caller type))
+                      (t
+                       (format nil "~A:~A [~A]" path line type)))))
                 refs))
          (summary (if summary-lines
                       (format nil "~{~A~%~}" summary-lines)

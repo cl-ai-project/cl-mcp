@@ -56,32 +56,38 @@ Candidates are generated in order of specificity:
 1. name only: \"resize\"
 2. name + qualifier: \"resize :after\"
 3. name + lambda-list: \"resize ((s shape) factor)\"
-4. name + qualifier + lambda-list: \"resize :after ((s shape) factor)\""
-  (destructuring-bind (_ name &rest rest) form
+4. name + qualifier + lambda-list: \"resize :after ((s shape) factor)\"
+
+Every candidate is passed through %STRIP-HASH-COLON so that lambda-list
+prints from package-inferred-system sources (which surface uninterned
+symbols as '#:foo') compare equal to user inputs written without the
+'#:' reader-macro prefix."
+  (destructuring-bind
+      (_ name &rest rest)
+      form
     (declare (ignore _))
-    (let ((qualifiers '())
-          (lambda-list nil))
+    (let ((qualifiers 'nil) (lambda-list nil))
       (dolist (part rest)
-        (when (listp part)
-          (setf lambda-list part)
-          (return))
+        (when (listp part) (setf lambda-list part) (return))
         (push part qualifiers))
       (let ((name-str (%normalize-string name))
-            (lambda-str (and lambda-list
-                             (%normalize-string
-                              (with-output-to-string (s)
-                                (prin1 lambda-list s)))))
-            ;; Use ~S to preserve colon prefix for keywords like :after
-            (qual-str (and qualifiers
-                           (%normalize-string
-                            (format nil "~{~S~^ ~}" (nreverse qualifiers))))))
+            (lambda-str
+             (and lambda-list
+                  (%strip-hash-colon
+                   (%normalize-string
+                    (with-output-to-string (s) (prin1 lambda-list s))))))
+            (qual-str
+             (and qualifiers
+                  (%strip-hash-colon
+                   (%normalize-string
+                    (format nil "~{~S~^ ~}" (nreverse qualifiers)))))))
         (remove nil
                 (list name-str
-                      ;; name + qualifier (without lambda-list)
                       (and qual-str (format nil "~A ~A" name-str qual-str))
                       (and lambda-str (format nil "~A ~A" name-str lambda-str))
                       (and (and qual-str lambda-str)
-                           (format nil "~A ~A ~A" name-str qual-str lambda-str))))))))
+                           (format nil "~A ~A ~A" name-str qual-str
+                                   lambda-str))))))))
 
 (defun %definition-candidates (form form-type)
   "Return candidate strings that identify FORM with FORM-TYPE."
@@ -160,6 +166,47 @@ Handles uninterned symbols (#:pkg), keywords (:pkg), and string literals (\"pkg\
      (subseq name 1 (1- (length name))))
     (t name)))
 
+(defun %strip-hash-colon (s)
+  "Return S with every '#:' reader-macro prefix removed.
+Normalizes uninterned symbol prints (produced by PRIN1 on symbols from
+package-inferred-system sources) so candidate strings and user-supplied
+form-name strings compare equal regardless of whether the original
+source used interned or uninterned symbols. Keyword prefixes ':foo' are
+preserved, so defmethod qualifiers like ':after' still match.
+
+Scans S as a simple state machine that tracks whether the cursor is
+inside a string literal. Only '#:' occurrences OUTSIDE string literals
+are removed; '#:' embedded in an EQL specializer like \"#:tag\" is
+preserved so two defmethods differing only by a string literal prefix
+remain distinguishable."
+  (with-output-to-string (out)
+    (let ((len (length s))
+          (in-string nil)
+          (i 0))
+      (loop while (< i len) do
+        (let ((c (char s i)))
+          (cond
+            ;; Escaped character inside a string literal: emit both as-is.
+            ((and in-string (char= c #\\) (< (1+ i) len))
+             (write-char c out)
+             (write-char (char s (1+ i)) out)
+             (incf i 2))
+            ;; String delimiter: toggle state and pass through.
+            ((char= c #\")
+             (write-char c out)
+             (setf in-string (not in-string))
+             (incf i))
+            ;; '#:' outside a string literal: drop both characters.
+            ((and (not in-string)
+                  (char= c #\#)
+                  (< (1+ i) len)
+                  (char= (char s (1+ i)) #\:))
+             (incf i 2))
+            ;; Everything else: pass through unchanged.
+            (t
+             (write-char c out)
+             (incf i))))))))
+
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.
 If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
@@ -169,7 +216,8 @@ If multiple matches exist without an index, signals an error with candidate info
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let ((target (string-downcase (%strip-name-prefix base-name)))
+    (let ((target (%strip-hash-colon
+                   (string-downcase (%strip-name-prefix base-name))))
           (matches nil))
       (when (zerop (length target))
         (error "form_name resolved to empty string after prefix stripping; ~
