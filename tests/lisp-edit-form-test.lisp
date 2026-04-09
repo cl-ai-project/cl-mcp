@@ -604,6 +604,38 @@ then clean up."
           ;; Verify the primary method is untouched
           (ok (search "(slot-value s 'size)" updated)))))))
 
+(deftest lisp-edit-form-defmethod-uninterned-specializer
+  (testing "defmethod with #: uninterned symbols in specializer matches plain form-name"
+    (with-temp-file "tests/tmp/edit-form-uninterned.lisp"
+        (format nil
+                "(defmethod evaluate ((#:e #:binary-op-expr))~%  :binary)~%~%(defmethod evaluate ((#:e #:num-expr))~%  :num)~%")
+      (lambda (path)
+        ;; User typed form_name without #: prefixes, as in ordinary source
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "evaluate ((e binary-op-expr))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod evaluate ((e binary-op-expr))~%  :binary-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":binary-replaced" updated))
+          (ok (null (search ":binary)" updated)))
+          (ok (search ":num)" updated))))))
+  (testing "defmethod with #: also matches when form-name is written with #:"
+    (with-temp-file "tests/tmp/edit-form-uninterned-hash.lisp"
+        (format nil
+                "(defmethod evaluate ((#:e #:binary-op-expr))~%  :binary)~%~%(defmethod evaluate ((#:e #:num-expr))~%  :num)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "evaluate ((#:e #:num-expr))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod evaluate ((e num-expr))~%  :num-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":num-replaced" updated))
+          (ok (null (search ":num)" updated)))
+          (ok (search ":binary)" updated)))))))
 
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
