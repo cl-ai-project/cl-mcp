@@ -252,3 +252,41 @@ callers do not need to reference it."
                                                  last-seg))))
                   (uiop:subdirectories scaffolds)))))
           (ok (null remnants)))))))
+
+(deftest scaffold-e2e-load-and-test
+  (with-temp-project-root (root)
+    ;; The scaffold's CLAUDE.md uses ../../prompts/... which, relative to
+    ;; root/scaffolds/foo-lib-e2e/, resolves to root/prompts/. Create stubs
+    ;; so file-based @-includes would resolve if anything ever opened them.
+    (let ((prompts (uiop:ensure-directory-pathname
+                    (merge-pathnames "prompts/" root))))
+      (ensure-directories-exist prompts)
+      (with-open-file (s (merge-pathnames "repl-driven-development.md" prompts)
+                         :direction :output :if-exists :supersede)
+        (write-string "stub" s))
+      (with-open-file (s (merge-pathnames "common-lisp-expert.md" prompts)
+                         :direction :output :if-exists :supersede)
+        (write-string "stub" s)))
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "foo-lib-e2e"
+     :description "e2e demo"
+     :author "Test"
+     :license "MIT"
+     :destination "scaffolds")
+    (let* ((asd-path (merge-pathnames "scaffolds/foo-lib-e2e/foo-lib-e2e.asd" root))
+           (system-name "foo-lib-e2e")
+           (test-system-name "foo-lib-e2e/tests"))
+      (unwind-protect
+           (progn
+             (testing "asd is loadable"
+               (ok (asdf:load-asd asd-path)))
+             (testing "system loads cleanly"
+               (ok (asdf:load-system system-name)))
+             (testing "bundled test system loads"
+               (ok (asdf:load-system test-system-name)))
+             (testing "generated greet function works"
+               (ok (equal "Hello, world!"
+                          (funcall (find-symbol "GREET" "FOO-LIB-E2E/SRC/MAIN")
+                                   "world")))))
+        (ignore-errors (asdf:clear-system test-system-name))
+        (ignore-errors (asdf:clear-system system-name))))))
