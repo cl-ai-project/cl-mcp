@@ -407,3 +407,63 @@ Example requests:
 // Kill and immediately spawn a replacement
 {"method":"tools/call","params":{"name":"pool-kill-worker","arguments":{"reset":true}}}
 ```
+
+## `project-scaffold`
+Generate a minimal Common Lisp project skeleton under the project root. The
+generated project uses `package-inferred-system` + Rove and ships with
+`CLAUDE.md` / `AGENTS.md` templates referencing cl-mcp's existing prompts via
+relative `@`-include paths. On success, returns the list of created files and
+a `next_steps` array with concrete REPL commands the agent can invoke to
+register the project with ASDF and run its tests.
+
+Input:
+- `name` (string, required): project name in lisp-case. Must match `^[a-z][a-z0-9-]*$` and be 1–64 chars.
+- `description` (string, optional): one-line description for `.asd` and `README.md`. No newlines. Defaults to a generic placeholder.
+- `author` (string, optional): `.asd` `:author`. No newlines. Defaults to `"Unknown"`.
+- `license` (string, optional): `.asd` `:license`. No newlines. Defaults to `"MIT"`.
+- `destination` (string, optional): parent directory under project root where `<name>/` is created. No absolute paths, no `..` traversal. Defaults to `"scaffolds"`.
+
+Output fields (on success):
+- `created` (boolean): always `true` on success
+- `path` (string): directory path relative to project root (e.g. `"scaffolds/foo-lib/"`)
+- `absolute_path` (string): fully qualified path
+- `files` (array of strings): relative file paths written, in manifest order
+- `next_steps` (array of strings): human-readable REPL commands to register the system with ASDF, load it, run its tests, and edit it via `lisp-edit-form`
+
+Output on failure:
+- `created` (boolean): `false`
+- `error` (string): diagnostic message explaining which field was rejected
+
+Behavior:
+- Runs inline in the parent process alongside other `fs-*` tools.
+- Atomically writes to a `.tmp-project-scaffold-<uuid>/` directory under the
+  destination, then renames on success. Failed generations leave no artifact.
+- Fails if the target directory already exists; choose a unique `name` per call
+  rather than relying on overwrite semantics.
+- Does NOT automatically load or switch project root. The caller runs the
+  returned `next_steps` via `repl-eval` / `load-system` / `run-tests`.
+- Generated scaffolds live under `<project-root>/scaffolds/<name>/` and are
+  accessible to every cl-mcp tool (read, edit, grep, eval) without changing
+  `project-root`.
+
+Example request:
+```json
+{"jsonrpc":"2.0","id":5,"method":"tools/call",
+ "params":{"name":"project-scaffold",
+           "arguments":{"name":"demo-lib",
+                        "description":"A scratch project for testing cl-mcp tools",
+                        "author":"Satoshi Imai",
+                        "license":"MIT"}}}
+```
+
+Response (excerpt):
+```json
+{"result":{"created":true,
+           "path":"scaffolds/demo-lib/",
+           "files":["demo-lib.asd","CLAUDE.md","AGENTS.md","README.md",
+                    ".gitignore","src/main.lisp","tests/main-test.lisp"],
+           "next_steps":["To register with ASDF: run repl-eval with (asdf:load-asd \"...\")",
+                         "To load: run load-system with {\"system\": \"demo-lib\"}",
+                         "To test: run run-tests with {\"system\": \"demo-lib/tests\"}",
+                         "To edit: use lisp-edit-form with paths under scaffolds/demo-lib/"]}}
+```

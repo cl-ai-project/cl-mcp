@@ -79,10 +79,14 @@
                 #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/project-scaffold
+                #:project-scaffold)
   (:export #:run
            #:version
            ;; Tool definition macro
            #:define-tool
+           ;; Project scaffolding
+           #:project-scaffold
            ;; File system tools
            #:fs-read-file
            #:fs-write-file
