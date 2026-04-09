@@ -205,25 +205,88 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
     (t
      (error "framework must be a string or symbol: ~S" framework))))
 
+(defparameter *load-error-tail-max-lines* 20
+  "Maximum number of trailing stderr lines attached to a test-system load failure.")
+
+(defparameter *load-error-tail-max-chars* 2000
+  "Maximum total characters of trailing stderr attached to a test-system load failure.")
+
+(defun %tail-lines (text max-lines max-chars)
+  "Return the last MAX-LINES lines of TEXT, capped at MAX-CHARS characters.
+Returns NIL when TEXT is empty or contains only whitespace. Used to
+extract the most actionable portion of captured compiler output for
+inclusion in load-failure error messages."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) (or text ""))))
+    (when (plusp (length trimmed))
+      (let* ((lines (uiop:split-string trimmed :separator '(#\Newline)))
+             (n (length lines))
+             (start (max 0 (- n max-lines)))
+             (tail (subseq lines start))
+             (joined (format nil "~{~A~^~%~}" tail)))
+        (if (> (length joined) max-chars)
+            (let ((cut (max 0 (- (length joined) max-chars))))
+              (format nil "... (truncated)~%~A" (subseq joined cut)))
+            joined)))))
+
+(defun %format-load-error (system-name condition stderr)
+  "Format a test-system load-failure message.
+When STDERR contains captured compiler output, the tail of it is
+appended under a 'Compiler output (most recent):' header so the user
+can see the underlying reason (e.g., SBCL package-variance warnings)
+instead of just an opaque COMPILE-FILE-ERROR."
+  (let ((tail (%tail-lines stderr *load-error-tail-max-lines*
+                           *load-error-tail-max-chars*)))
+    (if tail
+        (format nil "Failed to load test system ~A: ~A~%~%Compiler output (most recent):~%~A"
+                system-name condition tail)
+        (format nil "Failed to load test system ~A: ~A"
+                system-name condition))))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
 that files edited on disk (e.g., via lisp-edit-form in the parent process)
 are recompiled before tests execute.  Dependencies whose source files
-have not changed are skipped by ASDF's timestamp check (negligible overhead)."
-  (handler-case
-      (progn
-        (when (asdf:find-system system-name nil)
-          (let ((asd-src
-                  (ignore-errors
-                    (asdf:system-source-file
-                     (asdf:find-system system-name nil)))))
-            (asdf:clear-system system-name)
-            (when (and asd-src (not (asdf:find-system system-name nil)))
-              (ignore-errors (asdf:load-asd asd-src)))))
-        (asdf:load-system system-name))
-    (error (c)
-      (error "Failed to load test system ~A: ~A" system-name c))))
+have not changed are skipped by ASDF's timestamp check (negligible overhead).
+
+Captures compile-time diagnostics during the load phase so that on
+failure the tail of the captured output is included in the error
+message. Two complementary capture paths are used:
+  1. HANDLER-BIND on WARNING collects individual warning conditions as
+     they fire.
+  2. The ASDF:LOAD-SYSTEM call runs inside WITH-COMPILATION-UNIT
+     :OVERRIDE T with *ERROR-OUTPUT* bound to a string stream, so
+     SBCL's compilation-unit summary (which enumerates caught fatal
+     errors and non-fatal warnings) fires into our capture before
+     exiting the scope.
+Package-variance warnings and 'caught N ERROR condition' summaries
+surface to the caller instead of being swallowed into an opaque
+COMPILE-FILE-ERROR."
+  (let ((captured-warnings (make-string-output-stream))
+        (captured-stderr (make-string-output-stream)))
+    (handler-case
+        (handler-bind
+            ((warning
+              (lambda (c)
+                (format captured-warnings "~A~%" c))))
+          (progn
+            (when (asdf:find-system system-name nil)
+              (let ((asd-src
+                      (ignore-errors
+                        (asdf:system-source-file
+                         (asdf:find-system system-name nil)))))
+                (asdf:clear-system system-name)
+                (when (and asd-src (not (asdf:find-system system-name nil)))
+                  (ignore-errors (asdf:load-asd asd-src)))))
+            (let ((*error-output* captured-stderr))
+              (with-compilation-unit (:override t)
+                (asdf:load-system system-name)))))
+      (error (c)
+        (let* ((warnings-text (get-output-stream-string captured-warnings))
+               (stderr-text (get-output-stream-string captured-stderr))
+               (combined (concatenate 'string warnings-text stderr-text)))
+          (error "~A"
+                 (%format-load-error system-name c combined)))))))
 
 (defun %rove-extract-selected-failures (results)
   "Extract failure details from selected test RESULTS returned by rove:run-tests.

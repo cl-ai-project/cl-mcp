@@ -288,3 +288,32 @@
       ;; System should still be findable after the clear+load cycle
       (ok (asdf:find-system system-name nil)
           "System is loaded after %%ensure-system-loaded"))))
+
+(deftest format-load-error-includes-compiler-output
+  (testing "no compiler output: message is just the base error"
+    (let ((msg (cl-mcp/src/test-runner-core::%format-load-error
+                "my-system"
+                (make-condition 'simple-error
+                                :format-control "base error"
+                                :format-arguments nil)
+                "")))
+      (ok (search "my-system" msg))
+      (ok (search "base error" msg))
+      (ok (null (search "Compiler output" msg)))))
+  (testing "with compiler output: tail is appended under a clear header"
+    (let* ((stderr (with-output-to-string (s)
+                     (dotimes (i 30)
+                       (format s "line ~D of compiler output~%" i))))
+           (msg (cl-mcp/src/test-runner-core::%format-load-error
+                 "my-system"
+                 (make-condition 'simple-error
+                                 :format-control "compile-file-error"
+                                 :format-arguments nil)
+                 stderr)))
+      (ok (search "my-system" msg))
+      (ok (search "compile-file-error" msg))
+      (ok (search "Compiler output" msg))
+      ;; Keeps the most recent lines, not the earliest ones
+      (ok (search "line 29" msg))
+      ;; Truncated: line 0 should be gone
+      (ok (null (search "line 0 of" msg))))))
