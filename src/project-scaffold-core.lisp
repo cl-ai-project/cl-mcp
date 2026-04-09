@@ -10,6 +10,7 @@
   (:import-from #:cl-ppcre
                 #:scan)
   (:export #:validate-project-name
+           #:validate-destination
            #:invalid-argument-error
            #:invalid-argument-field
            #:invalid-argument-value
@@ -58,3 +59,22 @@ lower-case letters, digits, or hyphens."
            :field "name" :value name
            :reason (format nil "must match ~A" *project-name-regex*)))
   name)
+
+(defun validate-destination (destination)
+  "Return DESTINATION when it is a safe relative path, else signal error.
+A valid destination is a non-empty relative path with no absolute segment
+and no '..' component. Empty strings and NIL are rejected."
+  (unless (and (stringp destination) (plusp (length destination)))
+    (error 'invalid-argument-error
+           :field "destination" :value destination
+           :reason "must be a non-empty string"))
+  (when (char= (char destination 0) #\/)
+    (error 'invalid-argument-error
+           :field "destination" :value destination
+           :reason "must be a relative path (no leading /)"))
+  (dolist (segment (uiop:split-string destination :separator "/"))
+    (when (string= segment "..")
+      (error 'invalid-argument-error
+             :field "destination" :value destination
+             :reason "must not contain '..' path segments")))
+  destination)

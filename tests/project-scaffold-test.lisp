@@ -39,3 +39,21 @@
   (testing "rejects non-string"
     (ok (signals (cl-mcp/src/project-scaffold-core:validate-project-name :foo)
                  'cl-mcp/src/project-scaffold-core:invalid-argument-error))))
+
+(deftest validate-destination
+  (testing "accepts a plain relative directory"
+    (ok (cl-mcp/src/project-scaffold-core:validate-destination "scaffolds")))
+  (testing "accepts a nested relative directory"
+    (ok (cl-mcp/src/project-scaffold-core:validate-destination "work/samples")))
+  (testing "rejects absolute path"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-destination "/tmp/foo")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects parent traversal"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-destination "../outside")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects embedded parent traversal"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-destination "scaffolds/../..")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects empty"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-destination "")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error))))
