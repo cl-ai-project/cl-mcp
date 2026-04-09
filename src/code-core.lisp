@@ -203,9 +203,19 @@ Returns T for any path when *project-root* is not set."
                                  (:project-only (member t nil)))
                           (values vector fixnum &optional))
                 code-find-references))
+
 (defun code-find-references (symbol-name &key package (project-only t))
   "Return a vector of reference objects and the count for SYMBOL-NAME.
-Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"."
+Each element is a hash-table with keys \"path\", \"line\", \"type\",
+\"caller\", and \"context\".
+
+SBCL xref reports references at the granularity of the *enclosing
+function's definition location*, not the exact call-site line, so
+the LINE field points at the start of the function that contains
+the reference. The CALLER field surfaces the enclosing function's
+fully-qualified name so callers can locate the actual usage: read
+the caller's definition with LISP-READ-FILE name_pattern=<caller>,
+or grep the file starting from LINE to find the call site."
   (let ((sym (%parse-symbol symbol-name :package package))
         (results '()))
     #+sbcl
@@ -222,21 +232,31 @@ Each element is a hash-table with keys \"path\", \"line\", \"type\", \"context\"
         (let ((fn (and pkg (find-symbol finder pkg))))
           (when fn
             (dolist (source (ignore-errors (funcall fn sym)))
-              (let ((definition (if (consp source) (cdr source) source)))
+              (let ((caller-name (and (consp source) (car source)))
+                    (definition (if (consp source) (cdr source) source)))
                 (multiple-value-bind (pathname path line)
                     (%definition->path/line definition path-fn offset-fn)
                   (when (and path line
                              (or (not project-only)
                                  (%path-inside-project-p pathname)))
                     (let* ((type (%finder->type finder))
+                           (caller-str
+                            (and caller-name
+                                 (handler-case
+                                     (let ((*print-case* :downcase)
+                                           (*print-readably* nil))
+                                       (princ-to-string caller-name))
+                                   (error () nil))))
                            (context (%line-snippet pathname line))
-                           (key (format nil "~A:~A:~A" path line type)))
+                           (key (format nil "~A:~A:~A:~A"
+                                        path line type (or caller-str ""))))
                       (unless (gethash key seen)
                         (setf (gethash key seen) t)
                         (let ((h (make-hash-table :test #'equal)))
                           (setf (gethash "path" h) path
                                 (gethash "line" h) line
                                 (gethash "type" h) type
+                                (gethash "caller" h) (or caller-str "")
                                 (gethash "context" h) (or context ""))
                           (push h results)))))))))))
       #-sbcl
