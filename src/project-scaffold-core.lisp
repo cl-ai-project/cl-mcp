@@ -11,13 +11,13 @@
                 #:scan
                 #:regex-replace-all)
   (:import-from #:cl-mcp/src/project-scaffold-templates
-                #:+asd-template+
-                #:+claude-md-template+
-                #:+agents-md-template+
-                #:+readme-template+
-                #:+gitignore-template+
-                #:+main-lisp-template+
-                #:+main-test-template+)
+                #:*asd-template*
+                #:*claude-md-template*
+                #:*agents-md-template*
+                #:*readme-template*
+                #:*gitignore-template*
+                #:*main-lisp-template*
+                #:*main-test-template*)
   (:export #:validate-project-name
            #:validate-destination
            #:validate-text-field
@@ -125,13 +125,12 @@ cl-ppcre's :simple-calls replacement callback."
            (format nil "{{~A}}" key))))
    :simple-calls t))
 
-(defun compute-parent-prompts-path (destination name)
-  "Return the relative path from DESTINATION/NAME back to <root>/prompts.
+(defun compute-parent-prompts-path (destination)
+  "Return the relative path from DESTINATION/<name> back to <root>/prompts.
 DESTINATION is a slash-separated relative directory (e.g. \"scaffolds\",
-\"work/samples\"), NAME is the project directory name. The returned path
-goes up by one '..' for every path segment in DESTINATION plus one for
-NAME, then descends into 'prompts'."
-  (declare (ignore name))
+\"work/samples\"). The returned path goes up by one '..' for every path
+segment in DESTINATION plus one for the project directory itself, then
+descends into 'prompts'."
   (let* ((segments (remove-if (lambda (s) (zerop (length s)))
                               (uiop:split-string destination :separator "/")))
          (depth (1+ (length segments)))
@@ -146,7 +145,7 @@ NAME, then descends into 'prompts'."
 Applies all template substitutions but performs no I/O. Callers are
 responsible for input validation before calling this function; plan-scaffold
 assumes its arguments are already normalized strings."
-  (let* ((parent-prompts (compute-parent-prompts-path destination name))
+  (let* ((parent-prompts (compute-parent-prompts-path destination))
          (bindings `(("name" . ,name)
                      ("description" . ,description)
                      ("author" . ,author)
@@ -154,10 +153,10 @@ assumes its arguments are already normalized strings."
                      ("parent-prompts" . ,parent-prompts)))
          (render (lambda (tpl) (render-template tpl bindings))))
     (list
-     (cons (format nil "~A.asd" name)  (funcall render +asd-template+))
-     (cons "CLAUDE.md"                 (funcall render +claude-md-template+))
-     (cons "AGENTS.md"                 (funcall render +agents-md-template+))
-     (cons "README.md"                 (funcall render +readme-template+))
-     (cons ".gitignore"                (funcall render +gitignore-template+))
-     (cons "src/main.lisp"             (funcall render +main-lisp-template+))
-     (cons "tests/main-test.lisp"      (funcall render +main-test-template+)))))
+     (cons (format nil "~A.asd" name)  (funcall render *asd-template*))
+     (cons "CLAUDE.md"                 (funcall render *claude-md-template*))
+     (cons "AGENTS.md"                 (funcall render *agents-md-template*))
+     (cons "README.md"                 (funcall render *readme-template*))
+     (cons ".gitignore"                (funcall render *gitignore-template*))
+     (cons "src/main.lisp"             (funcall render *main-lisp-template*))
+     (cons "tests/main-test.lisp"      (funcall render *main-test-template*)))))

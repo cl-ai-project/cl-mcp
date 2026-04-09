@@ -8,17 +8,17 @@
 
 (defpackage #:cl-mcp/src/project-scaffold-templates
   (:use #:cl)
-  (:export #:+asd-template+
-           #:+claude-md-template+
-           #:+agents-md-template+
-           #:+readme-template+
-           #:+gitignore-template+
-           #:+main-lisp-template+
-           #:+main-test-template+))
+  (:export #:*asd-template*
+           #:*claude-md-template*
+           #:*agents-md-template*
+           #:*readme-template*
+           #:*gitignore-template*
+           #:*main-lisp-template*
+           #:*main-test-template*))
 
 (in-package #:cl-mcp/src/project-scaffold-templates)
 
-(defparameter +asd-template+
+(defparameter *asd-template*
   ";;;; {{name}}.asd
 
 (asdf:defsystem \"{{name}}\"
@@ -35,11 +35,19 @@
   :depends-on (\"rove\"
                \"{{name}}\"
                \"{{name}}/tests/main-test\")
-  :perform (test-op (o c) (uiop:symbol-call :rove :run c)))
+  :perform (test-op (o c)
+                    (declare (ignore o))
+                    (let ((test-packages
+                           (remove-if-not
+                            (lambda (dep)
+                              (and (stringp dep)
+                                   (uiop:string-prefix-p \"{{name}}/tests/\" dep)))
+                            (asdf:system-depends-on c))))
+                      (uiop:symbol-call :rove :run test-packages))))
 "
   "Template for the generated project's .asd system definition.")
 
-(defparameter +claude-md-template+
+(defparameter *claude-md-template*
   "# CLAUDE.md
 
 ## Agent Guidelines
@@ -78,7 +86,7 @@ Use cl-mcp tools for all Lisp code operations:
 "
   "Template for the generated project's CLAUDE.md.")
 
-(defparameter +agents-md-template+
+(defparameter *agents-md-template*
   "# Repository Guidelines
 
 @{{parent-prompts}}/repl-driven-development.md
@@ -103,7 +111,7 @@ lisp-case identifiers, docstrings on public functions.
 "
   "Template for the generated project's AGENTS.md.")
 
-(defparameter +readme-template+
+(defparameter *readme-template*
   "# {{name}}
 
 {{description}}
@@ -128,7 +136,7 @@ lisp-case identifiers, docstrings on public functions.
 "
   "Template for the generated project's README.md.")
 
-(defparameter +gitignore-template+
+(defparameter *gitignore-template*
   "*.fasl
 *.ufasl
 *.x86f
@@ -137,7 +145,7 @@ lisp-case identifiers, docstrings on public functions.
 "
   "Template for the generated project's .gitignore.")
 
-(defparameter +main-lisp-template+
+(defparameter *main-lisp-template*
   ";;;; src/main.lisp
 
 (defpackage #:{{name}}/src/main
@@ -152,7 +160,7 @@ lisp-case identifiers, docstrings on public functions.
 "
   "Template for the generated project's src/main.lisp.")
 
-(defparameter +main-test-template+
+(defparameter *main-test-template*
   ";;;; tests/main-test.lisp
 
 (defpackage #:{{name}}/tests/main-test
