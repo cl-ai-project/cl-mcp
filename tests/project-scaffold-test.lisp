@@ -57,3 +57,20 @@
   (testing "rejects empty"
     (ok (signals (cl-mcp/src/project-scaffold-core:validate-destination "")
                  'cl-mcp/src/project-scaffold-core:invalid-argument-error))))
+
+(deftest validate-text-field
+  (testing "accepts normal text"
+    (ok (cl-mcp/src/project-scaffold-core:validate-text-field "author" "Ada Lovelace")))
+  (testing "accepts empty string"
+    (ok (cl-mcp/src/project-scaffold-core:validate-text-field "description" "")))
+  (testing "rejects newline"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field
+                  "author" (format nil "Ada~%Lovelace"))
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects CR"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field
+                  "description" (format nil "foo~Abar" #\Return))
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects non-string"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field "license" 42)
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error))))

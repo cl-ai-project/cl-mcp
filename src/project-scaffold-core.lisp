@@ -11,6 +11,7 @@
                 #:scan)
   (:export #:validate-project-name
            #:validate-destination
+           #:validate-text-field
            #:invalid-argument-error
            #:invalid-argument-field
            #:invalid-argument-value
@@ -78,3 +79,18 @@ and no '..' component. Empty strings and NIL are rejected."
              :field "destination" :value destination
              :reason "must not contain '..' path segments")))
   destination)
+
+(defun validate-text-field (field-name value)
+  "Return VALUE when it is an acceptable free-text field, else signal.
+FIELD-NAME is included in the error for caller-side diagnostics. A valid
+value is a string containing no newline (#\\Newline) or carriage return
+(#\\Return) characters. Empty strings are allowed."
+  (unless (stringp value)
+    (error 'invalid-argument-error
+           :field field-name :value value
+           :reason "must be a string"))
+  (when (or (find #\Newline value) (find #\Return value))
+    (error 'invalid-argument-error
+           :field field-name :value value
+           :reason "must not contain newline characters"))
+  value)
