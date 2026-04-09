@@ -64,8 +64,19 @@ mallet src/*.lisp
 ## Repository Structure
 
 ```
-src/          Core implementation (protocol, tools, transports)
-tests/        Rove test suites (mirrored naming: *-test.lisp)
-scripts/      Helper clients and stdio<->TCP bridge
-prompts/      System prompts for AI agents
+src/              Core implementation (protocol, tools, transports)
+tests/            Rove test suites (mirrored naming: *-test.lisp)
+scripts/          Helper clients and stdio<->TCP bridge
+prompts/          System prompts for AI agents
+.claude/skills/   Project-local Claude Code skills (auto-discovered)
 ```
+
+## Dogfooding
+
+For structured feedback-collection cycles ("build a throwaway project with
+cl-mcp's own tools and record every rough edge"), use the `dogfooding-cl-mcp`
+skill shipped in `.claude/skills/dogfooding-cl-mcp/SKILL.md`. Claude Code
+auto-discovers project-local skills on session start, so invoking `/dogfooding-cl-mcp`
+(or the `Skill` tool with `skill: "dogfooding-cl-mcp"`) loads the workflow.
+The skill includes a pitfalls table of known issues and a P1/P2/P3 feedback
+format; contributing new pitfalls back to the skill is welcomed via normal PRs.
