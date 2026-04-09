@@ -60,6 +60,28 @@
         (ok (find "src" names :test #'string=))
         (ok (not (find ".git" names :test #'string=)))))))
 
+(deftest fs-list-directory-show-hidden
+  (testing "show-hidden=nil omits dotfiles (default)"
+    (with-test-project-root
+      (let* ((entries (fs-list-directory "."))
+             (names (map 'list (lambda (h) (gethash "name" h)) entries)))
+        (ok (not (find-if (lambda (n) (and n (plusp (length n))
+                                           (char= (char n 0) #\.)))
+                          names))))))
+  (testing "show-hidden=t includes dotfiles but keeps extension filter"
+    (with-test-project-root
+      (let* ((entries (fs-list-directory "." :show-hidden t))
+             (names (map 'list (lambda (h) (gethash "name" h)) entries)))
+        ;; The cl-mcp repo has a .gitignore; with show-hidden it must appear.
+        ;; (If the repo layout changes this assertion tells us.)
+        (ok (or (find ".gitignore" names :test #'string=)
+                (find ".git" names :test #'string=)))
+        ;; Extensions in *skip-extensions* are still filtered out.
+        (ok (not (find-if (lambda (n)
+                            (and n (search ".fasl" n :from-end t)
+                                 (not (char= (char n 0) #\.))))
+                          names)))))))
+
 (deftest fs-list-directory-includes-files
   (testing "fs-list-directory returns files with type metadata"
     (with-test-project-root
