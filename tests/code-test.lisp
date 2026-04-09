@@ -50,7 +50,7 @@
     ;; "not bound as a function or variable".
     (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol "common-lisp:standard-object")
-      (declare (ignore path line))
+      (declare (ignore doc path line))
       (ok (stringp name))
       (ok (string= type "class"))
       (ok (stringp arglist)
