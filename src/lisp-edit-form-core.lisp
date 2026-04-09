@@ -167,13 +167,45 @@ Handles uninterned symbols (#:pkg), keywords (:pkg), and string literals (\"pkg\
     (t name)))
 
 (defun %strip-hash-colon (s)
-  "Return S with every '#:' substring removed.
+  "Return S with every '#:' reader-macro prefix removed.
 Normalizes uninterned symbol prints (produced by PRIN1 on symbols from
 package-inferred-system sources) so candidate strings and user-supplied
 form-name strings compare equal regardless of whether the original
 source used interned or uninterned symbols. Keyword prefixes ':foo' are
-preserved, so defmethod qualifiers like ':after' still match."
-  (cl-ppcre:regex-replace-all "#:" s ""))
+preserved, so defmethod qualifiers like ':after' still match.
+
+Scans S as a simple state machine that tracks whether the cursor is
+inside a string literal. Only '#:' occurrences OUTSIDE string literals
+are removed; '#:' embedded in an EQL specializer like \"#:tag\" is
+preserved so two defmethods differing only by a string literal prefix
+remain distinguishable."
+  (with-output-to-string (out)
+    (let ((len (length s))
+          (in-string nil)
+          (i 0))
+      (loop while (< i len) do
+        (let ((c (char s i)))
+          (cond
+            ;; Escaped character inside a string literal: emit both as-is.
+            ((and in-string (char= c #\\) (< (1+ i) len))
+             (write-char c out)
+             (write-char (char s (1+ i)) out)
+             (incf i 2))
+            ;; String delimiter: toggle state and pass through.
+            ((char= c #\")
+             (write-char c out)
+             (setf in-string (not in-string))
+             (incf i))
+            ;; '#:' outside a string literal: drop both characters.
+            ((and (not in-string)
+                  (char= c #\#)
+                  (< (1+ i) len)
+                  (char= (char s (1+ i)) #\:))
+             (incf i 2))
+            ;; Everything else: pass through unchanged.
+            (t
+             (write-char c out)
+             (incf i))))))))
 
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.

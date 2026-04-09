@@ -637,6 +637,29 @@ then clean up."
           (ok (null (search ":num)" updated)))
           (ok (search ":binary)" updated)))))))
 
+(deftest lisp-edit-form-defmethod-preserves-hash-colon-in-strings
+  (testing "#: inside an EQL string specializer is not stripped by the normalizer"
+    (with-temp-file "tests/tmp/edit-form-string-hash-colon.lisp"
+        (format nil
+                "(defmethod tag ((x (eql \"#:keep\")))~%  :hash-keep)~%~%(defmethod tag ((x (eql \"keep\")))~%  :plain-keep)~%")
+      (lambda (path)
+        ;; Two methods with EQL string specializers differ only by whether
+        ;; the literal begins with #:. If %strip-hash-colon blindly removes
+        ;; every '#:' substring the two candidates collide and lisp-edit-form
+        ;; cannot target either one unambiguously. Matching the quoted form
+        ;; exactly must resolve to the '#:keep' variant only.
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "tag ((x (eql \"#:keep\")))"
+                        :operation "replace"
+                        :content
+                        (format nil "(defmethod tag ((x (eql \"#:keep\")))~%  :hash-keep-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":hash-keep-replaced" updated))
+          (ok (null (search ":hash-keep)" updated)))
+          ;; The plain "keep" method must be untouched.
+          (ok (search ":plain-keep" updated)))))))
+
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
     (handler-case
