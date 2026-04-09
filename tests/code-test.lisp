@@ -124,6 +124,51 @@
                         (search "(defmacro version" line-text))
                     "reported line should contain the version def form")))))))))
 
+(deftest code-offset-to-line-skips-reader-conditionals
+  (testing "%offset->line lands on (def...) even when preceded by #+ / #- / #|...|#"
+    (let* ((tmp (uiop:merge-pathnames*
+                 (format nil "cl-mcp-offset-test-~A.lisp" (get-universal-time))
+                 (uiop:temporary-directory)))
+           (path (namestring tmp))
+           (text
+            (format nil
+                    "(in-package :cl-user)~%~
+                     ~%~
+                     (defun before () :ok)~%~
+                     ~%~
+                     #|~%~
+                      block comment~%~
+                     |#~%~
+                     (defun after-block () :ok)~%~
+                     ~%~
+                     #+(or sbcl ccl)~%~
+                     (defun after-list-cond () :ok)~%~
+                     ~%~
+                     #-sbcl~%~
+                     (defun after-atom-cond () :ok)~%")))
+      (unwind-protect
+           (progn
+             (with-open-file (s path :direction :output :if-exists :supersede)
+               (write-string text s))
+             (labels ((line-of-marker (needle)
+                        (1+ (count #\Newline text :end (search needle text))))
+                      (probe-before (needle)
+                        ;; Simulate SBCL's offset landing a character or two
+                        ;; before the directive.
+                        (let ((pos (search needle text)))
+                          (cl-mcp/src/code-core::%offset->line
+                           path (max 0 (- pos 1))))))
+               (ok (= (probe-before "#|")
+                      (line-of-marker "(defun after-block"))
+                   "offset just before #|...|# should report the defun's line")
+               (ok (= (probe-before "#+(or")
+                      (line-of-marker "(defun after-list-cond"))
+                   "offset just before #+(or ...) should report the defun's line")
+               (ok (= (probe-before "#-sbcl")
+                      (line-of-marker "(defun after-atom-cond"))
+                   "offset just before #-sbcl should report the defun's line")))
+        (ignore-errors (delete-file path))))))
+
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns valid structure"
     ;; Skip this test on macOS due to XREF instability

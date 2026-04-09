@@ -83,6 +83,36 @@
          (ok (not (search "#:x" content)))
          (ok (not (search "#:i" content))))))))
 
+(deftest lisp-read-file-preserves-genuinely-uninterned-symbols
+  (testing "#:foo in source survives as #:foo in expanded output"
+    (with-temp-lisp-file
+     "tests/tmp/dogfood-hash-colon-preserve.lisp"
+     (format nil "~A~%~A~%~A~%~A~%~A~%~A~%"
+             ";; A defpackage with #: prefixes uses uninterned symbols"
+             "(defpackage #:dogfood-preserve-pkg"
+             "  (:use #:cl)"
+             "  (:export #:greet))"
+             "(in-package #:dogfood-preserve-pkg)"
+             "(defun greet (who) (format nil \"Hello, ~A\" who))")
+     (lambda (path)
+       (let* ((result (lisp-read-file path
+                                      :name-pattern "greet"
+                                      :content-pattern "dogfood-preserve-pkg"))
+              (content (gethash "content" result)))
+         (ok (stringp content))
+         ;; Genuine #: symbols from source must survive as #: in display.
+         (ok (search "#:dogfood-preserve-pkg" content)
+             "genuinely uninterned package name should keep #: prefix")
+         (ok (search "#:cl" content)
+             "#:cl in :use should keep #: prefix")
+         (ok (search "#:greet" content)
+             "#:greet in :export should keep #: prefix")
+         ;; But symbols that became homeless by teardown should NOT have it.
+         (ok (not (search "#:who" content))
+             "greet parameter 'who' should NOT acquire a spurious #: prefix")
+         (ok (search "(defun greet" content)
+             "defun name should render without #: prefix"))))))
+
 (deftest lisp-read-file-raw-text-mode
   (testing "raw mode slices text by offset and limit"
     (let* ((result (lisp-read-file "README.md" :collapsed nil :offset 0 :limit 3))

@@ -72,14 +72,17 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
 
 (defun %offset->line (pathname offset)
   "Convert character OFFSET within PATHNAME to a 1-based line number.
-SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET often points to a whitespace
-character (typically the newline right after the preceding form's closing
-paren) rather than to the `(' that starts the form itself.  To give the
-user a line number that matches what they see when they open the file,
-we walk forward from OFFSET to the next `(' (skipping whitespace and
-`;'-style comments) and count newlines up to that position.  Capped at
-1024 characters of look-ahead to stay safe if the offset is spurious.
-Returns NIL when the file cannot be read."
+SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET typically points at a
+whitespace character or reader-conditional directive that precedes
+the actual `(def...)' form. Walk forward from OFFSET across:
+  - whitespace
+  - `;' line comments
+  - `#|...|#' block comments
+  - `#+feature' / `#-feature' reader conditionals (with atom or
+    list feature expressions)
+and stop at the first `(' that begins the next definition form.
+Scan is capped at 1024 characters of look-ahead to stay safe if
+the offset is spurious. Returns NIL when the file cannot be read."
   (when (and pathname offset)
     (handler-case
         (let* ((physical (translate-logical-pathname pathname))
@@ -89,18 +92,59 @@ Returns NIL when the file cannot be read."
                (limit (min len (+ start 1024))))
           (labels ((ws-p (ch)
                      (or (char= ch #\Space) (char= ch #\Tab)
-                         (char= ch #\Newline) (char= ch #\Return))))
+                         (char= ch #\Newline) (char= ch #\Return)))
+                   (skip-balanced-list (i)
+                     (let ((depth 0))
+                       (loop while (< i limit) do
+                         (let ((c (char content i)))
+                           (incf i)
+                           (cond
+                             ((char= c #\() (incf depth))
+                             ((char= c #\))
+                              (decf depth)
+                              (when (zerop depth) (return))))))
+                       i))
+                   (skip-atom (i)
+                     (loop while (< i limit) do
+                       (let ((c (char content i)))
+                         (when (or (ws-p c) (char= c #\() (char= c #\))
+                                   (char= c #\;))
+                           (return))
+                         (incf i)))
+                     i)
+                   (skip-conditional (i)
+                     (incf i 2)
+                     (loop while (and (< i limit) (ws-p (char content i)))
+                           do (incf i))
+                     (if (< i limit)
+                         (if (char= (char content i) #\()
+                             (skip-balanced-list i)
+                             (skip-atom i))
+                         i))
+                   (skip-block-comment (i)
+                     (let ((end (search "|#" content :start2 (+ i 2)
+                                        :end2 limit)))
+                       (if end (+ end 2) limit))))
             (let ((i start))
-              (loop
-               (when (>= i limit) (return))
-               (let ((ch (char content i)))
-                 (cond
-                   ((ws-p ch) (incf i))
-                   ((char= ch #\;)
-                    ;; Skip line comment.
-                    (let ((nl (position #\Newline content :start i :end limit)))
-                      (setf i (if nl (1+ nl) limit))))
-                   (t (return)))))
+              (loop while (< i limit) do
+                (let ((ch (char content i)))
+                  (cond
+                    ((ws-p ch) (incf i))
+                    ((char= ch #\;)
+                     (let ((nl (position #\Newline content :start i
+                                         :end limit)))
+                       (setf i (if nl (1+ nl) limit))))
+                    ((char= ch #\#)
+                     (cond
+                       ((and (< (1+ i) limit)
+                             (char= (char content (1+ i)) #\|))
+                        (setf i (skip-block-comment i)))
+                       ((and (< (1+ i) limit)
+                             (or (char= (char content (1+ i)) #\+)
+                                 (char= (char content (1+ i)) #\-)))
+                        (setf i (skip-conditional i)))
+                       (t (return))))
+                    (t (return)))))
               (1+ (count #\Newline content :end (min i len))))))
       (error (e)
         (log-event :warn "code.find.line-error"

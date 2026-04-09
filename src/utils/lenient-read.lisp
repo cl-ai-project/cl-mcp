@@ -11,7 +11,9 @@
                 #:symbol-does-not-exist
                 #:symbol-is-not-external)
   (:export #:call-with-lenient-packages
-           #:call-with-managed-packages))
+           #:call-with-managed-packages
+           #:*homeless-due-to-teardown*
+           #:record-homeless-on-teardown))
 
 (in-package #:cl-mcp/src/utils/lenient-read)
 
@@ -19,6 +21,30 @@
   "Additional package objects treated as writable temporary packages.
 Bound by parent-side package-context synthesis so the lenient reader can
 intern/export symbols into pre-created local nickname target stubs.")
+
+(defvar *homeless-due-to-teardown*
+  #+sbcl (make-hash-table :test #'eq :weakness :key :synchronized t)
+  #-sbcl (make-hash-table :test #'eq)
+  "Weak-key hash table of symbols that became homeless because the
+synthesized package they were interned in was torn down at the end
+of a reader operation (either a lenient stub or a file-package
+context). Used by display code like lisp-read-file's form printer to
+decide whether to render a homeless symbol as `#:foo' (genuinely
+uninterned in source) or as plain `foo' (became homeless only as a
+side effect of package teardown).
+
+Entries are weakly held, so they disappear automatically when the
+owning CST form is garbage-collected.")
+
+(defun record-homeless-on-teardown (pkg)
+  "Register every symbol whose home is PKG as becoming homeless due
+to teardown. Must be called BEFORE `delete-package' so that the
+symbols' home-package relationship is still intact. Silently does
+nothing for NIL or deleted packages."
+  (when (and pkg (packagep pkg) (package-name pkg))
+    (do-symbols (s pkg)
+      (when (eq (symbol-package s) pkg)
+        (setf (gethash s *homeless-due-to-teardown*) t)))))
 
 (defun %find-restart-by-name (name-string condition)
   "Find the first restart whose name matches NAME-STRING by string comparison.
@@ -128,11 +154,13 @@ is about a missing package, a missing symbol, or a non-external symbol."
                  (when r (invoke-restart r)))))))))))
 
 (defun %cleanup-stub-packages (stubs)
-  "Delete all stub packages, first uninterning their symbols.
+  "Delete all stub packages, first recording their soon-to-be-homeless
+symbols in *HOMELESS-DUE-TO-TEARDOWN* and uninterning them.
 Safe to call even if packages have already been deleted."
   (dolist (pkg stubs)
     (let ((name (ignore-errors (package-name pkg))))
       (when (and name (find-package name))
+        (record-homeless-on-teardown pkg)
         (do-symbols (s pkg)
           (unintern s pkg))
         (delete-package pkg)))))

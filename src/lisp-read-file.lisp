@@ -17,6 +17,8 @@
                 #:make-ht #:result #:text-content #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/lenient-read
+                #:*homeless-due-to-teardown*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/utils/strings
@@ -41,6 +43,49 @@
 
 (defparameter *text-context-lines* 5
   "Number of surrounding lines to include for text filtering with patterns.")
+
+(defun %print-homeless-symbol-name (stream name)
+  "Write NAME to STREAM with case conversion honoring *PRINT-CASE*."
+  (write-string (ecase *print-case*
+                  (:downcase (string-downcase name))
+                  (:upcase name)
+                  (:capitalize (string-capitalize name)))
+                stream))
+
+(defun %print-source-symbol (stream sym)
+  "Pprint-dispatch handler for symbols in lisp-read-file output.
+
+A symbol with no home package is either:
+  (a) genuinely uninterned in the source — e.g. written as `#:foo'.
+      In that case it is NOT in *HOMELESS-DUE-TO-TEARDOWN*, and we
+      preserve the `#:' prefix so the display remains a faithful
+      reproduction of the source.
+  (b) homeless only because a synthesized package was torn down
+      after reading. In that case it IS in the teardown set, and we
+      strip the `#:' so expanded views are readable.
+
+Interned symbols (keywords, ordinary package symbols) fall through
+to the default printer with *PRINT-CIRCLE* forced to NIL. Rebinding
+*PRINT-CIRCLE* avoids a subtle interaction with the pretty printer
+that would otherwise label shared symbol objects with `#1=#1#'
+self-references when the outer tree is walked under *PRINT-PRETTY*."
+  (cond
+    ((and (symbolp sym) (null (symbol-package sym)))
+     (unless (gethash sym *homeless-due-to-teardown*)
+       (write-string "#:" stream))
+     (%print-homeless-symbol-name stream (symbol-name sym)))
+    (t
+     (let ((*print-pprint-dispatch* (copy-pprint-dispatch nil))
+           (*print-circle* nil))
+       (prin1 sym stream)))))
+
+(defvar *source-pprint-dispatch*
+  (let ((table (copy-pprint-dispatch nil)))
+    (set-pprint-dispatch 'symbol #'%print-source-symbol 0 table)
+    table)
+  "Pprint dispatch used by %FORM->STRING and %COLLAPSE-DEF-FORM so
+homeless-due-to-teardown symbols render without `#:' while genuine
+uninterned symbols retain their prefix. See %PRINT-SOURCE-SYMBOL.")
 
 (defun lisp-source-path-p (path)
   "Return T when PATH designator refers to a Lisp source file by extension."
@@ -86,23 +131,36 @@ PATTERN is a non-empty string that is not valid regex syntax."
 
 (defun %form->string (form)
   "Return FORM printed as Lisp source text for display.
-Binds *PRINT-GENSYM* to NIL so that symbols that were interned into a
-synthesized package which has since been deleted (leaving them homeless)
-do not acquire a spurious `#:' prefix in the output."
+Uses *SOURCE-PPRINT-DISPATCH* so symbols made homeless by a
+synthesized package's teardown print without the `#:' prefix, while
+symbols that were genuinely uninterned in the source (e.g., `#:foo'
+inside a `defpackage') retain their prefix.
+
+Forces *PRINT-CIRCLE* to NIL because the CST reader may intern a
+single symbol object once and share it across multiple positions in
+the form tree. Under *PRINT-CIRCLE* T, that would cause the pretty
+printer to label the first occurrence with `#1=' and emit `#1#' on
+reuse — producing nonsense like `(in-package #1=#1#)' when the
+shared symbol is the sole argument of a form."
   (let ((*print-pretty* t)
         (*print-case* :downcase)
         (*print-right-margin* 80)
-        (*print-gensym* nil))
+        (*print-circle* nil)
+        (*print-pprint-dispatch* *source-pprint-dispatch*))
     (with-output-to-string (out)
       (write form :stream out :pretty t :right-margin 80))))
 
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
 For defmethod, includes qualifiers like :before, :after, :around.
-Binds *PRINT-GENSYM* to NIL so symbols from synthesized-and-deleted
-packages print without a spurious `#:' prefix."
+Uses *SOURCE-PPRINT-DISPATCH* so homeless-due-to-teardown symbols
+print without a spurious `#:' prefix while genuinely uninterned
+source symbols keep theirs. Forces *PRINT-CIRCLE* to NIL to avoid
+spurious `#1=#1#' self-references when the CST reader shares a
+single symbol object across multiple positions in the form tree."
   (let* ((*print-case* :downcase)
-         (*print-gensym* nil)
+         (*print-circle* nil)
+         (*print-pprint-dispatch* *source-pprint-dispatch*)
          (head (car form))
          (name (second form))
          (qualifiers
