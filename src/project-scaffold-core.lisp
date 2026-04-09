@@ -8,10 +8,12 @@
 (defpackage #:cl-mcp/src/project-scaffold-core
   (:use #:cl)
   (:import-from #:cl-ppcre
-                #:scan)
+                #:scan
+                #:regex-replace-all)
   (:export #:validate-project-name
            #:validate-destination
            #:validate-text-field
+           #:render-template
            #:invalid-argument-error
            #:invalid-argument-field
            #:invalid-argument-value
@@ -94,3 +96,21 @@ value is a string containing no newline (#\\Newline) or carriage return
            :field field-name :value value
            :reason "must not contain newline characters"))
   value)
+
+(defun render-template (template bindings)
+  "Return TEMPLATE with each '{{key}}' substituted using BINDINGS.
+BINDINGS is an alist of (KEY-STRING . VALUE-STRING). Unknown placeholders
+are left intact. Values are substituted literally; regex metacharacters
+in values (including backslash and dollar sign) are handled safely via
+cl-ppcre's :simple-calls replacement callback."
+  (cl-ppcre:regex-replace-all
+   "\\{\\{([A-Za-z_-][A-Za-z0-9_-]*)\\}\\}"
+   template
+   (lambda (match &rest registers)
+     (declare (ignore match))
+     (let* ((key (first registers))
+            (entry (assoc key bindings :test #'string=)))
+       (if entry
+           (cdr entry)
+           (format nil "{{~A}}" key))))
+   :simple-calls t))

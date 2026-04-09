@@ -74,3 +74,38 @@
   (testing "rejects non-string"
     (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field "license" 42)
                  'cl-mcp/src/project-scaffold-core:invalid-argument-error))))
+
+(deftest render-template
+  (testing "substitutes a single placeholder"
+    (ok (equal "hello foo"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "hello {{name}}" '(("name" . "foo"))))))
+  (testing "substitutes multiple placeholders"
+    (ok (equal "foo by Ada (MIT)"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "{{name}} by {{author}} ({{license}})"
+                '(("name" . "foo") ("author" . "Ada") ("license" . "MIT"))))))
+  (testing "leaves unknown placeholder unchanged"
+    (ok (equal "hello {{unknown}}"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "hello {{unknown}}" '(("name" . "foo"))))))
+  (testing "handles repeated placeholder"
+    (ok (equal "foo-foo"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "{{name}}-{{name}}" '(("name" . "foo"))))))
+  (testing "passes through regex-sensitive characters in values"
+    (ok (equal "value: a.b*c"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "value: {{v}}" '(("v" . "a.b*c"))))))
+  (testing "leaves format directive ~A unchanged in value"
+    (ok (equal "value: ~A done"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "value: {{v}} done" '(("v" . "~A"))))))
+  (testing "handles backslash in value"
+    (ok (equal "value: a\\b"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "value: {{v}}" '(("v" . "a\\b"))))))
+  (testing "handles dollar sign in value"
+    (ok (equal "value: $1.00"
+               (cl-mcp/src/project-scaffold-core:render-template
+                "value: {{v}}" '(("v" . "$1.00")))))))
