@@ -127,7 +127,8 @@ PATTERN is a non-empty string that is not valid regex syntax."
                  (let ((n (symbol-name head)))
                    (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
                        (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
-        (list (string-downcase (prin1-to-string name)))))))
+        (list (string-downcase
+               (if (symbolp name) (symbol-name name) (prin1-to-string name))))))))
 
 (defun %form->string (form)
   "Return FORM printed as Lisp source text for display.

@@ -86,9 +86,36 @@ Returns a list of alists, each containing:
     (mapcar (lambda (r) (%normalize-result r search-path)) results)))
 
 (defun %format-clgrep-results (results)
-  "Convert clgrep results (list of alists) to a vector of hash tables."
-  (map 'vector #'alist-to-hash-table results))
-
+  "Convert clgrep results (list of alists) to a vector of hash tables.
+Deduplicates results by (file, form-start-byte): when a single form
+contains multiple pattern matches, the form appears once with a
+MATCH_LINES array listing all individual (line, match) pairs."
+  (let ((groups (make-hash-table :test #'equal))
+        (order nil))
+    (dolist (result results)
+      (let* ((file (cdr (assoc :file result)))
+             (form-start-byte (cdr (assoc :form-start-byte result)))
+             (key (cons file form-start-byte)))
+        (unless (gethash key groups)
+          (push key order))
+        (push result (gethash key groups))))
+    (map 'vector
+         (lambda (key)
+           (let* ((matches (nreverse (gethash key groups)))
+                  (representative (alist-to-hash-table (first matches)))
+                  (match-lines
+                   (map 'vector
+                        (lambda (m)
+                          (let ((ht (make-hash-table :test #'equal)))
+                            (setf (gethash "line" ht)
+                                  (cdr (assoc :line m)))
+                            (setf (gethash "match" ht)
+                                  (cdr (assoc :match m)))
+                            ht))
+                        matches)))
+             (setf (gethash "match_lines" representative) match-lines)
+             representative))
+         (nreverse order))))
 
 (define-tool "clgrep-search"
   :description "Perform semantic grep search for a pattern in Lisp files.
@@ -133,5 +160,5 @@ Recommended workflow:
             (make-ht "content" (text-content (with-output-to-string (s)
                                                (encode formatted s)))
                      "matches" formatted
-                     "count" (length results)
+                     "count" (length formatted)
                      "limited" (<= effective-limit (length results))))))

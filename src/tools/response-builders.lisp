@@ -156,7 +156,10 @@ still see what was warned about."
                                                             "~%... [~D more characters truncated]"
                                                             (- (length wd) limit)))
                                        wd)))
-                        (format s "~%~A" (string-right-trim '(#\Newline) body)))))))
+                        (format s "~%~A" (string-right-trim '(#\Newline) body))
+                      (when (search "also exports" wd)
+                        (format s "~%~%Hint: package-variance warnings mean the running image has stale exports. ~
+Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
                ((string= status "timeout")
                 (format s "~A" (gethash "message" ht)))
                ((string= status "error")
@@ -229,8 +232,10 @@ NIL the symbol was not found and an isError payload is returned."
       (make-ht "path" path
                "line" line
                "content" (text-content
-                          (format nil "~A defined in ~A at line ~D"
-                                  symbol path line)))
+                          (if line
+                            (format nil "~A defined in ~A at line ~D"
+                                    symbol path line)
+                            (format nil "~A defined in ~A" symbol path))))
       (make-ht "isError" t
                "content" (text-content
                           (format nil "Definition not found for ~A"
@@ -245,7 +250,7 @@ NIL the symbol was not found and an isError payload is returned."
            "path" path
            "line" line
            "content" (text-content
-                      (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A:~D~]"
+                      (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]"
                               name type arglist doc path line))))
 
 (defun build-code-find-references-response (symbol refs count project-only)
@@ -262,7 +267,8 @@ fields remain in the structured \"refs\" payload for programmatic use."
                         (type (gethash "type" h))
                         (line (gethash "line" h)))
                     (cond
-                      ((and caller (plusp (length caller)))
+                      ((and caller (plusp (length caller))
+                            (string/= caller "(lambda)"))
                        (format nil "~A (used in ~A) [~A]" path caller type))
                       (t
                        (format nil "~A:~A [~A]" path line type)))))

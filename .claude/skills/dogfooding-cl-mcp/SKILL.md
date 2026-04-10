@@ -33,6 +33,14 @@ fs-get-project-info                    # confirm
 
 Note the original cl-mcp project root before switching. You will restore it at the end.
 
+**Hydrate deferred tool schemas** before any tool call with boolean/integer parameters.
+Without this, calls like `load-system force=true` or `inspect-object id=N` will fail
+with misleading `must be boolean`/`must be integer` errors (harness-side issue, not cl-mcp):
+
+```
+ToolSearch select:mcp__cl-mcp__lisp-read-file,mcp__cl-mcp__load-system,mcp__cl-mcp__repl-eval,mcp__cl-mcp__inspect-object,mcp__cl-mcp__lisp-edit-form,mcp__cl-mcp__clgrep-search,mcp__cl-mcp__code-find,mcp__cl-mcp__code-describe,mcp__cl-mcp__code-find-references,mcp__cl-mcp__pool-kill-worker
+```
+
 ### 2. Scaffold with `project-scaffold`
 
 Call `project-scaffold` once. Pick a `name` that does not exist yet under `scaffolds/`. Save the response — note the `absolute_path` and `files` list.
@@ -115,10 +123,12 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |
 | `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | ASDF has not loaded the scaffold's `.asd` yet | `repl-eval '(asdf:load-asd "<absolute-path>/<name>.asd")'` once, then `load-system` works — see step 3 |
 | `project-scaffold` text response does not contain the `next_steps` array | Response builder does not render `next_steps` in `content[].text` | Use the `absolute_path` from the structured response and prime ASDF manually per step 3 |
-| `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Known broken in the MCP JSON layer (may be intermittent) | Fall back to `repl-eval '(inspect <N>)'` or re-reference the raw value via a `defparameter` and print slots directly |
+| `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
 | `lisp-edit-form content=<multi-form>` rejects with `content must contain exactly one top-level form` | Tool only accepts one form per call | Chain multiple `insert_after` calls, one form each |
 | `clgrep-search form_types=[...]` filter returns `[]` even when matches exist in the un-filtered query | Filter is currently unreliable | Omit `form_types` and post-filter client-side, OR prefer `code-find` / `code-describe` for exact lookups |
-| `clgrep-search` signature field is a 4KB blob with the whole form body | Known token waste (see cl-mcp-feedback.md P2) | Use `head_limit` aggressively, or do targeted `lisp-read-file name_pattern=...` instead |
+| `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
+| `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
+| `load-system` after changing package exports shows noisy "also exports" warnings | SBCL package-variance; stale worker image | `pool-kill-worker` then `load-system` for a clean image. `load-system` now shows a hint when this happens |
 
 ## Success criteria
 

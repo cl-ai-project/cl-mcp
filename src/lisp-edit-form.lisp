@@ -202,150 +202,197 @@ comments near a target form."
 
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
-        (end (cst-node-end node))
-        (snippet (ecase operation
-                   ((:replace) content)
-                   ((:insert-before :insert-after) (ensure-trailing-newline content)))))
+        (end (cst-node-end node)))
     (ecase operation
-      (:replace
-       (concatenate 'string (subseq text 0 start) snippet (subseq text end)))
-      (:insert-before
-       (let* ((prefix (subseq text 0 start))
-              (sep (if (zerop start)
-                       ""
-                       (%ensure-blank-separation prefix ""))))
+      ((:replace)
+       (concatenate 'string (subseq text 0 start) content (subseq text end)))
+      ((:insert-before)
+       (let* ((snippet (ensure-trailing-newline content))
+              (prefix (subseq text 0 start))
+              (sep
+               (if (zerop start)
+                   ""
+                   (%ensure-blank-separation prefix ""))))
          (concatenate 'string prefix sep snippet (subseq text start))))
-      (:insert-after
-       (let* ((suffix (subseq text end))
-              (ws-end (or (position-if-not
-                           (lambda (ch)
-                             (member ch '(#\Space #\Tab #\Newline #\Return)))
-                           suffix)
-                          (length suffix)))
-              (between (%ensure-blank-separation (subseq text 0 end)
-                                                 (subseq suffix 0 ws-end)))
+      ((:insert-after)
+       (let* ((snippet (ensure-trailing-newline content))
+              (suffix (subseq text end))
+              (ws-end
+               (or
+                (position-if-not
+                 (lambda (ch) (member ch '(#\Space #\Tab #\Newline #\Return)))
+                 suffix)
+                (length suffix)))
+              (between
+               (%ensure-blank-separation (subseq text 0 end)
+                                         (subseq suffix 0 ws-end)))
               (rest (subseq suffix ws-end))
               (prefix (subseq text 0 end)))
-         (concatenate 'string prefix between snippet rest))))))
+         (concatenate 'string prefix between snippet rest)))
+      ((:delete)
+       (let* ((suffix (subseq text end))
+              (ws-end
+               (or
+                (position-if-not
+                 (lambda (ch) (member ch '(#\Space #\Tab #\Newline #\Return)))
+                 suffix)
+                (length suffix))))
+         (concatenate 'string (subseq text 0 start)
+                      (subseq suffix ws-end)))))))
 
 (defun %apply-operation-normalized (text node operation content)
   (let ((start (cst-node-start node))
-         (end (cst-node-end node))
-         (snippet (%trim-outer-whitespace content)))
+        (end (cst-node-end node)))
     (ecase operation
-      (:replace
+      ((:replace)
+       (let ((snippet (%trim-outer-whitespace content)))
+         (multiple-value-bind (prefix-core _)
+             (%split-trailing-whitespace (subseq text 0 start))
+           (declare (ignore _))
+           (multiple-value-bind (_ suffix-core)
+               (%split-leading-whitespace (subseq text end))
+             (declare (ignore _))
+             (concatenate 'string prefix-core
+                          (%normalized-separator prefix-core snippet) snippet
+                          (%normalized-separator snippet suffix-core)
+                          suffix-core)))))
+      ((:insert-before)
+       (let ((snippet (%trim-outer-whitespace content)))
+         (multiple-value-bind (prefix-core _)
+             (%split-trailing-whitespace (subseq text 0 start))
+           (declare (ignore _))
+           (let ((target (subseq text start end)) (suffix (subseq text end)))
+             (concatenate 'string prefix-core
+                          (%normalized-separator prefix-core snippet) snippet
+                          (%normalized-separator snippet target) target
+                          suffix)))))
+      ((:insert-after)
+       (let ((snippet (%trim-outer-whitespace content)))
+         (multiple-value-bind (_ suffix-core)
+             (%split-leading-whitespace (subseq text end))
+           (declare (ignore _))
+           (let ((prefix (subseq text 0 end)))
+             (concatenate 'string prefix (%normalized-separator prefix snippet)
+                          snippet (%normalized-separator snippet suffix-core)
+                          suffix-core)))))
+      ((:delete)
        (multiple-value-bind (prefix-core _)
            (%split-trailing-whitespace (subseq text 0 start))
          (declare (ignore _))
          (multiple-value-bind (_ suffix-core)
              (%split-leading-whitespace (subseq text end))
            (declare (ignore _))
-           (concatenate 'string
-                        prefix-core
-                        (%normalized-separator prefix-core snippet)
-                        snippet
-                        (%normalized-separator snippet suffix-core)
-                        suffix-core))))
-      (:insert-before
-       (multiple-value-bind (prefix-core _)
-           (%split-trailing-whitespace (subseq text 0 start))
-         (declare (ignore _))
-         (let ((target (subseq text start end))
-               (suffix (subseq text end)))
-           (concatenate 'string
-                        prefix-core
-                        (%normalized-separator prefix-core snippet)
-                        snippet
-                        (%normalized-separator snippet target)
-                        target
-                        suffix))))
-      (:insert-after
-       (multiple-value-bind (_ suffix-core)
-           (%split-leading-whitespace (subseq text end))
-         (declare (ignore _))
-         (let ((prefix (subseq text 0 end)))
-           (concatenate 'string
-                        prefix
-                        (%normalized-separator prefix snippet)
-                        snippet
-                        (%normalized-separator snippet suffix-core)
-                        suffix-core)))))))
+           (cond
+            ((and (zerop (length prefix-core))
+                  (zerop (length suffix-core)))
+             "")
+            ((zerop (length prefix-core))
+             suffix-core)
+            ((zerop (length suffix-core))
+             (concatenate 'string prefix-core (string #\Newline)))
+            (t
+             (concatenate 'string prefix-core
+                          (%normalized-separator prefix-core suffix-core)
+                          suffix-core)))))))))
 
 (defun %apply-operation (text node operation content normalize-blank-lines)
+  "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines."
   (if normalize-blank-lines
       (%apply-operation-normalized text node operation content)
       (%apply-operation-preserve-spacing text node operation content)))
 
-(defun lisp-edit-form (&key file-path form-type form-name operation content
-                            dry-run (normalize-blank-lines t) readtable)
+(defun lisp-edit-form
+       (&key file-path form-type form-name operation content dry-run
+        (normalize-blank-lines t) readtable)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
-FORM-NAME, and OPERATION are always required. CONTENT is always required
-and specifies the full Lisp form.
+FORM-NAME, and OPERATION are always required. CONTENT is required for
+replace/insert_before/insert_after but ignored for delete.
 
-OPERATION must be one of: \"replace\", \"insert_before\", \"insert_after\".
-Missing closing parentheses are auto-repaired using parinfer.
+OPERATION must be one of: \"replace\", \"insert_before\", \"insert_after\", \"delete\".
+Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing both the file and the new content."
-  (unless (and (stringp file-path) (stringp form-type) (stringp form-name)
-               (stringp operation))
+  (unless
+      (and (stringp file-path) (stringp form-type) (stringp form-name)
+           (stringp operation))
     (error "file_path, form_type, form_name, and operation must be strings"))
-  (unless (stringp content)
-    (error "content is required for ~A operation" operation))
-  (unless (member dry-run '(t nil))
-    (error "dry-run must be boolean"))
+  (unless (member dry-run '(t nil)) (error "dry-run must be boolean"))
   (unless (member normalize-blank-lines '(t nil))
     (error "normalize-blank-lines must be boolean"))
   (let* ((op-normalized (string-downcase operation))
-         (op-key (cond ((string= op-normalized "replace") :replace)
-                       ((string= op-normalized "insert_before") :insert-before)
-                       ((string= op-normalized "insert_after") :insert-after)
-                       (t (error "Unsupported operation: ~A" operation)))))
-    (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
+         (op-key
+          (cond ((string= op-normalized "replace") :replace)
+                ((string= op-normalized "insert_before") :insert-before)
+                ((string= op-normalized "insert_after") :insert-after)
+                ((string= op-normalized "delete") :delete)
+                (t (error "Unsupported operation: ~A" operation)))))
+    (unless (or (eq op-key :delete) (stringp content))
+      (error "content is required for ~A operation" operation))
+    (multiple-value-bind
+        (abs rel original nodes target target-snippet _ file-package-name)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore nodes _))
-      (multiple-value-bind (validated-content parinfer-warning)
-          (%validate-and-repair-content content readtable
-                                        file-package-name abs)
-        (let* ((updated (%apply-operation original target op-key
-                                          validated-content
-                                          normalize-blank-lines))
-               (would-change (not (string= original updated))))
-          (log-event :debug "lisp.edit.form"
-                     "path" (namestring abs)
-                     "operation" op-normalized
-                     "form_type" form-type
-                     "form_name" form-name
-                     "normalize_blank_lines" normalize-blank-lines
-                     "bytes" (length updated)
-                     "dry_run" dry-run
-                     "would_change" would-change)
-          (cond
-            (dry-run
-             (let ((result (make-hash-table :test #'equal)))
-               (setf (gethash "would_change" result) would-change
-                     (gethash "original" result) target-snippet
-                     (gethash "preview" result) updated
-                     (gethash "file_path" result) (namestring abs)
-                     (gethash "operation" result) op-normalized)
-               (when parinfer-warning
-                 (setf (gethash "parinfer_warning" result) parinfer-warning))
-               result))
-            (would-change
-             (fs-write-file rel updated)
-             (values updated parinfer-warning t))
-            (t
-             (values updated parinfer-warning nil))))))))
+      (if (eq op-key :delete)
+          ;; Delete path: no content validation needed
+          (let* ((updated
+                  (%apply-operation original target op-key nil
+                                    normalize-blank-lines))
+                 (would-change (not (string= original updated))))
+            (log-event :debug "lisp.edit.form" "path" (namestring abs)
+                       "operation" op-normalized "form_type" form-type
+                       "form_name" form-name "normalize_blank_lines"
+                       normalize-blank-lines "bytes" (length updated) "dry_run"
+                       dry-run "would_change" would-change)
+            (cond
+             (dry-run
+              (let ((result (make-hash-table :test #'equal)))
+                (setf (gethash "would_change" result) would-change
+                      (gethash "original" result) target-snippet
+                      (gethash "preview" result) updated
+                      (gethash "file_path" result) (namestring abs)
+                      (gethash "operation" result) op-normalized)
+                result))
+             (would-change (fs-write-file rel updated)
+              (values updated nil t))
+             (t (values updated nil nil))))
+          ;; Non-delete path: validate and repair content
+          (multiple-value-bind (validated-content parinfer-warning)
+              (%validate-and-repair-content content readtable file-package-name
+                                            abs)
+            (let* ((updated
+                    (%apply-operation original target op-key validated-content
+                                      normalize-blank-lines))
+                   (would-change (not (string= original updated))))
+              (log-event :debug "lisp.edit.form" "path" (namestring abs)
+                         "operation" op-normalized "form_type" form-type
+                         "form_name" form-name "normalize_blank_lines"
+                         normalize-blank-lines "bytes" (length updated) "dry_run"
+                         dry-run "would_change" would-change)
+              (cond
+               (dry-run
+                (let ((result (make-hash-table :test #'equal)))
+                  (setf (gethash "would_change" result) would-change
+                        (gethash "original" result) target-snippet
+                        (gethash "preview" result) updated
+                        (gethash "file_path" result) (namestring abs)
+                        (gethash "operation" result) op-normalized)
+                  (when parinfer-warning
+                    (setf (gethash "parinfer_warning" result) parinfer-warning))
+                  result))
+               (would-change (fs-write-file rel updated)
+                (values updated parinfer-warning t))
+               (t (values updated parinfer-warning nil)))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
-Supports replace, insert_before, and insert_after operations while preserving
+Supports replace, insert_before, insert_after, and delete operations while preserving
 formatting and comments.
 PREFERRED METHOD for editing existing Lisp source code.
-Automatically repairs missing closing parentheses using parinfer.
+Automatically repairs missing closing parentheses using parinfer (non-delete ops).
 ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ensure
 safety and structure preservation."
   :args ((file_path :type :string :required t
@@ -359,17 +406,18 @@ options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
 \"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
          (operation :type :string :required t
-                    :enum ("replace" "insert_before" "insert_after")
+                    :enum ("replace" "insert_before" "insert_after" "delete")
                     :description "Operation to perform")
-         (content :type :string :required t
-                  :description "Full Lisp form for the operation. Must contain exactly ONE top-level form.
+         (content :type :string
+                  :description "Full Lisp form for the operation. Required for replace/insert_before/insert_after.
+Ignored for delete. Must contain exactly ONE top-level form.
 Missing closing parentheses are automatically repaired using parinfer.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (normalize_blank_lines :type :boolean
                                 :default t
                                 :description "When true (default), normalize blank lines around edited top-level forms.
-Applies to replace, insert_before, and insert_after operations.")
+Applies to replace, insert_before, insert_after, and delete operations.")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
@@ -377,7 +425,7 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (progn
-    (unless content
+    (when (and (not content) (string/= (string-downcase operation) "delete"))
       (error 'arg-validation-error :arg-name "content"
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
