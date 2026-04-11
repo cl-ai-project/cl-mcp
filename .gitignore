@@ -17,3 +17,7 @@
 # Test scratch space
 tests/tmp/*
 !tests/tmp/.gitkeep
+
+# Dogfooding: throwaway scaffold projects and feedback log
+experiments/
+claudedocs/dogfooding-feedback.md

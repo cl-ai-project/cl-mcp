@@ -21,17 +21,17 @@ Build a real mid-size Common Lisp project with cl-mcp's own tools, watching for 
 
 ## Workflow
 
-### 1. Workspace setup (isolate the throwaway project)
+### 1. Workspace setup
 
-**Never scaffold inside cl-mcp's own git tree.** The generated files would show up in `git status` and could be committed by accident.
+Scaffold projects live under `experiments/` inside the cl-mcp checkout.
+This directory is listed in `.gitignore`, so generated files never appear
+in `git status` and cannot be committed by accident.  No project-root
+switching is needed.
 
 ```
-mkdir -p ~/cl-mcp-experiments          # one-time; outside cl-mcp checkout
-fs-set-project-root path=~/cl-mcp-experiments
+fs-set-project-root path=.            # ensure project root is cl-mcp
 fs-get-project-info                    # confirm
 ```
-
-Note the original cl-mcp project root before switching. You will restore it at the end.
 
 **Hydrate deferred tool schemas** before any tool call with boolean/integer parameters.
 Without this, calls like `load-system force=true` or `inspect-object id=N` will fail
@@ -43,19 +43,17 @@ ToolSearch select:mcp__cl-mcp__lisp-read-file,mcp__cl-mcp__load-system,mcp__cl-m
 
 ### 2. Scaffold with `project-scaffold`
 
-Call `project-scaffold` once. Pick a `name` that does not exist yet under `scaffolds/`. Save the response — note the `absolute_path` and `files` list.
+Call `project-scaffold` once with `destination: "experiments"`. Pick a `name` that does not exist yet. Save the response — note the `absolute_path` and `files` list.
 
-⚠️ **The text summary returned by `project-scaffold` currently omits the `next_steps` array** (the field exists in the structured response but is not rendered in the visible content). Do not wait for it. Go straight to step 3.
+`project-scaffold` now **auto-registers** the `.asd` with ASDF, so `load-system` works immediately after scaffolding.
 
-### 3. Register the scaffold with ASDF (before first load-system)
+### 3. First load (no manual ASDF registration needed)
 
-ASDF does not auto-discover projects under `~/cl-mcp-experiments/`. The `load-system` tool will fail with `Component "<name>" not found` unless you prime ASDF first:
+After scaffolding, `load-system system=<name>` should work directly thanks to auto-registration. If it fails with `Component "<name>" not found` (e.g., after a worker restart), re-register:
 
 ```
 repl-eval code='(asdf:load-asd "<absolute-path-from-step-2>/<name>.asd")'
 ```
-
-Only AFTER that call does `load-system system=<name>` work. This is a one-time prime per scaffold.
 
 ### 4. Build out medium complexity
 
@@ -84,11 +82,9 @@ Deliberately try each tool at least once so friction surfaces:
 
 Keep a running list. Append to the feedback file at the end of the cycle, not at the end of the session.
 
-**Feedback file location** — pick the variant that matches how you work:
-
-- **Solo / private notes** (default for most contributors): `~/.claude/memory/cl-mcp-feedback.md`. Contains your personal observations; never committed to cl-mcp's git tree.
-- **Team-shared** (if the project has agreed on a shared file): e.g. `<cl-mcp-repo>/claudedocs/dogfooding-feedback.md`. Visible to other contributors; avoid sensitive material and un-redacted paths.
-- **Project-specific override** — if the user of this skill has said "record feedback to X", use X and skip the defaults.
+**Feedback file location**: `claudedocs/dogfooding-feedback.md` inside the cl-mcp checkout.
+This path is listed in `.gitignore` so it is never committed. If the user has said
+"record feedback to X", use X and skip the default.
 
 In all cases: **append, never overwrite**. Create the file with `fs-write-file` if it does not exist; afterwards append via shell heredoc or `repl-eval`.
 
@@ -103,11 +99,9 @@ For each item: Problem (one line), Reproduction or symptom, Suggested fix.
 
 At the end of the cycle:
 
-1. `fs-set-project-root path=<original-cl-mcp-path>` to restore the working context
-2. Report generation stats (project name, location, test count, feedback items count)
-3. Leave the throwaway project on disk — it is cheap storage and the next cycle can reuse `~/cl-mcp-experiments/` as the parent
-
-Do **not** `git add` anything in cl-mcp's checkout.
+1. Report generation stats (project name, location, test count, feedback items count)
+2. Leave the throwaway project on disk under `experiments/` — it is cheap storage and gitignored
+3. Verify `git status` shows no untracked experiment files (gitignore should handle this)
 
 ## Known pitfalls (check before recording as new bugs)
 
@@ -115,13 +109,13 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 
 | Symptom | Cause | Workaround |
 |---|---|---|
-| `run-tests` on aggregate `<name>/tests` reports `Passed: 0, Failed: 0` with `✓ PASS` despite tests actually running | `run-tests` result extractor does not handle the scaffold's `:perform (test-op ...)` rove:run shape | Run each sub-package individually (`run-tests system=<name>/tests/foo-test`) OR verify via `(asdf:test-system :<name>)` in repl-eval |
+| `run-tests` on aggregate `<name>/tests` reports `Passed: 0, Failed: 0` with `✓ PASS` despite tests actually running | Fixed in PR #98: fallback now purges Rove suites and clears ASDF state before sub-system runs | Should work now; if it still fails, file a new issue |
 | `run-tests` fails with opaque `COMPILE-FILE-ERROR while compiling ...` after you edited a `defpackage` | SBCL package-variance warning escalated to error; cached worker state | `pool-kill-worker` then `load-system` to get a fresh image |
 | `lisp-edit-form` or `lisp-patch-form` on a `.asd` file rejects `form_type: "asdf:defsystem"` | Tool matches on unqualified symbol name | Use `form_type: "defsystem"` |
 | `code-find` returns `symbol is required` when you pass `name:` | Parameter name is `symbol`, not `name` | Check the tool schema: the required key is `symbol` |
 | `fs-list-directory` hides `.gitignore` and other dotfiles | Default behavior filters `*hidden-prefixes*` | Pass `show_hidden: true` (added in PR #94) |
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |
-| `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | ASDF has not loaded the scaffold's `.asd` yet | `repl-eval '(asdf:load-asd "<absolute-path>/<name>.asd")'` once, then `load-system` works — see step 3 |
+| `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed in PR #98: `project-scaffold` now auto-registers with ASDF | Should work now; manual `asdf:load-asd` only needed after worker restart |
 | `project-scaffold` text response does not contain the `next_steps` array | Response builder does not render `next_steps` in `content[].text` | Use the `absolute_path` from the structured response and prime ASDF manually per step 3 |
 | `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
 | `lisp-edit-form content=<multi-form>` rejects with `content must contain exactly one top-level form` | Tool only accepts one form per call | Chain multiple `insert_after` calls, one form each |
@@ -138,14 +132,13 @@ You are done with one cycle when:
 - [ ] At least one edited Lisp file was sanity-checked with `lisp-check-parens` (cheap and catches `lisp-patch-form` drift early)
 - [ ] At least **5 feedback items** were **actually appended** to the chosen feedback file (verify with a `fs-read-file` or shell `tail` — the "I'll record it later" trap is real)
 - [ ] Feedback is categorized P1/P2/P3 under a dated section heading
-- [ ] Project root is restored to cl-mcp's original location
-- [ ] Nothing in `git status` under cl-mcp references the throwaway project
+- [ ] Nothing in `git status` references the throwaway project (gitignore should handle this)
 
 ## Anti-patterns
 
-- **Scaffolding inside cl-mcp's checkout.** The generated files will taint `git status`. Always set project root to an outside directory first.
+- **Scaffolding outside `experiments/`.** If you scaffold into a non-gitignored path inside cl-mcp, generated files will taint `git status`. Always use `destination: "experiments"`.
 - **Building a project you intend to keep.** This is a feedback-gathering exercise; grab shallow breadth (lots of tool calls) over deep polish.
-- **Trusting `✓ PASS / Passed: 0, Failed: 0` on the aggregate test system.** See the pitfalls table — this is a known silent bug.
+- **Trusting `✓ PASS / Passed: 0, Failed: 0` on the aggregate test system.** Fixed in PR #98, but verify it works; if counts are still 0, run sub-packages individually.
 - **Recording only tool bugs.** Capture UX friction too: confusing errors, missing defaults, unnecessary retries. Those become P2/P3 items.
 - **Skipping the "try every tool" step.** If you only use `lisp-edit-form` and `run-tests`, you only produce feedback on those two tools.
 
