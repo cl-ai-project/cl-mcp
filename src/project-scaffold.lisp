@@ -125,13 +125,11 @@ underlying error after cleaning up the temp directory."
       (%absolute-scaffold-paths *project-root* destination name)
     (%assert-within-project-root target-dir)
     (%assert-within-project-root temp-dir)
-    (when (uiop:directory-exists-p target-dir)
-      (if overwrite
-          (uiop:delete-directory-tree target-dir :validate t)
-          (error 'invalid-argument-error
-                 :field "name" :value name
-                 :reason (format nil "target directory already exists: ~A"
-                                 (namestring target-dir)))))
+    (when (and (uiop:directory-exists-p target-dir) (not overwrite))
+      (error 'invalid-argument-error
+             :field "name" :value name
+             :reason (format nil "target directory already exists: ~A"
+                             (namestring target-dir))))
     (let ((plan (plan-scaffold :name name
                                :description (or description "")
                                :author (or author "")
@@ -141,6 +139,11 @@ underlying error after cleaning up the temp directory."
       (unwind-protect
            (progn
              (%write-files-to-temp temp-dir plan)
+             ;; Delete existing target AFTER temp is ready, preserving
+             ;; atomicity: if %write-files-to-temp fails, the original
+             ;; scaffold survives.
+             (when (and overwrite (uiop:directory-exists-p target-dir))
+               (uiop:delete-directory-tree target-dir :validate t))
              (rename-file temp-dir target-dir)
              (setf committed t)
              (list :target-dir target-dir

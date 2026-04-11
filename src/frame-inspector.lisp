@@ -136,10 +136,11 @@ Internal frames include:
                            "INVOKE-DEBUGGER" "BREAK" "EVAL")
            :test #'string-equal)))
 
-(defun %collect-frames
-    (max-frames print-level print-length
-     &key locals-preview-frames preview-max-depth preview-max-elements
-     locals-preview-skip-internal filter-internal)
+#+sbcl
+(defun %collect-frames (max-frames print-level print-length
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal
+                             filter-internal)
   "Walk stack and collect frame information using SBCL backtrace API.
 LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews.
 When LOCALS-PREVIEW-SKIP-INTERNAL is true, only USER frames are counted and
@@ -147,52 +148,57 @@ receive previews; internal frames are skipped entirely for preview purposes.
 When FILTER-INTERNAL is true, internal frames are excluded from the result
 entirely, keeping backtraces focused on user code.
 PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
-  (let ((frames 'nil)
+  (let ((frames '())
         (index 0)
         (user-frame-index 0)
         (preview-frames (or locals-preview-frames 0))
         (skip-internal (and locals-preview-skip-internal t)))
     (handler-case
-     (let ((map-fn
-            (ignore-errors
-             (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
-       (when map-fn
-         (funcall map-fn
-                  (lambda (frame)
-                    (when (< index max-frames)
-                      (let* ((function-name (%frame-function-name frame))
-                             (source-loc (%frame-source-location frame))
-                             (is-internal (%internal-frame-p function-name)))
-                        (unless (and filter-internal is-internal)
-                          (let ((include-preview
-                                 (if skip-internal
-                                     (and (not is-internal)
-                                          (< user-frame-index preview-frames))
-                                     (< index preview-frames))))
-                            (push
-                             (list :index index :function function-name
-                                   :source-file (getf source-loc :file)
-                                   :source-line (getf source-loc :line) :locals
-                                   (%frame-locals frame print-level print-length
-                                                  :include-preview include-preview
-                                                  :preview-max-depth
-                                                  preview-max-depth
-                                                  :preview-max-elements
-                                                  preview-max-elements))
-                             frames))
-                          (unless is-internal (incf user-frame-index))
-                          (incf index))))))))
-     (error nil nil))
+        (let ((map-fn (ignore-errors
+                        (fdefinition
+                         (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
+          (when map-fn
+            (funcall map-fn
+                     (lambda (frame)
+                       (when (< index max-frames)
+                         (let* ((function-name (%frame-function-name frame))
+                                (source-loc (%frame-source-location frame))
+                                (is-internal (%internal-frame-p function-name)))
+                           (unless (and filter-internal is-internal)
+                             (let ((include-preview
+                                     (if skip-internal
+                                         (and (not is-internal)
+                                              (< user-frame-index preview-frames))
+                                         (< index preview-frames))))
+                               (push (list :index index
+                                           :function function-name
+                                           :source-file (getf source-loc :file)
+                                           :source-line (getf source-loc :line)
+                                           :locals
+                                           (%frame-locals frame print-level
+                                                          print-length
+                                                          :include-preview
+                                                          include-preview
+                                                          :preview-max-depth
+                                                          preview-max-depth
+                                                          :preview-max-elements
+                                                          preview-max-elements))
+                                     frames))
+                             (unless is-internal
+                               (incf user-frame-index))
+                             (incf index))))))))
+      (error () nil))
     (nreverse frames)))
 
 #-sbcl
 (defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth preview-max-elements
-                             locals-preview-skip-internal)
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal
+                             filter-internal)
   "Fallback for non-SBCL: return empty frame list."
   (declare (ignore max-frames print-level print-length
                    locals-preview-frames preview-max-depth preview-max-elements
-                   locals-preview-skip-internal))
+                   locals-preview-skip-internal filter-internal))
   nil)
 
 (defun capture-error-context
