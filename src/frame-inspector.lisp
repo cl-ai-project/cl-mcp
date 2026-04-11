@@ -11,7 +11,8 @@
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/inspect
                 #:generate-result-preview)
-  (:export #:capture-error-context))
+  (:export #:capture-error-context
+           #:%internal-frame-p))
 
 
 (in-package #:cl-mcp/src/frame-inspector)
@@ -206,7 +207,7 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
      &key (max-frames 20) (print-level 3) (print-length 10)
      (locals-preview-frames 0) (preview-max-depth 1)
      (preview-max-elements 5) (locals-preview-skip-internal t)
-     (filter-internal t))
+     (filter-internal nil))
   "Capture structured error context including frames and locals.
 
 LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (default: 0).

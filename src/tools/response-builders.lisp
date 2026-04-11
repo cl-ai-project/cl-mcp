@@ -17,6 +17,8 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
+  (:import-from #:cl-mcp/src/frame-inspector
+                #:%internal-frame-p)
   (:export #:build-eval-response
            #:build-load-system-response
            #:build-run-tests-response
@@ -30,34 +32,41 @@
 (defun %build-error-context-ht (error-context)
   "Build a hash-table from an error-context plist for JSON serialization.
 ERROR-CONTEXT is a plist with keys :condition-type, :message, :restarts,
-and :frames as returned by repl-eval."
-  (make-ht
-   "condition_type" (sanitize-for-json (getf error-context :condition-type))
-   "message" (sanitize-for-json (getf error-context :message))
-   "restarts"
-   (mapcar (lambda (r)
-             (make-ht "name" (sanitize-for-json (getf r :name))
-                      "description" (sanitize-for-json (getf r :description))))
-           (getf error-context :restarts))
-   "frames"
-   (mapcar (lambda (f)
-             (make-ht
-              "index" (getf f :index)
-              "function" (sanitize-for-json (getf f :function))
-              "source_file" (getf f :source-file)
-              "source_line" (getf f :source-line)
-              "locals"
-              (mapcar (lambda (l)
-                        (let ((lht (make-ht
-                                    "name" (sanitize-for-json (getf l :name))
-                                    "value" (sanitize-for-json (getf l :value)))))
-                          (when (getf l :object-id)
-                            (setf (gethash "object_id" lht) (getf l :object-id)))
-                          (when (getf l :preview)
-                            (setf (gethash "preview" lht) (getf l :preview)))
-                          lht))
-                      (getf f :locals))))
-           (getf error-context :frames))))
+and :frames as returned by repl-eval.
+Internal/infrastructure frames (CL-MCP, SBCL internals, ASDF, etc.) are
+filtered out so that the user-visible backtrace focuses on application code."
+  (let ((user-frames
+          (remove-if (lambda (f)
+                       (%internal-frame-p
+                        (or (getf f :function) "")))
+                     (getf error-context :frames))))
+    (make-ht
+     "condition_type" (sanitize-for-json (getf error-context :condition-type))
+     "message" (sanitize-for-json (getf error-context :message))
+     "restarts"
+     (mapcar (lambda (r)
+               (make-ht "name" (sanitize-for-json (getf r :name))
+                        "description" (sanitize-for-json (getf r :description))))
+             (getf error-context :restarts))
+     "frames"
+     (mapcar (lambda (f)
+               (make-ht
+                "index" (getf f :index)
+                "function" (sanitize-for-json (getf f :function))
+                "source_file" (getf f :source-file)
+                "source_line" (getf f :source-line)
+                "locals"
+                (mapcar (lambda (l)
+                          (let ((lht (make-ht
+                                      "name" (sanitize-for-json (getf l :name))
+                                      "value" (sanitize-for-json (getf l :value)))))
+                            (when (getf l :object-id)
+                              (setf (gethash "object_id" lht) (getf l :object-id)))
+                            (when (getf l :preview)
+                              (setf (gethash "preview" lht) (getf l :preview)))
+                            lht))
+                        (getf f :locals))))
+             user-frames))))
 
 (defun build-eval-response (printed raw-value stdout stderr error-context
                             &key include-result-preview
@@ -122,19 +131,18 @@ so that MCP clients rendering only content[].text still see them."
                                     restarts)))
                   (when frames
                     (format s "~&Backtrace:")
-                    ;; Show at most 5 frames in content text;
-                    ;; full backtrace is in structured error_context.
-                    (loop for frame in frames
-                          for i below 5
-                          for fn = (sanitize-for-json
-                                    (getf frame :function))
-                          for src = (sanitize-for-json
-                                     (getf frame :source-file))
-                          for line = (getf frame :source-line)
+                    ;; Filter internal frames; show at most 5 user frames.
+                    (loop with shown = 0
+                          for frame in frames
+                          for fn = (or (getf frame :function) "")
+                          unless (%internal-frame-p fn)
                           do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
                                      (or (getf frame :index) "?")
-                                     (or fn "?")
-                                     src line))))))))
+                                     (sanitize-for-json fn)
+                                     (sanitize-for-json (getf frame :source-file))
+                                     (getf frame :source-line))
+                             (incf shown)
+                          until (>= shown 5))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)
