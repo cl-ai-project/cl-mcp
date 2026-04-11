@@ -122,14 +122,18 @@ so that MCP clients rendering only content[].text still see them."
                                     restarts)))
                   (when frames
                     (format s "~&Backtrace:")
+                    ;; Show at most 5 frames in content text;
+                    ;; full backtrace is in structured error_context.
                     (loop for frame in frames
                           for i below 5
                           for fn = (sanitize-for-json
                                     (getf frame :function))
-                          for src = (getf frame :source-file)
+                          for src = (sanitize-for-json
+                                     (getf frame :source-file))
                           for line = (getf frame :source-line)
-                          do (format s "~&  ~D: ~A~@[ (~A~@[:~A~])~]"
-                                     (getf frame :index) (or fn "?")
+                          do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
+                                     (or (getf frame :index) "?")
+                                     (or fn "?")
                                      src line))))))))
       (setf (gethash "content" ht)
             (text-content

@@ -432,6 +432,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
+         (_ (unless report-stream-sym
+              (error "Rove internal symbol *REPORT-STREAM* not found; incompatible Rove version?")))
          (start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
@@ -439,19 +441,17 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          successp
          results
          rove-error)
-    (declare (ignore successp))
+    (declare (ignore successp _))
     (handler-case
+        ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
+        ;; Cannot use regular let because the symbol is resolved at runtime.
         (setf (values successp results)
-              (funcall
-               (compile nil
-                        `(lambda (run-tests-fn tests stdout-s stderr-s debug-s)
-                           (let ((,report-stream-sym (make-broadcast-stream))
-                                 (*standard-output* stdout-s)
-                                 (*error-output* stderr-s)
-                                 (*test-debug-output* debug-s))
-                             (funcall run-tests-fn tests))))
-               run-tests-fn test-symbols stdout-stream stderr-stream
-               debug-stream))
+              (progv (list report-stream-sym)
+                  (list (make-broadcast-stream))
+                (let ((*standard-output* stdout-stream)
+                      (*error-output* stderr-stream)
+                      (*test-debug-output* debug-stream))
+                  (funcall run-tests-fn test-symbols))))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test-runner" "message"
@@ -538,6 +538,9 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
+         (_ (unless (and report-stream-sym last-report-sym)
+              (error "Rove internal symbols not found (~A ~A); incompatible Rove version?"
+                     report-stream-sym last-report-sym)))
          (start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
@@ -545,7 +548,10 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          successp
          results
          rove-error)
+    (declare (ignore successp results _))
     (handler-case
+     ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
+     ;; Cannot use regular let because the symbol is resolved at runtime.
      (setf (values successp results)
              (progv (list report-stream-sym)
                  (list (make-broadcast-stream))
@@ -636,21 +642,35 @@ the surrounding passed/failed/pending/failure-details bindings."
                                "zero counts from aggregate system, retrying sub-systems"
                                "count" (length sub-systems))
                     (dolist (sub-sys sub-systems)
-                      (handler-case
-                          (progn
-                            (progv (list report-stream-sym)
-                                (list (make-broadcast-stream))
-                              (funcall run-fn
-                                       (intern (string-upcase sub-sys)
-                                               :keyword)))
-                            (%extract-suites
-                             (symbol-value last-report-sym)))
-                        (error (c)
-                          (log-event :warn "test-runner" "message"
-                                     "sub-system test error"
-                                     "sub-system" sub-sys
-                                     "error"
-                                     (princ-to-string c)))))))))
+                      (let ((run-ok nil))
+                        (handler-case
+                            (progn
+                              ;; progv: bind late-resolved Rove special
+                              ;; (see M1 guard above for nil safety)
+                              (progv (list report-stream-sym)
+                                  (list (make-broadcast-stream))
+                                (funcall run-fn
+                                         (intern (string-upcase sub-sys)
+                                                 :keyword)))
+                              (setf run-ok t))
+                          (error (c)
+                            (incf failed 1)
+                            (push (make-failure-detail
+                                   :test-name sub-sys
+                                   :reason (format nil
+                                                   "Sub-system crashed: ~A"
+                                                   (princ-to-string c)))
+                                  failure-details)
+                            (log-event :warn "test-runner" "message"
+                                       "sub-system test error"
+                                       "sub-system" sub-sys
+                                       "error"
+                                       (princ-to-string c))))
+                        ;; Extract outside handler-case so extraction
+                        ;; bugs propagate instead of being swallowed.
+                        (when run-ok
+                          (%extract-suites
+                           (symbol-value last-report-sym)))))))))
             (let ((ht
                    (make-test-result :passed passed :failed failed :pending
                                      pending :failed-tests
