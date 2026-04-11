@@ -933,7 +933,7 @@ then clean up."
 ;;; ============================================================
 
 (deftest lisp-edit-form-schema-avoids-top-level-combinators
-  (testing "inputSchema has 3-value operation enum, content required, no old_text/new_text"
+  (testing "inputSchema has 4-value operation enum (incl delete), content optional, no old_text/new_text"
     (let* ((descriptor (cl-mcp/src/lisp-edit-form::lisp-edit-form-descriptor))
            (schema (gethash "inputSchema" descriptor)))
       (ok (string= "object" (gethash "type" schema))
@@ -952,11 +952,12 @@ then clean up."
         (ok content "content property should exist")
         ;; operation enum should have exactly 3 values
         (let ((enum (gethash "enum" operation)))
-          (ok (= 3 (length enum))
-              "operation enum should have exactly 3 values")
+          (ok (= 4 (length enum))
+              "operation enum should have exactly 4 values")
           (ok (find "replace" enum :test #'string=))
           (ok (find "insert_before" enum :test #'string=))
-          (ok (find "insert_after" enum :test #'string=)))
+          (ok (find "insert_after" enum :test #'string=))
+          (ok (find "delete" enum :test #'string=)))
         ;; content should be in required list
         (ok (find "file_path" required :test #'string=)
             "file_path should remain globally required")
@@ -966,8 +967,8 @@ then clean up."
             "form_name should remain globally required")
         (ok (find "operation" required :test #'string=)
             "operation should remain globally required")
-        (ok (find "content" required :test #'string=)
-            "content should now be globally required")))))
+        (ok (not (find "content" required :test #'string=))
+            "content should NOT be globally required (optional for delete)")))))
 
 (deftest lisp-edit-form-handler-returns-tool-error
   (testing "handler returns isError for operational errors on new protocol"
