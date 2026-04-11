@@ -112,13 +112,25 @@ so that MCP clients rendering only content[].text still see them."
                               (getf error-context :condition-type)))
                       (msg (sanitize-for-json
                             (getf error-context :message)))
-                      (restarts (getf error-context :restarts)))
+                      (restarts (getf error-context :restarts))
+                      (frames (getf error-context :frames)))
                   (format s "~&~%[~A] ~A" (or ctype "ERROR") (or msg ""))
                   (when restarts
                     (format s "~&Restarts: ~{~A~^, ~}"
                             (mapcar (lambda (r)
                                       (sanitize-for-json (getf r :name)))
-                                    restarts))))))))
+                                    restarts)))
+                  (when frames
+                    (format s "~&Backtrace:")
+                    (loop for frame in frames
+                          for i below 5
+                          for fn = (sanitize-for-json
+                                    (getf frame :function))
+                          for src = (getf frame :source-file)
+                          for line = (getf frame :source-line)
+                          do (format s "~&  ~D: ~A~@[ (~A~@[:~A~])~]"
+                                     (getf frame :index) (or fn "?")
+                                     src line))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)

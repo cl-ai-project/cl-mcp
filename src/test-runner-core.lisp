@@ -504,9 +504,26 @@ TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
   (run-rove-selected-tests
    (list (%coerce-test-symbol test-name))))
 
+(defun %find-rove-test-sub-systems (system-name)
+  "Return test sub-system names from SYSTEM-NAME's ASDF :depends-on.
+Filters string dependencies that have SYSTEM-NAME/ as a prefix.
+Used to detect aggregate test systems (e.g., my-proj/tests) whose
+sub-systems (my-proj/tests/foo-test) hold the actual Rove suites."
+  (let* ((sys (ignore-errors (asdf:find-system system-name nil)))
+         (deps (when sys
+                 (ignore-errors (asdf:system-depends-on sys))))
+         (prefix (concatenate 'string (string-downcase system-name) "/")))
+    (remove-if-not (lambda (dep)
+                     (and (stringp dep)
+                          (uiop:string-prefix-p prefix dep)))
+                   deps)))
+
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
-Uses rove:run to ensure any :around methods (e.g., test environment setup) are invoked."
+Uses rove:run to ensure any :around methods (e.g., test environment setup)
+are invoked.  When the initial run returns zero counts (common with aggregate
+test systems whose rove:run keyword does not map to registered suites),
+detects test sub-systems from ASDF dependencies and runs each individually."
   (log-event :info "test-runner" "framework" "rove" "system" system-name)
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
@@ -530,17 +547,13 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
          rove-error)
     (handler-case
      (setf (values successp results)
-             (funcall
-              (compile nil
-                       `(lambda (run-fn system-key stdout-s stderr-s debug-s)
-                          (let ((,report-stream-sym
-                                 (make-broadcast-stream))
-                                (*standard-output* stdout-s)
-                                (*error-output* stderr-s)
-                                (*test-debug-output* debug-s))
-                            (funcall run-fn system-key))))
-              run-fn (intern (string-upcase system-name) :keyword) stdout-stream
-              stderr-stream debug-stream))
+             (progv (list report-stream-sym)
+                 (list (make-broadcast-stream))
+               (let ((*standard-output* stdout-stream)
+                     (*error-output* stderr-stream)
+                     (*test-debug-output* debug-stream))
+                 (funcall run-fn
+                          (intern (string-upcase system-name) :keyword)))))
      (error (c) (setf rove-error (princ-to-string c))
             (log-event :error "test-runner" "message" "rove:run crashed"
                        "error" rove-error)))
@@ -556,12 +569,13 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
            (debug-output (get-output-stream-string debug-stream)))
       (if rove-error
           (let ((ht
-                 (make-test-result :passed 0 :failed 1
-                                   :failed-tests
+                 (make-test-result :passed 0 :failed 1 :failed-tests
                                    (list
-                                    (make-failure-detail
-                                     :test-name system-name
-                                     :reason (format nil "Test runner crashed: ~A" rove-error)))
+                                    (make-failure-detail :test-name system-name
+                                                         :reason
+                                                         (format nil
+                                                                 "Test runner crashed: ~A"
+                                                                 rove-error)))
                                    :framework :rove :duration duration-ms)))
             (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
             (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
@@ -573,33 +587,79 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup) are i
                 (failed 0)
                 (pending 0)
                 (failure-details nil))
-            (dolist (suite-result suite-results)
-              (dolist (pkg-result (funcall passed-tests-fn suite-result))
-                (incf passed (length (funcall passed-tests-fn pkg-result)))
-                (incf failed (length (funcall failed-tests-fn pkg-result)))
-                (incf pending (length (funcall pending-tests-fn pkg-result))))
-              (dolist (pkg-result (funcall failed-tests-fn suite-result))
-                (incf passed (length (funcall passed-tests-fn pkg-result)))
-                (incf failed (length (funcall failed-tests-fn pkg-result)))
-                (incf pending (length (funcall pending-tests-fn pkg-result)))))
-            (when (plusp failed)
-              (dolist (suite-result suite-results)
-                (dolist
-                    (pkg-result
-                     (append (funcall passed-tests-fn suite-result)
-                             (funcall failed-tests-fn suite-result)))
-                  (dolist (test-fail (funcall failed-tests-fn pkg-result))
-                    (let ((test-name (funcall test-name-fn test-fail))
-                          (assertions (%rove-extract-assertions test-fail)))
-                      (dolist (a assertions)
-                        (setf (gethash "test_name" a) (princ-to-string test-name))
-                        (push a failure-details)))))))
+            (labels
+                ((%extract-suites (suites)
+                   "Extract counts and failure details from SUITES into
+the surrounding passed/failed/pending/failure-details bindings."
+                   (dolist (suite-result suites)
+                     (dolist
+                         (pkg-result (funcall passed-tests-fn suite-result))
+                       (incf passed
+                             (length (funcall passed-tests-fn pkg-result)))
+                       (incf failed
+                             (length (funcall failed-tests-fn pkg-result)))
+                       (incf pending
+                             (length (funcall pending-tests-fn pkg-result))))
+                     (dolist
+                         (pkg-result (funcall failed-tests-fn suite-result))
+                       (incf passed
+                             (length (funcall passed-tests-fn pkg-result)))
+                       (incf failed
+                             (length (funcall failed-tests-fn pkg-result)))
+                       (incf pending
+                             (length (funcall pending-tests-fn pkg-result))))
+                     (dolist
+                         (pkg-result
+                          (append (funcall passed-tests-fn suite-result)
+                                  (funcall failed-tests-fn suite-result)))
+                       (dolist
+                           (test-fail (funcall failed-tests-fn pkg-result))
+                         (let ((test-name (funcall test-name-fn test-fail))
+                               (assertions
+                                (%rove-extract-assertions test-fail)))
+                           (dolist (a assertions)
+                             (setf (gethash "test_name" a)
+                                     (princ-to-string test-name))
+                             (push a failure-details))))))))
+              (%extract-suites suite-results)
+              ;; Fallback: aggregate test systems (e.g., with a custom
+              ;; :perform test-op that calls rove:run on sub-packages)
+              ;; report 0 counts because rove:run with the aggregate
+              ;; keyword finds no registered suites.  Detect sub-systems
+              ;; and run each individually.
+              (when (and (zerop (+ passed failed pending))
+                         (null rove-error))
+                (let ((sub-systems
+                       (%find-rove-test-sub-systems system-name)))
+                  (when sub-systems
+                    (log-event :info "test-runner" "message"
+                               "zero counts from aggregate system, retrying sub-systems"
+                               "count" (length sub-systems))
+                    (dolist (sub-sys sub-systems)
+                      (handler-case
+                          (progn
+                            (progv (list report-stream-sym)
+                                (list (make-broadcast-stream))
+                              (funcall run-fn
+                                       (intern (string-upcase sub-sys)
+                                               :keyword)))
+                            (%extract-suites
+                             (symbol-value last-report-sym)))
+                        (error (c)
+                          (log-event :warn "test-runner" "message"
+                                     "sub-system test error"
+                                     "sub-system" sub-sys
+                                     "error"
+                                     (princ-to-string c)))))))))
             (let ((ht
-                   (make-test-result :passed passed :failed failed :pending pending
-                                     :failed-tests (nreverse failure-details)
-                                     :framework :rove :duration duration-ms)))
-              (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-              (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+                   (make-test-result :passed passed :failed failed :pending
+                                     pending :failed-tests
+                                     (nreverse failure-details) :framework
+                                     :rove :duration duration-ms)))
+              (when (plusp (length stdout))
+                (setf (gethash "stdout" ht) stdout))
+              (when (plusp (length stderr))
+                (setf (gethash "stderr" ht) stderr))
               (when (plusp (length debug-output))
                 (setf (gethash "debug_output" ht) debug-output))
               ht))))))

@@ -167,6 +167,24 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 
 **Fallback via `repl-eval`**: `(rove:run :my-system/tests)` after `load-system`.
 
+**Rove testing pitfalls:**
+- Rove's `signals` assertion does **not** reliably catch conditions raised inside `restart-case`. Use `handler-case` wrappers instead:
+  ```lisp
+  ;; WRONG — may propagate instead of being caught by Rove:
+  (ok (signals my-error (dequeue empty-q)))
+  ;; RIGHT:
+  (ok (handler-case (progn (dequeue empty-q) nil)
+        (my-error () t)))
+  ```
+- Restart names are **symbols** compared with `eq`. When invoking a restart defined in package A from test code in package B, you must package-qualify:
+  ```lisp
+  ;; WRONG — reads as TEST-PKG::RETURN-NIL, not QUEUE-PKG::RETURN-NIL:
+  (invoke-restart 'return-nil)
+  ;; RIGHT:
+  (invoke-restart 'my-queue-pkg::return-nil)
+  ```
+  To avoid this, define restarts with **keyword** names (`:return-nil`) in library code.
+
 **Pre-PR**: `(asdf:compile-system :my-system :force t)` to catch warnings from all file changes, then run full suite.
 
 ## Troubleshooting

@@ -443,8 +443,10 @@ is used instead of Eclector, which means comments are NOT preserved."))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
                      (pw (gethash "parinfer_warning" updated))
-                     (summary (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]"
-                                      operation form_type form_name file_path would-change pw)))
+                     (summary (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]~
+                                               ~@[~%~%--- original ---~%~A~]~@[~%~%--- preview ---~%~A~]"
+                                      operation form_type form_name file_path would-change pw
+                                      original-form preview)))
                 (result id
                         (apply #'make-ht
                                "path" file_path
