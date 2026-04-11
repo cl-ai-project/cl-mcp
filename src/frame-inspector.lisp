@@ -11,7 +11,8 @@
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/inspect
                 #:generate-result-preview)
-  (:export #:capture-error-context))
+  (:export #:capture-error-context
+           #:%internal-frame-p))
 
 
 (in-package #:cl-mcp/src/frame-inspector)
@@ -139,11 +140,14 @@ Internal frames include:
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length
                         &key locals-preview-frames preview-max-depth
-                             preview-max-elements locals-preview-skip-internal)
+                             preview-max-elements locals-preview-skip-internal
+                             filter-internal)
   "Walk stack and collect frame information using SBCL backtrace API.
 LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews.
 When LOCALS-PREVIEW-SKIP-INTERNAL is true, only USER frames are counted and
 receive previews; internal frames are skipped entirely for preview purposes.
+When FILTER-INTERNAL is true, internal frames are excluded from the result
+entirely, keeping backtraces focused on user code.
 PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
   (let ((frames '())
         (index 0)
@@ -160,51 +164,50 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
                        (when (< index max-frames)
                          (let* ((function-name (%frame-function-name frame))
                                 (source-loc (%frame-source-location frame))
-                                (is-internal (%internal-frame-p function-name))
-                                ;; When skip-internal: only user frames get preview
-                                ;; When not skip-internal: count all frames
-                                (include-preview
-                                 (if skip-internal
-                                     (and (not is-internal)
-                                          (< user-frame-index preview-frames))
-                                     (< index preview-frames))))
-                           (push (list :index index
-                                       :function function-name
-                                       :source-file (getf source-loc :file)
-                                       :source-line (getf source-loc :line)
-                                       :locals
-                                       (%frame-locals frame print-level
-                                                      print-length
-                                                      :include-preview
-                                                      include-preview
-                                                      :preview-max-depth
-                                                      preview-max-depth
-                                                      :preview-max-elements
-                                                      preview-max-elements))
-                                 frames)
-                           (unless is-internal
-                             (incf user-frame-index)))
-                         (incf index))))))
+                                (is-internal (%internal-frame-p function-name)))
+                           (unless (and filter-internal is-internal)
+                             (let ((include-preview
+                                     (if skip-internal
+                                         (and (not is-internal)
+                                              (< user-frame-index preview-frames))
+                                         (< index preview-frames))))
+                               (push (list :index index
+                                           :function function-name
+                                           :source-file (getf source-loc :file)
+                                           :source-line (getf source-loc :line)
+                                           :locals
+                                           (%frame-locals frame print-level
+                                                          print-length
+                                                          :include-preview
+                                                          include-preview
+                                                          :preview-max-depth
+                                                          preview-max-depth
+                                                          :preview-max-elements
+                                                          preview-max-elements))
+                                     frames))
+                             (unless is-internal
+                               (incf user-frame-index))
+                             (incf index))))))))
       (error () nil))
     (nreverse frames)))
 
 #-sbcl
 (defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth preview-max-elements
-                             locals-preview-skip-internal)
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal
+                             filter-internal)
   "Fallback for non-SBCL: return empty frame list."
   (declare (ignore max-frames print-level print-length
                    locals-preview-frames preview-max-depth preview-max-elements
-                   locals-preview-skip-internal))
+                   locals-preview-skip-internal filter-internal))
   nil)
 
-(defun capture-error-context (condition &key (max-frames 20)
-                                             (print-level 3)
-                                             (print-length 10)
-                                             (locals-preview-frames 0)
-                                             (preview-max-depth 1)
-                                             (preview-max-elements 5)
-                                             (locals-preview-skip-internal t))
+(defun capture-error-context
+    (condition
+     &key (max-frames 20) (print-level 3) (print-length 10)
+     (locals-preview-frames 0) (preview-max-depth 1)
+     (preview-max-elements 5) (locals-preview-skip-internal t)
+     (filter-internal nil))
   "Capture structured error context including frames and locals.
 
 LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (default: 0).
@@ -213,6 +216,9 @@ LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (
 LOCALS-PREVIEW-SKIP-INTERNAL: When true (default), skip internal frames when counting for preview.
   Internal frames include CL-MCP, SBCL internals (SB-KERNEL, etc.), ASDF, UIOP, anonymous functions.
   This ensures user code frames get previews even when buried under infrastructure frames.
+FILTER-INTERNAL: When true (default), exclude internal frames from the result entirely.
+  This keeps backtraces focused on user code by omitting CL-MCP, SBCL, and other
+  infrastructure frames.
 PREVIEW-MAX-DEPTH: Max nesting depth for local previews (default: 1).
 PREVIEW-MAX-ELEMENTS: Max elements per collection in local previews (default: 5).
 
@@ -223,14 +229,14 @@ Returns a plist with:
   :restarts - list of (:name STRING :description STRING)
   :frames - list of frame plists (SBCL only, NIL on other implementations)
             When LOCALS-PREVIEW-FRAMES > 0, locals in top frames include :preview field."
-  (list :error t
-        :condition-type (prin1-to-string (type-of condition))
-        :message (handler-case
-                     (princ-to-string condition)
-                   (error () "<error formatting condition>"))
-        :restarts (%collect-restarts)
-        :frames (%collect-frames max-frames print-level print-length
-                                 :locals-preview-frames locals-preview-frames
-                                 :preview-max-depth preview-max-depth
-                                 :preview-max-elements preview-max-elements
-                                 :locals-preview-skip-internal locals-preview-skip-internal)))
+  (list :error t :condition-type (prin1-to-string (type-of condition)) :message
+        (handler-case (princ-to-string condition)
+                      (error nil "<error formatting condition>"))
+        :restarts (%collect-restarts) :frames
+        (%collect-frames max-frames print-level print-length
+                         :locals-preview-frames locals-preview-frames
+                         :preview-max-depth preview-max-depth
+                         :preview-max-elements preview-max-elements
+                         :locals-preview-skip-internal
+                         locals-preview-skip-internal
+                         :filter-internal filter-internal)))

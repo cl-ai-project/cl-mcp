@@ -15,7 +15,8 @@
                 #:make-ht)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
-  (:export #:load-system))
+  (:export #:load-system
+           #:*last-compiler-stderr*))
 
 (in-package #:cl-mcp/src/system-loader-core)
 
@@ -67,12 +68,23 @@ returned as a success -- completed work is never discarded as a timeout."
         (error (c)
           (values (list c) nil t)))))
 
+(defvar *last-compiler-stderr* nil
+  "Captured compiler stderr from the most recent %call-with-suppressed-output call.
+Always set via unwind-protect so it survives error unwinds.  When the call
+completes normally this is set to NIL; on error it holds the stderr string
+accumulated up to the point of failure.")
+
 (defun %call-with-suppressed-output (thunk)
   "Call THUNK with compilation and load output suppressed.
-Returns (values thunk-result warning-count warning-details)."
+Returns (values thunk-result warning-count warning-details compiler-stderr).
+The stderr string is also saved to *last-compiler-stderr* via unwind-protect
+so it survives error unwinds and can be retrieved by callers that catch the error."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
         (stderr (make-string-output-stream)))
+    ;; Reset before each call so stale data from a previous run is not
+    ;; mistakenly attributed to this invocation.
+    (setf *last-compiler-stderr* nil)
     #+sbcl
     (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
           (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
@@ -82,48 +94,68 @@ Returns (values thunk-result warning-count warning-details)."
       (when err-sym (push err-sym syms) (push stderr vals))
       (when note-sym (push note-sym syms) (push stderr vals))
       (when trace-sym (push trace-sym syms) (push nil vals))
-      (let ((result
-              (handler-bind
-                  ((warning
-                     (lambda (w)
-                       (incf warning-count)
-                       (format warning-details "~A~%" w)
-                       (when (find-restart 'muffle-warning)
-                         (invoke-restart 'muffle-warning)))))
-                (let ((*compile-verbose* nil)
-                      (*compile-print* nil)
-                      (*load-verbose* nil)
-                      (*load-print* nil)
-                      (*standard-output* (make-string-output-stream))
-                      (*trace-output* (make-string-output-stream))
-                      (*error-output* stderr))
-                  (if syms
-                      (progv (nreverse syms) (nreverse vals)
-                        (with-compilation-unit (:override t)
-                          (funcall thunk)))
-                      (with-compilation-unit (:override t)
-                        (funcall thunk)))))))
-        (values result warning-count
-                (get-output-stream-string warning-details))))
+      (let ((result nil)
+            (completed-p nil))
+        (unwind-protect
+            (progn
+              (setf result
+                    (handler-bind
+                        ((warning
+                           (lambda (w)
+                             (incf warning-count)
+                             (format warning-details "~A~%" w)
+                             (when (find-restart 'muffle-warning)
+                               (invoke-restart 'muffle-warning)))))
+                      (let ((*compile-verbose* nil)
+                            (*compile-print* nil)
+                            (*load-verbose* nil)
+                            (*load-print* nil)
+                            (*standard-output* (make-string-output-stream))
+                            (*trace-output* (make-string-output-stream))
+                            (*error-output* stderr))
+                        (if syms
+                            (progv (nreverse syms) (nreverse vals)
+                              (with-compilation-unit (:override t)
+                                (funcall thunk)))
+                            (with-compilation-unit (:override t)
+                              (funcall thunk))))))
+              (setf completed-p t)
+              (values result warning-count
+                      (get-output-stream-string warning-details)
+                      (get-output-stream-string stderr)))
+          ;; Always capture stderr so it survives error unwind.
+          (unless completed-p
+            (setf *last-compiler-stderr*
+                  (ignore-errors (get-output-stream-string stderr)))))))
     #-sbcl
-    (let ((result
-            (handler-bind
-                ((warning
-                   (lambda (w)
-                     (incf warning-count)
-                     (format warning-details "~A~%" w)
-                     (when (find-restart 'muffle-warning)
-                       (invoke-restart 'muffle-warning)))))
-              (let ((*compile-verbose* nil)
-                    (*compile-print* nil)
-                    (*load-verbose* nil)
-                    (*load-print* nil)
-                    (*standard-output* (make-string-output-stream))
-                    (*trace-output* (make-string-output-stream))
-                    (*error-output* stderr))
-                (funcall thunk)))))
-      (values result warning-count
-              (get-output-stream-string warning-details)))))
+    (let ((result nil)
+          (completed-p nil))
+      (unwind-protect
+          (progn
+            (setf result
+                  (handler-bind
+                      ((warning
+                         (lambda (w)
+                           (incf warning-count)
+                           (format warning-details "~A~%" w)
+                           (when (find-restart 'muffle-warning)
+                             (invoke-restart 'muffle-warning)))))
+                    (let ((*compile-verbose* nil)
+                          (*compile-print* nil)
+                          (*load-verbose* nil)
+                          (*load-print* nil)
+                          (*standard-output* (make-string-output-stream))
+                          (*trace-output* (make-string-output-stream))
+                          (*error-output* stderr))
+                      (funcall thunk))))
+            (setf completed-p t)
+            (values result warning-count
+                    (get-output-stream-string warning-details)
+                    (get-output-stream-string stderr)))
+        ;; Always capture stderr so it survives error unwind.
+        (unless completed-p
+          (setf *last-compiler-stderr*
+                (ignore-errors (get-output-stream-string stderr))))))))
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
@@ -182,21 +214,28 @@ or NIL (no timeout). Default is 120 seconds."
                       "system" system-name
                       "timeout" timeout-seconds))
           (errored-p
-           (let ((err (first result-list)))
+           (let ((err (first result-list))
+                 (compiler-stderr *last-compiler-stderr*))
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              (setf (gethash "message" ht)
                    (sanitize-for-json
                     (or (ignore-errors (princ-to-string err))
                         (format nil "~A" (type-of err)))))
+             (when (and (stringp compiler-stderr)
+                        (plusp (length compiler-stderr)))
+               (setf (gethash "compiler_output" ht)
+                     (sanitize-for-json compiler-stderr)))
              (log-event :error "load-system-error"
                         "system" system-name
                         "error" (or (ignore-errors (princ-to-string err))
                                     "unprintable error"))))
           (t
-           (destructuring-bind (load-result warning-count warning-details)
+           (destructuring-bind
+                 (load-result warning-count warning-details
+                  &optional compiler-stderr)
                result-list
-             (declare (ignore load-result))
+             (declare (ignore load-result compiler-stderr))
              (setf (gethash "status" ht) "loaded")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              (setf (gethash "forced" ht) force)

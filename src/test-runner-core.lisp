@@ -538,6 +538,8 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
+         (pkgs-var (find-symbol "*PACKAGE-SUITES*"
+                                :rove/core/suite/package))
          (_ (unless (and report-stream-sym last-report-sym)
               (error "Rove internal symbols not found (~A ~A); incompatible Rove version?"
                      report-stream-sym last-report-sym)))
@@ -645,6 +647,18 @@ the surrounding passed/failed/pending/failure-details bindings."
                       (let ((run-ok nil))
                         (handler-case
                             (progn
+                              ;; Purge Rove suite for this sub-system so
+                              ;; rove:run rebuilds from fresh deftests,
+                              ;; producing a full 3-level result structure.
+                              (when (and pkgs-var (boundp pkgs-var)
+                                         (hash-table-p (symbol-value pkgs-var)))
+                                (let ((pkg (find-package (string-upcase sub-sys))))
+                                  (when pkg
+                                    (remhash pkg (symbol-value pkgs-var)))))
+                              ;; Clear ASDF loaded state so rove:run
+                              ;; triggers a real reload of deftest forms.
+                              (ignore-errors
+                                (asdf/system-registry:clear-system sub-sys))
                               ;; progv: bind late-resolved Rove special
                               ;; (see M1 guard above for nil safety)
                               (progv (list report-stream-sym)
