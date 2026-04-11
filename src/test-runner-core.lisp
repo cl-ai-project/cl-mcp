@@ -649,9 +649,12 @@ the surrounding passed/failed/pending/failure-details bindings."
                               ;; (see M1 guard above for nil safety)
                               (progv (list report-stream-sym)
                                   (list (make-broadcast-stream))
-                                (funcall run-fn
-                                         (intern (string-upcase sub-sys)
-                                                 :keyword)))
+                                (let ((*standard-output* (make-broadcast-stream))
+                                      (*error-output* (make-broadcast-stream))
+                                      (*test-debug-output* (make-broadcast-stream)))
+                                  (funcall run-fn
+                                           (intern (string-upcase sub-sys)
+                                                   :keyword))))
                               (setf run-ok t))
                           (error (c)
                             (incf failed 1)
