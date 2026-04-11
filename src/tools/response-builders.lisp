@@ -180,7 +180,22 @@ Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
                 (format s "~A" (gethash "message" ht)))
                ((string= status "error")
                 (format s "Error loading ~A: ~A"
-                        system (gethash "message" ht)))))))
+                        system (gethash "message" ht))
+                (let ((co (gethash "compiler_output" ht)))
+                  (when (and (stringp co) (plusp (length co)))
+                    (let* ((limit 2048)
+                           (truncated-p (> (length co) limit))
+                           (body (if truncated-p
+                                     (concatenate
+                                      'string (subseq co 0 limit)
+                                      (format nil
+                                              "~%... [~D more characters truncated]"
+                                              (- (length co) limit)))
+                                     co)))
+                      (format s "~%~%Compiler output:~%~A"
+                              (string-right-trim '(#\Newline) body)))))
+                (format s "~%~%Hint: the worker process may now have a broken package state. ~
+Use pool-kill-worker to get a fresh worker, then retry load-system."))))))
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

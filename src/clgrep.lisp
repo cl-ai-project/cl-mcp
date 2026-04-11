@@ -14,8 +14,6 @@
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
-  (:import-from #:yason
-                #:encode)
   (:export
    #:clgrep-search))
 
@@ -157,8 +155,17 @@ Recommended workflow:
                          :include-form include-form))
          (formatted (%format-clgrep-results results)))
     (result id
-            (make-ht "content" (text-content (with-output-to-string (s)
-                                               (encode formatted s)))
+            (make-ht "content" (text-content
+                       (with-output-to-string (s)
+                         (format s "~D match~:P for ~S~@[ in ~A~]:~%"
+                                 (length formatted) pattern path)
+                         (loop for match across formatted
+                               do (format s "  ~A:~A [~A] ~A~%"
+                                          (gethash "file" match)
+                                          (gethash "line" match)
+                                          (gethash "form-type" match)
+                                          (or (gethash "signature" match)
+                                              (gethash "form-name" match))))))
                      "matches" formatted
                      "count" (length formatted)
                      "limited" (<= effective-limit (length results))))))

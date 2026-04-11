@@ -107,7 +107,7 @@ TEMP-DIR if any intermediate write fails."
             (content (cdr entry)))
         (fs-write-file (concatenate 'string temp-relative rel) content)))))
 
-(defun write-scaffold (&key name description author license destination)
+(defun write-scaffold (&key name description author license destination overwrite)
   "Generate the scaffold project atomically. Returns a plist with:
   :target-dir (absolute pathname)
   :relative-path (namestring relative to *project-root*)
@@ -126,10 +126,12 @@ underlying error after cleaning up the temp directory."
     (%assert-within-project-root target-dir)
     (%assert-within-project-root temp-dir)
     (when (uiop:directory-exists-p target-dir)
-      (error 'invalid-argument-error
-             :field "name" :value name
-             :reason (format nil "target directory already exists: ~A"
-                             (namestring target-dir))))
+      (if overwrite
+          (uiop:delete-directory-tree target-dir :validate t)
+          (error 'invalid-argument-error
+                 :field "name" :value name
+                 :reason (format nil "target directory already exists: ~A"
+                                 (namestring target-dir)))))
     (let ((plan (plan-scaffold :name name
                                :description (or description "")
                                :author (or author "")
@@ -172,7 +174,9 @@ cl-mcp's tool surface."
    (license :type :string :description
             "License string for .asd :license. No newlines.")
    (destination :type :string :description
-                "Relative parent directory under project root where <name>/ is created. Default: scaffolds."))
+                "Relative parent directory under project root where <name>/ is created. Default: scaffolds.")
+   (overwrite :type :boolean :description
+              "When true, replace an existing scaffold directory instead of failing."))
   :body
   (handler-case
       (let* ((result-plist
@@ -181,7 +185,8 @@ cl-mcp's tool surface."
                :description (or description "A Common Lisp project scaffolded by cl-mcp.")
                :author (or author "Unknown")
                :license (or license "MIT")
-               :destination (or destination "scaffolds")))
+               :destination (or destination "scaffolds")
+               :overwrite overwrite))
              (target-dir (getf result-plist :target-dir))
              (relative (getf result-plist :relative-path))
              (files (getf result-plist :files))
@@ -190,7 +195,7 @@ cl-mcp's tool surface."
              (next-steps
               (vector
                (format nil
-                       "To register with ASDF: run repl-eval with (asdf:load-asd ~S)"
+                       "Auto-registered with ASDF. To re-register: (asdf:load-asd ~S)"
                        abs-asd)
                (format nil
                        "To load: run load-system with {\"system\": ~S}"
@@ -201,6 +206,8 @@ cl-mcp's tool surface."
                (format nil
                        "To edit: use lisp-edit-form with paths under ~A"
                        relative))))
+        ;; Auto-register with ASDF
+        (ignore-errors (asdf/find-system:load-asd abs-asd))
         (result id
                 (make-ht
                  "created" t
