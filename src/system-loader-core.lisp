@@ -210,7 +210,10 @@ If ASDF signals MISSING-COMPONENT for the requested system, searches
 registering it."
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
-  (let ((start-time (get-internal-real-time)))
+  ;; ASDF system names are canonically lowercase; normalize early so all
+  ;; subsequent find-system / load-system / clear-system calls match.
+  (let ((system-name (string-downcase system-name))
+        (start-time (get-internal-real-time)))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
