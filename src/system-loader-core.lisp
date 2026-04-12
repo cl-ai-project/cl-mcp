@@ -18,8 +18,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:export #:load-system
-           #:*last-compiler-stderr*
-           #:*auto-discovered-asd*))
+           #:*last-compiler-stderr*))
 
 (in-package #:cl-mcp/src/system-loader-core)
 
@@ -205,26 +204,29 @@ If ASDF signals MISSING-COMPONENT for the requested system, searches
 registering it."
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
-  (let ((*auto-discovered-asd* nil)
-        (start-time (get-internal-real-time)))
+  (let ((start-time (get-internal-real-time)))
+    (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
     (multiple-value-bind (result-list timed-out-p errored-p)
         (%load-with-timeout
          (lambda ()
            (flet ((%do-load ()
-                    (when (and force (asdf/system:find-system system-name nil))
+                    (when (and force (asdf:find-system system-name nil))
+                      ;; Save .asd path before clearing: locally-registered
+                      ;; systems cannot be rediscovered after clear-system
                       (let ((asd-src
                              (ignore-errors
-                              (asdf/system:system-source-file
-                               (asdf/system:find-system system-name nil)))))
-                        (asdf/system-registry:clear-system system-name)
+                              (asdf:system-source-file
+                               (asdf:find-system system-name nil)))))
+                        (asdf:clear-system system-name)
+                        ;; Re-read .asd so edits to :depends-on etc. are picked up
                         (when asd-src
                           (ignore-errors
-                           (asdf/find-system:load-asd asd-src)))))
+                           (asdf:load-asd asd-src)))))
                     (%call-with-suppressed-output
                      (lambda ()
-                       (asdf/operate:load-system system-name
+                       (asdf:load-system system-name
                                                  :force clear-fasls)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
