@@ -288,10 +288,19 @@ NIL the symbol was not found and an isError payload is returned."
       (make-ht "path" path
                "line" line
                "content" (text-content
-                          (if line
-                            (format nil "~A defined in ~A at line ~D"
-                                    symbol path line)
-                            (format nil "~A defined in ~A" symbol path))))
+                          (let ((on-disk (ignore-errors (probe-file path))))
+                            (cond
+                              ((and line on-disk)
+                               (format nil "~A defined in ~A at line ~D"
+                                       symbol path line))
+                              (line
+                               (format nil "~A defined in ~A at line ~D (source not on disk)"
+                                       symbol path line))
+                              (on-disk
+                               (format nil "~A defined in ~A" symbol path))
+                              (t
+                               (format nil "~A defined in ~A (source not on disk)"
+                                       symbol path))))))
       (make-ht "isError" t
                "content" (text-content
                           (format nil "Definition not found for ~A"
