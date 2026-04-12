@@ -176,7 +176,7 @@ single symbol object across multiple positions in the form tree."
          (args-display
           (if args
               (with-output-to-string (out)
-                (write args :stream out :pretty nil :case :downcase))
+                (write args :stream out :pretty t :case :downcase))
               "()"))
          (doc (%truncate-doc (find-if #'stringp (cddr form))))
          ;; Use ~S to preserve colon for keyword qualifiers
