@@ -197,7 +197,7 @@ still see what was warned about."
                                                             "~%... [~D more characters truncated]"
                                                             (- (length wd) limit)))
                                        wd)))
-                        (format s "~%~A" (string-right-trim '(#\Newline) body))
+                        (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body))
                       (when (search "also exports" wd)
                         (format s "~%~%Hint: package-variance warnings mean the running image has stale exports. ~
 Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
