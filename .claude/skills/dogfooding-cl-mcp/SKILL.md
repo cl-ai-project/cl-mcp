@@ -83,7 +83,7 @@ Deliberately try each tool at least once so friction surfaces:
 Keep a running list. Append to the feedback file at the end of the cycle, not at the end of the session.
 
 **Feedback file location**: `claudedocs/dogfooding-feedback.md` inside the cl-mcp checkout.
-This path is listed in `.gitignore` so it is never committed. If the user has said
+The `claudedocs/` directory is listed in `.gitignore` so it is never committed. If the user has said
 "record feedback to X", use X and skip the default.
 
 In all cases: **append, never overwrite**. Create the file with `fs-write-file` if it does not exist; afterwards append via shell heredoc or `repl-eval`.

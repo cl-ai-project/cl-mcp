@@ -239,46 +239,79 @@ Returns either a primitive value representation, an object-ref, or a circular-re
        (let ((class (class-of object)))
          (typep class 'structure-class))))
 
-(defun %inspect-structure (object seen-table active-table depth max-depth max-elements)
+(defun %inspect-structure
+    (object seen-table active-table depth max-depth max-elements)
   "Inspect a structure."
   (let ((slots '())
         (class-name (%type-name object)))
     #+sbcl
-    (handler-case
-        ;; Use dynamic symbol lookup for SBCL internals to avoid reader errors
-        (let ((layout-of-fn (find-symbol "LAYOUT-OF" "SB-KERNEL"))
-               (wrapper-info-fn (find-symbol "WRAPPER-INFO" "SB-KERNEL"))
-               (wrapper-dd-fn (find-symbol "WRAPPER-DD" "SB-KERNEL"))
-               (dd-slots-fn (find-symbol "DD-SLOTS" "SB-KERNEL"))
-               (dsd-name-fn (find-symbol "DSD-NAME" "SB-KERNEL"))
-               (dsd-accessor-fn (find-symbol "DSD-ACCESSOR-NAME" "SB-KERNEL")))
-          (when (and layout-of-fn wrapper-info-fn wrapper-dd-fn
-                     dd-slots-fn dsd-name-fn dsd-accessor-fn
-                     (fboundp layout-of-fn) (fboundp wrapper-info-fn))
-            (let ((layout (funcall wrapper-info-fn (funcall layout-of-fn object))))
-              (when layout
-                (let ((dd (funcall wrapper-dd-fn layout)))
-                  (when dd
-                    (dolist (dsd (funcall dd-slots-fn dd))
-                      (let* ((slot-name (symbol-name (funcall dsd-name-fn dsd)))
-                             (accessor (funcall dsd-accessor-fn dsd))
-                             (value (handler-case
-                                        (funcall accessor object)
-                                      (error () :unbound))))
-                        (push (make-ht "name" slot-name
-                                       "value" (if (eq value :unbound)
-                                                   (make-ht "kind" "unbound"
-                                                            "summary" "#<unbound-slot>")
-                                                   (%value-repr value seen-table active-table
-                                                                depth max-depth max-elements)))
-                              slots)))))))))
-      (error () nil))  ; Silently ignore if internal API not available
+    (let ((layout-of-fn (find-symbol "LAYOUT-OF" "SB-KERNEL"))
+          (dd-slots-fn (find-symbol "DD-SLOTS" "SB-KERNEL"))
+          (dsd-name-fn (find-symbol "DSD-NAME" "SB-KERNEL"))
+          (dsd-accessor-fn (find-symbol "DSD-ACCESSOR-NAME" "SB-KERNEL")))
+      ;; Modern SBCL path: layout-of → layout-info → dd-slots.
+      ;; Isolated in its own handler-case so errors here do not
+      ;; prevent the legacy fallback from running.
+      (handler-case
+          (let ((layout-info-fn (find-symbol "LAYOUT-INFO" "SB-KERNEL")))
+            (when (and layout-of-fn layout-info-fn dd-slots-fn
+                       dsd-name-fn dsd-accessor-fn
+                       (fboundp layout-of-fn) (fboundp layout-info-fn))
+              (let* ((layout (funcall layout-of-fn object))
+                     (dd (funcall layout-info-fn layout)))
+                (when dd
+                  (dolist (dsd (funcall dd-slots-fn dd))
+                    (let* ((slot-name (symbol-name (funcall dsd-name-fn dsd)))
+                           (accessor (funcall dsd-accessor-fn dsd))
+                           (value (handler-case (funcall accessor object)
+                                    (error () :unbound))))
+                      (push (make-ht "name" slot-name
+                                     "value"
+                                     (if (eq value :unbound)
+                                         (make-ht "kind" "unbound"
+                                                  "summary" "#<unbound-slot>")
+                                         (%value-repr value seen-table
+                                                      active-table depth
+                                                      max-depth max-elements)))
+                            slots)))))))
+        (error () nil))
+      ;; Legacy SBCL path: layout-of → wrapper-info → wrapper-dd → dd-slots.
+      ;; Only tried when the modern path produced no slots.
+      (when (null slots)
+        (handler-case
+            (let ((wrapper-info-fn (find-symbol "WRAPPER-INFO" "SB-KERNEL"))
+                  (wrapper-dd-fn (find-symbol "WRAPPER-DD" "SB-KERNEL")))
+              (when (and wrapper-info-fn wrapper-dd-fn layout-of-fn
+                         dd-slots-fn dsd-name-fn dsd-accessor-fn
+                         (fboundp layout-of-fn) (fboundp wrapper-info-fn))
+                (let ((layout (funcall wrapper-info-fn
+                                       (funcall layout-of-fn object))))
+                  (when layout
+                    (let ((dd (funcall wrapper-dd-fn layout)))
+                      (when dd
+                        (dolist (dsd (funcall dd-slots-fn dd))
+                          (let* ((slot-name
+                                   (symbol-name (funcall dsd-name-fn dsd)))
+                                 (accessor (funcall dsd-accessor-fn dsd))
+                                 (value
+                                   (handler-case (funcall accessor object)
+                                     (error () :unbound))))
+                            (push (make-ht
+                                   "name" slot-name
+                                   "value"
+                                   (if (eq value :unbound)
+                                       (make-ht "kind" "unbound"
+                                                "summary" "#<unbound-slot>")
+                                       (%value-repr value seen-table
+                                                    active-table depth
+                                                    max-depth max-elements)))
+                                  slots)))))))))
+          (error () nil))))
     (let ((ht (make-ht "kind" "structure"
                        "class" class-name
                        "summary" (safe-prin1 object)
                        "slots" (nreverse slots))))
-      (setf (gethash "meta" ht)
-            (make-ht "slot_count" (length slots)))
+      (setf (gethash "meta" ht) (make-ht "slot_count" (length slots)))
       ht)))
 
 (defun %inspect-instance (object seen-table active-table depth max-depth max-elements)

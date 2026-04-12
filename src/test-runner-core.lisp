@@ -205,10 +205,10 @@ When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
     (t
      (error "framework must be a string or symbol: ~S" framework))))
 
-(defparameter *load-error-tail-max-lines* 20
+(defparameter *load-error-tail-max-lines* 40
   "Maximum number of trailing stderr lines attached to a test-system load failure.")
 
-(defparameter *load-error-tail-max-chars* 2000
+(defparameter *load-error-tail-max-chars* 4000
   "Maximum total characters of trailing stderr attached to a test-system load failure.")
 
 (defun %tail-lines (text max-lines max-chars)
@@ -233,14 +233,19 @@ inclusion in load-failure error messages."
 When STDERR contains captured compiler output, the tail of it is
 appended under a 'Compiler output (most recent):' header so the user
 can see the underlying reason (e.g., SBCL package-variance warnings)
-instead of just an opaque COMPILE-FILE-ERROR."
+instead of just an opaque COMPILE-FILE-ERROR.
+Shows the condition type explicitly to aid root-cause diagnosis."
   (let ((tail (%tail-lines stderr *load-error-tail-max-lines*
-                           *load-error-tail-max-chars*)))
+                           *load-error-tail-max-chars*))
+        (ctype (type-of condition))
+        (cmsg (or (ignore-errors (princ-to-string condition))
+                  "unprintable condition")))
     (if tail
-        (format nil "Failed to load test system ~A: ~A~%~%Compiler output (most recent):~%~A"
-                system-name condition tail)
-        (format nil "Failed to load test system ~A: ~A"
-                system-name condition))))
+        (format nil
+                "Failed to load test system ~A:~%  [~A] ~A~%~%Compiler output (most recent):~%~A"
+                system-name ctype cmsg tail)
+        (format nil "Failed to load test system ~A:~%  [~A] ~A"
+                system-name ctype cmsg))))
 
 (defun %extract-defpackage-names-from-file (pathname)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -373,7 +378,9 @@ COMPILE-FILE-ERROR."
                 ;; previous load do not linger as ghost tests.
                 (ignore-errors (%rove-purge-ghost-suites system-name))
                 (asdf:clear-system system-name)
-                (when (and asd-src (not (asdf:find-system system-name nil)))
+                ;; Always re-read the .asd so edits to :depends-on
+                ;; and other system metadata are picked up.
+                (when asd-src
                   (ignore-errors (asdf:load-asd asd-src)))))
             (let ((*error-output* captured-stderr))
               (with-compilation-unit (:override t)
