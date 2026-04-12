@@ -121,6 +121,17 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
           else
             append (%rove-extract-assertions child))))
 
+(defun %safe-test-name (test-name-fn node)
+  "Call TEST-NAME-FN on NODE, falling back gracefully on error.
+Some Rove result objects (e.g., FAILED-ASSERTION) lack a TEST-NAME method."
+  (handler-case (funcall test-name-fn node)
+    (error ()
+      (let* ((pkg (find-package :rove/core/result))
+             (desc-sym (find-symbol "ASSERTION-DESCRIPTION" pkg)))
+        (or (and desc-sym
+                 (ignore-errors (funcall (fdefinition desc-sym) node)))
+            "<unknown test>")))))
+
 (defun %rove-extract-test-failures (stats &key single-test-p)
   "Extract all failure details from Rove stats.
 When SINGLE-TEST-P is true, stats contain test results directly (no suite wrapper)."
@@ -134,9 +145,9 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
     (if single-test-p
         ;; Single test mode: failed-tests contains FAILED-TEST directly (deftest level)
         (loop for test-fail across failed-tests
-              do (let ((test-name (funcall test-name-fn test-fail)))
+              do (let ((test-name (%safe-test-name test-name-fn test-fail)))
                    (loop for testing-fail in (funcall test-failed-fn test-fail)
-                         do (let ((testing-desc (funcall test-name-fn testing-fail))
+                         do (let ((testing-desc (%safe-test-name test-name-fn testing-fail))
                                    (assertions (%rove-extract-assertions testing-fail)))
                               (dolist (assertion assertions)
                                 (setf (gethash "test_name" assertion)
@@ -146,8 +157,8 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
         (loop for suite-fail across failed-tests
               do (loop for test-fail in (funcall test-failed-fn suite-fail)
                        do (loop for testing-fail in (funcall test-failed-fn test-fail)
-                                do (let ((test-name (funcall test-name-fn test-fail))
-                                          (testing-desc (funcall test-name-fn testing-fail))
+                                do (let ((test-name (%safe-test-name test-name-fn test-fail))
+                                          (testing-desc (%safe-test-name test-name-fn testing-fail))
                                           (assertions (%rove-extract-assertions testing-fail)))
                                      (dolist (assertion assertions)
                                        (setf (gethash "test_name" assertion)
@@ -629,7 +640,7 @@ the surrounding passed/failed/pending/failure-details bindings."
                                   (funcall failed-tests-fn suite-result)))
                        (dolist
                            (test-fail (funcall failed-tests-fn pkg-result))
-                         (let ((test-name (funcall test-name-fn test-fail))
+                         (let ((test-name (%safe-test-name test-name-fn test-fail))
                                (assertions
                                 (%rove-extract-assertions test-fail)))
                            (dolist (a assertions)
