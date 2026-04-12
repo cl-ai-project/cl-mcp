@@ -171,11 +171,21 @@ all locatable, not only ordinary functions."
            (find (and pkg (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
            (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
            (offset (and pkg (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
-           (kinds '(:function :generic-function :macro
+           (kinds '(:function :generic-function :method :macro
                     :class :condition :structure :type
                     :variable :constant :method-combination :package))
            (source
-            (or (loop for kind in kinds
+            (or ;; Prefer definitions with a known source file.
+                ;; Implicitly-created GFs have NIL pathname; :method
+                ;; entries carry the actual defmethod file location.
+                (loop for kind in kinds
+                      for src = (and find-by-name
+                                     (first (ignore-errors
+                                             (funcall find-by-name sym kind))))
+                      when (and src path-fn (funcall path-fn src))
+                        return src)
+                ;; Fallback: accept any source even without pathname
+                (loop for kind in kinds
                       for src = (and find-by-name
                                      (first (ignore-errors
                                              (funcall find-by-name sym kind))))

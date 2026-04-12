@@ -20,4 +20,4 @@ tests/tmp/*
 
 # Dogfooding: throwaway scaffold projects and feedback log
 experiments/
-claudedocs/dogfooding-feedback.md
+claudedocs/

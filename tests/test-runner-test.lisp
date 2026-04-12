@@ -377,7 +377,7 @@
       (ok (null (search "Compiler output" msg)))))
   (testing "with compiler output: tail is appended under a clear header"
     (let* ((stderr (with-output-to-string (s)
-                     (dotimes (i 30)
+                     (dotimes (i 60)
                        (format s "line ~D of compiler output~%" i))))
            (msg (cl-mcp/src/test-runner-core::%format-load-error
                  "my-system"
@@ -389,6 +389,6 @@
       (ok (search "compile-file-error" msg))
       (ok (search "Compiler output" msg))
       ;; Keeps the most recent lines, not the earliest ones
-      (ok (search "line 29" msg))
-      ;; Truncated: line 0 should be gone
+      (ok (search "line 59" msg))
+      ;; Truncated: line 0 should be gone (*load-error-tail-max-lines* = 40)
       (ok (null (search "line 0 of" msg))))))

@@ -192,8 +192,10 @@ or NIL (no timeout). Default is 120 seconds."
                        (asdf:system-source-file
                         (asdf:find-system system-name nil)))))
                (asdf:clear-system system-name)
-               ;; If ASDF can no longer find the system, re-register it.
-               (when (and asd-src (not (asdf:find-system system-name nil)))
+               ;; Always re-read the .asd so edits to :depends-on,
+               ;; exports, etc. are picked up — not just when the
+               ;; system becomes unfindable after clear-system.
+               (when asd-src
                  (ignore-errors (asdf:load-asd asd-src)))))
            (%call-with-suppressed-output
             (lambda ()

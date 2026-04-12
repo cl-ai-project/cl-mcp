@@ -74,11 +74,12 @@ useful debug information."
               display-frames)
       'vector))))
 
-(defun build-eval-response (printed raw-value stdout stderr error-context
-                            &key include-result-preview
-                                 (preview-max-depth 1)
-                                 (preview-max-elements 8)
-                                 max-output-length)
+(defun build-eval-response
+    (printed raw-value stdout stderr error-context
+     &key include-result-preview
+          (preview-max-depth 1)
+          (preview-max-elements 8)
+          max-output-length)
   "Build the standard repl-eval response hash-table.
 Called by both the inline tool path and the worker handler.
 Returns a hash-table with content, stdout, stderr, and optional
@@ -135,20 +136,25 @@ so that MCP clients rendering only content[].text still see them."
                             (mapcar (lambda (r)
                                       (sanitize-for-json (getf r :name)))
                                     restarts)))
-                  (when frames
-                    (format s "~&Backtrace:")
-                    ;; Filter internal frames; show at most 5 user frames.
-                    (loop with shown = 0
-                          for frame in frames
-                          for fn = (or (getf frame :function) "")
-                          unless (%internal-frame-p fn)
-                          do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
-                                     (or (getf frame :index) "?")
-                                     (sanitize-for-json fn)
-                                     (sanitize-for-json (getf frame :source-file))
-                                     (getf frame :source-line))
-                             (incf shown)
-                          until (>= shown 5))))))))
+                  ;; Only show Backtrace header when non-internal frames exist
+                  (let ((user-frames
+                          (and frames
+                               (loop for frame in frames
+                                     for fn = (or (getf frame :function) "")
+                                     unless (%internal-frame-p fn)
+                                       collect frame))))
+                    (when user-frames
+                      (format s "~&Backtrace:")
+                      (loop for frame in user-frames
+                            for shown from 1
+                            do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
+                                       (or (getf frame :index) "?")
+                                       (sanitize-for-json
+                                        (or (getf frame :function) ""))
+                                       (sanitize-for-json
+                                        (getf frame :source-file))
+                                       (getf frame :source-line))
+                            until (>= shown 5)))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)

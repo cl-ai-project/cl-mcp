@@ -220,8 +220,10 @@ cl-mcp's tool surface."
                  "next_steps" next-steps
                  "content"
                  (text-content
-                  (format nil "Scaffolded ~A at ~A (~D files)"
-                          name relative (length files))))))
+                  (format nil "Scaffolded ~A at ~A (~D files)~%Path: ~A~%~{~A~%~}"
+                          name relative (length files)
+                          (namestring target-dir)
+                          (coerce next-steps 'list))))))
     (invalid-argument-error (e)
       (result id
               (make-ht
