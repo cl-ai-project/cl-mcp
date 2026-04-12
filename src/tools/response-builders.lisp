@@ -178,6 +178,11 @@ still see what was warned about."
                ((string= status "loaded")
                 (format s "System ~A loaded successfully in ~Dms"
                         system (gethash "duration_ms" ht))
+                (let ((discovered (gethash "auto_discovered_asd" ht)))
+                  (when discovered
+                    (format s
+                            "~%Auto-registered ~A (was not on ASDF search path)"
+                            discovered)))
                 (let ((wc (gethash "warnings" ht 0))
                       (wd (gethash "warning_details" ht)))
                   (when (plusp wc)
