@@ -83,13 +83,18 @@ that response builders can include an informational hint.")
 
 (defun %discover-asd-in-project (system-name)
   "Search *project-root* for a .asd file matching SYSTEM-NAME.
+For package-inferred subsystems like \"foo/tests\", searches for the
+root system \"foo\" since .asd files are named after the root.
 Returns the pathname of the shallowest match, or NIL if none found.
 Wrapped in IGNORE-ERRORS for filesystem robustness."
   (when *project-root*
     (ignore-errors
-     (let* ((pattern (merge-pathnames
+     (let* ((root-name (subseq system-name
+                                0 (or (position #\/ system-name)
+                                      (length system-name))))
+            (pattern (merge-pathnames
                       (make-pathname :directory '(:relative :wild-inferiors)
-                                     :name system-name
+                                     :name root-name
                                      :type "asd")
                       *project-root*))
             (matches (directory pattern)))
@@ -230,11 +235,17 @@ registering it."
                                                  :force clear-fasls)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
-                 ;; Only retry when the top-level system itself is missing
-                 (let ((asd-path
-                        (when (string-equal system-name
-                                            (asdf/find-component:missing-requires c))
-                          (%discover-asd-in-project system-name))))
+                 ;; Retry when the missing component is the system itself
+                 ;; or its root (for package-inferred subsystems like "foo/tests")
+                 (let* ((missing (princ-to-string
+                                  (asdf/find-component:missing-requires c)))
+                        (root-name (subseq system-name
+                                           0 (or (position #\/ system-name)
+                                                 (length system-name))))
+                        (asd-path
+                         (when (or (string-equal system-name missing)
+                                   (string-equal root-name missing))
+                           (%discover-asd-in-project system-name))))
                    (unless asd-path
                      (error c))
                    ;; Register discovered .asd and retry once
