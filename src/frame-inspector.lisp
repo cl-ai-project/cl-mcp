@@ -11,6 +11,9 @@
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/inspect
                 #:generate-result-preview)
+  (:import-from #:cl-mcp/src/code-core
+                #:%offset->line
+                #:%ensure-sb-introspect)
   (:export #:capture-error-context
            #:%internal-frame-p))
 
@@ -73,7 +76,11 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
 
 #+sbcl
 (defun %frame-source-location (frame)
-  "Extract source file and line from FRAME, or NIL if unavailable."
+  "Extract source file and line from FRAME, or NIL if unavailable.
+Attempts to resolve actual file line number via sb-introspect by getting
+the function object's definition source and converting its character-offset
+to a line number using %OFFSET->LINE.  Falls back to the top-level form
+offset when introspection is not possible."
   (handler-case
       (let ((code-location (sb-di:frame-code-location frame)))
         (when code-location
@@ -81,9 +88,23 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
             (when debug-source
               (let ((namestring (sb-di:debug-source-namestring debug-source)))
                 (when namestring
-                  (list :file namestring
-                        :line (ignore-errors
-                                (sb-di:code-location-toplevel-form-offset code-location)))))))))
+                  (let ((line (ignore-errors
+                                (let* ((debug-fun (sb-di:frame-debug-fun frame))
+                                       (fun (sb-di:debug-fun-fun debug-fun)))
+                                  (when fun
+                                    (let ((pkg (%ensure-sb-introspect)))
+                                      (when pkg
+                                        (let* ((find-def-src (fdefinition (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
+                                               (source (funcall find-def-src fun))
+                                               (char-offset-accessor (fdefinition (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
+                                               (char-offset (funcall char-offset-accessor source)))
+                                          (when char-offset
+                                            (%offset->line namestring char-offset))))))))))
+                    (if line
+                        (list :file namestring :line line)
+                        (list :file namestring :line
+                              (ignore-errors
+                                (sb-di:code-location-toplevel-form-offset code-location)))))))))))
     (error () nil)))
 
 #+sbcl
