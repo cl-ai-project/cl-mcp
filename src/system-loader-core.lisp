@@ -89,9 +89,10 @@ Returns the pathname of the shallowest match, or NIL if none found.
 Wrapped in IGNORE-ERRORS for filesystem robustness."
   (when *project-root*
     (ignore-errors
-     (let* ((root-name (subseq system-name
+     (let* ((root-name (string-downcase
+                        (subseq system-name
                                 0 (or (position #\/ system-name)
-                                      (length system-name))))
+                                      (length system-name)))))
             (pattern (merge-pathnames
                       (make-pathname :directory '(:relative :wild-inferiors)
                                      :name root-name
