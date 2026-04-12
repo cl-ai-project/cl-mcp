@@ -121,6 +121,17 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
           else
             append (%rove-extract-assertions child))))
 
+(defun %safe-test-name (test-name-fn node)
+  "Call TEST-NAME-FN on NODE, falling back gracefully on error.
+Some Rove result objects (e.g., FAILED-ASSERTION) lack a TEST-NAME method."
+  (handler-case (funcall test-name-fn node)
+    (error ()
+      (let* ((pkg (find-package :rove/core/result))
+             (desc-sym (find-symbol "ASSERTION-DESCRIPTION" pkg)))
+        (or (and desc-sym
+                 (ignore-errors (funcall (fdefinition desc-sym) node)))
+            "<unknown test>")))))
+
 (defun %rove-extract-test-failures (stats &key single-test-p)
   "Extract all failure details from Rove stats.
 When SINGLE-TEST-P is true, stats contain test results directly (no suite wrapper)."
@@ -134,9 +145,9 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
     (if single-test-p
         ;; Single test mode: failed-tests contains FAILED-TEST directly (deftest level)
         (loop for test-fail across failed-tests
-              do (let ((test-name (funcall test-name-fn test-fail)))
+              do (let ((test-name (%safe-test-name test-name-fn test-fail)))
                    (loop for testing-fail in (funcall test-failed-fn test-fail)
-                         do (let ((testing-desc (funcall test-name-fn testing-fail))
+                         do (let ((testing-desc (%safe-test-name test-name-fn testing-fail))
                                    (assertions (%rove-extract-assertions testing-fail)))
                               (dolist (assertion assertions)
                                 (setf (gethash "test_name" assertion)
@@ -146,8 +157,8 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
         (loop for suite-fail across failed-tests
               do (loop for test-fail in (funcall test-failed-fn suite-fail)
                        do (loop for testing-fail in (funcall test-failed-fn test-fail)
-                                do (let ((test-name (funcall test-name-fn test-fail))
-                                          (testing-desc (funcall test-name-fn testing-fail))
+                                do (let ((test-name (%safe-test-name test-name-fn test-fail))
+                                          (testing-desc (%safe-test-name test-name-fn testing-fail))
                                           (assertions (%rove-extract-assertions testing-fail)))
                                      (dolist (assertion assertions)
                                        (setf (gethash "test_name" assertion)
@@ -340,6 +351,34 @@ package-inferred-system and classic ASDF layouts:
                               (walk-system (second dep))))))))))
           (walk-system system-name))))))
 
+(defun %ensure-rove-test-name-method ()
+  "Add a TEST-NAME method for FAILED-ASSERTION if Rove is loaded and the
+method is missing.  Rove's TEST-NAME generic function has no method for
+FAILED-ASSERTION, which causes NO-APPLICABLE-METHOD crashes inside
+rove:run-tests when a deftest body contains bare (ok ...) assertions
+without a (testing ...) wrapper.  This monkey-patch lets Rove's internal
+iteration proceed instead of crashing."
+  (let ((pkg (find-package :rove/core/result)))
+    (when pkg
+      (let ((test-name-gf (ignore-errors
+                             (fdefinition (find-symbol "TEST-NAME" pkg))))
+            (fa-class (find-class (find-symbol "FAILED-ASSERTION" pkg) nil))
+            (desc-fn (ignore-errors
+                       (fdefinition (find-symbol "ASSERTION-DESCRIPTION" pkg)))))
+        (when (and test-name-gf fa-class desc-fn
+                   (typep test-name-gf 'generic-function)
+                   (null (ignore-errors
+                           (find-method test-name-gf nil (list fa-class)))))
+          (let ((method
+                  (eval
+                   `(defmethod ,(find-symbol "TEST-NAME" pkg)
+                        ((obj ,(find-symbol "FAILED-ASSERTION" pkg)))
+                      (or (ignore-errors (funcall ,desc-fn obj))
+                          "<assertion>")))))
+            (when method
+              (log-event :info "test-runner"
+                         "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
@@ -429,6 +468,7 @@ a future Rove version returns them directly instead of crashing."
   "Run Rove TEST-SYMBOLS and return structured results.
 Wraps rove:run-tests with error handling for Rove bugs (e.g., direct assertions
 without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
+  (%ensure-rove-test-name-method)
   (log-event :info "test-runner" "framework" "rove" "selected_tests"
              (format nil "~{~A~^, ~}" test-symbols))
   (let* ((result-pkg (find-package :rove/core/result))
@@ -531,6 +571,7 @@ Uses rove:run to ensure any :around methods (e.g., test environment setup)
 are invoked.  When the initial run returns zero counts (common with aggregate
 test systems whose rove:run keyword does not map to registered suites),
 detects test sub-systems from ASDF dependencies and runs each individually."
+  (%ensure-rove-test-name-method)
   (log-event :info "test-runner" "framework" "rove" "system" system-name)
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
@@ -629,7 +670,7 @@ the surrounding passed/failed/pending/failure-details bindings."
                                   (funcall failed-tests-fn suite-result)))
                        (dolist
                            (test-fail (funcall failed-tests-fn pkg-result))
-                         (let ((test-name (funcall test-name-fn test-fail))
+                         (let ((test-name (%safe-test-name test-name-fn test-fail))
                                (assertions
                                 (%rove-extract-assertions test-fail)))
                            (dolist (a assertions)

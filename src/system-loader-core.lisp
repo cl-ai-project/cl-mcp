@@ -15,6 +15,8 @@
                 #:make-ht)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:export #:load-system
            #:*last-compiler-stderr*))
 
@@ -73,6 +75,37 @@ returned as a success -- completed work is never discarded as a timeout."
 Always set via unwind-protect so it survives error unwinds.  When the call
 completes normally this is set to NIL; on error it holds the stderr string
 accumulated up to the point of failure.")
+
+(defvar *auto-discovered-asd* nil
+  "When non-NIL, holds the namestring of the .asd file that was auto-discovered
+and registered during the most recent load-system call.  Bound dynamically so
+that response builders can include an informational hint.")
+
+(defun %discover-asd-in-project (system-name)
+  "Search *project-root* for a .asd file matching SYSTEM-NAME.
+For package-inferred subsystems like \"foo/tests\", searches for the
+root system \"foo\" since .asd files are named after the root.
+Returns the pathname of the shallowest match, or NIL if none found.
+Wrapped in IGNORE-ERRORS for filesystem robustness."
+  (when *project-root*
+    (ignore-errors
+     (let* ((root-name (string-downcase
+                        (subseq system-name
+                                0 (or (position #\/ system-name)
+                                      (length system-name)))))
+            (pattern (merge-pathnames
+                      (make-pathname :directory '(:relative :wild-inferiors)
+                                     :name root-name
+                                     :type "asd")
+                      *project-root*))
+            (matches (directory pattern)))
+       (when matches
+         ;; Prefer shallowest path (closest to project root)
+         (first
+          (sort (copy-list matches)
+                (lambda (a b)
+                  (< (length (pathname-directory a))
+                     (length (pathname-directory b)))))))))))
 
 (defun %call-with-suppressed-output (thunk)
   "Call THUNK with compilation and load output suppressed.
@@ -163,91 +196,117 @@ so it survives error unwinds and can be retrieved by callers that catch the erro
                           (values hash-table &rest t))
                 load-system))
 
-(defun load-system (system-name &key (force t) (clear-fasls nil)
-                                     (timeout-seconds 120))
+(defun load-system
+       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
 changed files are picked up. When CLEAR-FASLS is true, forces full
 recompilation from source. TIMEOUT-SECONDS must be a positive number
-or NIL (no timeout). Default is 120 seconds."
+or NIL (no timeout). Default is 120 seconds.
+
+If ASDF signals MISSING-COMPONENT for the requested system, searches
+*project-root* for a matching .asd file and retries once after
+registering it."
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
-  (let ((start-time (get-internal-real-time)))
-    (log-event :info "load-system"
-               "system" system-name
-               "force" force
-               "clear_fasls" clear-fasls
-               "timeout" timeout-seconds)
+  ;; ASDF system names are canonically lowercase; normalize early so all
+  ;; subsequent find-system / load-system / clear-system calls match.
+  (let ((system-name (string-downcase system-name))
+        (start-time (get-internal-real-time)))
+    (setf *auto-discovered-asd* nil)
+    (log-event :info "load-system" "system" system-name "force" force
+               "clear_fasls" clear-fasls "timeout" timeout-seconds)
     (multiple-value-bind (result-list timed-out-p errored-p)
         (%load-with-timeout
          (lambda ()
-           (when (and force (asdf:find-system system-name nil))
-             ;; Save the .asd path before clearing: locally-registered
-             ;; systems (loaded via asdf:load-asd, not on the standard
-             ;; search path) are removed from the in-memory registry by
-             ;; clear-system and cannot be rediscovered automatically.
-             (let ((asd-src
-                     (ignore-errors
-                       (asdf:system-source-file
-                        (asdf:find-system system-name nil)))))
-               (asdf:clear-system system-name)
-               ;; Always re-read the .asd so edits to :depends-on,
-               ;; exports, etc. are picked up — not just when the
-               ;; system becomes unfindable after clear-system.
-               (when asd-src
-                 (ignore-errors (asdf:load-asd asd-src)))))
-           (%call-with-suppressed-output
-            (lambda ()
-              (asdf:load-system system-name :force clear-fasls))))
+           (flet ((%do-load ()
+                    (when (and force (asdf:find-system system-name nil))
+                      ;; Save .asd path before clearing: locally-registered
+                      ;; systems cannot be rediscovered after clear-system
+                      (let ((asd-src
+                             (ignore-errors
+                              (asdf:system-source-file
+                               (asdf:find-system system-name nil)))))
+                        (asdf:clear-system system-name)
+                        ;; Re-read .asd so edits to :depends-on etc. are picked up
+                        (when asd-src
+                          (ignore-errors
+                           (asdf:load-asd asd-src)))))
+                    (%call-with-suppressed-output
+                     (lambda ()
+                       (asdf:load-system system-name
+                                                 :force clear-fasls)))))
+             (handler-case (%do-load)
+               (asdf/find-component:missing-component (c)
+                 ;; Retry when the missing component is the system itself
+                 ;; or its root (for package-inferred subsystems like "foo/tests")
+                 (let* ((missing (princ-to-string
+                                  (asdf/find-component:missing-requires c)))
+                        (root-name (subseq system-name
+                                           0 (or (position #\/ system-name)
+                                                 (length system-name))))
+                        (asd-path
+                         (when (or (string-equal system-name missing)
+                                   (string-equal root-name missing))
+                           (%discover-asd-in-project system-name))))
+                   (unless asd-path
+                     (error c))
+                   ;; Register discovered .asd and retry once
+                   (log-event :info "load-system-auto-discover"
+                              "system" system-name
+                              "asd_path" (namestring asd-path))
+                   (asdf/find-system:load-asd asd-path)
+                   (setf *auto-discovered-asd* (namestring asd-path))
+                   (%do-load))))))
          timeout-seconds)
       (let ((elapsed-ms
-               (round (* 1000 (/ (- (get-internal-real-time) start-time)
-                                 internal-time-units-per-second))))
-             (ht (make-ht "system" system-name)))
+             (round
+              (* 1000
+                 (/ (- (get-internal-real-time) start-time)
+                    internal-time-units-per-second))))
+            (ht (make-ht "system" system-name)))
         (cond
-          (timed-out-p
-           (setf (gethash "status" ht) "timeout")
-           (setf (gethash "duration_ms" ht) elapsed-ms)
-           (setf (gethash "message" ht)
-                 (format nil "Load timed out after ~,2F seconds"
-                         timeout-seconds))
-           (log-event :warn "load-system-timeout"
-                      "system" system-name
-                      "timeout" timeout-seconds))
-          (errored-p
-           (let ((err (first result-list))
-                 (compiler-stderr *last-compiler-stderr*))
-             (setf (gethash "status" ht) "error")
-             (setf (gethash "duration_ms" ht) elapsed-ms)
-             (setf (gethash "message" ht)
-                   (sanitize-for-json
-                    (or (ignore-errors (princ-to-string err))
-                        (format nil "~A" (type-of err)))))
-             (when (and (stringp compiler-stderr)
-                        (plusp (length compiler-stderr)))
-               (setf (gethash "compiler_output" ht)
-                     (sanitize-for-json compiler-stderr)))
-             (log-event :error "load-system-error"
-                        "system" system-name
-                        "error" (or (ignore-errors (princ-to-string err))
-                                    "unprintable error"))))
-          (t
-           (destructuring-bind
-                 (load-result warning-count warning-details
-                  &optional compiler-stderr)
-               result-list
-             (declare (ignore load-result compiler-stderr))
-             (setf (gethash "status" ht) "loaded")
-             (setf (gethash "duration_ms" ht) elapsed-ms)
-             (setf (gethash "forced" ht) force)
-             (setf (gethash "clear_fasls" ht) clear-fasls)
-             (setf (gethash "warnings" ht) warning-count)
-             (when (plusp warning-count)
-               (setf (gethash "warning_details" ht)
-                     (sanitize-for-json warning-details)))
-             (log-event :info "load-system-complete"
-                        "system" system-name
-                        "duration_ms" elapsed-ms
-                        "warnings" warning-count))))
+         (timed-out-p (setf (gethash "status" ht) "timeout")
+          (setf (gethash "duration_ms" ht) elapsed-ms)
+          (setf (gethash "message" ht)
+                  (format nil "Load timed out after ~,2F seconds"
+                          timeout-seconds))
+          (log-event :warn "load-system-timeout" "system" system-name "timeout"
+                     timeout-seconds))
+         (errored-p
+          (let ((err (first result-list))
+                (compiler-stderr *last-compiler-stderr*))
+            (setf (gethash "status" ht) "error")
+            (setf (gethash "duration_ms" ht) elapsed-ms)
+            (setf (gethash "message" ht)
+                    (sanitize-for-json
+                     (or (ignore-errors (princ-to-string err))
+                         (format nil "~A" (type-of err)))))
+            (when
+                (and (stringp compiler-stderr)
+                     (plusp (length compiler-stderr)))
+              (setf (gethash "compiler_output" ht)
+                      (sanitize-for-json compiler-stderr)))
+            (log-event :error "load-system-error" "system" system-name "error"
+                       (or (ignore-errors (princ-to-string err))
+                           "unprintable error"))))
+         (t
+          (destructuring-bind
+              (load-result warning-count warning-details
+               &optional compiler-stderr)
+              result-list
+            (declare (ignore load-result compiler-stderr))
+            (setf (gethash "status" ht) "loaded")
+            (setf (gethash "duration_ms" ht) elapsed-ms)
+            (setf (gethash "forced" ht) force)
+            (setf (gethash "clear_fasls" ht) clear-fasls)
+            (setf (gethash "warnings" ht) warning-count)
+            (when (plusp warning-count)
+              (setf (gethash "warning_details" ht)
+                      (sanitize-for-json warning-details)))
+            (log-event :info "load-system-complete" "system" system-name
+                       "duration_ms" elapsed-ms "warnings" warning-count))))
+        (when *auto-discovered-asd*
+          (setf (gethash "auto_discovered_asd" ht) *auto-discovered-asd*))
         ht))))
