@@ -21,3 +21,6 @@ tests/tmp/*
 # Dogfooding: throwaway scaffold projects and feedback log
 experiments/
 claudedocs/
+
+# AI agent working documents (designs, plans, reports)
+docs/plans/
