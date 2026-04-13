@@ -73,6 +73,7 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
       (error () nil))
     (nreverse locals)))
 
+#+sbcl
 (defun %frame-source-location (frame)
   "Extract source file and line from FRAME, or NIL if unavailable.
 Uses the code-location's TLF offset and the debug-source start-positions
@@ -178,9 +179,12 @@ Internal frames include:
                   (or (%extract-method-name function-name "FAST-METHOD")
                       (%extract-method-name function-name "SLOW-METHOD"))))
             (if method-name
-                ;; It's a method wrapper — internal only if method name
-                ;; belongs to an internal package
-                (%prefix-internal-p method-name)
+                ;; It's a method wrapper — internal if method name
+                ;; belongs to an internal package or is unqualified
+                ;; (unqualified names like SLOT-MISSING are CLOS
+                ;; protocol methods from SB-PCL, not user code)
+                (or (not (position #\: method-name))
+                    (%prefix-internal-p method-name))
                 ;; Not a method wrapper; exempt (SETF ...) with user symbols
                 (not (and (>= (length function-name) 6)
                           (string-equal function-name "(SETF " :end1 6)

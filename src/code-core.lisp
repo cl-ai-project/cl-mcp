@@ -159,12 +159,13 @@ the offset is spurious. Returns NIL when the file cannot be read."
 Fallback when sb-introspect does not provide a character offset (common
 for defmethod).  Requires a token boundary after the name to avoid
 matching prefix-sharing symbols (e.g. foo vs foobar).
-Skips matches inside line comments and block comments (#| ... |#),
-and checks both bare and package-qualified name forms."
+Skips matches inside line comments, block comments (#| ... |#), and
+string literals.  Checks both bare and package-qualified name forms."
   (handler-case
       (let* ((physical (translate-logical-pathname pathname))
              (content (read-file-string physical))
              (lowered (string-downcase content))
+             (len (length lowered))
              (bare-name (string-downcase (symbol-name sym)))
              ;; Build list of name variants: bare + package-qualified
              (names
@@ -175,20 +176,40 @@ and checks both bare and package-qualified name forms."
                     (push (concatenate 'string pkg-name ":" bare-name) acc)
                     (push (concatenate 'string pkg-name "::" bare-name) acc)))
                 acc))
-             ;; Pre-compute block comment regions
-             (block-comments
-              (loop for start = (search "#|" lowered :start2 0)
-                      then (search "#|" lowered :start2 (cdr region))
-                    for region = (when start
-                                   (let ((end (search "|#" lowered
-                                                      :start2 (+ start 2))))
-                                     (cons start (if end (+ end 2)
-                                                     (length lowered)))))
-                    while region collect region))
+             ;; Pre-compute regions to skip (block comments + strings)
+             (skip-regions
+              (let ((regions nil))
+                ;; Block comments: #| ... |#
+                (loop for i from 0 below (1- len)
+                      do (when (and (char= (char content i) #\#)
+                                    (char= (char content (1+ i)) #\|))
+                           (let ((end (search "|#" content :start2 (+ i 2))))
+                             (push (cons i (if end (+ end 2) len)) regions)
+                             (when end (setf i (1+ end))))))
+                ;; String literals (track escaped quotes)
+                (let ((in-string nil) (str-start 0))
+                  (loop for i from 0 below len
+                        for ch = (char content i)
+                        do (cond
+                             ((and (not in-string) (char= ch #\")
+                                   ;; Ignore " inside line comments
+                                   (let ((ls (or (position #\Newline content
+                                                           :end i :from-end t)
+                                                 -1)))
+                                     (not (position #\; content
+                                                    :start (1+ ls) :end i))))
+                              (setf in-string t str-start i))
+                             ((and in-string (char= ch #\")
+                                   (not (and (> i 0)
+                                             (char= (char content (1- i))
+                                                    #\\))))
+                              (push (cons str-start (1+ i)) regions)
+                              (setf in-string nil)))))
+                (nreverse regions)))
              (best nil))
-        (flet ((%in-block-comment-p (pos)
+        (flet ((%in-skip-region-p (pos)
                  (some (lambda (r) (and (>= pos (car r)) (< pos (cdr r))))
-                       block-comments)))
+                       skip-regions)))
           (dolist (prefix '("(defun " "(defmethod " "(defmacro "
                             "(defgeneric " "(defclass " "(defstruct "
                             "(define-condition " "(defvar "
@@ -201,15 +222,15 @@ and checks both bare and package-qualified name forms."
                       while found
                       do (let ((end-pos (+ found (length pattern))))
                            ;; Check token boundary after name
-                           (when (or (>= end-pos (length lowered))
+                           (when (or (>= end-pos len)
                                      (let ((ch (char lowered end-pos)))
                                        (or (char= ch #\Space)
                                            (char= ch #\Newline)
                                            (char= ch #\Return)
                                            (char= ch #\Tab)
                                            (char= ch #\() (char= ch #\)))))
-                             ;; Skip matches inside block comments
-                             (unless (%in-block-comment-p found)
+                             ;; Skip matches inside block comments or strings
+                             (unless (%in-skip-region-p found)
                                ;; Skip matches inside line comments
                                (let* ((line-start
                                         (or (position #\Newline lowered
