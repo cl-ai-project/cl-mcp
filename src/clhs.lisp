@@ -189,61 +189,64 @@ Returns a file:// URL for local installations, or http:// URL otherwise."
 ;;; HTML Text Extraction
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *brief-max-chars* 1500
+  "Character limit for brief mode when no Description heading is found.
+Covers Syntax + Arguments for most entries and the introductory
+paragraph of section pages.")
+
 (defun %extract-text-from-html (path &key (max-chars 8000) brief)
   "Extract plain text from HTML file at PATH.
 Returns at most MAX-CHARS characters of content.
-When BRIEF is true, stop before the Description section to return
-only Syntax and Arguments (compact summary for agents)."
-  (unless (probe-file path)
-    (return-from %extract-text-from-html nil))
-  (with-open-file (s path :external-format :latin-1)
-    (let ((result (make-array 0 :element-type 'character
-                                :adjustable t :fill-pointer 0))
-          (in-script nil)
-          (in-style nil))
-      (flet ((append-text (text)
-               (when (and text (< (length result) max-chars))
-                 (loop for char across text
-                       while (< (length result) max-chars)
-                       do (vector-push-extend char result)))))
-        (loop for line = (read-line s nil)
-              while (and line (< (length result) max-chars))
-              do (let ((text line))
-                   ;; Track script/style blocks to skip
-                   (when (search "<script" text :test #'char-equal)
-                     (setf in-script t))
-                   (when (search "</script>" text :test #'char-equal)
-                     (setf in-script nil)
-                     (setf text ""))
-                   (when (search "<style" text :test #'char-equal)
-                     (setf in-style t))
-                   (when (search "</style>" text :test #'char-equal)
-                     (setf in-style nil)
-                     (setf text ""))
-                   (unless (or in-script in-style)
-                     ;; Remove HTML tags
-                     (setf text (cl-ppcre:regex-replace-all "<[^>]+>" text ""))
-                     ;; Decode common HTML entities
-                     (setf text (cl-ppcre:regex-replace-all "&lt;" text "<"))
-                     (setf text (cl-ppcre:regex-replace-all "&gt;" text ">"))
-                     (setf text (cl-ppcre:regex-replace-all "&amp;" text "&"))
-                     (setf text (cl-ppcre:regex-replace-all "&quot;" text "\""))
-                     (setf text (cl-ppcre:regex-replace-all "&nbsp;" text " "))
-                     (setf text (cl-ppcre:regex-replace-all "&#\\d+;" text ""))
-                     ;; Collapse multiple spaces
-                     (setf text (cl-ppcre:regex-replace-all "  +" text " "))
-                     (let ((trimmed (string-trim '(#\Space #\Tab) text)))
-                       ;; In brief mode, stop at Description section
-                       ;; Use prefix match — after tag stripping the header
-                       ;; and first sentence can land on the same line
-                       (when (and brief
-                                  (>= (length trimmed) 12)
-                                  (string-equal trimmed "Description:" :end1 12))
-                         (return))
-                       (when (plusp (length trimmed))
-                         (append-text trimmed)
-                         (append-text (string #\Newline))))))))
-      (coerce result 'string))))
+When BRIEF is true, stop before the Description section.  If no
+Description heading exists (e.g. section pages), cap output at
+*BRIEF-MAX-CHARS* instead."
+  (unless (probe-file path) (return-from %extract-text-from-html nil))
+  (let ((limit (if brief (min max-chars *brief-max-chars*) max-chars)))
+    (with-open-file (s path :external-format :latin-1)
+      (let ((result
+             (make-array 0 :element-type 'character :adjustable t
+                         :fill-pointer 0))
+            (in-script nil)
+            (in-style nil))
+        (flet ((append-text (text)
+                 (when (and text (< (length result) limit))
+                   (loop for char across text
+                         while (< (length result) limit)
+                         do (vector-push-extend char result)))))
+          (loop for line = (read-line s nil)
+                while (and line (< (length result) limit))
+                do (let ((text line))
+                     (when (search "<script" text :test #'char-equal)
+                       (setf in-script t))
+                     (when (search "</script>" text :test #'char-equal)
+                       (setf in-script nil)
+                       (setf text ""))
+                     (when (search "<style" text :test #'char-equal)
+                       (setf in-style t))
+                     (when (search "</style>" text :test #'char-equal)
+                       (setf in-style nil)
+                       (setf text ""))
+                     (unless (or in-script in-style)
+                       (setf text (cl-ppcre:regex-replace-all "<[^>]+>" text ""))
+                       (setf text (cl-ppcre:regex-replace-all "&lt;" text "<"))
+                       (setf text (cl-ppcre:regex-replace-all "&gt;" text ">"))
+                       (setf text (cl-ppcre:regex-replace-all "&amp;" text "&"))
+                       (setf text
+                             (cl-ppcre:regex-replace-all "&quot;" text "\""))
+                       (setf text (cl-ppcre:regex-replace-all "&nbsp;" text " "))
+                       (setf text (cl-ppcre:regex-replace-all "&#\\d+;" text ""))
+                       ;; Collapse multiple spaces
+                       (setf text (cl-ppcre:regex-replace-all "  +" text " "))
+                       (let ((trimmed (string-trim '(#\Space #\Tab) text)))
+                         ;; In brief mode, stop at Description section
+                         (when (and brief
+                                    (>= (length trimmed) 12)
+                                    (string-equal trimmed "Description:" :end1 12))
+                           (return))
+                         (when (plusp (length trimmed))
+                           (append-text trimmed)
+                           (append-text (string #\Newline))))))))
+        (coerce result 'string)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Main Lookup Function
