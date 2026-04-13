@@ -237,16 +237,14 @@ string literals.  Checks both bare and package-qualified name forms."
                                                       :end found :from-end t)
                                             -1))
                                       (before-match
-                                        (subseq lowered (1+ line-start) found))
-                                      (trimmed-before
-                                        (string-trim '(#\Space #\Tab)
-                                                     before-match)))
+                                        (subseq lowered (1+ line-start) found)))
                                  (unless (or (position #\; before-match)
-                                             ;; Skip #+nil / #-nil / #+ignore etc.
-                                             (and (>= (length trimmed-before) 2)
-                                                  (char= (char trimmed-before 0) #\#)
-                                                  (or (char= (char trimmed-before 1) #\+)
-                                                      (char= (char trimmed-before 1) #\-))))
+                                             ;; Skip #+nil — the standard disabled-form pattern.
+                                             ;; Active conditionals like #+sbcl must pass through.
+                                             ;; Check untrimmed before-match for #+nil with
+                                             ;; any trailing delimiter.
+                                             (search "#+nil " before-match)
+                                             (search "#+nil(" before-match))
                                    (when (or (null best) (< found best))
                                      (setf best found))))))))))))
         (when best

@@ -193,12 +193,12 @@ Internal frames include:
                   (or (%extract-method-name function-name "FAST-METHOD")
                       (%extract-method-name function-name "SLOW-METHOD"))))
             (if method-name
-                ;; It's a method wrapper — internal if method name
-                ;; belongs to an internal package or is unqualified
-                ;; (unqualified names like SLOT-MISSING are CLOS
-                ;; protocol methods from SB-PCL, not user code)
-                (or (not (position #\: method-name))
-                    (%prefix-internal-p method-name))
+                ;; It's a method wrapper — internal only if the inner
+                ;; method name has an internal package prefix.
+                ;; Unqualified names (PRINT-OBJECT, INITIALIZE-INSTANCE,
+                ;; SHARED-INITIALIZE, etc.) are standard CL generics
+                ;; that users commonly specialize, so treat as user code.
+                (%prefix-internal-p method-name)
                 ;; Not a method wrapper; exempt (SETF ...) with user symbols
                 (not (and (>= (length function-name) 6)
                           (string-equal function-name "(SETF " :end1 6)
