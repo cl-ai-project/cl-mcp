@@ -234,8 +234,11 @@ only Syntax and Arguments (compact summary for agents)."
                      (setf text (cl-ppcre:regex-replace-all "  +" text " "))
                      (let ((trimmed (string-trim '(#\Space #\Tab) text)))
                        ;; In brief mode, stop at Description section
+                       ;; Use prefix match — after tag stripping the header
+                       ;; and first sentence can land on the same line
                        (when (and brief
-                                  (string-equal trimmed "Description:"))
+                                  (>= (length trimmed) 12)
+                                  (string-equal trimmed "Description:" :end1 12))
                          (return))
                        (when (plusp (length trimmed))
                          (append-text trimmed)

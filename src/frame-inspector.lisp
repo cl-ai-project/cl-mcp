@@ -138,32 +138,41 @@ Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 Internal frames include:
 - Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
-- Standard CL functions like ERROR, SIGNAL, EVAL, etc."
-  (or
-   ;; Anonymous/compiler-generated frames start with (
-   ;; Exempt CLOS method wrappers and SETF functions — these represent
-   ;; user-defined methods despite starting with (
-   (and (> (length function-name) 0)
-        (char= (char function-name 0) #\()
-        (not (search "FAST-METHOD" function-name))
-        (not (search "SLOW-METHOD" function-name))
-        (not (and (>= (length function-name) 6)
-                  (string-equal function-name "(SETF " :end1 6))))
-   ;; Check for internal package prefixes with proper boundary
-   ;; Prefix must be followed by : or / (package delimiters) or be exact match
-   (some (lambda (prefix)
-           (let ((prefix-len (length prefix)))
-             (and (>= (length function-name) prefix-len)
-                  (string-equal function-name prefix :end1 prefix-len)
-                  ;; Verify boundary: next char is : or / or end of string
-                  (or (= (length function-name) prefix-len)
-                      (char= (char function-name prefix-len) #\:)
-                      (char= (char function-name prefix-len) #\/)))))
-         *internal-package-prefixes*)
-   ;; Standard error signaling and evaluation functions (unqualified)
-   (member function-name '("ERROR" "SIGNAL" "CERROR" "WARN"
-                           "INVOKE-DEBUGGER" "BREAK" "EVAL")
-           :test #'string-equal)))
+- Standard CL functions like ERROR, SIGNAL, EVAL, etc.
+- CLOS method wrappers (SB-PCL::FAST-METHOD) are exempt when the inner
+  method belongs to user code.
+- (SETF ...) frames are checked by extracting the inner symbol name and
+  applying the package-prefix filter."
+  (flet ((%prefix-internal-p (name)
+           "Check NAME against *internal-package-prefixes*."
+           (some (lambda (prefix)
+                   (let ((prefix-len (length prefix)))
+                     (and (>= (length name) prefix-len)
+                          (string-equal name prefix :end1 prefix-len)
+                          (or (= (length name) prefix-len)
+                              (char= (char name prefix-len) #\:)
+                              (char= (char name prefix-len) #\/)))))
+                 *internal-package-prefixes*)))
+    (or
+     ;; Anonymous/compiler-generated frames start with (
+     ;; Exempt CLOS method wrappers — these represent user-defined methods.
+     ;; For (SETF ...) frames, extract the inner symbol and check it against
+     ;; the package-prefix list so (SETF SB-IMPL::FOO) is still filtered.
+     (and (> (length function-name) 0)
+          (char= (char function-name 0) #\()
+          (not (search "FAST-METHOD" function-name))
+          (not (search "SLOW-METHOD" function-name))
+          (not (and (>= (length function-name) 6)
+                    (string-equal function-name "(SETF " :end1 6)
+                    (not (%prefix-internal-p
+                          (string-trim '(#\) #\Space)
+                                       (subseq function-name 6)))))))
+     ;; Check for internal package prefixes with proper boundary
+     (%prefix-internal-p function-name)
+     ;; Standard error signaling and evaluation functions (unqualified)
+     (member function-name
+             '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK" "EVAL")
+             :test #'string-equal))))
 
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length
