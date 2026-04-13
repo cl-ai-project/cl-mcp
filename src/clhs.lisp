@@ -198,55 +198,64 @@ paragraph of section pages.")
   "Extract plain text from HTML file at PATH.
 Returns at most MAX-CHARS characters of content.
 When BRIEF is true, stop before the Description section.  If no
-Description heading exists (e.g. section pages), cap output at
-*BRIEF-MAX-CHARS* instead."
+Description heading is found (e.g. section pages), the result is
+truncated to *BRIEF-MAX-CHARS* after extraction.  The char limit is
+applied post-hoc so that long Syntax sections are not cut short before
+the Description sentinel is reached."
   (unless (probe-file path) (return-from %extract-text-from-html nil))
-  (let ((limit (if brief (min max-chars *brief-max-chars*) max-chars)))
-    (with-open-file (s path :external-format :latin-1)
-      (let ((result
-             (make-array 0 :element-type 'character :adjustable t
-                         :fill-pointer 0))
-            (in-script nil)
-            (in-style nil))
-        (flet ((append-text (text)
-                 (when (and text (< (length result) limit))
-                   (loop for char across text
-                         while (< (length result) limit)
-                         do (vector-push-extend char result)))))
-          (loop for line = (read-line s nil)
-                while (and line (< (length result) limit))
-                do (let ((text line))
-                     (when (search "<script" text :test #'char-equal)
-                       (setf in-script t))
-                     (when (search "</script>" text :test #'char-equal)
-                       (setf in-script nil)
-                       (setf text ""))
-                     (when (search "<style" text :test #'char-equal)
-                       (setf in-style t))
-                     (when (search "</style>" text :test #'char-equal)
-                       (setf in-style nil)
-                       (setf text ""))
-                     (unless (or in-script in-style)
-                       (setf text (cl-ppcre:regex-replace-all "<[^>]+>" text ""))
-                       (setf text (cl-ppcre:regex-replace-all "&lt;" text "<"))
-                       (setf text (cl-ppcre:regex-replace-all "&gt;" text ">"))
-                       (setf text (cl-ppcre:regex-replace-all "&amp;" text "&"))
-                       (setf text
-                             (cl-ppcre:regex-replace-all "&quot;" text "\""))
-                       (setf text (cl-ppcre:regex-replace-all "&nbsp;" text " "))
-                       (setf text (cl-ppcre:regex-replace-all "&#\\d+;" text ""))
-                       ;; Collapse multiple spaces
-                       (setf text (cl-ppcre:regex-replace-all "  +" text " "))
-                       (let ((trimmed (string-trim '(#\Space #\Tab) text)))
-                         ;; In brief mode, stop at Description section
-                         (when (and brief
-                                    (>= (length trimmed) 12)
-                                    (string-equal trimmed "Description:" :end1 12))
-                           (return))
-                         (when (plusp (length trimmed))
-                           (append-text trimmed)
-                           (append-text (string #\Newline))))))))
-        (coerce result 'string)))))
+  (with-open-file (s path :external-format :latin-1)
+    (let ((result
+           (make-array 0 :element-type 'character :adjustable t
+                       :fill-pointer 0))
+          (in-script nil)
+          (in-style nil)
+          (hit-description nil))
+      (flet ((append-text (text)
+               (when (and text (< (length result) max-chars))
+                 (loop for char across text
+                       while (< (length result) max-chars)
+                       do (vector-push-extend char result)))))
+        (loop for line = (read-line s nil)
+              while (and line (< (length result) max-chars))
+              do (let ((text line))
+                   (when (search "<script" text :test #'char-equal)
+                     (setf in-script t))
+                   (when (search "</script>" text :test #'char-equal)
+                     (setf in-script nil)
+                     (setf text ""))
+                   (when (search "<style" text :test #'char-equal)
+                     (setf in-style t))
+                   (when (search "</style>" text :test #'char-equal)
+                     (setf in-style nil)
+                     (setf text ""))
+                   (unless (or in-script in-style)
+                     (setf text (cl-ppcre:regex-replace-all "<[^>]+>" text ""))
+                     (setf text (cl-ppcre:regex-replace-all "&lt;" text "<"))
+                     (setf text (cl-ppcre:regex-replace-all "&gt;" text ">"))
+                     (setf text (cl-ppcre:regex-replace-all "&amp;" text "&"))
+                     (setf text
+                           (cl-ppcre:regex-replace-all "&quot;" text "\""))
+                     (setf text (cl-ppcre:regex-replace-all "&nbsp;" text " "))
+                     (setf text (cl-ppcre:regex-replace-all "&#\\d+;" text ""))
+                     ;; Collapse multiple spaces
+                     (setf text (cl-ppcre:regex-replace-all "  +" text " "))
+                     (let ((trimmed (string-trim '(#\Space #\Tab) text)))
+                       ;; In brief mode, stop at Description section
+                       (when (and brief
+                                  (>= (length trimmed) 12)
+                                  (string-equal trimmed "Description:" :end1 12))
+                         (setf hit-description t)
+                         (return))
+                       (when (plusp (length trimmed))
+                         (append-text trimmed)
+                         (append-text (string #\Newline))))))))
+      ;; Post-hoc brief cap: if Description heading was never found
+      ;; (e.g. section pages), truncate to *brief-max-chars*
+      (let ((text (coerce result 'string)))
+        (if (and brief (not hit-description)
+                 (> (length text) *brief-max-chars*))
+            (subseq text 0 *brief-max-chars*)
+            text)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Main Lookup Function

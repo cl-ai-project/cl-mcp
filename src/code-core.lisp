@@ -158,30 +158,51 @@ the offset is spurious. Returns NIL when the file cannot be read."
   "Scan source file for a definition form naming SYM and return its line.
 Fallback when sb-introspect does not provide a character offset (common
 for defmethod).  Requires a token boundary after the name to avoid
-matching prefix-sharing symbols (e.g. foo vs foobar)."
+matching prefix-sharing symbols (e.g. foo vs foobar).
+Skips matches inside comments and checks both bare and package-qualified
+name forms."
   (handler-case
       (let* ((physical (translate-logical-pathname pathname))
              (content (read-file-string physical))
              (lowered (string-downcase content))
-             (name (string-downcase (symbol-name sym)))
+             (bare-name (string-downcase (symbol-name sym)))
+             ;; Build list of name variants: bare + package-qualified
+             (names
+              (let ((pkg (symbol-package sym))
+                    (acc (list bare-name)))
+                (when pkg
+                  (let ((pkg-name (string-downcase (package-name pkg))))
+                    (push (concatenate 'string pkg-name ":" bare-name) acc)
+                    (push (concatenate 'string pkg-name "::" bare-name) acc)))
+                acc))
              (best nil))
         (dolist (prefix '("(defun " "(defmethod " "(defmacro " "(defgeneric "
                           "(defclass " "(defstruct " "(define-condition "
                           "(defvar " "(defparameter " "(defconstant "
                           "(deftype "))
-          (let ((pattern (concatenate 'string prefix name)))
-            ;; Loop through all occurrences of pattern in file
-            (loop for start = 0 then (1+ found)
-                  for found = (search pattern lowered :start2 start)
-                  while found
-                  do (let ((end-pos (+ found (length pattern))))
-                       (when (and (or (>= end-pos (length lowered))
-                                      (let ((ch (char lowered end-pos)))
-                                        (or (char= ch #\Space) (char= ch #\Newline)
-                                            (char= ch #\Return) (char= ch #\Tab)
-                                            (char= ch #\() (char= ch #\)))))
-                                  (or (null best) (< found best)))
-                         (setf best found))))))
+          (dolist (name names)
+            (let ((pattern (concatenate 'string prefix name)))
+              ;; Loop through all occurrences of pattern in file
+              (loop for start = 0 then (1+ found)
+                    for found = (search pattern lowered :start2 start)
+                    while found
+                    do (let ((end-pos (+ found (length pattern))))
+                         ;; Check token boundary after name
+                         (when (or (>= end-pos (length lowered))
+                                   (let ((ch (char lowered end-pos)))
+                                     (or (char= ch #\Space) (char= ch #\Newline)
+                                         (char= ch #\Return) (char= ch #\Tab)
+                                         (char= ch #\() (char= ch #\)))))
+                           ;; Skip matches inside line comments
+                           (let* ((line-start
+                                    (or (position #\Newline lowered
+                                                  :end found :from-end t)
+                                        -1))
+                                  (before-match
+                                    (subseq lowered (1+ line-start) found)))
+                             (unless (position #\; before-match)
+                               (when (or (null best) (< found best))
+                                 (setf best found))))))))))
         (when best
           (1+ (count #\Newline content :end best))))
     (error () nil)))
