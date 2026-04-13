@@ -154,6 +154,27 @@ the offset is spurious. Returns NIL when the file cannot be read."
                    "error" (princ-to-string e))
         nil))))
 
+(defun %scan-for-definition-line (pathname sym)
+  "Scan source file for a definition form naming SYM and return its line.
+Fallback when sb-introspect does not provide a character offset (common
+for defmethod)."
+  (handler-case
+      (let* ((physical (translate-logical-pathname pathname))
+             (content (read-file-string physical))
+             (lowered (string-downcase content))
+             (name (string-downcase (symbol-name sym)))
+             (best nil))
+        (dolist (prefix '("(defun " "(defmethod " "(defmacro " "(defgeneric "
+                          "(defclass " "(defstruct " "(define-condition "
+                          "(defvar " "(defparameter " "(defconstant "
+                          "(deftype "))
+          (let ((found (search (concatenate 'string prefix name) lowered)))
+            (when (and found (or (null best) (< found best)))
+              (setf best found))))
+        (when best
+          (1+ (count #\Newline content :end best))))
+    (error () nil)))
+
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) &optional))
                 code-find-definition))
@@ -196,7 +217,8 @@ all locatable, not only ordinary functions."
       (when (and source path-fn)
         (let* ((pathname (funcall path-fn source))
                (char-offset (and offset (funcall offset source)))
-               (line (%offset->line pathname char-offset))
+               (line (or (%offset->line pathname char-offset)
+                       (%scan-for-definition-line pathname sym)))
                (path (normalize-path-for-display pathname)))
           (return-from code-find-definition (values path line))))
       (log-event :warn "code.find.not-found" "symbol" symbol-name)

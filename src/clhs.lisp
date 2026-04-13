@@ -118,7 +118,7 @@ Chapter numbers are zero-padded to 2 digits (e.g., 7 -> 07)."
        (every (lambda (c) (or (digit-char-p c) (char= c #\.))) string)
        (digit-char-p (char string 0))))
 
-(defun clhs-lookup-section (section-string &key (include-content t))
+(defun clhs-lookup-section (section-string &key (include-content t) brief)
   "Look up a section number (e.g., '22.3') in the Common Lisp HyperSpec.
 Returns a hash table with:
   - section: The section number
@@ -143,7 +143,7 @@ Returns a hash table with:
                            "url" url
                            "source" (if is-local "local" "remote"))))
       (when (and include-content is-local)
-        (let ((content (%extract-text-from-html local-path)))
+        (let ((content (%extract-text-from-html local-path :brief brief)))
           (when content
             (setf (gethash "content" result)
                   (text-content content)))))
@@ -189,9 +189,11 @@ Returns a file:// URL for local installations, or http:// URL otherwise."
 ;;; HTML Text Extraction
 ;;; ---------------------------------------------------------------------------
 
-(defun %extract-text-from-html (path &key (max-chars 8000))
+(defun %extract-text-from-html (path &key (max-chars 8000) brief)
   "Extract plain text from HTML file at PATH.
-Returns at most MAX-CHARS characters of content."
+Returns at most MAX-CHARS characters of content.
+When BRIEF is true, stop before the Description section to return
+only Syntax and Arguments (compact summary for agents)."
   (unless (probe-file path)
     (return-from %extract-text-from-html nil))
   (with-open-file (s path :external-format :latin-1)
@@ -231,6 +233,10 @@ Returns at most MAX-CHARS characters of content."
                      ;; Collapse multiple spaces
                      (setf text (cl-ppcre:regex-replace-all "  +" text " "))
                      (let ((trimmed (string-trim '(#\Space #\Tab) text)))
+                       ;; In brief mode, stop at Description section
+                       (when (and brief
+                                  (string-equal trimmed "Description:"))
+                         (return))
                        (when (plusp (length trimmed))
                          (append-text trimmed)
                          (append-text (string #\Newline))))))))
@@ -240,7 +246,7 @@ Returns at most MAX-CHARS characters of content."
 ;;; Main Lookup Function
 ;;; ---------------------------------------------------------------------------
 
-(defun clhs-lookup (query &key (include-content t))
+(defun clhs-lookup (query &key (include-content t) brief)
   "Look up QUERY in the Common Lisp HyperSpec.
 QUERY can be either:
   - A symbol name (e.g., 'loop', 'format', 'handler-case')
@@ -252,7 +258,7 @@ Returns a hash table with:
   - source: 'local' or 'remote'
   - content: Extracted text content (when INCLUDE-CONTENT is true and local)"
   (if (%section-number-p query)
-      (clhs-lookup-section query :include-content include-content)
+      (clhs-lookup-section query :include-content include-content :brief brief)
       ;; Symbol lookup
       (let* ((normalized (string-upcase (string-trim " " query)))
              (url (%symbol-url query))
@@ -266,7 +272,7 @@ Returns a hash table with:
                                "url" url
                                "source" (if is-local "local" "remote"))))
           (when (and include-content is-local)
-            (let ((content (%extract-text-from-html local-path)))
+            (let ((content (%extract-text-from-html local-path :brief brief)))
               (when content
                 (setf (gethash "content" result)
                       (text-content content)))))
@@ -296,7 +302,12 @@ Examples:
   :args ((query :type :string :required t
                 :description "Symbol name or section number to look up")
          (include_content :type :boolean :required nil
-                          :description "Include extracted text content (default: true)"))
+                          :description "Include extracted text content (default: true)")
+         (brief :type :boolean :required nil
+                :description "When true, return only Syntax and Arguments sections (compact).
+Omits Description, Examples, Notes for token efficiency."))
   :body
-  (let ((include-content (if (boundp 'include_content) include_content t)))
-    (result id (clhs-lookup query :include-content include-content))))
+  (let ((include-content (if (boundp 'include_content) include_content t))
+        (brief-mode (and (boundp 'brief) brief)))
+    (result id (clhs-lookup query :include-content include-content
+                                  :brief brief-mode))))

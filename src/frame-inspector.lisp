@@ -141,8 +141,14 @@ Internal frames include:
 - Standard CL functions like ERROR, SIGNAL, EVAL, etc."
   (or
    ;; Anonymous/compiler-generated frames start with (
+   ;; Exempt CLOS method wrappers and SETF functions — these represent
+   ;; user-defined methods despite starting with (
    (and (> (length function-name) 0)
-        (char= (char function-name 0) #\())
+        (char= (char function-name 0) #\()
+        (not (search "FAST-METHOD" function-name))
+        (not (search "SLOW-METHOD" function-name))
+        (not (and (>= (length function-name) 6)
+                  (string-equal function-name "(SETF " :end1 6))))
    ;; Check for internal package prefixes with proper boundary
    ;; Prefix must be followed by : or / (package delimiters) or be exact match
    (some (lambda (prefix)
