@@ -237,8 +237,16 @@ string literals.  Checks both bare and package-qualified name forms."
                                                       :end found :from-end t)
                                             -1))
                                       (before-match
-                                        (subseq lowered (1+ line-start) found)))
-                                 (unless (position #\; before-match)
+                                        (subseq lowered (1+ line-start) found))
+                                      (trimmed-before
+                                        (string-trim '(#\Space #\Tab)
+                                                     before-match)))
+                                 (unless (or (position #\; before-match)
+                                             ;; Skip #+nil / #-nil / #+ignore etc.
+                                             (and (>= (length trimmed-before) 2)
+                                                  (char= (char trimmed-before 0) #\#)
+                                                  (or (char= (char trimmed-before 1) #\+)
+                                                      (char= (char trimmed-before 1) #\-))))
                                    (when (or (null best) (< found best))
                                      (setf best found))))))))))))
         (when best

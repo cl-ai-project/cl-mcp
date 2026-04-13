@@ -165,11 +165,25 @@ Internal frames include:
                               (lambda (c) (char= c #\Space))
                               fn-name :start after)))
                  (when start
-                   (let ((end (or (position #\Space fn-name :start start)
-                                  (position #\( fn-name :start start)
-                                  (position #\) fn-name :start start)
-                                  (length fn-name))))
-                     (subseq fn-name start end))))))))
+                   (if (char= (char fn-name start) #\()
+                       ;; (SETF name) form — extract inner symbol
+                       (let* ((setf-pos (search "SETF " fn-name
+                                                :start2 start))
+                              (ns (when setf-pos
+                                    (position-if-not
+                                     (lambda (c) (char= c #\Space))
+                                     fn-name :start (+ setf-pos 5))))
+                              (ne (when ns
+                                    (or (position #\) fn-name :start ns)
+                                        (length fn-name)))))
+                         (when (and ns (> ne ns))
+                           (subseq fn-name ns ne)))
+                       ;; Plain name — delimited by space or paren
+                       (let ((end (or (position #\Space fn-name :start start)
+                                      (position #\( fn-name :start start)
+                                      (position #\) fn-name :start start)
+                                      (length fn-name))))
+                         (subseq fn-name start end)))))))))
     (or
      ;; Anonymous/compiler-generated frames start with (
      (and (> (length function-name) 0)
