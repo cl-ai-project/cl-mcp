@@ -98,7 +98,8 @@ offset when introspection is not possible."
                                                (source (funcall find-def-src fun))
                                                (char-offset-accessor (fdefinition (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
                                                (char-offset (funcall char-offset-accessor source)))
-                                          (when char-offset
+                                          (when (and char-offset
+                                                         (ignore-errors (probe-file namestring)))
                                             (%offset->line namestring char-offset))))))))))
                     (if line
                         (list :file namestring :line line)
