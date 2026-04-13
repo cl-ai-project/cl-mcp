@@ -49,7 +49,13 @@ The 'locals_preview_skip_internal' parameter (default: true) skips internal fram
 (CL-MCP, SBCL internals, ASDF, etc.) when counting frames for preview eligibility.
 This ensures user code frames get previews even when buried under infrastructure.
 NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
-SBCL's default optimization does not preserve locals for inspection."
+SBCL's default optimization does not preserve locals for inspection.
+
+NOTE: When evaluating multiple forms, all forms are read in the specified
+package before any evaluation begins. An (in-package ...) form only changes
+*package* at eval-time, not at read-time, so subsequent forms may still be
+read in the original package. Use separate repl-eval calls or specify the
+'package' parameter instead."
  :args
  ((code :type :string :required t :description
    "Code string of one or more forms evaluated sequentially")

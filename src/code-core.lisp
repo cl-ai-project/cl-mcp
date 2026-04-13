@@ -13,7 +13,9 @@
                 #:ensure-directory-pathname #:absolute-pathname-p)
   (:export #:code-find-definition
            #:code-describe-symbol
-           #:code-find-references))
+           #:code-find-references
+           #:%offset->line
+           #:%ensure-sb-introspect))
 
 (in-package #:cl-mcp/src/code-core)
 

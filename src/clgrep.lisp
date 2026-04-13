@@ -157,8 +157,8 @@ Recommended workflow:
     (result id
             (make-ht "content" (text-content
                        (with-output-to-string (s)
-                         (format s "~D match~:P for ~S~@[ in ~A~]:~%"
-                                 (length formatted) pattern path)
+                         (format s "~D ~:[matches~;match~] for ~S~@[ in ~A~]:~%"
+                                 (length formatted) (= 1 (length formatted)) pattern path)
                          (loop for match across formatted
                                do (format s "  ~A:~A [~A] ~A~%"
                                           (gethash "file" match)
