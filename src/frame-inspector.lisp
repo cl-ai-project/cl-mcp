@@ -141,8 +141,8 @@ Internal frames include:
 - Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
 - Standard CL functions like ERROR, SIGNAL, EVAL, etc.
-- CLOS method wrappers (SB-PCL::FAST-METHOD) are exempt when the inner
-  method belongs to user code.
+- CLOS method wrappers (SB-PCL::FAST-METHOD <name> ...) are exempt only
+  when the inner method name belongs to user code.
 - (SETF ...) frames are checked by extracting the inner symbol name and
   applying the package-prefix filter."
   (flet ((%prefix-internal-p (name)
@@ -154,26 +154,45 @@ Internal frames include:
                           (or (= (length name) prefix-len)
                               (char= (char name prefix-len) #\:)
                               (char= (char name prefix-len) #\/)))))
-                 *internal-package-prefixes*)))
+                 *internal-package-prefixes*))
+         (%extract-method-name (fn-name keyword)
+           "Extract method name from (SB-PCL::FAST-METHOD name ...) form."
+           (let ((pos (search keyword fn-name)))
+             (when pos
+               (let* ((after (+ pos (length keyword)))
+                      (start (position-if-not
+                              (lambda (c) (char= c #\Space))
+                              fn-name :start after)))
+                 (when start
+                   (let ((end (or (position #\Space fn-name :start start)
+                                  (position #\( fn-name :start start)
+                                  (position #\) fn-name :start start)
+                                  (length fn-name))))
+                     (subseq fn-name start end))))))))
     (or
      ;; Anonymous/compiler-generated frames start with (
-     ;; Exempt CLOS method wrappers — these represent user-defined methods.
-     ;; For (SETF ...) frames, extract the inner symbol and check it against
-     ;; the package-prefix list so (SETF SB-IMPL::FOO) is still filtered.
      (and (> (length function-name) 0)
           (char= (char function-name 0) #\()
-          (not (search "FAST-METHOD" function-name))
-          (not (search "SLOW-METHOD" function-name))
-          (not (and (>= (length function-name) 6)
-                    (string-equal function-name "(SETF " :end1 6)
-                    (not (%prefix-internal-p
-                          (string-trim '(#\) #\Space)
-                                       (subseq function-name 6)))))))
+          ;; Exempt CLOS method wrappers only if inner method is user code
+          (let ((method-name
+                  (or (%extract-method-name function-name "FAST-METHOD")
+                      (%extract-method-name function-name "SLOW-METHOD"))))
+            (if method-name
+                ;; It's a method wrapper — internal only if method name
+                ;; belongs to an internal package
+                (%prefix-internal-p method-name)
+                ;; Not a method wrapper; exempt (SETF ...) with user symbols
+                (not (and (>= (length function-name) 6)
+                          (string-equal function-name "(SETF " :end1 6)
+                          (not (%prefix-internal-p
+                                (string-trim '(#\) #\Space)
+                                             (subseq function-name 6)))))))))
      ;; Check for internal package prefixes with proper boundary
      (%prefix-internal-p function-name)
      ;; Standard error signaling and evaluation functions (unqualified)
      (member function-name
-             '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK" "EVAL")
+             '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK"
+               "EVAL")
              :test #'string-equal))))
 
 #+sbcl

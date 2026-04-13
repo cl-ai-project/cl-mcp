@@ -316,13 +316,11 @@ Examples:
   query='22.3.1' - Basic Output subsection (~C, ~%, etc.)"
   :args ((query :type :string :required t
                 :description "Symbol name or section number to look up")
-         (include_content :type :boolean :required nil
+         (include_content :type :boolean :required nil :default t
                           :description "Include extracted text content (default: true)")
          (brief :type :boolean :required nil
                 :description "When true, return only Syntax and Arguments sections (compact).
 Omits Description, Examples, Notes for token efficiency."))
   :body
-  (let ((include-content (if (boundp 'include_content) include_content t))
-        (brief-mode (and (boundp 'brief) brief)))
-    (result id (clhs-lookup query :include-content include-content
-                                  :brief brief-mode))))
+  (result id (clhs-lookup query :include-content include_content
+                                :brief brief)))

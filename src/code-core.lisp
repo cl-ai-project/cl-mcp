@@ -159,8 +159,8 @@ the offset is spurious. Returns NIL when the file cannot be read."
 Fallback when sb-introspect does not provide a character offset (common
 for defmethod).  Requires a token boundary after the name to avoid
 matching prefix-sharing symbols (e.g. foo vs foobar).
-Skips matches inside comments and checks both bare and package-qualified
-name forms."
+Skips matches inside line comments and block comments (#| ... |#),
+and checks both bare and package-qualified name forms."
   (handler-case
       (let* ((physical (translate-logical-pathname pathname))
              (content (read-file-string physical))
@@ -175,34 +175,51 @@ name forms."
                     (push (concatenate 'string pkg-name ":" bare-name) acc)
                     (push (concatenate 'string pkg-name "::" bare-name) acc)))
                 acc))
+             ;; Pre-compute block comment regions
+             (block-comments
+              (loop for start = (search "#|" lowered :start2 0)
+                      then (search "#|" lowered :start2 (cdr region))
+                    for region = (when start
+                                   (let ((end (search "|#" lowered
+                                                      :start2 (+ start 2))))
+                                     (cons start (if end (+ end 2)
+                                                     (length lowered)))))
+                    while region collect region))
              (best nil))
-        (dolist (prefix '("(defun " "(defmethod " "(defmacro " "(defgeneric "
-                          "(defclass " "(defstruct " "(define-condition "
-                          "(defvar " "(defparameter " "(defconstant "
-                          "(deftype "))
-          (dolist (name names)
-            (let ((pattern (concatenate 'string prefix name)))
-              ;; Loop through all occurrences of pattern in file
-              (loop for start = 0 then (1+ found)
-                    for found = (search pattern lowered :start2 start)
-                    while found
-                    do (let ((end-pos (+ found (length pattern))))
-                         ;; Check token boundary after name
-                         (when (or (>= end-pos (length lowered))
-                                   (let ((ch (char lowered end-pos)))
-                                     (or (char= ch #\Space) (char= ch #\Newline)
-                                         (char= ch #\Return) (char= ch #\Tab)
-                                         (char= ch #\() (char= ch #\)))))
-                           ;; Skip matches inside line comments
-                           (let* ((line-start
-                                    (or (position #\Newline lowered
-                                                  :end found :from-end t)
-                                        -1))
-                                  (before-match
-                                    (subseq lowered (1+ line-start) found)))
-                             (unless (position #\; before-match)
-                               (when (or (null best) (< found best))
-                                 (setf best found))))))))))
+        (flet ((%in-block-comment-p (pos)
+                 (some (lambda (r) (and (>= pos (car r)) (< pos (cdr r))))
+                       block-comments)))
+          (dolist (prefix '("(defun " "(defmethod " "(defmacro "
+                            "(defgeneric " "(defclass " "(defstruct "
+                            "(define-condition " "(defvar "
+                            "(defparameter " "(defconstant " "(deftype "))
+            (dolist (name names)
+              (let ((pattern (concatenate 'string prefix name)))
+                ;; Loop through all occurrences of pattern in file
+                (loop for start = 0 then (1+ found)
+                      for found = (search pattern lowered :start2 start)
+                      while found
+                      do (let ((end-pos (+ found (length pattern))))
+                           ;; Check token boundary after name
+                           (when (or (>= end-pos (length lowered))
+                                     (let ((ch (char lowered end-pos)))
+                                       (or (char= ch #\Space)
+                                           (char= ch #\Newline)
+                                           (char= ch #\Return)
+                                           (char= ch #\Tab)
+                                           (char= ch #\() (char= ch #\)))))
+                             ;; Skip matches inside block comments
+                             (unless (%in-block-comment-p found)
+                               ;; Skip matches inside line comments
+                               (let* ((line-start
+                                        (or (position #\Newline lowered
+                                                      :end found :from-end t)
+                                            -1))
+                                      (before-match
+                                        (subseq lowered (1+ line-start) found)))
+                                 (unless (position #\; before-match)
+                                   (when (or (null best) (< found best))
+                                     (setf best found))))))))))))
         (when best
           (1+ (count #\Newline content :end best))))
     (error () nil)))
