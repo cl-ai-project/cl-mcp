@@ -198,9 +198,22 @@ Internal frames include:
                          (subseq fn-name start end))))))))
          (%default-method-wrapper-p (fn-name method-name)
            "True when a FAST/SLOW-METHOD frame is an SBCL default method.
-Checks that the generic function name is unqualified and all specializer
-types are standard CL/MOP types (T, STANDARD-OBJECT, etc.)."
+Checks that the generic function name is (1) unqualified, (2) a symbol
+exported from COMMON-LISP or SB-MOP, and (3) all specializer types are
+standard CL/MOP types.  This prevents user generics like MY-GF (T) from
+being misclassified as internal."
            (and (not (find #\: method-name))
+                ;; Verify the generic name is a CL or MOP standard symbol
+                (or (multiple-value-bind (sym status)
+                        (find-symbol method-name :common-lisp)
+                      (declare (ignore sym))
+                      (eq status :external))
+                    (let ((mop (find-package :sb-mop)))
+                      (when mop
+                        (multiple-value-bind (sym status)
+                            (find-symbol method-name mop)
+                          (declare (ignore sym))
+                          (eq status :external)))))
                 (let* ((name-pos (search method-name fn-name
                                         :test #'char-equal))
                        (search-start (when name-pos

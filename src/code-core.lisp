@@ -168,13 +168,31 @@ string literals, and inactive reader-conditional forms."
              (len (length lowered))
              (bare-name (string-downcase (symbol-name sym)))
              ;; Build list of name variants: bare + package-qualified
+             ;; Includes home package (with : and ::) plus any packages
+             ;; that re-export the symbol (with : only), so definitions
+             ;; written as e.g. asdf:perform are found even when the
+             ;; symbol's home package is asdf/action.
              (names
               (let ((pkg (symbol-package sym))
+                    (sym-name (symbol-name sym))
                     (acc (list bare-name)))
                 (when pkg
-                  (let ((pkg-name (string-downcase (package-name pkg))))
-                    (push (concatenate 'string pkg-name ":" bare-name) acc)
-                    (push (concatenate 'string pkg-name "::" bare-name) acc)))
+                  (dolist (pn (cons (package-name pkg)
+                                    (package-nicknames pkg)))
+                    (let ((lpn (string-downcase pn)))
+                      (push (concatenate 'string lpn ":" bare-name) acc)
+                      (push (concatenate 'string lpn "::" bare-name) acc))))
+                ;; Re-exporting packages: only external (single-colon) access
+                (dolist (p (list-all-packages))
+                  (unless (eq p pkg)
+                    (multiple-value-bind (s status)
+                        (find-symbol sym-name p)
+                      (when (and (eq s sym) (eq status :external))
+                        (dolist (pn (cons (package-name p)
+                                          (package-nicknames p)))
+                          (let ((lpn (string-downcase pn)))
+                            (push (concatenate 'string lpn ":" bare-name)
+                                  acc)))))))
                 acc))
              ;; Pre-compute regions to skip (nested block comments + strings)
              (skip-regions
