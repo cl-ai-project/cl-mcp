@@ -273,10 +273,30 @@ string literals, and inactive reader-conditional forms."
                                                       :end found :from-end t)
                                             -1))
                                       (before-match
-                                        (subseq lowered (1+ line-start) found)))
+                                        (subseq lowered (1+ line-start) found))
+                                      ;; When before-match is only whitespace, the
+                                      ;; #+/#- guard may be on the previous line
+                                      (prev-line
+                                        (when (and (> line-start 0)
+                                                   (every (lambda (c)
+                                                            (or (char= c #\Space)
+                                                                (char= c #\Tab)))
+                                                          before-match))
+                                          (let ((prev-start
+                                                  (or (position #\Newline lowered
+                                                                :end line-start
+                                                                :from-end t)
+                                                      -1)))
+                                            (string-trim
+                                             '(#\Space #\Tab #\Newline)
+                                             (subseq lowered (1+ prev-start)
+                                                     line-start))))))
                                  (unless (or (position #\; before-match)
                                              (%inactive-reader-conditional-p
-                                              before-match))
+                                              before-match)
+                                             (and prev-line
+                                                  (%inactive-reader-conditional-p
+                                                   prev-line)))
                                    (when (or (null best) (< found best))
                                      (setf best found))))))))))))
         (when best
