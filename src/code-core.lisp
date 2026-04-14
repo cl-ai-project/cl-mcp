@@ -218,34 +218,39 @@ string literals, and inactive reader-conditional forms."
                               (setf in-string nil)))))
                 (nreverse regions)))
              (best nil))
-        (flet ((%in-skip-region-p (pos)
+        (labels ((%in-skip-region-p (pos)
                  (some (lambda (r) (and (>= pos (car r)) (< pos (cdr r))))
                        skip-regions))
-               (%inactive-reader-conditional-p (before-match)
-                 "Check if BEFORE-MATCH contains an inactive #+/- conditional."
-                 (let ((sharp-pos (search "#" before-match)))
+               (%eval-feature-expr (expr)
+                 "Evaluate a feature expression against *features*."
+                 (cond
+                   ((keywordp expr) (if (member expr *features*) t nil))
+                   ((and (consp expr) (eq (car expr) :and))
+                    (every #'%eval-feature-expr (cdr expr)))
+                   ((and (consp expr) (eq (car expr) :or))
+                    (some #'%eval-feature-expr (cdr expr)))
+                   ((and (consp expr) (eq (car expr) :not) (cdr expr))
+                    (not (%eval-feature-expr (cadr expr))))
+                   (t nil)))
+               (%inactive-reader-conditional-p (text)
+                 "Check if TEXT contains an inactive #+/- conditional.
+Handles both simple keywords and compound expressions."
+                 (let ((sharp-pos (search "#" text)))
                    (when (and sharp-pos
-                              (< (1+ sharp-pos) (length before-match))
-                              (let ((ch (char before-match (1+ sharp-pos))))
+                              (< (1+ sharp-pos) (length text))
+                              (let ((ch (char text (1+ sharp-pos))))
                                 (or (char= ch #\+) (char= ch #\-))))
-                     ;; Extract feature token after #+ or #-
-                     (let* ((negate (char= (char before-match (1+ sharp-pos)) #\-))
+                     (let* ((negate (char= (char text (1+ sharp-pos)) #\-))
                             (feat-start (+ sharp-pos 2))
-                            (feat-end (or (position #\Space before-match
-                                                    :start feat-start)
-                                          (position #\( before-match
-                                                    :start feat-start)
-                                          (length before-match)))
-                            (feat (string-upcase
-                                   (subseq before-match feat-start feat-end))))
-                       ;; Simple keyword feature: check against *features*
-                       ;; Compound expressions (starting with "(") pass through
-                       ;; as assumed-active
-                       (when (and (plusp (length feat))
-                                  (not (char= (char feat 0) #\()))
-                         (let* ((feat-kw (intern feat :keyword))
-                                (present (member feat-kw *features*)))
-                           (if negate present (not present)))))))))
+                            (feat-text (string-upcase
+                                        (subseq text feat-start)))
+                            (expr (ignore-errors
+                                    (let ((*package* (find-package :keyword))
+                                          (*read-eval* nil))
+                                      (read-from-string feat-text)))))
+                       (when expr
+                         (let ((active (%eval-feature-expr expr)))
+                           (if negate active (not active)))))))))
           (dolist (prefix '("(defun " "(defmethod " "(defmacro "
                             "(defgeneric " "(defclass " "(defstruct "
                             "(define-condition " "(defvar "
@@ -275,28 +280,47 @@ string literals, and inactive reader-conditional forms."
                                       (before-match
                                         (subseq lowered (1+ line-start) found))
                                       ;; When before-match is only whitespace, the
-                                      ;; #+/#- guard may be on the previous line
-                                      (prev-line
+                                      ;; #+/#- guard may be on a preceding line
+                                      ;; (possibly separated by blank/comment lines).
+                                      ;; Scan backwards to find the nearest content line.
+                                      (guard-line
                                         (when (and (> line-start 0)
                                                    (every (lambda (c)
                                                             (or (char= c #\Space)
                                                                 (char= c #\Tab)))
                                                           before-match))
-                                          (let ((prev-start
-                                                  (or (position #\Newline lowered
-                                                                :end line-start
-                                                                :from-end t)
-                                                      -1)))
-                                            (string-trim
-                                             '(#\Space #\Tab #\Newline)
-                                             (subseq lowered (1+ prev-start)
-                                                     line-start))))))
+                                          (loop with scan-end = line-start
+                                                for prev-end = scan-end
+                                                for prev-start = (or (position #\Newline lowered
+                                                                               :end prev-end
+                                                                               :from-end t)
+                                                                     -1)
+                                                for prev-text = (string-trim
+                                                                 '(#\Space #\Tab #\Newline)
+                                                                 (subseq lowered (1+ prev-start)
+                                                                         prev-end))
+                                                ;; Skip blank lines and comment-only lines
+                                                do (cond
+                                                     ((zerop (length prev-text))
+                                                      (if (> prev-start 0)
+                                                          (setf scan-end prev-start)
+                                                          (return nil)))
+                                                     ((char= (char prev-text 0) #\;)
+                                                      (if (> prev-start 0)
+                                                          (setf scan-end prev-start)
+                                                          (return nil)))
+                                                     ;; Content line — only relevant as guard if it
+                                                     ;; is JUST a conditional (no form on same line)
+                                                     (t (return
+                                                          (if (search "(def" prev-text)
+                                                              nil ; has its own form, not a guard for us
+                                                              prev-text))))))))
                                  (unless (or (position #\; before-match)
                                              (%inactive-reader-conditional-p
                                               before-match)
-                                             (and prev-line
+                                             (and guard-line
                                                   (%inactive-reader-conditional-p
-                                                   prev-line)))
+                                                   guard-line)))
                                    (when (or (null best) (< found best))
                                      (setf best found))))))))))))
         (when best
