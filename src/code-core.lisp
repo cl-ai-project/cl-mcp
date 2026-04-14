@@ -159,8 +159,8 @@ the offset is spurious. Returns NIL when the file cannot be read."
 Fallback when sb-introspect does not provide a character offset (common
 for defmethod).  Requires a token boundary after the name to avoid
 matching prefix-sharing symbols (e.g. foo vs foobar).
-Skips matches inside line comments, block comments (#| ... |#), and
-string literals.  Checks both bare and package-qualified name forms."
+Skips matches inside line comments, nested block comments (#| ... |#),
+string literals, and inactive reader-conditional forms."
   (handler-case
       (let* ((physical (translate-logical-pathname pathname))
              (content (read-file-string physical))
@@ -176,23 +176,34 @@ string literals.  Checks both bare and package-qualified name forms."
                     (push (concatenate 'string pkg-name ":" bare-name) acc)
                     (push (concatenate 'string pkg-name "::" bare-name) acc)))
                 acc))
-             ;; Pre-compute regions to skip (block comments + strings)
+             ;; Pre-compute regions to skip (nested block comments + strings)
              (skip-regions
               (let ((regions nil))
-                ;; Block comments: #| ... |#
-                (loop for i from 0 below (1- len)
-                      do (when (and (char= (char content i) #\#)
-                                    (char= (char content (1+ i)) #\|))
-                           (let ((end (search "|#" content :start2 (+ i 2))))
-                             (push (cons i (if end (+ end 2) len)) regions)
-                             (when end (setf i (1+ end))))))
+                ;; Nested block comments: #| ... #| ... |# ... |#
+                (loop with i = 0
+                      while (< i (1- len))
+                      do (if (and (char= (char content i) #\#)
+                                  (char= (char content (1+ i)) #\|))
+                             (let ((depth 1)
+                                   (j (+ i 2)))
+                               (loop while (and (< j (1- len)) (plusp depth))
+                                     do (cond
+                                          ((and (char= (char content j) #\#)
+                                                (char= (char content (1+ j)) #\|))
+                                           (incf depth) (incf j 2))
+                                          ((and (char= (char content j) #\|)
+                                                (char= (char content (1+ j)) #\#))
+                                           (decf depth) (incf j 2))
+                                          (t (incf j))))
+                               (push (cons i (min j len)) regions)
+                               (setf i j))
+                             (incf i)))
                 ;; String literals (track escaped quotes)
                 (let ((in-string nil) (str-start 0))
                   (loop for i from 0 below len
                         for ch = (char content i)
                         do (cond
                              ((and (not in-string) (char= ch #\")
-                                   ;; Ignore " inside line comments
                                    (let ((ls (or (position #\Newline content
                                                            :end i :from-end t)
                                                  -1)))
@@ -209,7 +220,32 @@ string literals.  Checks both bare and package-qualified name forms."
              (best nil))
         (flet ((%in-skip-region-p (pos)
                  (some (lambda (r) (and (>= pos (car r)) (< pos (cdr r))))
-                       skip-regions)))
+                       skip-regions))
+               (%inactive-reader-conditional-p (before-match)
+                 "Check if BEFORE-MATCH contains an inactive #+/- conditional."
+                 (let ((sharp-pos (search "#" before-match)))
+                   (when (and sharp-pos
+                              (< (1+ sharp-pos) (length before-match))
+                              (let ((ch (char before-match (1+ sharp-pos))))
+                                (or (char= ch #\+) (char= ch #\-))))
+                     ;; Extract feature token after #+ or #-
+                     (let* ((negate (char= (char before-match (1+ sharp-pos)) #\-))
+                            (feat-start (+ sharp-pos 2))
+                            (feat-end (or (position #\Space before-match
+                                                    :start feat-start)
+                                          (position #\( before-match
+                                                    :start feat-start)
+                                          (length before-match)))
+                            (feat (string-upcase
+                                   (subseq before-match feat-start feat-end))))
+                       ;; Simple keyword feature: check against *features*
+                       ;; Compound expressions (starting with "(") pass through
+                       ;; as assumed-active
+                       (when (and (plusp (length feat))
+                                  (not (char= (char feat 0) #\()))
+                         (let* ((feat-kw (intern feat :keyword))
+                                (present (member feat-kw *features*)))
+                           (if negate present (not present)))))))))
           (dolist (prefix '("(defun " "(defmethod " "(defmacro "
                             "(defgeneric " "(defclass " "(defstruct "
                             "(define-condition " "(defvar "
@@ -231,7 +267,7 @@ string literals.  Checks both bare and package-qualified name forms."
                                            (char= ch #\() (char= ch #\)))))
                              ;; Skip matches inside block comments or strings
                              (unless (%in-skip-region-p found)
-                               ;; Skip matches inside line comments
+                               ;; Skip matches inside line comments or inactive conditionals
                                (let* ((line-start
                                         (or (position #\Newline lowered
                                                       :end found :from-end t)
@@ -239,12 +275,8 @@ string literals.  Checks both bare and package-qualified name forms."
                                       (before-match
                                         (subseq lowered (1+ line-start) found)))
                                  (unless (or (position #\; before-match)
-                                             ;; Skip #+nil — the standard disabled-form pattern.
-                                             ;; Active conditionals like #+sbcl must pass through.
-                                             ;; Check untrimmed before-match for #+nil with
-                                             ;; any trailing delimiter.
-                                             (search "#+nil " before-match)
-                                             (search "#+nil(" before-match))
+                                             (%inactive-reader-conditional-p
+                                              before-match))
                                    (when (or (null best) (< found best))
                                      (setf best found))))))))))))
         (when best
