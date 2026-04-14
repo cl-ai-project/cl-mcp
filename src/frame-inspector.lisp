@@ -136,135 +136,71 @@ point)."
   "Package prefixes that indicate internal/infrastructure frames.
 Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 
-(defparameter *standard-clos-specializers*
-  '("T" "STANDARD-OBJECT" "STRUCTURE-OBJECT" "CONDITION"
-    "FUNCALLABLE-STANDARD-OBJECT" "STANDARD-CLASS" "BUILT-IN-CLASS"
-    "CLASS" "STANDARD-GENERIC-FUNCTION" "STANDARD-METHOD" "METHOD"
-    "FUNCTION")
-  "Type names used as specializers in SBCL's default CLOS methods.
-When a FAST-METHOD/SLOW-METHOD wrapper has an unqualified generic function
-name and all specializers are from this list, it is an SBCL default method
-rather than user code.")
-
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
 Internal frames include:
 - Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
 - Standard CL functions like ERROR, SIGNAL, EVAL, etc.
-- CLOS method wrappers (SB-PCL::FAST-METHOD <name> ...) are exempt only
-  when the inner method name belongs to user code with non-standard specializers.
-- Default CLOS methods with only standard specializers (T, STANDARD-OBJECT, etc.)
-  are treated as internal even when the generic name is unqualified.
+- CLOS method wrappers (SB-PCL::FAST-METHOD <name> ...) are exempt
+  when the inner method name belongs to user code (no internal package prefix).
 - (SETF ...) frames are checked by extracting the inner symbol name and
   applying the package-prefix filter."
   (flet ((%prefix-internal-p (name)
            "Check NAME against *internal-package-prefixes*."
-           (some (lambda (prefix)
-                   (let ((prefix-len (length prefix)))
-                     (and (>= (length name) prefix-len)
-                          (string-equal name prefix :end1 prefix-len)
-                          (or (= (length name) prefix-len)
-                              (char= (char name prefix-len) #\:)
-                              (char= (char name prefix-len) #\/)))))
-                 *internal-package-prefixes*))
+           (some
+            (lambda (prefix)
+              (let ((prefix-len (length prefix)))
+                (and (>= (length name) prefix-len)
+                     (string-equal name prefix :end1 prefix-len)
+                     (or (= (length name) prefix-len)
+                         (char= (char name prefix-len) #\:)
+                         (char= (char name prefix-len) #\/)))))
+            *internal-package-prefixes*))
          (%extract-method-name (fn-name keyword)
            "Extract method name from (SB-PCL::FAST-METHOD name ...) form."
            (let ((pos (search keyword fn-name)))
              (when pos
                (let* ((after (+ pos (length keyword)))
-                      (start (position-if-not
-                              (lambda (c) (char= c #\Space))
-                              fn-name :start after)))
+                      (start
+                       (position-if-not (lambda (c) (char= c #\ )) fn-name
+                                        :start after)))
                  (when start
                    (if (char= (char fn-name start) #\()
-                       ;; (SETF name) form — extract inner symbol
-                       (let* ((setf-pos (search "SETF " fn-name
-                                                :start2 start))
-                              (ns (when setf-pos
-                                    (position-if-not
-                                     (lambda (c) (char= c #\Space))
-                                     fn-name :start (+ setf-pos 5))))
-                              (ne (when ns
-                                    (or (position #\) fn-name :start ns)
-                                        (length fn-name)))))
-                         (when (and ns (> ne ns))
-                           (subseq fn-name ns ne)))
-                       ;; Plain name — delimited by space or paren
-                       (let ((end (or (position #\Space fn-name :start start)
-                                      (position #\( fn-name :start start)
-                                      (position #\) fn-name :start start)
-                                      (length fn-name))))
-                         (subseq fn-name start end))))))))
-         (%default-method-wrapper-p (fn-name method-name)
-           "True when a FAST/SLOW-METHOD frame is an SBCL default method.
-Checks that the generic function name is (1) unqualified, (2) a symbol
-exported from COMMON-LISP or SB-MOP, and (3) all specializer types are
-standard CL/MOP types.  This prevents user generics like MY-GF (T) from
-being misclassified as internal."
-           (and (not (find #\: method-name))
-                ;; Verify the generic name is a CL or MOP standard symbol
-                (or (multiple-value-bind (sym status)
-                        (find-symbol method-name :common-lisp)
-                      (declare (ignore sym))
-                      (eq status :external))
-                    (let ((mop (find-package :sb-mop)))
-                      (when mop
-                        (multiple-value-bind (sym status)
-                            (find-symbol method-name mop)
-                          (declare (ignore sym))
-                          (eq status :external)))))
-                (let* ((name-pos (search method-name fn-name
-                                        :test #'char-equal))
-                       (search-start (when name-pos
-                                       (+ name-pos (length method-name))))
-                       (spec-open (when search-start
-                                    (position #\( fn-name
-                                              :start search-start)))
-                       (spec-close (when spec-open
-                                     (position #\) fn-name
-                                               :start (1+ spec-open)))))
-                  (when (and spec-open spec-close (< spec-open spec-close))
-                    (let ((spec-text (subseq fn-name
-                                            (1+ spec-open) spec-close)))
-                      (loop with len = (length spec-text)
-                            with start = 0
-                            while (< start len)
-                            for ts = (position-if-not
-                                      (lambda (c) (char= c #\Space))
-                                      spec-text :start start)
-                            while ts
-                            for te = (or (position #\Space spec-text
-                                                   :start ts)
-                                         len)
-                            for token = (subseq spec-text ts te)
-                            always (member token
-                                           *standard-clos-specializers*
-                                           :test #'string-equal)
-                            do (setf start te))))))))
+                       (let* ((setf-pos (search "SETF " fn-name :start2 start))
+                              (ns
+                               (when setf-pos
+                                 (position-if-not (lambda (c) (char= c #\ ))
+                                                  fn-name :start
+                                                  (+ setf-pos 5))))
+                              (ne
+                               (when ns
+                                 (or (position #\) fn-name :start ns)
+                                     (length fn-name)))))
+                         (when (and ns (> ne ns)) (subseq fn-name ns ne)))
+                       (let ((end
+                              (or (position #\  fn-name :start start)
+                                  (position #\( fn-name :start start)
+                                  (position #\) fn-name :start start)
+                                  (length fn-name))))
+                         (subseq fn-name start end)))))))))
     (or
-     ;; Anonymous/compiler-generated frames start with (
-     (and (> (length function-name) 0)
-          (char= (char function-name 0) #\()
-          ;; Exempt CLOS method wrappers only if inner method is user code
+     (and (> (length function-name) 0) (char= (char function-name 0) #\()
           (let ((method-name
-                  (or (%extract-method-name function-name "FAST-METHOD")
-                      (%extract-method-name function-name "SLOW-METHOD"))))
+                 (or (%extract-method-name function-name "FAST-METHOD")
+                     (%extract-method-name function-name "SLOW-METHOD"))))
             (if method-name
-                ;; It's a method wrapper — internal if the inner method
-                ;; name has an internal package prefix, OR if all
-                ;; specializers are standard types (SBCL default method).
-                (or (%prefix-internal-p method-name)
-                    (%default-method-wrapper-p function-name method-name))
-                ;; Not a method wrapper; exempt (SETF ...) with user symbols
-                (not (and (>= (length function-name) 6)
-                          (string-equal function-name "(SETF " :end1 6)
-                          (not (%prefix-internal-p
-                                (string-trim '(#\) #\Space)
-                                             (subseq function-name 6)))))))))
-     ;; Check for internal package prefixes with proper boundary
+                ;; Method wrapper — internal only if the inner method
+                ;; name has an internal package prefix.
+                (%prefix-internal-p method-name)
+                (not
+                 (and (>= (length function-name) 6)
+                      (string-equal function-name "(SETF " :end1 6)
+                      (not
+                       (%prefix-internal-p
+                        (string-trim '(#\) #\ )
+                                     (subseq function-name 6)))))))))
      (%prefix-internal-p function-name)
-     ;; Standard error signaling and evaluation functions (unqualified)
      (member function-name
              '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK"
                "EVAL")
