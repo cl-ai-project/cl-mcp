@@ -136,6 +136,16 @@ point)."
   "Package prefixes that indicate internal/infrastructure frames.
 Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 
+(defparameter *standard-clos-specializers*
+  '("T" "STANDARD-OBJECT" "STRUCTURE-OBJECT" "CONDITION"
+    "FUNCALLABLE-STANDARD-OBJECT" "STANDARD-CLASS" "BUILT-IN-CLASS"
+    "CLASS" "STANDARD-GENERIC-FUNCTION" "STANDARD-METHOD" "METHOD"
+    "FUNCTION")
+  "Type names used as specializers in SBCL's default CLOS methods.
+When a FAST-METHOD/SLOW-METHOD wrapper has an unqualified generic function
+name and all specializers are from this list, it is an SBCL default method
+rather than user code.")
+
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
 Internal frames include:
@@ -143,7 +153,9 @@ Internal frames include:
 - Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
 - Standard CL functions like ERROR, SIGNAL, EVAL, etc.
 - CLOS method wrappers (SB-PCL::FAST-METHOD <name> ...) are exempt only
-  when the inner method name belongs to user code.
+  when the inner method name belongs to user code with non-standard specializers.
+- Default CLOS methods with only standard specializers (T, STANDARD-OBJECT, etc.)
+  are treated as internal even when the generic name is unqualified.
 - (SETF ...) frames are checked by extracting the inner symbol name and
   applying the package-prefix filter."
   (flet ((%prefix-internal-p (name)
@@ -183,7 +195,40 @@ Internal frames include:
                                       (position #\( fn-name :start start)
                                       (position #\) fn-name :start start)
                                       (length fn-name))))
-                         (subseq fn-name start end)))))))))
+                         (subseq fn-name start end))))))))
+         (%default-method-wrapper-p (fn-name method-name)
+           "True when a FAST/SLOW-METHOD frame is an SBCL default method.
+Checks that the generic function name is unqualified and all specializer
+types are standard CL/MOP types (T, STANDARD-OBJECT, etc.)."
+           (and (not (find #\: method-name))
+                (let* ((name-pos (search method-name fn-name
+                                        :test #'char-equal))
+                       (search-start (when name-pos
+                                       (+ name-pos (length method-name))))
+                       (spec-open (when search-start
+                                    (position #\( fn-name
+                                              :start search-start)))
+                       (spec-close (when spec-open
+                                     (position #\) fn-name
+                                               :start (1+ spec-open)))))
+                  (when (and spec-open spec-close (< spec-open spec-close))
+                    (let ((spec-text (subseq fn-name
+                                            (1+ spec-open) spec-close)))
+                      (loop with len = (length spec-text)
+                            with start = 0
+                            while (< start len)
+                            for ts = (position-if-not
+                                      (lambda (c) (char= c #\Space))
+                                      spec-text :start start)
+                            while ts
+                            for te = (or (position #\Space spec-text
+                                                   :start ts)
+                                         len)
+                            for token = (subseq spec-text ts te)
+                            always (member token
+                                           *standard-clos-specializers*
+                                           :test #'string-equal)
+                            do (setf start te))))))))
     (or
      ;; Anonymous/compiler-generated frames start with (
      (and (> (length function-name) 0)
@@ -193,12 +238,11 @@ Internal frames include:
                   (or (%extract-method-name function-name "FAST-METHOD")
                       (%extract-method-name function-name "SLOW-METHOD"))))
             (if method-name
-                ;; It's a method wrapper — internal only if the inner
-                ;; method name has an internal package prefix.
-                ;; Unqualified names (PRINT-OBJECT, INITIALIZE-INSTANCE,
-                ;; SHARED-INITIALIZE, etc.) are standard CL generics
-                ;; that users commonly specialize, so treat as user code.
-                (%prefix-internal-p method-name)
+                ;; It's a method wrapper — internal if the inner method
+                ;; name has an internal package prefix, OR if all
+                ;; specializers are standard types (SBCL default method).
+                (or (%prefix-internal-p method-name)
+                    (%default-method-wrapper-p function-name method-name))
                 ;; Not a method wrapper; exempt (SETF ...) with user symbols
                 (not (and (>= (length function-name) 6)
                           (string-equal function-name "(SETF " :end1 6)

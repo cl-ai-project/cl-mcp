@@ -309,12 +309,32 @@ Handles both simple keywords and compound expressions."
                                                       (if (> prev-start 0)
                                                           (setf scan-end prev-start)
                                                           (return nil)))
-                                                     ;; Content line — only relevant as guard if it
-                                                     ;; is JUST a conditional (no form on same line)
-                                                     (t (return
-                                                          (if (search "(def" prev-text)
-                                                              nil ; has its own form, not a guard for us
-                                                              prev-text))))))))
+                                                     ;; Content line — check for reader conditional,
+                                                     ;; top-level definition, or keep scanning past
+                                                     ;; intermediate forms when match is indented.
+                                                     (t
+                                                      (cond
+                                                        ;; Found a reader conditional — use as guard
+                                                        ((%inactive-reader-conditional-p prev-text)
+                                                         (return prev-text))
+                                                        ;; Top-level (def at column 0 — separate form, stop
+                                                        ((let ((raw (subseq lowered
+                                                                            (1+ prev-start)
+                                                                            prev-end)))
+                                                           (and (> (length raw) 0)
+                                                                (char= (char raw 0) #\()
+                                                                (search "(def" raw)))
+                                                         (return nil))
+                                                        ;; Match is indented (inside multi-line form like
+                                                        ;; #+nil (progn ...)) — keep scanning past
+                                                        ;; intermediate lines (closing parens, sibling
+                                                        ;; forms) to find the enclosing guard.
+                                                        ((and (plusp (length before-match))
+                                                              (> prev-start 0))
+                                                         (setf scan-end prev-start))
+                                                        ;; Match at column 0 — return line as-is
+                                                        ;; (caller checks for reader conditional)
+                                                        (t (return prev-text)))))))))
                                  (unless (or (position #\; before-match)
                                              (%inactive-reader-conditional-p
                                               before-match)
