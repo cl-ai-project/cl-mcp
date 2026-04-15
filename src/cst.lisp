@@ -133,8 +133,8 @@ Returns the complete list of nodes (including previously collected NODES)."
                      :end-line (%pos->line end))))
 
   (defmethod make-skipped-input-result ((client parse-result-client)
-                                        stream reason children source)
-    (declare (ignore client stream children))
+                                        stream reason source)
+    (declare (ignore client stream))
     (destructuring-bind (start . end) source
       (make-cst-node :kind :skipped
                      :value reason
