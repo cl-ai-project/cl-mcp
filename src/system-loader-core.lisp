@@ -237,11 +237,11 @@ registering it."
   (check-type timeout-seconds (or null (real (0))))
   ;; ASDF system names are canonically lowercase; normalize early so all
   ;; subsequent find-system / load-system / clear-system calls match.
-  (let* ((system-name (string-downcase system-name))
-         (start-time (get-internal-real-time))
-         (suppress (cond
-                     ((eq suppress-redefinition-warnings :auto) force)
-                     (t suppress-redefinition-warnings))))
+  (let ((system-name (string-downcase system-name))
+        (start-time (get-internal-real-time))
+        (suppress (cond
+                    ((eq suppress-redefinition-warnings :auto) force)
+                    (t suppress-redefinition-warnings))))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds
