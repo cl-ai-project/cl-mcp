@@ -171,6 +171,31 @@
               (make-condition 'simple-warning
                               :format-control "variable X unused"))))))
 
+(deftest decide-suppress-redefinition-helper
+  (testing "%decide-suppress-redefinition honors :auto, T, and NIL"
+    (testing ":auto with cleared-prior-p=t suppresses"
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               :auto t))))
+    (testing ":auto with cleared-prior-p=nil does NOT suppress (first-time load)"
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            :auto nil))))
+    (testing "explicit T always suppresses"
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               t nil)))
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               t t))))
+    (testing "explicit NIL never suppresses"
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            nil t)))
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            nil nil))))))
+
 (deftest suppress-redefinition-warning-filter-behavior
   (testing "%call-with-suppressed-output drops redefining-warnings when asked"
     (let ((thunk
