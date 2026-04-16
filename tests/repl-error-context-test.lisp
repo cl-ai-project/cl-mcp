@@ -69,3 +69,27 @@
       (declare (ignore printed stdout stderr))
       (ok (eq raw :timeout))
       (ok (null error-context)))))
+
+(deftest backtrace-falls-back-when-all-frames-internal
+  (testing
+   "build-eval-response shows backtrace even when every frame is internal"
+   (let* ((ctx
+           (list :error t
+                 :condition-type "SIMPLE-ERROR"
+                 :message "test"
+                 :restarts nil
+                 :frames
+                 (list (list :index 0 :function "SB-KERNEL::ERROR"
+                             :source-file nil :source-line nil :locals nil)
+                       (list :index 1 :function "SB-INT::FOO"
+                             :source-file nil :source-line nil :locals nil))))
+          (resp (cl-mcp/src/tools/response-builders:build-eval-response
+                 "" nil "" "" ctx))
+          (content (gethash "content" resp))
+          (text (when (and (vectorp content) (plusp (length content)))
+                  (gethash "text" (aref content 0)))))
+     (ok text)
+     (ok (search "Backtrace:" text)
+         "Backtrace header appears despite all frames being internal")
+     (ok (search "SB-KERNEL::ERROR" text)
+         "fallback includes the first would-be-filtered frame"))))
