@@ -81,6 +81,18 @@ accumulated up to the point of failure.")
 and registered during the most recent load-system call.  Bound dynamically so
 that response builders can include an informational hint.")
 
+(defun %redefinition-warning-p (warning)
+  "Return T when WARNING is an SBCL \"redefining X in DEFUN/DEFMACRO/...\"
+notification that is pure noise under force=true reloads. Uses the
+condition class where available and falls back to a textual prefix match
+on other implementations so the filter still works in portable images."
+  (or #+sbcl
+      (let ((cls (find-class 'sb-kernel:redefinition-warning nil)))
+        (and cls (typep warning cls)))
+      (let ((text (ignore-errors (princ-to-string warning))))
+        (and (stringp text)
+             (uiop:string-prefix-p "redefining " text)))))
+
 (defun %discover-asd-in-project (system-name)
   "Search *project-root* for a .asd file matching SYSTEM-NAME.
 For package-inferred subsystems like \"foo/tests\", searches for the
@@ -107,38 +119,75 @@ Wrapped in IGNORE-ERRORS for filesystem robustness."
                   (< (length (pathname-directory a))
                      (length (pathname-directory b)))))))))))
 
-(defun %call-with-suppressed-output (thunk)
+(defun %call-with-suppressed-output (thunk &key suppress-redefinition)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr).
 The stderr string is also saved to *last-compiler-stderr* via unwind-protect
-so it survives error unwinds and can be retrieved by callers that catch the error."
+so it survives error unwinds and can be retrieved by callers that catch the error.
+
+When SUPPRESS-REDEFINITION is non-nil, warnings identified by
+%REDEFINITION-WARNING-P are silently muffled and do not increment the
+returned count.  Useful under force=true reloads where 'redefining X in
+DEFUN' lines are noise that drown real warnings."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
         (stderr (make-string-output-stream)))
     ;; Reset before each call so stale data from a previous run is not
     ;; mistakenly attributed to this invocation.
     (setf *last-compiler-stderr* nil)
-    #+sbcl
-    (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
-          (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
-          (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
-          (syms nil)
-          (vals nil))
-      (when err-sym (push err-sym syms) (push stderr vals))
-      (when note-sym (push note-sym syms) (push stderr vals))
-      (when trace-sym (push trace-sym syms) (push nil vals))
+    (flet ((handle-warning (w)
+             (cond
+               ((and suppress-redefinition (%redefinition-warning-p w))
+                (when (find-restart 'muffle-warning)
+                  (invoke-restart 'muffle-warning)))
+               (t
+                (incf warning-count)
+                (format warning-details "~A~%" w)
+                (when (find-restart 'muffle-warning)
+                  (invoke-restart 'muffle-warning))))))
+      #+sbcl
+      (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
+            (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
+            (trace-sym (find-symbol "*COMPILER-TRACE-OUTPUT*" "SB-C"))
+            (syms nil)
+            (vals nil))
+        (when err-sym (push err-sym syms) (push stderr vals))
+        (when note-sym (push note-sym syms) (push stderr vals))
+        (when trace-sym (push trace-sym syms) (push nil vals))
+        (let ((result nil)
+              (completed-p nil))
+          (unwind-protect
+              (progn
+                (setf result
+                      (handler-bind ((warning #'handle-warning))
+                        (let ((*compile-verbose* nil)
+                              (*compile-print* nil)
+                              (*load-verbose* nil)
+                              (*load-print* nil)
+                              (*standard-output* (make-string-output-stream))
+                              (*trace-output* (make-string-output-stream))
+                              (*error-output* stderr))
+                          (if syms
+                              (progv (nreverse syms) (nreverse vals)
+                                (with-compilation-unit (:override t)
+                                  (funcall thunk)))
+                              (with-compilation-unit (:override t)
+                                (funcall thunk))))))
+                (setf completed-p t)
+                (values result warning-count
+                        (get-output-stream-string warning-details)
+                        (get-output-stream-string stderr)))
+            ;; Always capture stderr so it survives error unwind.
+            (unless completed-p
+              (setf *last-compiler-stderr*
+                    (ignore-errors (get-output-stream-string stderr)))))))
+      #-sbcl
       (let ((result nil)
             (completed-p nil))
         (unwind-protect
             (progn
               (setf result
-                    (handler-bind
-                        ((warning
-                           (lambda (w)
-                             (incf warning-count)
-                             (format warning-details "~A~%" w)
-                             (when (find-restart 'muffle-warning)
-                               (invoke-restart 'muffle-warning)))))
+                    (handler-bind ((warning #'handle-warning))
                       (let ((*compile-verbose* nil)
                             (*compile-print* nil)
                             (*load-verbose* nil)
@@ -146,12 +195,7 @@ so it survives error unwinds and can be retrieved by callers that catch the erro
                             (*standard-output* (make-string-output-stream))
                             (*trace-output* (make-string-output-stream))
                             (*error-output* stderr))
-                        (if syms
-                            (progv (nreverse syms) (nreverse vals)
-                              (with-compilation-unit (:override t)
-                                (funcall thunk)))
-                            (with-compilation-unit (:override t)
-                              (funcall thunk))))))
+                        (funcall thunk))))
               (setf completed-p t)
               (values result warning-count
                       (get-output-stream-string warning-details)
@@ -159,51 +203,32 @@ so it survives error unwinds and can be retrieved by callers that catch the erro
           ;; Always capture stderr so it survives error unwind.
           (unless completed-p
             (setf *last-compiler-stderr*
-                  (ignore-errors (get-output-stream-string stderr)))))))
-    #-sbcl
-    (let ((result nil)
-          (completed-p nil))
-      (unwind-protect
-          (progn
-            (setf result
-                  (handler-bind
-                      ((warning
-                         (lambda (w)
-                           (incf warning-count)
-                           (format warning-details "~A~%" w)
-                           (when (find-restart 'muffle-warning)
-                             (invoke-restart 'muffle-warning)))))
-                    (let ((*compile-verbose* nil)
-                          (*compile-print* nil)
-                          (*load-verbose* nil)
-                          (*load-print* nil)
-                          (*standard-output* (make-string-output-stream))
-                          (*trace-output* (make-string-output-stream))
-                          (*error-output* stderr))
-                      (funcall thunk))))
-            (setf completed-p t)
-            (values result warning-count
-                    (get-output-stream-string warning-details)
-                    (get-output-stream-string stderr)))
-        ;; Always capture stderr so it survives error unwind.
-        (unless completed-p
-          (setf *last-compiler-stderr*
-                (ignore-errors (get-output-stream-string stderr))))))))
+                  (ignore-errors (get-output-stream-string stderr)))))))))
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
-                                       (:timeout-seconds (or null (real (0)))))
+                                       (:timeout-seconds (or null (real (0))))
+                                       (:suppress-redefinition-warnings t))
                           (values hash-table &rest t))
                 load-system))
 
 (defun load-system
-       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
+       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120)
+                         (suppress-redefinition-warnings :auto))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
 changed files are picked up. When CLEAR-FASLS is true, forces full
 recompilation from source. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds.
+
+SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
+'redefining X in DEFUN' style notifications are dropped from the
+captured warning stream.  Values:
+  :auto  - suppress when FORCE is true (default, matches the
+           force=true use case where redefinitions are expected).
+  T      - always suppress.
+  NIL    - never suppress (preserve pre-change behavior).
 
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
@@ -212,11 +237,15 @@ registering it."
   (check-type timeout-seconds (or null (real (0))))
   ;; ASDF system names are canonically lowercase; normalize early so all
   ;; subsequent find-system / load-system / clear-system calls match.
-  (let ((system-name (string-downcase system-name))
-        (start-time (get-internal-real-time)))
+  (let* ((system-name (string-downcase system-name))
+         (start-time (get-internal-real-time))
+         (suppress (cond
+                     ((eq suppress-redefinition-warnings :auto) force)
+                     (t suppress-redefinition-warnings))))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
-               "clear_fasls" clear-fasls "timeout" timeout-seconds)
+               "clear_fasls" clear-fasls "timeout" timeout-seconds
+               "suppress_redefinition" suppress)
     (multiple-value-bind (result-list timed-out-p errored-p)
         (%load-with-timeout
          (lambda ()
@@ -236,7 +265,8 @@ registering it."
                     (%call-with-suppressed-output
                      (lambda ()
                        (asdf:load-system system-name
-                                                 :force clear-fasls)))))
+                                                 :force clear-fasls))
+                     :suppress-redefinition suppress)))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  ;; Retry when the missing component is the system itself

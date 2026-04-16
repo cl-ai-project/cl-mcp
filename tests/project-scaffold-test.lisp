@@ -163,11 +163,17 @@
       (let ((src (cdr (assoc "src/main.lisp" plan :test #'string=))))
         (ok src)
         (ok (search "#:foo-lib/src/main" src))))
-    (testing "main-test.lisp imports the greet symbol"
+    (testing "main-test.lisp has a scaffold-smoke deftest and no greet reference"
       (let ((test (cdr (assoc "tests/main-test.lisp" plan :test #'string=))))
         (ok test)
-        (ok (search "#:foo-lib/src/main" test))
-        (ok (search "#:greet" test))))
+        (ok (search "scaffold-smoke" test))
+        (ok (search ":foo-lib/src/main" test))
+        (ok (null (search "greet" test)))))
+    (testing "main.lisp scaffold has no :export clause"
+      (let ((src (cdr (assoc "src/main.lisp" plan :test #'string=))))
+        (ok src)
+        (ok (null (search ":export" src)))
+        (ok (null (search "defun greet" src)))))
     (testing "no unresolved placeholders remain"
       (dolist (entry plan)
         (ok (null (search "{{" (cdr entry))))))))
@@ -291,10 +297,13 @@ callers do not need to reference it."
                (ok (asdf:load-system system-name)))
              (testing "bundled test system loads"
                (ok (asdf:load-system test-system-name)))
-             (testing "generated greet function works"
-               (ok (equal "Hello, world!"
-                          (funcall (find-symbol "GREET" "FOO-LIB-E2E/SRC/MAIN")
-                                   "world")))))
+             (testing "generated main package exists with no dangling exports"
+               (let ((pkg (find-package "FOO-LIB-E2E/SRC/MAIN")))
+                 (ok pkg)
+                 (let ((externals '()))
+                   (do-external-symbols (s pkg) (push s externals))
+                   (ok (null externals)
+                       "scaffold main package starts with zero exports")))))
         (ignore-errors (asdf:clear-system test-system-name))
         (ignore-errors (asdf:clear-system system-name))))))
 
@@ -373,7 +382,7 @@ callers do not need to reference it."
           (ok (find-if (lambda (s) (search "lisp-edit-form" s))
                        (coerce next-steps 'list))))))))
 
-(deftest scaffold-e2e-test-system-runs-greet-test
+(deftest scaffold-e2e-test-system-runs-smoke-test
   (with-temp-project-root (root)
     (let ((prompts (uiop:ensure-directory-pathname
                     (merge-pathnames "prompts/" root))))

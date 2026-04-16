@@ -35,6 +35,13 @@ Solves three problems with using (asdf:load-system) via repl-eval:
 PREREQUISITE: The system must be findable by ASDF (registered via
 asdf:load-asd or on the ASDF source registry / Quicklisp search paths).
 
+Warning handling: under force=true reloads, SBCL 'redefining X in DEFUN'
+notifications are dropped from the warnings count/details automatically
+(those redefinitions are exactly what force=true requests).  Real
+warnings (style, type, package variance) always pass through unchanged.
+Under force=false, redefining-warnings are preserved because they
+usually indicate unexpected state.
+
 Examples:
   First-time load: system='my-project', force=false
   Reload after edits: system='my-project' (force=true is default)
