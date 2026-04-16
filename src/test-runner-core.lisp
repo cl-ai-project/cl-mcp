@@ -412,9 +412,9 @@ COMPILE-FILE-ERROR."
                       (ignore-errors
                         (asdf:system-source-file
                          (asdf:find-system system-name nil))))
-                    (sub-systems
-                      (ignore-errors
-                        (%find-rove-test-sub-systems system-name))))
+                    ;; %find-rove-test-sub-systems already wraps its
+                    ;; ASDF lookups in IGNORE-ERRORS internally.
+                    (sub-systems (%find-rove-test-sub-systems system-name)))
                 ;; Purge Rove suite registry BEFORE clearing the system,
                 ;; so any deftest forms deleted from source since the
                 ;; previous load do not linger as ghost tests.

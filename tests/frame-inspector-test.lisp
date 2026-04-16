@@ -148,10 +148,10 @@
    ;; resolves TLF offset to a real character position via
    ;; debug-source-start-positions and converts to an actual line.
    ;; Pad the file so the defun starts beyond small TLF-offset integers.
-   (let* ((path (format nil "/tmp/cl-mcp-frame-demo-~A.lisp"
-                        (random 1000000)))
-          (sym-name "CL-MCP-FRAME-DEMO-FN-XYZQ")
-          captured)
+   (let ((path (format nil "/tmp/cl-mcp-frame-demo-~A.lisp"
+                       (random 1000000)))
+         (sym-name "CL-MCP-FRAME-DEMO-FN-XYZQ")
+         captured)
      (unwind-protect
           (progn
             (with-open-file (s path :direction :output :if-exists :supersede)

@@ -77,8 +77,9 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
 (defun %frame-source-location (frame)
   "Extract source file and line from FRAME, or NIL if unavailable.
 Uses the code-location's TLF offset and the debug-source start-positions
-array to resolve the line of the enclosing top-level form.  Falls back
-to the raw TLF offset when start-positions is unavailable.
+array to resolve the line of the enclosing top-level form.  Returns a
+NIL line (but still the file name) when start-positions is unavailable,
+so callers do not render a small TLF index as if it were a line number.
 
 NOTE: does NOT use sb-introspect FIND-DEFINITION-SOURCE — that returns
 the function definition line which is misleading for backtraces (every
@@ -104,10 +105,9 @@ point)."
                                       (< tlf-offset (length start-positions)))
                              (aref start-positions tlf-offset)))
                          (line
-                           (if (and tlf-char
-                                    (ignore-errors (probe-file namestring)))
-                               (%offset->line namestring tlf-char)
-                               tlf-offset)))
+                           (when (and tlf-char
+                                      (ignore-errors (probe-file namestring)))
+                             (%offset->line namestring tlf-char))))
                     (list :file namestring :line line))))))))
     (error () nil)))
 
@@ -136,75 +136,98 @@ point)."
   "Package prefixes that indicate internal/infrastructure frames.
 Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 
+(defparameter *standard-signaling-frames*
+  '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK" "EVAL")
+  "Unqualified standard CL function names always classified as internal frames
+in backtraces, independent of the *internal-package-prefixes* list.")
+
+(defparameter *method-wrapper-prefixes*
+  '("(SB-PCL::FAST-METHOD " "(SB-PCL::SLOW-METHOD ")
+  "Exact leading substrings (opening paren + package-qualified operator +
+trailing space) that mark an SBCL CLOS method wrapper frame.  Matching against
+the full prefix avoids collisions with arbitrary user symbols that merely
+contain the substring FAST-METHOD.")
+
+(defun %prefix-internal-p (name)
+  "Return T if NAME begins with any entry in *INTERNAL-PACKAGE-PREFIXES*
+terminated by a package delimiter (: or /) or end-of-string."
+  (some (lambda (prefix)
+          (let ((prefix-len (length prefix)))
+            (and (>= (length name) prefix-len)
+                 (string-equal name prefix :end1 prefix-len)
+                 (or (= (length name) prefix-len)
+                     (char= (char name prefix-len) #\:)
+                     (char= (char name prefix-len) #\/)))))
+        *internal-package-prefixes*))
+
+(defun %parse-wrapped-symbol (s start)
+  "Read a symbol token from S starting at or after START, skipping leading
+spaces.  When the token is a nested (SETF NAME) form, returns just NAME.
+Returns NIL when no symbol can be extracted."
+  (let ((head (position-if-not (lambda (c) (char= c #\Space))
+                               s :start start)))
+    (when head
+      (if (char= (char s head) #\()
+          (let ((setf-pos (search "SETF " s :start2 head)))
+            (when setf-pos
+              (let* ((sym-start (position-if-not (lambda (c) (char= c #\Space))
+                                                 s :start (+ setf-pos 5)))
+                     (sym-end (when sym-start
+                                (or (position #\) s :start sym-start)
+                                    (length s)))))
+                (when (and sym-start sym-end (< sym-start sym-end))
+                  (subseq s sym-start sym-end)))))
+          (subseq s head
+                  (or (position-if (lambda (c)
+                                     (or (char= c #\Space)
+                                         (char= c #\()
+                                         (char= c #\))))
+                                   s :start head)
+                      (length s)))))))
+
+(defun %method-wrapper-name (function-name)
+  "Return the user-visible method name from a (SB-PCL::FAST-METHOD NAME ...)
+or (SB-PCL::SLOW-METHOD NAME ...) wrapper, or NIL when FUNCTION-NAME is not a
+method wrapper.  Uses a full opening-paren-qualified prefix match so symbols
+that merely contain FAST-METHOD as a substring are not misclassified."
+  (dolist (prefix *method-wrapper-prefixes*)
+    (let ((prefix-len (length prefix)))
+      (when (and (>= (length function-name) prefix-len)
+                 (string-equal function-name prefix :end1 prefix-len))
+        (return-from %method-wrapper-name
+          (%parse-wrapped-symbol function-name prefix-len))))))
+
+(defun %setf-frame-target (function-name)
+  "Return the target symbol name from a (SETF NAME) frame as a string, or NIL
+when FUNCTION-NAME is not a SETF frame."
+  (when (and (>= (length function-name) 6)
+             (string-equal function-name "(SETF " :end1 6))
+    (string-trim '(#\) #\Space) (subseq function-name 6))))
+
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
-Internal frames include:
-- Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
-- Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
-- Standard CL functions like ERROR, SIGNAL, EVAL, etc.
-- CLOS method wrappers (SB-PCL::FAST-METHOD <name> ...) are exempt
-  when the inner method name belongs to user code (no internal package prefix).
-- (SETF ...) frames are checked by extracting the inner symbol name and
-  applying the package-prefix filter."
-  (flet ((%prefix-internal-p (name)
-           "Check NAME against *internal-package-prefixes*."
-           (some
-            (lambda (prefix)
-              (let ((prefix-len (length prefix)))
-                (and (>= (length name) prefix-len)
-                     (string-equal name prefix :end1 prefix-len)
-                     (or (= (length name) prefix-len)
-                         (char= (char name prefix-len) #\:)
-                         (char= (char name prefix-len) #\/)))))
-            *internal-package-prefixes*))
-         (%extract-method-name (fn-name keyword)
-           "Extract method name from (SB-PCL::FAST-METHOD name ...) form."
-           (let ((pos (search keyword fn-name)))
-             (when pos
-               (let* ((after (+ pos (length keyword)))
-                      (start
-                       (position-if-not (lambda (c) (char= c #\ )) fn-name
-                                        :start after)))
-                 (when start
-                   (if (char= (char fn-name start) #\()
-                       (let* ((setf-pos (search "SETF " fn-name :start2 start))
-                              (ns
-                               (when setf-pos
-                                 (position-if-not (lambda (c) (char= c #\ ))
-                                                  fn-name :start
-                                                  (+ setf-pos 5))))
-                              (ne
-                               (when ns
-                                 (or (position #\) fn-name :start ns)
-                                     (length fn-name)))))
-                         (when (and ns (> ne ns)) (subseq fn-name ns ne)))
-                       (let ((end
-                              (or (position #\  fn-name :start start)
-                                  (position #\( fn-name :start start)
-                                  (position #\) fn-name :start start)
-                                  (length fn-name))))
-                         (subseq fn-name start end)))))))))
-    (or
-     (and (> (length function-name) 0) (char= (char function-name 0) #\()
-          (let ((method-name
-                 (or (%extract-method-name function-name "FAST-METHOD")
-                     (%extract-method-name function-name "SLOW-METHOD"))))
-            (if method-name
-                ;; Method wrapper — internal only if the inner method
-                ;; name has an internal package prefix.
-                (%prefix-internal-p method-name)
-                (not
-                 (and (>= (length function-name) 6)
-                      (string-equal function-name "(SETF " :end1 6)
-                      (not
-                       (%prefix-internal-p
-                        (string-trim '(#\) #\ )
-                                     (subseq function-name 6)))))))))
-     (%prefix-internal-p function-name)
-     (member function-name
-             '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK"
-               "EVAL")
-             :test #'string-equal))))
+Dispatches on structural shape first, then applies the package-prefix filter
+to the relevant inner name:
+
+- (SB-PCL::FAST-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
+- (SB-PCL::SLOW-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
+- (SETF NAME)                          -> internal iff NAME has an internal prefix
+- Any other (...) wrapper (FLET, LAMBDA, LABELS, etc.) -> always internal
+- Bare symbol name matching an internal package prefix -> internal
+- Unqualified name in *STANDARD-SIGNALING-FRAMES*      -> internal
+
+Empty strings are treated as non-internal (caller's responsibility to filter)."
+  (when (plusp (length function-name))
+    (let ((method-name (%method-wrapper-name function-name))
+          (setf-target (%setf-frame-target function-name)))
+      (cond
+        (method-name (%prefix-internal-p method-name))
+        (setf-target (%prefix-internal-p setf-target))
+        ((char= (char function-name 0) #\() t)
+        ((%prefix-internal-p function-name) t)
+        ((member function-name *standard-signaling-frames*
+                 :test #'string-equal)
+         t)))))
 
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length

@@ -151,27 +151,39 @@
   (testing "brief mode returns shorter content than non-brief for symbol pages"
     (let ((brief (clhs-lookup "loop" :include-content t :brief t))
           (full (clhs-lookup "loop" :include-content t :brief nil)))
-      (when (and (string= (gethash "source" brief) "local")
-                 (string= (gethash "source" full) "local"))
-        (let* ((brief-vec (gethash "content" brief))
-               (full-vec (gethash "content" full))
-               (brief-text (when (and (vectorp brief-vec) (plusp (length brief-vec)))
-                             (gethash "text" (aref brief-vec 0))))
-               (full-text (when (and (vectorp full-vec) (plusp (length full-vec)))
-                            (gethash "text" (aref full-vec 0)))))
-          (when (and brief-text full-text)
-            (ok (< (length brief-text) (length full-text))
-                "brief content is shorter than full content")
-            (ok (null (search "Description:" brief-text))
-                "brief content stops before the Description section")))))))
+      (cond
+        ((not (and (string= (gethash "source" brief) "local")
+                   (string= (gethash "source" full) "local")))
+         (rove:skip "local CLHS not installed"))
+        (t
+         (let* ((brief-vec (gethash "content" brief))
+                (full-vec (gethash "content" full))
+                (brief-text
+                 (when (and (vectorp brief-vec) (plusp (length brief-vec)))
+                   (gethash "text" (aref brief-vec 0))))
+                (full-text
+                 (when (and (vectorp full-vec) (plusp (length full-vec)))
+                   (gethash "text" (aref full-vec 0)))))
+           (ok (and brief-text full-text)
+               "content text was extracted for both brief and full")
+           (when (and brief-text full-text)
+             (ok (< (length brief-text) (length full-text))
+                 "brief content is shorter than full content")
+             (ok (null (search "Description:" brief-text))
+                 "brief content stops before the Description section"))))))))
 
 (deftest clhs-lookup-brief-caps-section-pages
-  (testing "brief mode caps section page content to *brief-max-chars*"
+  (testing "brief mode caps section page content to +brief-max-chars+"
     (let ((result (clhs-lookup "22.3" :include-content t :brief t)))
-      (when (string= (gethash "source" result) "local")
-        (let* ((content-vec (gethash "content" result))
-               (text (when (and (vectorp content-vec) (plusp (length content-vec)))
-                       (gethash "text" (aref content-vec 0)))))
-          (when text
-            (ok (<= (length text) cl-mcp/src/clhs::*brief-max-chars*)
-                "section page content is capped to *brief-max-chars*")))))))
+      (cond
+        ((not (string= (gethash "source" result) "local"))
+         (rove:skip "local CLHS not installed"))
+        (t
+         (let* ((content-vec (gethash "content" result))
+                (text
+                 (when (and (vectorp content-vec) (plusp (length content-vec)))
+                   (gethash "text" (aref content-vec 0)))))
+           (ok text "section page content text was extracted")
+           (when text
+             (ok (<= (length text) cl-mcp/src/clhs::+brief-max-chars+)
+                 "section page content is capped to +brief-max-chars+"))))))))

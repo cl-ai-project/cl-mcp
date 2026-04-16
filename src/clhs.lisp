@@ -189,7 +189,8 @@ Returns a file:// URL for local installations, or http:// URL otherwise."
 ;;; HTML Text Extraction
 ;;; ---------------------------------------------------------------------------
 
-(defparameter *brief-max-chars* 1500
+(defconstant +brief-max-chars+
+  1500
   "Character limit for brief mode when no Description heading is found.
 Covers Syntax + Arguments for most entries and the introductory
 paragraph of section pages.")
@@ -199,7 +200,7 @@ paragraph of section pages.")
 Returns at most MAX-CHARS characters of content.
 When BRIEF is true, stop before the Description section.  If no
 Description heading is found (e.g. section pages), the result is
-truncated to *BRIEF-MAX-CHARS* after extraction.  The char limit is
+truncated to +BRIEF-MAX-CHARS+ after extraction.  The char limit is
 applied post-hoc so that long Syntax sections are not cut short before
 the Description sentinel is reached."
   (unless (probe-file path) (return-from %extract-text-from-html nil))
@@ -253,8 +254,8 @@ the Description sentinel is reached."
       ;; (e.g. section pages), truncate to *brief-max-chars*
       (let ((text (coerce result 'string)))
         (if (and brief (not hit-description)
-                 (> (length text) *brief-max-chars*))
-            (subseq text 0 *brief-max-chars*)
+                 (> (length text) +brief-max-chars+))
+            (subseq text 0 +brief-max-chars+)
             text)))))
 
 ;;; ---------------------------------------------------------------------------
