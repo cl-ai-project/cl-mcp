@@ -109,13 +109,14 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 
 | Symptom | Cause | Workaround |
 |---|---|---|
-| `run-tests` on aggregate `<name>/tests` reports `Passed: 0, Failed: 0` with `✓ PASS` despite tests actually running | Fixed in PR #98: fallback now purges Rove suites and clears ASDF state before sub-system runs | Should work now; if it still fails, file a new issue |
+| `run-tests` on aggregate `<name>/tests` reports `Passed: 0, Failed: 0` with `✓ PASS` despite tests actually running | Fixed in PR #98: fallback now purges Rove suites and clears ASDF state before sub-system runs | Resolved. Zero-count case is handled. See next row for non-zero undercount variant |
+| `run-tests` aggregate reports partial counts (e.g., 6 instead of 13) after individual sub-packages were run first in the same worker session | Individual runs left Rove suites registered; `%ensure-system-loaded` only cleared the aggregate ASDF system, so ASDF skipped reloading sub-systems and deftest forms didn't re-register | Fixed: `%ensure-system-loaded` now also clears ASDF state for test sub-systems |
 | `run-tests` fails with opaque `COMPILE-FILE-ERROR while compiling ...` after you edited a `defpackage` | SBCL package-variance warning escalated to error; cached worker state | `pool-kill-worker` then `load-system` to get a fresh image |
 | `lisp-edit-form` or `lisp-patch-form` on a `.asd` file rejects `form_type: "asdf:defsystem"` | Tool matches on unqualified symbol name | Use `form_type: "defsystem"` |
 | `code-find` returns `symbol is required` when you pass `name:` | Parameter name is `symbol`, not `name` | Check the tool schema: the required key is `symbol` |
 | `fs-list-directory` hides `.gitignore` and other dotfiles | Default behavior filters `*hidden-prefixes*` | Pass `show_hidden: true` (added in PR #94) |
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |
-| `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed: `load-system` now auto-discovers `.asd` files under the project root on MISSING-COMPONENT | Should work now; manual `asdf:load-asd` only needed if `.asd` is outside the project root |
+| `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed: `load-system` now auto-discovers `.asd` files under the project root on MISSING-COMPONENT | Resolved. Verified in cycle 10 (2026-04-13). Manual `asdf:load-asd` only needed if `.asd` is outside the project root |
 | `run-tests` single-test mode reports `Test runner crashed` with `no applicable method for TEST-NAME` on `FAILED-ASSERTION` | Rove internal bug: `rove:run-tests` calls `TEST-NAME` on `FAILED-ASSERTION` objects. Caught by handler-case in `run-rove-selected-tests`; `%safe-test-name` guards `run-rove-tests` path | Failure is reported gracefully (not a hard crash). The "Test runner crashed" reason text reflects Rove's internal error |
 | `project-scaffold` text response does not contain the `next_steps` array | Response builder does not render `next_steps` in `content[].text` | Use the `absolute_path` from the structured response and prime ASDF manually per step 3 |
 | `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
@@ -129,7 +130,7 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 
 You are done with one cycle when:
 
-- [ ] The throwaway project has all its generated Rove tests green (verified per-package OR via `asdf:test-system`, **not** just via the buggy aggregate `run-tests` path)
+- [ ] The throwaway project has all its generated Rove tests green (verified per-package OR via aggregate `run-tests`; the aggregate undercount bug is now fixed)
 - [ ] At least one edited Lisp file was sanity-checked with `lisp-check-parens` (cheap and catches `lisp-patch-form` drift early)
 - [ ] At least **5 feedback items** were **actually appended** to the chosen feedback file (verify with a `fs-read-file` or shell `tail` — the "I'll record it later" trap is real)
 - [ ] Feedback is categorized P1/P2/P3 under a dated section heading
@@ -139,7 +140,7 @@ You are done with one cycle when:
 
 - **Scaffolding outside `experiments/`.** If you scaffold into a non-gitignored path inside cl-mcp, generated files will taint `git status`. Always use `destination: "experiments"`.
 - **Building a project you intend to keep.** This is a feedback-gathering exercise; grab shallow breadth (lots of tool calls) over deep polish.
-- **Trusting `✓ PASS / Passed: 0, Failed: 0` on the aggregate test system.** Fixed in PR #98, but verify it works; if counts are still 0, run sub-packages individually.
+- **Trusting aggregate counts without cross-checking.** Both the zero-count and partial-count bugs are now fixed; aggregate `run-tests` should report correct totals. If counts seem wrong, verify with per-package runs.
 - **Recording only tool bugs.** Capture UX friction too: confusing errors, missing defaults, unnecessary retries. Those become P2/P3 items.
 - **Skipping the "try every tool" step.** If you only use `lisp-edit-form` and `run-tests`, you only produce feedback on those two tools.
 

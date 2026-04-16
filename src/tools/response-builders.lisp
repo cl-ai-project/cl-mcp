@@ -136,16 +136,20 @@ so that MCP clients rendering only content[].text still see them."
                             (mapcar (lambda (r)
                                       (sanitize-for-json (getf r :name)))
                                     restarts)))
-                  ;; Only show Backtrace header when non-internal frames exist
-                  (let ((user-frames
-                          (and frames
-                               (loop for frame in frames
-                                     for fn = (or (getf frame :function) "")
-                                     unless (%internal-frame-p fn)
-                                       collect frame))))
-                    (when user-frames
+                  ;; Show user frames, falling back to all frames when
+                  ;; filtering removes everything
+                  (let* ((user-frames
+                           (and frames
+                                (loop for frame in frames
+                                      for fn = (or (getf frame :function) "")
+                                      unless (%internal-frame-p fn)
+                                        collect frame)))
+                         (display-frames (or user-frames
+                                             (and frames (subseq frames 0
+                                                          (min 5 (length frames)))))))
+                    (when display-frames
                       (format s "~&Backtrace:")
-                      (loop for frame in user-frames
+                      (loop for frame in display-frames
                             for shown from 1
                             do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
                                        (or (getf frame :index) "?")

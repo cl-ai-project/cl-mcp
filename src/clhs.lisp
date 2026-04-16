@@ -118,7 +118,7 @@ Chapter numbers are zero-padded to 2 digits (e.g., 7 -> 07)."
        (every (lambda (c) (or (digit-char-p c) (char= c #\.))) string)
        (digit-char-p (char string 0))))
 
-(defun clhs-lookup-section (section-string &key (include-content t))
+(defun clhs-lookup-section (section-string &key (include-content t) brief)
   "Look up a section number (e.g., '22.3') in the Common Lisp HyperSpec.
 Returns a hash table with:
   - section: The section number
@@ -143,7 +143,7 @@ Returns a hash table with:
                            "url" url
                            "source" (if is-local "local" "remote"))))
       (when (and include-content is-local)
-        (let ((content (%extract-text-from-html local-path)))
+        (let ((content (%extract-text-from-html local-path :brief brief)))
           (when content
             (setf (gethash "content" result)
                   (text-content content)))))
@@ -189,16 +189,28 @@ Returns a file:// URL for local installations, or http:// URL otherwise."
 ;;; HTML Text Extraction
 ;;; ---------------------------------------------------------------------------
 
-(defun %extract-text-from-html (path &key (max-chars 8000))
+(defconstant +brief-max-chars+
+  1500
+  "Character limit for brief mode when no Description heading is found.
+Covers Syntax + Arguments for most entries and the introductory
+paragraph of section pages.")
+
+(defun %extract-text-from-html (path &key (max-chars 8000) brief)
   "Extract plain text from HTML file at PATH.
-Returns at most MAX-CHARS characters of content."
-  (unless (probe-file path)
-    (return-from %extract-text-from-html nil))
+Returns at most MAX-CHARS characters of content.
+When BRIEF is true, stop before the Description section.  If no
+Description heading is found (e.g. section pages), the result is
+truncated to +BRIEF-MAX-CHARS+ after extraction.  The char limit is
+applied post-hoc so that long Syntax sections are not cut short before
+the Description sentinel is reached."
+  (unless (probe-file path) (return-from %extract-text-from-html nil))
   (with-open-file (s path :external-format :latin-1)
-    (let ((result (make-array 0 :element-type 'character
-                                :adjustable t :fill-pointer 0))
+    (let ((result
+           (make-array 0 :element-type 'character :adjustable t
+                       :fill-pointer 0))
           (in-script nil)
-          (in-style nil))
+          (in-style nil)
+          (hit-description nil))
       (flet ((append-text (text)
                (when (and text (< (length result) max-chars))
                  (loop for char across text
@@ -207,7 +219,6 @@ Returns at most MAX-CHARS characters of content."
         (loop for line = (read-line s nil)
               while (and line (< (length result) max-chars))
               do (let ((text line))
-                   ;; Track script/style blocks to skip
                    (when (search "<script" text :test #'char-equal)
                      (setf in-script t))
                    (when (search "</script>" text :test #'char-equal)
@@ -219,28 +230,39 @@ Returns at most MAX-CHARS characters of content."
                      (setf in-style nil)
                      (setf text ""))
                    (unless (or in-script in-style)
-                     ;; Remove HTML tags
                      (setf text (cl-ppcre:regex-replace-all "<[^>]+>" text ""))
-                     ;; Decode common HTML entities
                      (setf text (cl-ppcre:regex-replace-all "&lt;" text "<"))
                      (setf text (cl-ppcre:regex-replace-all "&gt;" text ">"))
                      (setf text (cl-ppcre:regex-replace-all "&amp;" text "&"))
-                     (setf text (cl-ppcre:regex-replace-all "&quot;" text "\""))
+                     (setf text
+                           (cl-ppcre:regex-replace-all "&quot;" text "\""))
                      (setf text (cl-ppcre:regex-replace-all "&nbsp;" text " "))
                      (setf text (cl-ppcre:regex-replace-all "&#\\d+;" text ""))
                      ;; Collapse multiple spaces
                      (setf text (cl-ppcre:regex-replace-all "  +" text " "))
                      (let ((trimmed (string-trim '(#\Space #\Tab) text)))
+                       ;; In brief mode, stop at Description section
+                       (when (and brief
+                                  (>= (length trimmed) 12)
+                                  (string-equal trimmed "Description:" :end1 12))
+                         (setf hit-description t)
+                         (return))
                        (when (plusp (length trimmed))
                          (append-text trimmed)
                          (append-text (string #\Newline))))))))
-      (coerce result 'string))))
+      ;; Post-hoc brief cap: if Description heading was never found
+      ;; (e.g. section pages), truncate to *brief-max-chars*
+      (let ((text (coerce result 'string)))
+        (if (and brief (not hit-description)
+                 (> (length text) +brief-max-chars+))
+            (subseq text 0 +brief-max-chars+)
+            text)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Main Lookup Function
 ;;; ---------------------------------------------------------------------------
 
-(defun clhs-lookup (query &key (include-content t))
+(defun clhs-lookup (query &key (include-content t) brief)
   "Look up QUERY in the Common Lisp HyperSpec.
 QUERY can be either:
   - A symbol name (e.g., 'loop', 'format', 'handler-case')
@@ -252,7 +274,7 @@ Returns a hash table with:
   - source: 'local' or 'remote'
   - content: Extracted text content (when INCLUDE-CONTENT is true and local)"
   (if (%section-number-p query)
-      (clhs-lookup-section query :include-content include-content)
+      (clhs-lookup-section query :include-content include-content :brief brief)
       ;; Symbol lookup
       (let* ((normalized (string-upcase (string-trim " " query)))
              (url (%symbol-url query))
@@ -266,7 +288,7 @@ Returns a hash table with:
                                "url" url
                                "source" (if is-local "local" "remote"))))
           (when (and include-content is-local)
-            (let ((content (%extract-text-from-html local-path)))
+            (let ((content (%extract-text-from-html local-path :brief brief)))
               (when content
                 (setf (gethash "content" result)
                       (text-content content)))))
@@ -295,8 +317,11 @@ Examples:
   query='22.3.1' - Basic Output subsection (~C, ~%, etc.)"
   :args ((query :type :string :required t
                 :description "Symbol name or section number to look up")
-         (include_content :type :boolean :required nil
-                          :description "Include extracted text content (default: true)"))
+         (include_content :type :boolean :required nil :default t
+                          :description "Include extracted text content (default: true)")
+         (brief :type :boolean :required nil
+                :description "When true, return only Syntax and Arguments sections (compact).
+Omits Description, Examples, Notes for token efficiency."))
   :body
-  (let ((include-content (if (boundp 'include_content) include_content t)))
-    (result id (clhs-lookup query :include-content include-content))))
+  (result id (clhs-lookup query :include-content include_content
+                                :brief brief)))

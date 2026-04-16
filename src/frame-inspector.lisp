@@ -12,8 +12,7 @@
   (:import-from #:cl-mcp/src/inspect
                 #:generate-result-preview)
   (:import-from #:cl-mcp/src/code-core
-                #:%offset->line
-                #:%ensure-sb-introspect)
+                #:%offset->line)
   (:export #:capture-error-context
            #:%internal-frame-p))
 
@@ -77,10 +76,15 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
 #+sbcl
 (defun %frame-source-location (frame)
   "Extract source file and line from FRAME, or NIL if unavailable.
-Attempts to resolve actual file line number via sb-introspect by getting
-the function object's definition source and converting its character-offset
-to a line number using %OFFSET->LINE.  Falls back to the top-level form
-offset when introspection is not possible."
+Uses the code-location's TLF offset and the debug-source start-positions
+array to resolve the line of the enclosing top-level form.  Returns a
+NIL line (but still the file name) when start-positions is unavailable,
+so callers do not render a small TLF index as if it were a line number.
+
+NOTE: does NOT use sb-introspect FIND-DEFINITION-SOURCE — that returns
+the function definition line which is misleading for backtraces (every
+frame in the same function would show the defun line, not the execution
+point)."
   (handler-case
       (let ((code-location (sb-di:frame-code-location frame)))
         (when code-location
@@ -88,24 +92,23 @@ offset when introspection is not possible."
             (when debug-source
               (let ((namestring (sb-di:debug-source-namestring debug-source)))
                 (when namestring
-                  (let ((line (ignore-errors
-                                (let* ((debug-fun (sb-di:frame-debug-fun frame))
-                                       (fun (sb-di:debug-fun-fun debug-fun)))
-                                  (when fun
-                                    (let ((pkg (%ensure-sb-introspect)))
-                                      (when pkg
-                                        (let* ((find-def-src (fdefinition (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
-                                               (source (funcall find-def-src fun))
-                                               (char-offset-accessor (fdefinition (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
-                                               (char-offset (funcall char-offset-accessor source)))
-                                          (when (and char-offset
-                                                         (ignore-errors (probe-file namestring)))
-                                            (%offset->line namestring char-offset))))))))))
-                    (if line
-                        (list :file namestring :line line)
-                        (list :file namestring :line
-                              (ignore-errors
-                                (sb-di:code-location-toplevel-form-offset code-location)))))))))))
+                  (let* ((tlf-offset
+                           (ignore-errors
+                             (sb-di:code-location-toplevel-form-offset
+                              code-location)))
+                         (start-positions
+                           (ignore-errors
+                             (sb-c::debug-source-start-positions
+                              debug-source)))
+                         (tlf-char
+                           (when (and start-positions tlf-offset
+                                      (< tlf-offset (length start-positions)))
+                             (aref start-positions tlf-offset)))
+                         (line
+                           (when (and tlf-char
+                                      (ignore-errors (probe-file namestring)))
+                             (%offset->line namestring tlf-char))))
+                    (list :file namestring :line line))))))))
     (error () nil)))
 
 #+sbcl
@@ -133,31 +136,98 @@ offset when introspection is not possible."
   "Package prefixes that indicate internal/infrastructure frames.
 Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
 
+(defparameter *standard-signaling-frames*
+  '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK" "EVAL")
+  "Unqualified standard CL function names always classified as internal frames
+in backtraces, independent of the *internal-package-prefixes* list.")
+
+(defparameter *method-wrapper-prefixes*
+  '("(SB-PCL::FAST-METHOD " "(SB-PCL::SLOW-METHOD ")
+  "Exact leading substrings (opening paren + package-qualified operator +
+trailing space) that mark an SBCL CLOS method wrapper frame.  Matching against
+the full prefix avoids collisions with arbitrary user symbols that merely
+contain the substring FAST-METHOD.")
+
+(defun %prefix-internal-p (name)
+  "Return T if NAME begins with any entry in *INTERNAL-PACKAGE-PREFIXES*
+terminated by a package delimiter (: or /) or end-of-string."
+  (some (lambda (prefix)
+          (let ((prefix-len (length prefix)))
+            (and (>= (length name) prefix-len)
+                 (string-equal name prefix :end1 prefix-len)
+                 (or (= (length name) prefix-len)
+                     (char= (char name prefix-len) #\:)
+                     (char= (char name prefix-len) #\/)))))
+        *internal-package-prefixes*))
+
+(defun %parse-wrapped-symbol (s start)
+  "Read a symbol token from S starting at or after START, skipping leading
+spaces.  When the token is a nested (SETF NAME) form, returns just NAME.
+Returns NIL when no symbol can be extracted."
+  (let ((head (position-if-not (lambda (c) (char= c #\Space))
+                               s :start start)))
+    (when head
+      (if (char= (char s head) #\()
+          (let ((setf-pos (search "SETF " s :start2 head)))
+            (when setf-pos
+              (let* ((sym-start (position-if-not (lambda (c) (char= c #\Space))
+                                                 s :start (+ setf-pos 5)))
+                     (sym-end (when sym-start
+                                (or (position #\) s :start sym-start)
+                                    (length s)))))
+                (when (and sym-start sym-end (< sym-start sym-end))
+                  (subseq s sym-start sym-end)))))
+          (subseq s head
+                  (or (position-if (lambda (c)
+                                     (or (char= c #\Space)
+                                         (char= c #\()
+                                         (char= c #\))))
+                                   s :start head)
+                      (length s)))))))
+
+(defun %method-wrapper-name (function-name)
+  "Return the user-visible method name from a (SB-PCL::FAST-METHOD NAME ...)
+or (SB-PCL::SLOW-METHOD NAME ...) wrapper, or NIL when FUNCTION-NAME is not a
+method wrapper.  Uses a full opening-paren-qualified prefix match so symbols
+that merely contain FAST-METHOD as a substring are not misclassified."
+  (dolist (prefix *method-wrapper-prefixes*)
+    (let ((prefix-len (length prefix)))
+      (when (and (>= (length function-name) prefix-len)
+                 (string-equal function-name prefix :end1 prefix-len))
+        (return-from %method-wrapper-name
+          (%parse-wrapped-symbol function-name prefix-len))))))
+
+(defun %setf-frame-target (function-name)
+  "Return the target symbol name from a (SETF NAME) frame as a string, or NIL
+when FUNCTION-NAME is not a SETF frame."
+  (when (and (>= (length function-name) 6)
+             (string-equal function-name "(SETF " :end1 6))
+    (string-trim '(#\) #\Space) (subseq function-name 6))))
+
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
-Internal frames include:
-- Frames from CL-MCP, SBCL internals (SB-KERNEL:, SB-INT:, etc.), ASDF, UIOP
-- Anonymous functions like (FLET ...), (LAMBDA ...), (LABELS ...)
-- Standard CL functions like ERROR, SIGNAL, EVAL, etc."
-  (or
-   ;; Anonymous/compiler-generated frames start with (
-   (and (> (length function-name) 0)
-        (char= (char function-name 0) #\())
-   ;; Check for internal package prefixes with proper boundary
-   ;; Prefix must be followed by : or / (package delimiters) or be exact match
-   (some (lambda (prefix)
-           (let ((prefix-len (length prefix)))
-             (and (>= (length function-name) prefix-len)
-                  (string-equal function-name prefix :end1 prefix-len)
-                  ;; Verify boundary: next char is : or / or end of string
-                  (or (= (length function-name) prefix-len)
-                      (char= (char function-name prefix-len) #\:)
-                      (char= (char function-name prefix-len) #\/)))))
-         *internal-package-prefixes*)
-   ;; Standard error signaling and evaluation functions (unqualified)
-   (member function-name '("ERROR" "SIGNAL" "CERROR" "WARN"
-                           "INVOKE-DEBUGGER" "BREAK" "EVAL")
-           :test #'string-equal)))
+Dispatches on structural shape first, then applies the package-prefix filter
+to the relevant inner name:
+
+- (SB-PCL::FAST-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
+- (SB-PCL::SLOW-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
+- (SETF NAME)                          -> internal iff NAME has an internal prefix
+- Any other (...) wrapper (FLET, LAMBDA, LABELS, etc.) -> always internal
+- Bare symbol name matching an internal package prefix -> internal
+- Unqualified name in *STANDARD-SIGNALING-FRAMES*      -> internal
+
+Empty strings are treated as non-internal (caller's responsibility to filter)."
+  (when (plusp (length function-name))
+    (let ((method-name (%method-wrapper-name function-name))
+          (setf-target (%setf-frame-target function-name)))
+      (cond
+        (method-name (%prefix-internal-p method-name))
+        (setf-target (%prefix-internal-p setf-target))
+        ((char= (char function-name 0) #\() t)
+        ((%prefix-internal-p function-name) t)
+        ((member function-name *standard-signaling-frames*
+                 :test #'string-equal)
+         t)))))
 
 #+sbcl
 (defun %collect-frames (max-frames print-level print-length

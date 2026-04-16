@@ -411,12 +411,21 @@ COMPILE-FILE-ERROR."
               (let ((asd-src
                       (ignore-errors
                         (asdf:system-source-file
-                         (asdf:find-system system-name nil)))))
+                         (asdf:find-system system-name nil))))
+                    ;; %find-rove-test-sub-systems already wraps its
+                    ;; ASDF lookups in IGNORE-ERRORS internally.
+                    (sub-systems (%find-rove-test-sub-systems system-name)))
                 ;; Purge Rove suite registry BEFORE clearing the system,
                 ;; so any deftest forms deleted from source since the
                 ;; previous load do not linger as ghost tests.
                 (ignore-errors (%rove-purge-ghost-suites system-name))
                 (asdf:clear-system system-name)
+                ;; Also clear test sub-systems so ASDF reloads them even
+                ;; when source files are unchanged.  Without this, deftest
+                ;; forms do not re-execute after ghost-suite purging and
+                ;; Rove reports zero counts for those packages.
+                (dolist (sub sub-systems)
+                  (ignore-errors (asdf:clear-system sub)))
                 ;; Always re-read the .asd so edits to :depends-on
                 ;; and other system metadata are picked up.
                 (when asd-src
