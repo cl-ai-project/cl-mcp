@@ -249,9 +249,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
          (summary
           (with-output-to-string (s)
             (format s "~A~%"
-                    (if (zerop failed)
-                        "✓ PASS"
-                        "✗ FAIL"))
+                    (cond ((string= framework-name "load-error") "✗ LOAD FAILED")
+                          ((string= framework-name "timeout") "✗ TIMEOUT")
+                          ((zerop failed) "✓ PASS")
+                          (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
                     failed (when (plusp pending) pending))
             (format s "Duration: ~Dms~%" duration)

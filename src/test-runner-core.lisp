@@ -10,6 +10,7 @@
                 #:make-ht)
   (:export #:run-tests
            #:detect-test-framework
+           #:make-load-failure-result
            #:*test-debug-output*
            #:*max-test-output-length*))
 
@@ -257,6 +258,29 @@ Shows the condition type explicitly to aid root-cause diagnosis."
                 system-name ctype cmsg tail)
         (format nil "Failed to load test system ~A:~%  [~A] ~A"
                 system-name ctype cmsg))))
+
+(defun make-load-failure-result (system-name condition)
+  "Convert a test-system load failure into a structured test-result so
+RUN-TESTS returns a normal MCP response (failed:1 with a synthetic
+SYSTEM-LOAD entry) instead of letting the condition propagate as an
+opaque RPC-level error.  Mirrors the timeout pattern used by
+%handle-run-tests in worker/handlers.lisp."
+  (make-test-result
+   :passed 0
+   :failed 1
+   :pending 0
+   :framework :load-error
+   :duration 0
+   :failed-tests
+   (vector
+    (make-failure-detail
+     :test-name "SYSTEM-LOAD"
+     :description (format nil "Could not load test system ~A" system-name)
+     :reason
+     (format nil "~A~%~%Hint: the worker process may have a broken ~
+                  package state. Use pool-kill-worker to get a fresh ~
+                  worker, then retry run-tests."
+             condition)))))
 
 (defun %extract-defpackage-names-from-file (pathname)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -818,31 +842,31 @@ the surrounding passed/failed/pending/failure-details bindings."
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
 If TEST is provided, run only that specific test.
 If TESTS is provided, run those specific tests (array/list of fully qualified names).
-Returns a hash table with structured results."
-  (when (and test tests)
-    (error "Specify either TEST or TESTS, not both"))
-  ;; Load the test system before framework detection so that framework
-  ;; packages (e.g. :rove) are available for detect-test-framework.
-  ;; Without this, a freshly started process without Rove pre-loaded
-  ;; would fall back to the ASDF text-capture path that cannot report
-  ;; individual test counts (always returns passed=0, failed=0).
-  (%ensure-system-loaded system-name)
+Returns a hash table with structured results.
+
+If the implicit system-load step (%ENSURE-SYSTEM-LOADED) signals an
+error, the failure is converted via MAKE-LOAD-FAILURE-RESULT so callers
+always receive a structured hash.  Errors raised after the load step
+(e.g., framework-internal errors) still propagate normally."
+  (when (and test tests) (error "Specify either TEST or TESTS, not both"))
+  (handler-case (%ensure-system-loaded system-name)
+    (error (load-err)
+      (return-from run-tests
+        (make-load-failure-result system-name load-err))))
   (let ((fw (%resolve-framework system-name framework))
-         (selective-requested-p (or test tests)))
+        (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
-               "framework" (string-downcase (symbol-name fw))
-               "test" (cond
-                         (test (princ-to-string test))
-                         (tests "selected")
-                         (t "all")))
+               "framework" (string-downcase (symbol-name fw)) "test"
+               (cond (test (princ-to-string test)) (tests "selected")
+                     (t "all")))
     (case fw
       (:rove
-       ;; System already force-reloaded above; no second load needed.
        (if (find-package :rove)
            (if selective-requested-p
-               (let ((selected-tests (if test
-                                         (list (%coerce-test-symbol test))
-                                         (%normalize-tests-arg tests))))
+               (let ((selected-tests
+                      (if test
+                          (list (%coerce-test-symbol test))
+                          (%normalize-tests-arg tests))))
                  (run-rove-selected-tests selected-tests))
                (run-rove-tests system-name))
            (if selective-requested-p
@@ -850,22 +874,25 @@ Returns a hash table with structured results."
                 "Selective test execution with TEST/TESTS requires Rove for system ~A"
                 system-name)
                (progn
-                 (log-event :warn "test-runner" "message"
-                            "Rove not loaded, using ASDF fallback")
-                 (run-asdf-fallback system-name)))))
+                (log-event :warn "test-runner" "message"
+                           "Rove not loaded, using ASDF fallback")
+                (run-asdf-fallback system-name)))))
       (:fiveam
        (when selective-requested-p
-         (error "Selective test execution is currently supported only with Rove"))
+         (error
+          "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "FiveAM support not yet implemented")
        (run-asdf-fallback system-name))
       (:prove
        (when selective-requested-p
-         (error "Selective test execution is currently supported only with Rove"))
+         (error
+          "Selective test execution is currently supported only with Rove"))
        (log-event :warn "test-runner" "message"
                   "Prove support not yet implemented")
        (run-asdf-fallback system-name))
       (t
        (when selective-requested-p
-         (error "Selective test execution is currently supported only with Rove"))
+         (error
+          "Selective test execution is currently supported only with Rove"))
        (run-asdf-fallback system-name)))))
