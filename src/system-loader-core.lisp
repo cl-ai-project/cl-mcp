@@ -91,16 +91,22 @@ on other implementations so the filter still works in portable images."
         (and cls (typep warning cls)))
       (let ((text (ignore-errors (princ-to-string warning))))
         (and (stringp text)
-             (uiop:string-prefix-p "redefining " text)))))
+             (uiop:string-prefix-p "redefining " text)
+             ;; Require " in " so unrelated warnings happening to start
+             ;; with "redefining " (e.g. method-combination chatter)
+             ;; are not mistakenly muffled.
+             (search " in " text)))))
 
 (defun %decide-suppress-redefinition (flag cleared-prior-p)
   "Resolve the `suppress-redefinition-warnings` flag against whether a
 prior system instance was actually cleared.
 
-  :auto  - suppress only when CLEARED-PRIOR-P is true.  First-time
-           loads (no prior instance) do NOT suppress, so legitimate
-           duplicate-definition warnings inside the source still
-           surface.
+  :auto  - suppress only when CLEARED-PRIOR-P is true, meaning the
+           system was already loaded (per ASDF:ALREADY-LOADED-SYSTEMS)
+           and ASDF:CLEAR-SYSTEM was just invoked.  First-time loads
+           (discoverable via the registry but not previously loaded)
+           do NOT suppress, so legitimate duplicate-definition
+           warnings inside the source still surface.
   T      - always suppress.
   NIL    - never suppress."
   (cond ((eq flag :auto) cleared-prior-p)
@@ -238,10 +244,12 @@ or NIL (no timeout). Default is 120 seconds.
 SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
 'redefining X in DEFUN' style notifications are dropped from the
 captured warning stream.  Values:
-  :auto  - suppress only when a prior instance of the system was
-           actually cleared via ASDF:CLEAR-SYSTEM before reloading.
-           First-time loads do not suppress, so legitimate duplicate-
-           definition warnings inside source still surface.
+  :auto  - suppress only when the system was actually previously
+           loaded (per ASDF:ALREADY-LOADED-SYSTEMS) and thus cleared
+           via ASDF:CLEAR-SYSTEM before reloading.  First-time loads
+           (systems merely discoverable in the source registry) do
+           not suppress, so legitimate duplicate-definition warnings
+           inside source still surface.
   T      - always suppress.
   NIL    - never suppress (preserve pre-change behavior).
 
@@ -261,7 +269,9 @@ registering it."
            (flet ((%do-load ()
                     (let ((cleared-prior-p
                             (when (and force
-                                       (asdf:find-system system-name nil))
+                                       (member system-name
+                                               (asdf:already-loaded-systems)
+                                               :test #'string-equal))
                               (let ((asd-src
                                       (ignore-errors
                                        (asdf:system-source-file

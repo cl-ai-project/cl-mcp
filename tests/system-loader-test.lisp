@@ -169,7 +169,30 @@
                          :format-control "redefining FOO in DEFUN")))
     (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
               (make-condition 'simple-warning
-                              :format-control "variable X unused"))))))
+                              :format-control "variable X unused")))))
+  (testing "textual fallback requires ' in ' to avoid false positives"
+    (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
+              (make-condition 'simple-warning
+                              :format-control "redefining makes no sense"))))
+    (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
+              (make-condition 'simple-warning
+                              :format-control "not a redefining at all")))))
+  #+sbcl
+  (testing "primary typep path recognizes a real SBCL redefinition warning"
+    (let ((cls (find-class 'sb-kernel:redefinition-warning nil)))
+      (ok cls "sb-kernel:redefinition-warning class is present on SBCL")
+      (let ((captured nil))
+        (handler-bind ((warning
+                         (lambda (w)
+                           (push w captured)
+                           (muffle-warning w))))
+          (eval '(defun %rfp-typep-probe () 1))
+          (eval '(defun %rfp-typep-probe () 2)))
+        (let ((hit (find-if (lambda (w) (typep w cls)) captured)))
+          (ok hit "handler-bind captured a sb-kernel:redefinition-warning")
+          (when hit
+            (ok (cl-mcp/src/system-loader-core::%redefinition-warning-p hit)
+                "primary typep branch of %redefinition-warning-p matches")))))))
 
 (deftest decide-suppress-redefinition-helper
   (testing "%decide-suppress-redefinition honors :auto, T, and NIL"
