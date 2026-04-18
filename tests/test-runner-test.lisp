@@ -398,7 +398,8 @@
     (let* ((tmp-dir
             (uiop:ensure-directory-pathname
              (uiop:merge-pathnames*
-              (format nil "cl-mcp-load-fail-~A/" (get-universal-time))
+              (format nil "cl-mcp-load-fail-~A-~A/"
+                      (get-universal-time) (random 100000))
               (uiop:temporary-directory))))
            (asd-path (uiop:merge-pathnames* "broken-loadfail-sys.asd" tmp-dir))
            (src-path (uiop:merge-pathnames* "broken-loadfail.lisp" tmp-dir))

@@ -280,7 +280,8 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
      (format nil "~A~%~%Hint: the worker process may have a broken ~
                   package state. Use pool-kill-worker to get a fresh ~
                   worker, then retry run-tests."
-             condition)))))
+             (or (ignore-errors (princ-to-string condition))
+                 "unprintable condition"))))))
 
 (defun %extract-defpackage-names-from-file (pathname)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -849,8 +850,13 @@ error, the failure is converted via MAKE-LOAD-FAILURE-RESULT so callers
 always receive a structured hash.  Errors raised after the load step
 (e.g., framework-internal errors) still propagate normally."
   (when (and test tests) (error "Specify either TEST or TESTS, not both"))
+  ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
+  ;; so simple-error is the precise contract.  Catching plain ERROR would
+  ;; mask serious-condition subclasses or interactive-interrupt that
+  ;; should bubble up as bugs rather than be silently bucketed into a
+  ;; load-failure result.
   (handler-case (%ensure-system-loaded system-name)
-    (error (load-err)
+    (simple-error (load-err)
       (return-from run-tests
         (make-load-failure-result system-name load-err))))
   (let ((fw (%resolve-framework system-name framework))
