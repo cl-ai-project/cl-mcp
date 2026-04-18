@@ -43,9 +43,36 @@ ToolSearch select:mcp__cl-mcp__lisp-read-file,mcp__cl-mcp__load-system,mcp__cl-m
 
 ### 2. Scaffold with `project-scaffold`
 
-Call `project-scaffold` once with `destination: "experiments"`. Pick a `name` that does not exist yet. Save the response — note the `absolute_path` and `files` list.
+Call `project-scaffold` once with `destination: "experiments"`. Save the response — note the `absolute_path` and `files` list.
 
-`project-scaffold` now **auto-registers** the `.asd` with ASDF, so `load-system` works immediately after scaffolding.
+**Pick a name ASDF does not already know.** Before calling `project-scaffold`,
+verify with ASDF itself, not with a directory listing:
+
+```
+repl-eval code='(asdf:find-system "<candidate-name>" nil)' package=CL-USER
+```
+
+If the result is anything other than `NIL`, pick a different name. Roswell
+auto-registers every `.asd` under `~/.roswell/local-projects/**` (and some
+external paths like `~/cl-mcp-experiments/`), which can include stale
+scaffolds from prior dogfood sessions that a simple `ls experiments/` will
+miss. If you create a collision, `project-scaffold` will still report success
+and `load-system` will still return green, but ASDF will silently resolve to
+the **stale** `.asd` — your brand-new tests will be invisible and the test
+runner will report counts from ghost tests. The symptom is baffling; avoid it
+by asking ASDF up front.
+
+`project-scaffold` now **auto-registers** the `.asd` with ASDF, so
+`load-system` works immediately after scaffolding. Sanity-check the
+resolution after scaffolding:
+
+```
+repl-eval code='(asdf:system-source-file (asdf:find-system "<name>"))'
+```
+
+The returned path MUST match the `absolute_path` from the scaffold response.
+If it does not, you hit a collision despite the check above — rename and
+re-scaffold.
 
 ### 3. First load (no manual ASDF registration needed)
 
@@ -125,6 +152,7 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
 | `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
 | `load-system` after changing package exports shows noisy "also exports" warnings | SBCL package-variance; stale worker image | `pool-kill-worker` then `load-system` for a clean image. `load-system` now shows a hint when this happens |
+| `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
 
 ## Success criteria
 
