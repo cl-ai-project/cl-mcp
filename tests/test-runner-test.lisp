@@ -392,3 +392,66 @@
       (ok (search "line 59" msg))
       ;; Truncated: line 0 should be gone (*load-error-tail-max-lines* = 40)
       (ok (null (search "line 0 of" msg))))))
+
+(deftest run-tests-load-failure-returns-structured-result
+  (testing "compile error during system load surfaces as load-error result"
+    (let* ((tmp-dir
+            (uiop:ensure-directory-pathname
+             (uiop:merge-pathnames*
+              (format nil "cl-mcp-load-fail-~A-~A/"
+                      (get-universal-time) (random 100000))
+              (uiop:temporary-directory))))
+           (asd-path (uiop:merge-pathnames* "broken-loadfail-sys.asd" tmp-dir))
+           (src-path (uiop:merge-pathnames* "broken-loadfail.lisp" tmp-dir))
+           (system-name "broken-loadfail-sys"))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :components ((:file \"broken-loadfail\")))~%"
+                       system-name))
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:broken-loadfail (:use #:cl))~%")
+               (format s "(in-package #:broken-loadfail)~%")
+               (format s "(defun oops ("))
+             (asdf:load-asd asd-path)
+             (let ((result (run-tests system-name)))
+               (ok (= 0 (gethash "passed" result)))
+               (ok (= 1 (gethash "failed" result)))
+               (ok (string= "load-error" (gethash "framework" result))
+                   "framework field marks the failure category")
+               (let* ((fails (gethash "failed_tests" result))
+                      (first (and (vectorp fails)
+                                  (plusp (length fails))
+                                  (aref fails 0))))
+                 (ok first "failed_tests has at least one entry")
+                 (when first
+                   (ok (string= "SYSTEM-LOAD" (gethash "test_name" first))
+                       "synthetic test_name is SYSTEM-LOAD")
+                   (ok (search "pool-kill-worker" (gethash "reason" first))
+                       "reason carries the recovery hint")
+                   (ok (search system-name (gethash "description" first))
+                       "description names the offending system")))))
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest build-run-tests-response-uses-load-failed-banner
+  (testing "load-error framework renders as ✗ LOAD FAILED in summary"
+    (let* ((result
+            (cl-mcp/src/test-runner-core::make-load-failure-result
+             "some-system"
+             (make-condition 'simple-error
+                             :format-control "boom"
+                             :format-arguments nil)))
+           (response (build-run-tests-response result))
+           (content (gethash "content" response))
+           (text (when (and (vectorp content) (plusp (length content)))
+                   (gethash "text" (aref content 0)))))
+      (ok text "response has content text")
+      (when text
+        (ok (search "LOAD FAILED" text)
+            "summary uses LOAD FAILED banner instead of generic FAIL")
+        (ok (search "SYSTEM-LOAD" text)
+            "summary lists the synthetic SYSTEM-LOAD failure")
+        (ok (search "pool-kill-worker" text)
+            "recovery hint surfaces in the rendered text")))))
