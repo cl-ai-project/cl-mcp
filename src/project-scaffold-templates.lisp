@@ -120,9 +120,11 @@ lisp-case identifiers, docstrings on public functions.
 
 ```lisp
 (asdf:load-system :{{name}})
-({{name}}/src/main:greet \"world\")
-;; => \"Hello, world!\"
 ```
+
+Add your code under `src/`; the scaffolded `src/main.lisp` ships empty
+on purpose so you can define your own package exports without fighting
+SBCL's package-variance checks on reload.
 
 ## Tests
 
@@ -149,29 +151,28 @@ lisp-case identifiers, docstrings on public functions.
   ";;;; src/main.lisp
 
 (defpackage #:{{name}}/src/main
-  (:use #:cl)
-  (:export #:greet))
+  (:use #:cl))
 
 (in-package #:{{name}}/src/main)
-
-(defun greet (who)
-  \"Return a friendly greeting for WHO.\"
-  (format nil \"Hello, ~A!\" who))
 "
-  "Template for the generated project's src/main.lisp.")
+  "Template for the generated project's src/main.lisp.
+Intentionally empty past (in-package ...): no stub defun or dangling
+(:export ...) clauses so the first load-system does not pin symbols
+into the worker image. Add your own defuns/defclasses below.")
 
 (defparameter *main-test-template*
   ";;;; tests/main-test.lisp
 
 (defpackage #:{{name}}/tests/main-test
-  (:use #:cl #:rove)
-  (:import-from #:{{name}}/src/main
-                #:greet))
+  (:use #:cl #:rove))
 
 (in-package #:{{name}}/tests/main-test)
 
-(deftest greet-test
-  (testing \"greet returns a hello string\"
-    (ok (equal \"Hello, world!\" (greet \"world\")))))
+(deftest scaffold-smoke
+  (testing \"scaffold main package loads\"
+    (ok (find-package :{{name}}/src/main))))
 "
-  "Template for the generated project's tests/main-test.lisp.")
+  "Template for the generated project's tests/main-test.lisp.
+Exists so `run-tests` has at least one green assertion out of the box;
+holds no reference to any symbol the main package does not define, so
+deleting this file or replacing the test is free of cascading errors.")

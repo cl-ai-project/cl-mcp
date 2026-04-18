@@ -161,3 +161,102 @@
         ;; Cleanup: remove from registry and delete temp files.
         (ignore-errors (asdf:clear-system system-name))
         (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest suppress-redefinition-warning-predicate
+  (testing "%redefinition-warning-p recognizes the printed SBCL shape"
+    (ok (cl-mcp/src/system-loader-core::%redefinition-warning-p
+         (make-condition 'simple-warning
+                         :format-control "redefining FOO in DEFUN")))
+    (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
+              (make-condition 'simple-warning
+                              :format-control "variable X unused")))))
+  (testing "textual fallback requires ' in ' to avoid false positives"
+    (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
+              (make-condition 'simple-warning
+                              :format-control "redefining makes no sense"))))
+    (ok (not (cl-mcp/src/system-loader-core::%redefinition-warning-p
+              (make-condition 'simple-warning
+                              :format-control "not a redefining at all")))))
+  #+sbcl
+  (testing "primary typep path recognizes a real SBCL redefinition warning"
+    (let ((cls (find-class 'sb-kernel:redefinition-warning nil)))
+      (ok cls "sb-kernel:redefinition-warning class is present on SBCL")
+      (let ((captured nil))
+        (handler-bind ((warning
+                         (lambda (w)
+                           (push w captured)
+                           (muffle-warning w))))
+          (eval '(defun %rfp-typep-probe () 1))
+          (eval '(defun %rfp-typep-probe () 2)))
+        (let ((hit (find-if (lambda (w) (typep w cls)) captured)))
+          (ok hit "handler-bind captured a sb-kernel:redefinition-warning")
+          (when hit
+            (ok (cl-mcp/src/system-loader-core::%redefinition-warning-p hit)
+                "primary typep branch of %redefinition-warning-p matches")))))))
+
+(deftest decide-suppress-redefinition-helper
+  (testing "%decide-suppress-redefinition honors :auto, T, and NIL"
+    (testing ":auto with cleared-prior-p=t suppresses"
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               :auto t))))
+    (testing ":auto with cleared-prior-p=nil does NOT suppress (first-time load)"
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            :auto nil))))
+    (testing "explicit T always suppresses"
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               t nil)))
+      (ok (eq t
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               t t))))
+    (testing "explicit NIL never suppresses"
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            nil t)))
+      (ok (null
+           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+            nil nil))))))
+
+(deftest suppress-redefinition-warning-filter-behavior
+  (testing "%call-with-suppressed-output drops redefining-warnings when asked"
+    (let ((thunk
+           (lambda ()
+             (warn "redefining FOO in DEFUN")
+             (warn "redefining BAR in DEFMACRO")
+             (warn "something real and bad")
+             :done)))
+      (testing "without suppress: all three warnings counted"
+        (multiple-value-bind (result warning-count details)
+            (cl-mcp/src/system-loader-core::%call-with-suppressed-output thunk)
+          (ok (eq result :done))
+          (ok (= warning-count 3))
+          (ok (search "redefining FOO" details))
+          (ok (search "something real" details))))
+      (testing "with suppress: redefining-warnings filtered, real one remains"
+        (multiple-value-bind (result warning-count details)
+            (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+             thunk :suppress-redefinition t)
+          (ok (eq result :done))
+          (ok (= warning-count 1))
+          (ok (null (search "redefining FOO" details)))
+          (ok (search "something real" details)))))))
+
+(deftest load-system-force-default-auto-suppresses-redefinition
+  (testing "force=true on an already-loaded system reports zero warnings
+(the implied redefining-warnings are now auto-filtered)"
+    (let ((ht (load-system "cl-mcp" :force t)))
+      (ok (hash-table-p ht))
+      (ok (string= "loaded" (gethash "status" ht)))
+      (ok (integerp (gethash "warnings" ht)))
+      (ok (zerop (gethash "warnings" ht))
+          "reloading an already-loaded system must not surface noise"))))
+
+(deftest load-system-explicit-suppress-nil-is-honored
+  (testing "explicit :suppress-redefinition-warnings nil is wired through without errors"
+    (let ((ht (load-system "cl-mcp"
+                           :force t
+                           :suppress-redefinition-warnings nil)))
+      (ok (hash-table-p ht))
+      (ok (string= "loaded" (gethash "status" ht))))))
