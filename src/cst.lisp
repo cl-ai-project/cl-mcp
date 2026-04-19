@@ -119,10 +119,45 @@ Returns the complete list of nodes (including previously collected NODES)."
                     (setf *package* pkg)))))
             (push node nodes)))))))
 
+;; Eclector's MAKE-SKIPPED-INPUT-RESULT generic function changed shape
+;; between releases:
+;;   - Eclector <= 0.10 (and the Feb-2024 release vendored under
+;;     local-projects): (client stream reason source)           -- 4 args
+;;   - Eclector >= 0.11 (Quicklisp 2024-10-12 and later):
+;;     (client stream reason children source)                   -- 5 args
+;;
+;; Rather than committing to one API and breaking the other, we inspect
+;; the installed generic function at compile time and push the feature
+;; :CL-MCP-ECLECTOR-SKIPPED-HAS-CHILDREN when the 5-argument signature is
+;; in effect. The reader conditional below then emits the matching
+;; DEFMETHOD. Note that we push the feature inside EVAL-WHEN with
+;; :COMPILE-TOPLEVEL so the reader sees it on the *next* top-level form
+;; in the same file.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (let* ((gf (fdefinition 'make-skipped-input-result))
+         (ll (#+sbcl sb-mop:generic-function-lambda-list
+              #+ccl ccl:generic-function-lambda-list
+              #+(or ecl clasp) clos:generic-function-lambda-list
+              #-(or sbcl ccl ecl clasp) closer-mop:generic-function-lambda-list
+              gf))
+         (required (loop for p in ll
+                         until (and (symbolp p)
+                                    (member p lambda-list-keywords))
+                         count 1)))
+    (cond
+      ((= required 5)
+       (pushnew :cl-mcp-eclector-skipped-has-children *features*))
+      ((= required 4)
+       (setf *features* (remove :cl-mcp-eclector-skipped-has-children *features*)))
+      (t
+       (warn "Unexpected arity ~D for ECLECTOR.PARSE-RESULT:MAKE-SKIPPED-INPUT-RESULT; ~
+              cl-mcp/src/cst assumes 4 or 5 required arguments."
+             required)))))
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defmethod make-expression-result ((client parse-result-client)
                                      result children source)
-    (declare (ignore client children))
+    (declare (ignore client))
     (destructuring-bind (start . end) source
       (make-cst-node :kind :expr
                      :value result
@@ -132,9 +167,23 @@ Returns the complete list of nodes (including previously collected NODES)."
                      :start-line (%pos->line start)
                      :end-line (%pos->line end))))
 
+  #+cl-mcp-eclector-skipped-has-children
   (defmethod make-skipped-input-result ((client parse-result-client)
                                         stream reason children source)
     (declare (ignore client stream children))
+    (destructuring-bind (start . end) source
+      (make-cst-node :kind :skipped
+                     :value reason
+                     :children nil
+                     :start start
+                     :end end
+                     :start-line (%pos->line start)
+                     :end-line (%pos->line end))))
+
+  #-cl-mcp-eclector-skipped-has-children
+  (defmethod make-skipped-input-result ((client parse-result-client)
+                                        stream reason source)
+    (declare (ignore client stream))
     (destructuring-bind (start . end) source
       (make-cst-node :kind :skipped
                      :value reason
