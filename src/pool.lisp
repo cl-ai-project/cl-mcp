@@ -91,13 +91,47 @@
 ;;; Configuration
 ;;; ---------------------------------------------------------------------------
 
-(defvar *worker-pool-warmup* 1
-  "Number of standby workers to pre-spawn and maintain.")
+(defun %env-int (name default &key (min nil))
+  "Read an integer from the environment variable NAME.  Return DEFAULT
+when NAME is unset or empty.  When the value is unparseable -- or,
+with MIN given, below MIN -- emit a warning and return DEFAULT.
 
-(defvar *max-pool-size* 16
+Used to seed pool-tuning defvars from the environment so operators
+can tune cl-mcp without editing source.  Each fresh SBCL process
+reads the environment once at load time."
+  (let ((s (uiop:getenv name)))
+    (cond
+      ((or (null s) (zerop (length s))) default)
+      (t
+       (handler-case
+           (let ((n (parse-integer s)))
+             (cond
+               ((and min (< n min))
+                (warn "~A=~A is below ~D; using default ~D"
+                      name n min default)
+                default)
+               (t n)))
+         (error ()
+           (warn "~A=~S is not an integer; using default ~D"
+                 name s default)
+           default))))))
+
+(defvar *worker-pool-warmup*
+  (%env-int "CL_MCP_WORKER_POOL_WARMUP" 1 :min 0)
+  "Number of standby workers to pre-spawn and maintain.
+Default 1; override with the CL_MCP_WORKER_POOL_WARMUP env var (must
+be a non-negative integer).  Set to 0 to disable pre-spawning;
+workers are then spawned on demand as sessions arrive.  This is the
+right setting when an MCP client has a tight handshake-timeout
+budget and no spare warmup time on a cold FASL cache.")
+
+(defvar *max-pool-size*
+  (%env-int "CL_MCP_MAX_POOL_SIZE" 16 :min 1)
   "Maximum total number of workers (bound + standby).  Prevents
 unbounded resource consumption from unlimited session creation.
-Each SBCL worker uses ~100-500MB memory.")
+Each SBCL worker uses ~100-500MB memory.
+Default 16; override with the CL_MCP_MAX_POOL_SIZE env var (must
+be a positive integer).  Must be >= *worker-pool-warmup*.")
 
 (defvar *health-check-interval-seconds* 10.0d0
   "Seconds between health monitor iterations while the pool is running.")
