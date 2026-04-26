@@ -78,19 +78,22 @@ a background replenish thread)"
 the warmup target within a generous bound"
     (unless (spawn-available-p)
       (skip "sbcl not available"))
+    ;; Bound is loose because cold-cache spawn is several seconds per
+    ;; worker and a prior test's in-flight replenish can still own
+    ;; *replenish-running* for one extra spawn after this test starts.
     (%with-fast-pool-defaults (:warmup 2)
       (unwind-protect
            (progn
              (initialize-pool)
              (let ((deadline (+ (get-internal-real-time)
-                                (* 30 internal-time-units-per-second))))
+                                (* 90 internal-time-units-per-second))))
                (loop
                  while (< (get-internal-real-time) deadline)
                  when (= 2 (length cl-mcp/src/pool::*standby-workers*))
                    return nil
                  do (sleep 0.1)))
              (ok (= 2 (length cl-mcp/src/pool::*standby-workers*))
-                 (format nil "expected 2 standbys within 30 s, got ~D"
+                 (format nil "expected 2 standbys within 90 s, got ~D"
                          (length cl-mcp/src/pool::*standby-workers*))))
         (shutdown-pool)))))
 
