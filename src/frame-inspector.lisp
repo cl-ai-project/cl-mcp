@@ -74,6 +74,17 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
     (nreverse locals)))
 
 #+sbcl
+(defun %debug-source-start-positions (debug-source)
+  "Return DEBUG-SOURCE start positions when this SBCL exposes the accessor.
+Older SBCL versions may not provide this internal accessor; avoid a read-time
+SB-C:: reference because package locks can reject interning missing symbols."
+  (let ((accessor
+          (or (find-symbol "DEBUG-SOURCE-START-POSITIONS" "SB-DI")
+              (find-symbol "DEBUG-SOURCE-START-POSITIONS" "SB-C"))))
+    (when (and accessor (fboundp accessor))
+      (funcall accessor debug-source))))
+
+#+sbcl
 (defun %frame-source-location (frame)
   "Extract source file and line from FRAME, or NIL if unavailable.
 Uses the code-location's TLF offset and the debug-source start-positions
@@ -98,8 +109,7 @@ point)."
                               code-location)))
                          (start-positions
                            (ignore-errors
-                             (sb-c::debug-source-start-positions
-                              debug-source)))
+                             (%debug-source-start-positions debug-source)))
                          (tlf-char
                            (when (and start-positions tlf-offset
                                       (< tlf-offset (length start-positions)))
