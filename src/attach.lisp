@@ -10,8 +10,18 @@
 
 (defpackage #:cl-mcp/src/attach
   (:use #:cl)
+  (:import-from #:bordeaux-threads
+                #:make-lock
+                #:with-lock-held)
+  (:import-from #:cl-mcp/src/log
+                #:log-event)
+  (:import-from #:slynk-client
+                #:slime-connect
+                #:slime-close
+                #:slime-network-error)
   (:export #:*attach-config*
            #:attach-config
+           #:make-attach-config
            #:attach-config-host
            #:attach-config-port
            #:parse-attach-spec
@@ -93,15 +103,84 @@ Returns the value of `*attach-config*' after the call."
       (setf *attach-config* (parse-attach-spec raw))))
   *attach-config*)
 
-(defun attach-active-p ()
-  "Return non-NIL when attach mode is configured for the current call.
-Stub: returns NIL until behaviour is layered in."
-  nil)
+(defvar *session-connections* (make-hash-table :test 'equal)
+  "Hash table mapping a session-id string to its open
+`slynk-client:slynk-connection' instance.  Each session keeps a single
+connection to the attached Slynk server for the lifetime of the
+session, lazily opened on first dispatch and closed on disconnect.")
 
-(defun attach-disconnect (session-id)
+(defvar *session-connections-lock* (make-lock "attach-session-connections")
+  "Lock guarding *session-connections* and the per-session call locks in
+*session-call-locks*.")
+
+(defvar *session-call-locks* (make-hash-table :test 'equal)
+  "Hash table mapping a session-id string to a `bordeaux-threads:lock'
+that serialises in-flight `slime-eval' calls on that session's
+connection.  slynk-client `slime-eval' is synchronous and the
+connection is not safe to share across concurrent callers.")
+
+(defun attach-active-p ()
+  "Return T when attach mode is configured (i.e. *attach-config* is
+non-NIL) and supported tools should route to the attached Slynk server
+instead of executing inline."
+  (not (null *attach-config*)))
+
+(defun %get-or-open-connection (session-id)
+  "Return the cached `slynk-connection' for SESSION-ID, opening one
+through `slynk-client:slime-connect' if necessary.  Signals
+`slime-network-error' if the connect attempt fails or returns NIL.
+Logs each newly opened connection as `attach.connection.opened'."
+  (check-type session-id string)
+  (let ((config *attach-config*))
+    (unless config
+      (error "attach mode is not configured; cannot open a Slynk connection"))
+    (with-lock-held (*session-connections-lock*)
+      (or (gethash session-id *session-connections*)
+          (let* ((host (attach-config-host config))
+                 (port (attach-config-port config))
+                 (conn (slime-connect host port)))
+            (unless conn
+              (error 'slime-network-error
+                     :format-control
+                     "slynk-client:slime-connect to ~A:~A returned NIL"
+                     :format-arguments (list host port)))
+            (setf (gethash session-id *session-connections*) conn)
+            (unless (gethash session-id *session-call-locks*)
+              (setf (gethash session-id *session-call-locks*)
+                    (make-lock (format nil "attach-eval/~A" session-id))))
+            (log-event :info "attach.connection.opened"
+                       "session" session-id
+                       "host" host
+                       "port" port)
+            conn)))))
+
+(defun %get-call-lock (session-id)
+  "Return the per-session call lock, creating it if missing.  Used by
+`with-attach-dispatch' to serialise concurrent eval calls on the same
+shared connection."
+  (with-lock-held (*session-connections-lock*)
+    (or (gethash session-id *session-call-locks*)
+        (setf (gethash session-id *session-call-locks*)
+              (make-lock (format nil "attach-eval/~A" session-id))))))
+
+(defun attach-disconnect (session-id &key (reason "explicit"))
   "Close and discard the cached Slynk connection for SESSION-ID, if any.
-Idempotent.  Stub: behaviour added in the connection-cache commit."
-  (declare (ignore session-id))
+Idempotent: a NIL or unknown session is a no-op.  REASON is logged with
+the close event so the source of the disconnect (network error, session
+end, manual reset) is preserved."
+  (when (and session-id (stringp session-id))
+    (let (conn)
+      (with-lock-held (*session-connections-lock*)
+        (setf conn (gethash session-id *session-connections*))
+        (when conn
+          (remhash session-id *session-connections*))
+        (remhash session-id *session-call-locks*))
+      (when conn
+        (handler-case (slime-close conn)
+          (error () nil))
+        (log-event :info "attach.connection.closed"
+                   "session" session-id
+                   "reason" reason))))
   nil)
 
 (defmacro with-attach-dispatch ((id tool params) &body body)

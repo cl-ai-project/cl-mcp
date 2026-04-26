@@ -1,9 +1,9 @@
 ;;;; tests/repl-attach-test.lisp
 ;;;;
-;;;; Tests for cl-mcp/src/attach: configuration parsing and env wiring.
-;;;; Connection-cache, dispatch macro, and end-to-end Slynk round-trip
-;;;; tests are added in subsequent commits as the corresponding behaviour
-;;;; lands.
+;;;; Tests for cl-mcp/src/attach: configuration parsing, env wiring, and
+;;;; per-session connection cache.  Dispatch macro and end-to-end
+;;;; Slynk round-trip tests are added in subsequent commits as the
+;;;; corresponding behaviour lands.
 
 (defpackage #:cl-mcp/tests/repl-attach-test
   (:use #:cl)
@@ -11,10 +11,13 @@
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/attach
                 #:*attach-config*
+                #:make-attach-config
                 #:attach-config-host
                 #:attach-config-port
                 #:parse-attach-spec
-                #:set-attach-from-env))
+                #:set-attach-from-env
+                #:attach-active-p
+                #:attach-disconnect))
 
 (in-package #:cl-mcp/tests/repl-attach-test)
 
@@ -110,3 +113,94 @@ duration of BODY, restoring the previous environment after."
       (setf (uiop:getenv "CL_MCP_SLYNK_ATTACH") "no-colon")
       (ok (%signals-error (set-attach-from-env)))
       (ok (null *attach-config*)))))
+
+;;; -- attach-active-p / connection cache -----------------------------------
+
+(defmacro %with-slynk-fixture ((port-var) &body body)
+  "Spin up a transient Slynk server on an OS-assigned port, bind PORT-VAR
+to that port, and tear it down on exit.  Tests that need attach to be
+configured should establish *attach-config* themselves before calling
+`%get-or-open-connection'."
+  (let ((p (gensym "PORT-"))
+        (cfg-snapshot (gensym "CFG-")))
+    `(let* ((,p (slynk:create-server :port 0 :dont-close t))
+            (,cfg-snapshot *attach-config*)
+            (,port-var ,p))
+       (unwind-protect
+            (progn ,@body)
+         ;; Drop any cached state we leaked into the package.
+         (let ((conns
+                (symbol-value
+                 (find-symbol "*SESSION-CONNECTIONS*" :cl-mcp/src/attach)))
+               (locks
+                (symbol-value
+                 (find-symbol "*SESSION-CALL-LOCKS*" :cl-mcp/src/attach))))
+           (loop for sid being the hash-keys of conns
+                 do (attach-disconnect sid :reason "fixture-teardown"))
+           (clrhash conns)
+           (clrhash locks))
+         (setf *attach-config* ,cfg-snapshot)
+         (handler-case (slynk:stop-server ,p)
+           (error () nil))))))
+
+(defun %open-conn (session-id)
+  "Internal helper that exercises %get-or-open-connection without
+exporting it from the attach package."
+  (funcall (find-symbol "%GET-OR-OPEN-CONNECTION" :cl-mcp/src/attach)
+           session-id))
+
+(deftest attach-active-p/follows-config
+  (testing "NIL config means attach is not active"
+    (let ((*attach-config* nil))
+      (ok (not (attach-active-p)))))
+  (testing "non-NIL config makes attach active"
+    (let ((*attach-config* (make-attach-config :host "x" :port 1)))
+      (ok (attach-active-p)))))
+
+(deftest connection-cache/same-session-returns-eq-connection
+  (testing "two opens for the same session return EQ"
+    (%with-slynk-fixture (port)
+      (let ((*attach-config* (make-attach-config :host "127.0.0.1"
+                                                 :port port)))
+        (let ((c1 (%open-conn "sess-A"))
+              (c2 (%open-conn "sess-A")))
+          (ok (not (null c1)))
+          (ok (eq c1 c2)))))))
+
+(deftest connection-cache/different-sessions-distinct
+  (testing "two sessions get distinct connections"
+    (%with-slynk-fixture (port)
+      (let ((*attach-config* (make-attach-config :host "127.0.0.1"
+                                                 :port port)))
+        (let ((c1 (%open-conn "sess-A"))
+              (c2 (%open-conn "sess-B")))
+          (ok (not (null c1)))
+          (ok (not (null c2)))
+          (ok (not (eq c1 c2))))))))
+
+(deftest attach-disconnect/removes-and-is-idempotent
+  (testing "disconnect drops the cached entry"
+    (%with-slynk-fixture (port)
+      (let ((*attach-config* (make-attach-config :host "127.0.0.1"
+                                                 :port port))
+            (conns (symbol-value
+                    (find-symbol "*SESSION-CONNECTIONS*"
+                                 :cl-mcp/src/attach))))
+        (%open-conn "sess-X")
+        (ok (gethash "sess-X" conns))
+        (attach-disconnect "sess-X" :reason "test")
+        (ok (null (gethash "sess-X" conns)))
+        ;; Idempotent: a second call is a no-op.
+        (attach-disconnect "sess-X" :reason "test-second")
+        (ok (null (gethash "sess-X" conns)))
+        ;; Idempotent: NIL session is a no-op.
+        (attach-disconnect nil)
+        (ok t)))))
+
+(deftest attach-disconnect/unknown-session-is-noop
+  (testing "disconnecting a never-opened session does not error"
+    (%with-slynk-fixture (port)
+      (let ((*attach-config* (make-attach-config :host "127.0.0.1"
+                                                 :port port)))
+        (attach-disconnect "never-opened" :reason "test")
+        (ok t)))))
