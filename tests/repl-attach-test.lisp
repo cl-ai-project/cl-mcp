@@ -347,3 +347,77 @@ keyword on `cl-mcp:run' without exporting it from cl-mcp/src/run."
     (%with-clean-env
       (ok (%signals-error (%apply-attach "no-colon" t)))
       (ok (null *attach-config*)))))
+
+(defun %tool-registered-p (name)
+  "Return T if NAME is currently registered in the global tool registry."
+  (let* ((pkg (find-package :cl-mcp/src/tools/registry))
+         (sym (and pkg (find-symbol "GET-TOOL-HANDLER" pkg))))
+    (and sym (not (null (funcall sym name))))))
+
+(defun %ensure-attach-integration-context ()
+  "Ensure the tool registry has `repl-eval' registered before an
+end-to-end test exercises `process-json-line'.  The test runner's
+force-reload of the test system clears
+`cl-mcp/src/tools/registry:*tool-registry*' (it is a defparameter), so
+load `cl-mcp/main' lazily on demand rather than gating on a sticky
+flag the way `tests/integration-test.lisp' does."
+  (unless (%tool-registered-p "repl-eval")
+    (asdf:load-system "cl-mcp/main" :force t)))
+
+(defun %tools-call-repl-eval (id code &key package)
+  "Build the JSON-RPC tools/call line shape that the MCP transport
+delivers, mirroring `tests/integration-test.lisp'.  Returns the request
+body string."
+  (with-output-to-string (s)
+    (format s "{\"jsonrpc\":\"2.0\",\"id\":~A,\"method\":\"tools/call\","
+            id)
+    (format s "\"params\":{\"name\":\"repl-eval\",")
+    (format s "\"arguments\":{\"code\":~S~@[,\"package\":~S~]}}}"
+            code package)))
+
+(deftest end-to-end/repl-eval-through-process-json-line
+  (testing "repl-eval through process-json-line round-trips via attach"
+    (%ensure-attach-integration-context)
+    (%with-attach-fixture ()
+      (let* ((cl-mcp/src/proxy:*use-worker-pool* nil)
+             (req1 (%tools-call-repl-eval
+                    101 "(defparameter *cl-mcp-attach-marker* :present)"
+                    :package "CL-USER"))
+             (resp1-json (cl-mcp/src/protocol:process-json-line req1))
+             (resp1 (yason:parse resp1-json))
+             (req2 (%tools-call-repl-eval
+                    102 "*cl-mcp-attach-marker*" :package "CL-USER"))
+             (resp2-json (cl-mcp/src/protocol:process-json-line req2))
+             (resp2 (yason:parse resp2-json))
+             (text2 (gethash "text"
+                             (aref (gethash "content"
+                                            (gethash "result" resp2))
+                                   0))))
+        (ok (string= "2.0" (gethash "jsonrpc" resp1)))
+        (ok (string= "2.0" (gethash "jsonrpc" resp2)))
+        ;; The second call sees the side effect of the first -- proof
+        ;; that both calls landed in the same attached image and not in
+        ;; a forked worker (which would lose the binding between calls).
+        (ok (search ":PRESENT" text2))))))
+
+(deftest end-to-end/threads-do-not-leak
+  (testing "thread count after a second round-trip does not grow vs the first"
+    (%ensure-attach-integration-context)
+    ;; Run two full attach cycles back-to-back.  The first cycle warms
+    ;; up Slynk's thread cache; the second cycle is the leak signal --
+    ;; if attach mode forgot to release something, the second teardown
+    ;; will leave more threads than the first.
+    (flet ((cycle ()
+             (%with-attach-fixture ()
+               (let ((cl-mcp/src/proxy:*use-worker-pool* nil))
+                 (cl-mcp/src/protocol:process-json-line
+                  (%tools-call-repl-eval 201 "(+ 1 2)" :package "CL-USER"))))
+             (sleep 0.3)
+             (length (bordeaux-threads:all-threads))))
+      (let ((after-1 (cycle))
+            (after-2 (cycle)))
+        ;; Allow a small slack window because Slynk reuses worker
+        ;; threads internally and may keep a few alive between calls.
+        (ok (<= after-2 (+ after-1 2))
+            (format nil "after cycle 2: ~A threads; after cycle 1: ~A; growth: ~A"
+                    after-2 after-1 (- after-2 after-1)))))))
