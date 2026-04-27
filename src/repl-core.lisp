@@ -102,14 +102,19 @@ on large outputs)."
     (when trace-sym
       (push trace-sym syms)
       (push nil vals))
+    ;; :override t forces this unit to emit its warning summary at its
+    ;; own boundary instead of deferring to any enclosing unit -- without
+    ;; it, compiler diagnostics from the user form leak past the stream
+    ;; rebinding above.  We deliberately do NOT set :source-namestring
+    ;; "repl-eval": that would propagate to every file compilation
+    ;; nested inside the user form (e.g. when the form calls
+    ;; (asdf:load-system ...)) and re-record every freshly-compiled
+    ;; symbol as if it had been defined at the REPL.
     (if syms
         (progv (nreverse syms) (nreverse vals)
-          ;; Ensure warnings are emitted within this dynamic extent.
-          (with-compilation-unit (:override t
-                                  :source-namestring "repl-eval")
+          (with-compilation-unit (:override t)
             (funcall thunk)))
-        (with-compilation-unit (:override t
-                                :source-namestring "repl-eval")
+        (with-compilation-unit (:override t)
           (funcall thunk))))
   #-sbcl
   (funcall thunk))
