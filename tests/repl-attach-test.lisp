@@ -1,14 +1,15 @@
 ;;;; tests/repl-attach-test.lisp
 ;;;;
-;;;; Tests for cl-mcp/src/attach: configuration parsing, env wiring, and
-;;;; per-session connection cache.  Dispatch macro and end-to-end
-;;;; Slynk round-trip tests are added in subsequent commits as the
-;;;; corresponding behaviour lands.
+;;;; Tests for cl-mcp/src/attach: configuration parsing, env wiring,
+;;;; per-session connection cache, and the with-attach-dispatch macro
+;;;; that routes repl-eval to a transient slynk:create-server fixture.
 
 (defpackage #:cl-mcp/tests/repl-attach-test
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
   (:import-from #:cl-mcp/src/attach
                 #:*attach-config*
                 #:make-attach-config
@@ -17,7 +18,8 @@
                 #:parse-attach-spec
                 #:set-attach-from-env
                 #:attach-active-p
-                #:attach-disconnect))
+                #:attach-disconnect
+                #:with-attach-dispatch))
 
 (in-package #:cl-mcp/tests/repl-attach-test)
 
@@ -204,3 +206,102 @@ exporting it from the attach package."
                                                  :port port)))
         (attach-disconnect "never-opened" :reason "test")
         (ok t)))))
+
+;;; -- with-attach-dispatch --------------------------------------------------
+
+(defmacro %with-attach-fixture (() &body body)
+  "Spin up a transient Slynk server, bind *attach-config* to its
+host/port, set *current-session-id* to a fresh string, and run BODY.
+Tears down the connection and the server in an unwind-protect."
+  (let ((p (gensym "PORT-"))
+        (s (gensym "SESSION-")))
+    `(%with-slynk-fixture (,p)
+       (let ((,s (format nil "test-~A" (random 1000000)))
+             (*attach-config* (make-attach-config :host "127.0.0.1"
+                                                  :port ,p))
+             (cl-mcp/src/state:*current-session-id* nil))
+         (setf cl-mcp/src/state:*current-session-id* ,s)
+         (unwind-protect
+              (locally ,@body)
+           (attach-disconnect ,s :reason "test-teardown"))))))
+
+(defun %dispatch (id tool params)
+  "Invoke the package-internal %dispatch-attach helper without exporting it."
+  (funcall (find-symbol "%DISPATCH-ATTACH" :cl-mcp/src/attach)
+           id tool params))
+
+(deftest with-attach-dispatch/passthrough-when-unset
+  (testing "attach unset: macro expands to body and runs it once"
+    (let ((*attach-config* nil)
+          (counter 0))
+      (with-attach-dispatch (1 "repl-eval" (make-ht "code" "(+ 1 2)"))
+        (incf counter))
+      (ok (= counter 1)))))
+
+(deftest with-attach-dispatch/round-trips-simple-form
+  (testing "(+ 1 2) round-trips through slynk and returns 3 in content"
+    (%with-attach-fixture ()
+(let ((res (%dispatch 11 "repl-eval"
+                            (make-ht "code" "(+ 1 2)"
+                                     "package" "CL-USER"))))
+        (ok (hash-table-p res))
+        (let ((content (gethash "content" res)))
+          (ok (and (vectorp content) (= 1 (length content))))
+          (let ((text (gethash "text" (aref content 0))))
+            (ok (search "3" text))))))))
+
+(deftest with-attach-dispatch/captures-stdout-and-stderr
+  (testing "stdout and stderr from the attached image are captured"
+    (%with-attach-fixture ()
+(let* ((res (%dispatch 12 "repl-eval"
+                             (make-ht "code"
+                                      "(progn (format t \"hi-out\") (format *error-output* \"hi-err\") (+ 7 8))"
+                                      "package" "CL-USER")))
+             (stdout (gethash "stdout" res))
+             (stderr (gethash "stderr" res)))
+        (ok (search "hi-out" stdout))
+        (ok (search "hi-err" stderr))))))
+
+(deftest with-attach-dispatch/captures-error-context
+  (testing "an error in the attached image lands in error_context"
+    (%with-attach-fixture ()
+(let ((res (%dispatch 13 "repl-eval"
+                            (make-ht "code" "(error \"boom\")"
+                                     "package" "CL-USER"))))
+        (ok (hash-table-p (gethash "error_context" res)))
+        (let ((ec (gethash "error_context" res)))
+          (ok (search "ERROR" (gethash "condition_type" ec)))
+          (ok (search "boom" (gethash "message" ec))))))))
+
+(deftest with-attach-dispatch/unsupported-tool-is-error
+  (testing "unsupported tools return isError without falling through"
+    (%with-attach-fixture ()
+(let ((res (%dispatch 14 "load-system"
+                            (make-ht "system" "foo"))))
+        (ok (gethash "isError" res))
+        (let* ((content (gethash "content" res))
+               (text (and (vectorp content) (plusp (length content))
+                          (gethash "text" (aref content 0)))))
+          (ok (search "load-system" text))
+          (ok (search "v1" text)))))))
+
+(deftest with-attach-dispatch/missing-code-is-error
+  (testing "missing 'code' parameter is a clean isError"
+    (%with-attach-fixture ()
+(let ((res (%dispatch 15 "repl-eval"
+                            (make-ht "package" "CL-USER"))))
+        (ok (gethash "isError" res))))))
+
+(deftest with-attach-dispatch/preserves-state-across-calls
+  (testing "two calls on the same session see each other's defparameter"
+    (%with-attach-fixture ()
+;; First call defines a marker in the attached image.
+      (%dispatch 21 "repl-eval"
+                 (make-ht "code" "(defparameter *cl-mcp-attach-marker* :present)"
+                          "package" "CL-USER"))
+      ;; Second call reads the marker and the result text shows :PRESENT.
+      (let* ((res (%dispatch 22 "repl-eval"
+                             (make-ht "code" "*cl-mcp-attach-marker*"
+                                      "package" "CL-USER")))
+             (text (gethash "text" (aref (gethash "content" res) 0))))
+        (ok (search ":PRESENT" text))))))
