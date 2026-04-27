@@ -188,6 +188,107 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 (cl-mcp:run :transport :stdio :worker-pool nil)
 ```
 
+## Attach Mode (opt-in)
+
+By default, every `repl-eval` runs in a forked, hermetic worker. That is
+the right default for most cl-mcp users — it isolates the AI agent from
+the host image — but it makes one workflow awkward: live debugging or
+UAT against a long-running application image (a strategy server, a
+daemon, a game). The hermetic worker has none of that application's
+state.
+
+**Attach mode** is an opt-in escape hatch. When configured, cl-mcp
+points `repl-eval` at a user-supplied, already-running [Slynk] listener
+and routes the evaluation through `slynk-client:slime-eval` instead of
+through the worker pool. Other tools and other sessions remain on the
+hermetic-worker path; attach mode is per-session and covers `repl-eval`
+only in v1.
+
+[Slynk]: https://github.com/joaotavora/sly
+
+### Configuring it
+
+Two equivalent surfaces:
+
+```bash
+# Environment variable (read once on cl-mcp:run entry)
+CL_MCP_SLYNK_ATTACH=127.0.0.1:4005 ros run -s cl-mcp -e '(cl-mcp:run)'
+```
+
+```lisp
+;; Keyword argument on cl-mcp:run (takes precedence over the env var)
+(cl-mcp:run :transport :stdio :slynk-attach "127.0.0.1:4005")
+```
+
+In your application image, start a Slynk listener on the same port
+*before* starting cl-mcp:
+
+```lisp
+(asdf:load-system :slynk)
+(slynk:create-server :port 4005 :dont-close t)
+```
+
+Now any `repl-eval` issued through cl-mcp evaluates inside that running
+image. State persists across calls — exactly what live debugging and
+UAT need.
+
+### Invariants
+
+- **Per-session, single connection.** Each MCP session opens one Slynk
+  connection and reuses it for the session's lifetime. Cross-session
+  sharing is not implemented.
+- **`repl-eval` only.** Other tools (`load-system`, `run-tests`, the
+  `code-*` family, `inspect-object`) still go through the hermetic
+  worker pool. Routing them through attach mode is on the roadmap as
+  per-tool follow-ups.
+- **Hermetic-worker path unchanged when attach is unset.** With
+  `CL_MCP_SLYNK_ATTACH` unset and `:slynk-attach` not passed, cl-mcp
+  behaves bit-for-bit as before — no extra dispatch, no Slynk traffic.
+- **Concurrency is serialised per connection.** `slime-eval` is
+  synchronous, so cl-mcp serialises concurrent `repl-eval` calls on a
+  single connection with a `bordeaux-threads` lock.
+- **Network errors fail closed.** If the connection drops mid-call, the
+  call returns an `isError` result and the cached connection is
+  discarded; the next call reconnects on demand. There is no automatic
+  retry inside a single call.
+
+### Licensing note
+
+Attach mode depends on the [`slynk-client`] library, which is **GPL
+v2**. cl-mcp itself is MIT-licensed; the combined-work implication of
+the dependency is a maintainer-review item. Until that review lands,
+the dependency is a direct `:depends-on` entry in `cl-mcp.asd` —
+i.e. building cl-mcp pulls in `slynk-client`. A follow-up may move
+attach mode behind a separate ASDF system loaded only when configured,
+in which case cl-mcp's MIT core stays GPL-clean. If the licensing
+posture matters for your deployment, either avoid configuring attach
+mode (the GPL code is loaded but never exercised) or watch the
+upstream PR thread for the optional-system restructuring.
+
+[`slynk-client`]: https://github.com/Shookakko/slynk-client
+
+### Local-development setup
+
+`slynk-client` is not on Quicklisp; the cl-mcp dev workflow expects it
+to be checked out alongside cl-mcp under `$LISP_WORKSPACE` (or anywhere
+ASDF's source registry can find it). `scripts/setup-dev.sh` documents
+the layout and clones the pinned fork if it isn't already present:
+
+```bash
+./scripts/setup-dev.sh
+```
+
+CI configuration is out of scope for v1. If your CI pipeline needs to
+build cl-mcp with attach support, replicate what the script does or add
+a `flake.nix` input — the maintainer's preferred path will be settled
+during PR review.
+
+### Opting out
+
+Unset `CL_MCP_SLYNK_ATTACH` and omit `:slynk-attach` from `cl-mcp:run`.
+With both unset, attach mode is inert and the worker-pool path is
+identical to a build that does not include attach.
+
 ## Environment Variables
 
 | Variable | Purpose | Default |
@@ -198,6 +299,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
 | `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
 | `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
+| `CL_MCP_SLYNK_ATTACH` | `host:port` of a running Slynk listener to route `repl-eval` to (see Attach Mode) | (not set = hermetic worker) |
 
 ### Tuning warmup for cold-start handshakes
 
