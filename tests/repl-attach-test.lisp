@@ -305,3 +305,45 @@ Tears down the connection and the server in an unwind-protect."
                                       "package" "CL-USER")))
              (text (gethash "text" (aref (gethash "content" res) 0))))
         (ok (search ":PRESENT" text))))))
+
+;;; -- :slynk-attach keyword on cl-mcp:run -----------------------------------
+
+(defun %apply-attach (spec supplied-p)
+  "Invoke the package-internal helper that backs the :slynk-attach
+keyword on `cl-mcp:run' without exporting it from cl-mcp/src/run."
+  (funcall (find-symbol "%APPLY-SLYNK-ATTACH" :cl-mcp/src/run)
+           spec supplied-p))
+
+(deftest run-slynk-attach-keyword/binds-config
+  (testing "supplied keyword string parses and binds *attach-config*"
+    (%with-clean-env
+      (%apply-attach "127.0.0.1:4005" t)
+      (ok (not (null *attach-config*)))
+      (ok (string= (attach-config-host *attach-config*) "127.0.0.1"))
+      (ok (= (attach-config-port *attach-config*) 4005)))))
+
+(deftest run-slynk-attach-keyword/nil-clears
+  (testing "supplied NIL clears *attach-config*"
+    (%with-clean-env
+      (setf *attach-config* (make-attach-config :host "x" :port 1))
+      (%apply-attach nil t)
+      (ok (null *attach-config*)))))
+
+(deftest run-slynk-attach-keyword/unsupplied-falls-back-to-env
+  (testing "unsupplied keyword reads CL_MCP_SLYNK_ATTACH"
+    (%with-clean-env
+      (setf (uiop:getenv "CL_MCP_SLYNK_ATTACH") "127.0.0.1:4005")
+      (%apply-attach nil nil)
+      (ok (not (null *attach-config*)))
+      (ok (string= (attach-config-host *attach-config*) "127.0.0.1"))
+      (ok (= (attach-config-port *attach-config*) 4005))))
+  (testing "unsupplied keyword with no env leaves config NIL"
+    (%with-clean-env
+      (%apply-attach nil nil)
+      (ok (null *attach-config*)))))
+
+(deftest run-slynk-attach-keyword/malformed-spec-raises
+  (testing "supplied malformed keyword raises and config stays NIL"
+    (%with-clean-env
+      (ok (%signals-error (%apply-attach "no-colon" t)))
+      (ok (null *attach-config*)))))
