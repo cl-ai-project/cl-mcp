@@ -205,51 +205,105 @@ ERROR-CONTEXT is either NIL on success, or a plist with keys
 `build-eval-response' already knows how to render.  Reader errors,
 unknown packages, and any error during evaluation are caught locally in
 the attached image so a single slime-eval round-trip always returns the
-five-tuple rather than blowing up the connection."
-  `(let ((stdout-stream (make-string-output-stream))
-         (stderr-stream (make-string-output-stream))
-         (error-context nil)
-         (raw-value nil)
-         (printed nil))
-     (handler-case
-         (let* ((pkg-name ,(or package-name "CL-USER"))
-                (pkg (or (find-package pkg-name)
-                         (error "Package ~S not found in attached image"
-                                pkg-name)))
-                (forms
-                 (let ((*package* pkg)
-                       (*read-eval* nil))
-                   (with-input-from-string (s ,code-string)
-                     (loop with eof = '#:eof
-                           for form = (read s nil eof)
-                           until (eq form eof)
-                           collect form)))))
-           (let ((*standard-output* stdout-stream)
-                 (*error-output* stderr-stream)
-                 (*package* pkg))
-             (dolist (form forms)
-               (setf raw-value (eval form))))
-           (let ((*print-readably* nil)
-                 (*print-circle* t))
-             (setf printed (prin1-to-string raw-value))))
-       (error (e)
-         (setf error-context
-               (list :condition-type (princ-to-string (type-of e))
-                     :message
-                     (handler-case (princ-to-string e)
-                       (error () (format nil "<error formatting ~A>"
-                                         (type-of e))))
-                     :restarts nil
-                     :frames nil))
-         (setf raw-value
-               (handler-case (princ-to-string e)
-                 (error () (format nil "<error formatting ~A>" (type-of e)))))
-         (setf printed raw-value)))
-     (list printed
-           raw-value
-           (get-output-stream-string stdout-stream)
-           (get-output-stream-string stderr-stream)
-           error-context)))
+five-tuple rather than blowing up the connection.
+
+Local bindings are built from symbols interned in COMMON-LISP-USER
+with a `%cl-mcp-attach-' prefix so the form refers to no symbols
+interned in CL-MCP/SRC/ATTACH.  Without that, the attached Slynk image
+would have to load cl-mcp just so its reader could resolve the rex
+form's package-qualified locals; a missing package surfaces as
+`:reader-error' on the slynk wire, slynk-client treats that as
+\"Invalid protocol message\" and signals it unhandled, and the
+`--disable-debugger' MCP host then exits with `Connection closed' on
+the first repl-eval.
+
+CL-USER is the only package guaranteed to exist in every conforming
+image, and slynk-client serialises each form with
+`with-standard-io-syntax' (which binds `*print-circle*' to NIL).
+Uninterned gensyms therefore round-trip as distinct symbols on each
+occurrence -- a `let' binding and its body reference would no longer
+share identity, and the body reference would surface as an unbound-
+variable error during `slime-eval'.  Interned CL-USER symbols
+round-trip by `eq' across the wire because both ends print and read
+them through the same package, which is what makes the let bindings
+match their uses.  The `%cl-mcp-attach-' prefix isolates them from
+ordinary user variables -- the symbols still get interned in CL-USER
+on the attached image, but their names are clearly machinery and the
+let binding shadows any pre-existing CL-USER variable for the
+duration of the form only.
+
+The reader loop is written with `do*' rather than `loop' on purpose:
+`loop' keywords (`with', `for', `until', `collect') would print as
+`CL-MCP/SRC/ATTACH::WITH' etc. when the form is built inside this
+package, which would re-introduce the host-package dependency through
+the back door.  `do*' uses ordinary CL operators only."
+  (flet ((cl-user-sym (name)
+           (intern name (find-package :common-lisp-user))))
+    (let ((s-stdout    (cl-user-sym "%CL-MCP-ATTACH-STDOUT"))
+          (s-stderr    (cl-user-sym "%CL-MCP-ATTACH-STDERR"))
+          (s-err-ctx   (cl-user-sym "%CL-MCP-ATTACH-ERROR-CONTEXT"))
+          (s-raw       (cl-user-sym "%CL-MCP-ATTACH-RAW-VALUE"))
+          (s-printed   (cl-user-sym "%CL-MCP-ATTACH-PRINTED"))
+          (s-pkg-name  (cl-user-sym "%CL-MCP-ATTACH-PKG-NAME"))
+          (s-pkg       (cl-user-sym "%CL-MCP-ATTACH-PKG"))
+          (s-forms     (cl-user-sym "%CL-MCP-ATTACH-FORMS"))
+          (s-stream    (cl-user-sym "%CL-MCP-ATTACH-STREAM"))
+          (s-acc       (cl-user-sym "%CL-MCP-ATTACH-ACC"))
+          (s-read-form (cl-user-sym "%CL-MCP-ATTACH-READ-FORM"))
+          (s-eval-form (cl-user-sym "%CL-MCP-ATTACH-EVAL-FORM"))
+          (s-eof       (cl-user-sym "%CL-MCP-ATTACH-EOF"))
+          (s-rest      (cl-user-sym "%CL-MCP-ATTACH-REST"))
+          (s-condition (cl-user-sym "%CL-MCP-ATTACH-CONDITION")))
+      `(let ((,s-stdout (make-string-output-stream))
+             (,s-stderr (make-string-output-stream))
+             (,s-err-ctx nil)
+             (,s-raw nil)
+             (,s-printed nil))
+         (handler-case
+             (let* ((,s-pkg-name ,(or package-name "CL-USER"))
+                    (,s-pkg (or (find-package ,s-pkg-name)
+                                (error "Package ~S not found in attached image"
+                                       ,s-pkg-name)))
+                    (,s-forms
+                     (let ((*package* ,s-pkg)
+                           (*read-eval* nil))
+                       (with-input-from-string (,s-stream ,code-string)
+                         (do* ((,s-eof '#:eof)
+                               (,s-acc nil)
+                               (,s-read-form (read ,s-stream nil ,s-eof)
+                                             (read ,s-stream nil ,s-eof)))
+                              ((eq ,s-read-form ,s-eof) (nreverse ,s-acc))
+                           (push ,s-read-form ,s-acc))))))
+               (let ((*standard-output* ,s-stdout)
+                     (*error-output* ,s-stderr)
+                     (*package* ,s-pkg))
+                 (do ((,s-rest ,s-forms (cdr ,s-rest))
+                      (,s-eval-form))
+                     ((null ,s-rest))
+                   (setf ,s-eval-form (car ,s-rest))
+                   (setf ,s-raw (eval ,s-eval-form))))
+               (let ((*print-readably* nil)
+                     (*print-circle* t))
+                 (setf ,s-printed (prin1-to-string ,s-raw))))
+           (error (,s-condition)
+             (setf ,s-err-ctx
+                   (list :condition-type (princ-to-string (type-of ,s-condition))
+                         :message
+                         (handler-case (princ-to-string ,s-condition)
+                           (error () (format nil "<error formatting ~A>"
+                                             (type-of ,s-condition))))
+                         :restarts nil
+                         :frames nil))
+             (setf ,s-raw
+                   (handler-case (princ-to-string ,s-condition)
+                     (error () (format nil "<error formatting ~A>"
+                                       (type-of ,s-condition)))))
+             (setf ,s-printed ,s-raw)))
+         (list ,s-printed
+               ,s-raw
+               (get-output-stream-string ,s-stdout)
+               (get-output-stream-string ,s-stderr)
+               ,s-err-ctx)))))
 
 (defun %unsupported-tool-error (tool)
   "Return a tool-result hash-table indicating that TOOL is not supported
