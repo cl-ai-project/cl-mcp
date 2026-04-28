@@ -32,6 +32,19 @@
                           (values boolean &optional))
                 run))
 
+(defun %dispatch-with-stdout-guard (thunk)
+  "Run THUNK with `*standard-output*' bound to a capture stream so any
+in-process code -- a tool, a library it calls into, a slynk-client
+event handler -- cannot corrupt the stdio JSON-RPC pipe by printing.
+Returns two values: THUNK's primary return, and the captured stdout
+string (empty when nothing was printed).  `*error-output*' is left
+alone: it maps to the process's stderr fd, which is separate from the
+JSON-RPC pipe and is the intended channel for log output."
+  (let* ((capture (make-string-output-stream))
+         (result (let ((*standard-output* capture))
+                   (funcall thunk))))
+    (values result (get-output-stream-string capture))))
+
 (defun %apply-slynk-attach (slynk-attach supplied-p)
   "Apply attach-mode configuration on `cl-mcp:run' entry.
 When SUPPLIED-P is true, treat SLYNK-ATTACH as authoritative: NIL
@@ -111,7 +124,16 @@ consulted via `set-attach-from-env'."
                                       "error" (princ-to-string e))
                            (return))))
                       (t
-                       (let ((resp (process-json-line line state)))
+                       (multiple-value-bind (resp captured)
+                           (%dispatch-with-stdout-guard
+                            (lambda () (process-json-line line state)))
+                         (when (plusp (length captured))
+                           (log-event :warn "stdio.transport.stdout-pollution"
+                                      "bytes" (length captured)
+                                      "preview"
+                                      (subseq captured
+                                              0
+                                              (min 200 (length captured)))))
                          (when resp
                            (handler-case
                                (progn

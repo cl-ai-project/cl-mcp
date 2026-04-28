@@ -19,7 +19,9 @@
                 #:set-attach-from-env
                 #:attach-active-p
                 #:attach-disconnect
-                #:with-attach-dispatch))
+                #:with-attach-dispatch)
+  (:import-from #:cl-mcp/src/run
+                #:run))
 
 (in-package #:cl-mcp/tests/repl-attach-test)
 
@@ -421,3 +423,89 @@ body string."
         (ok (<= after-2 (+ after-1 2))
             (format nil "after cycle 2: ~A threads; after cycle 1: ~A; growth: ~A"
                     after-2 after-1 (- after-2 after-1)))))))
+
+;;; -- stdio transport stdout-pollution guard -------------------------------
+;;;
+;;; In-process libraries used by attach mode (notably slynk-client) print
+;;; protocol events to *standard-output* unconditionally.  When the stdio
+;;; transport routes JSON-RPC frames through *standard-output*, any such
+;;; print would corrupt the framing and tear down the MCP transport on
+;;; the first attach round-trip.  The two tests below pin the contract:
+;;; nothing the transport calls into can leak onto the wire.
+
+(defun %dispatch-with-stdout-guard (thunk)
+  "Reach the package-internal helper from cl-mcp/src/run without
+exporting it from the production package."
+  (funcall (find-symbol "%DISPATCH-WITH-STDOUT-GUARD" :cl-mcp/src/run)
+           thunk))
+
+(deftest stdout-guard/captures-prints-and-returns-thunk-value
+  (testing "prints to *standard-output* during the thunk are captured"
+    (multiple-value-bind (value captured)
+        (%dispatch-with-stdout-guard
+         (lambda ()
+           (princ "leak-1 ")
+           (print '(:slynk-client-style :event))
+           42))
+      (ok (= value 42))
+      (ok (search "leak-1" captured))
+      (ok (search ":SLYNK-CLIENT-STYLE" captured))))
+  (testing "an empty thunk returns its value and an empty capture"
+    (multiple-value-bind (value captured)
+        (%dispatch-with-stdout-guard (lambda () :ok))
+      (ok (eq value :ok))
+      (ok (zerop (length captured))))))
+
+(deftest stdout-guard/does-not-escape-to-caller-stdout
+  (testing "*standard-output* of the caller is unaffected by thunk prints"
+    (let ((caller-stream (make-string-output-stream)))
+      (let ((*standard-output* caller-stream))
+        (%dispatch-with-stdout-guard
+         (lambda ()
+           (princ "this must not reach caller-stream")
+           (terpri))))
+      (ok (zerop (length (get-output-stream-string caller-stream)))))))
+
+(defparameter +stdio-pollution-initialize+
+  (concatenate 'string
+               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+               "\"params\":{\"protocolVersion\":\"2024-11-05\","
+               "\"capabilities\":{},"
+               "\"clientInfo\":{\"name\":\"stdout-guard-probe\",\"version\":\"0.0.1\"}}}"
+               (string #\Newline)))
+
+(defun %every-line-is-json-p (output)
+  "Return T iff every newline-terminated line in OUTPUT parses as JSON."
+  (with-input-from-string (s output)
+    (loop for line = (read-line s nil nil)
+          while line
+          always (handler-case
+                     (progn (yason:parse line) t)
+                   (error () nil)))))
+
+(deftest stdio-attach-roundtrip/no-stdout-pollution
+  (testing "attach repl-eval through stdio transport yields only JSON lines"
+    (%ensure-attach-integration-context)
+    (%with-slynk-fixture (port)
+      (let* ((host "127.0.0.1")
+             (spec (format nil "~A:~A" host port))
+             (eval-line (concatenate 'string
+                                     (%tools-call-repl-eval
+                                      2 "(+ 1 2)" :package "CL-USER")
+                                     (string #\Newline)))
+             (in (make-string-input-stream
+                  (concatenate 'string
+                               +stdio-pollution-initialize+
+                               eval-line)))
+             (out (make-string-output-stream))
+             (cl-mcp/src/proxy:*use-worker-pool* nil))
+        (run :transport :stdio :in in :out out :slynk-attach spec)
+        (let ((output (get-output-stream-string out)))
+          ;; The exact symptom of the bug we are guarding against: any
+          ;; raw Lisp form (a `(' that does not start a JSON object) on
+          ;; the wire would have crashed the MCP transport in production.
+          (ok (%every-line-is-json-p output)
+              (format nil "stdio output had non-JSON line(s): ~S" output))
+          ;; And the eval still produces a real round-trip result.
+          (ok (search "\"id\":2" output)
+              "tools/call response for id=2 is present"))))))
