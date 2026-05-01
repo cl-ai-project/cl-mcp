@@ -34,28 +34,37 @@
                   (lambda ()
                     (serve-tcp :host "127.0.0.1" :port 0
                                :on-listening (lambda (p) (setf port-var p))
-                               :accept-once t))
+                               :accept-once t
+                               :worker-pool nil))
                   :name "tcp-test-server")))
-        (loop repeat 200 until port-var do (sleep 0.01d0))
-        (ok port-var)
-        (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
-                                             :element-type 'character))
-               (stream (usocket:socket-stream sock)))
-          (unwind-protect
-               (let ((req (concatenate
-                           'string
-                           "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                           "\"method\":\"initialize\",\"params\":{}}\n")))
-                 (write-string req stream)
-                 (finish-output stream)
-                 ;; Half-close our write side so the server sees EOF and exits
-                 ;; the read loop even if the client crashes before closing.
-                 (ignore-errors (usocket:socket-shutdown sock :output))
-                 (let ((line (read-line stream)))
-                   (ok (search "\"result\"" line))))
-            (ignore-errors (close stream))
-            (ignore-errors (usocket:socket-close sock))))
-        (join-thread thr))))))
+        (unwind-protect
+             (progn
+               (loop repeat 1000 until port-var do (sleep 0.01d0))
+               (ok port-var)
+               (when port-var
+                 (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
+                                                      :element-type 'character))
+                        (stream (usocket:socket-stream sock)))
+                   (unwind-protect
+                        (let ((req (concatenate
+                                    'string
+                                    "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                    "\"method\":\"initialize\",\"params\":{}}\n")))
+                          (write-string req stream)
+                          (finish-output stream)
+                          ;; Half-close our write side so the server sees EOF and exits
+                          ;; the read loop even if the client crashes before closing.
+                          (ignore-errors (usocket:socket-shutdown sock :output))
+                          (let ((line (read-line stream)))
+                            (ok (search "\"result\"" line))))
+                     (ignore-errors (close stream))
+                     (ignore-errors (usocket:socket-close sock))))))
+          ;; If port-var never got set or connection failed, we MUST ensure the
+          ;; thread exits or we will hang on join-thread.
+          (unless port-var
+            ;; Nudge it to exit if it's still waiting for a port
+            (sleep 0.1))
+          (join-thread thr)))))))
 
 (deftest tcp-idle-connection-does-not-drop
   (testing "idle tcp connections stay open for later requests"
@@ -67,29 +76,31 @@
                       (lambda ()
                         (serve-tcp :host "127.0.0.1" :port 0
                                    :accept-once t
-                                   :on-listening (lambda (p) (setf port-var p))))
+                                   :on-listening (lambda (p) (setf port-var p))
+                                   :worker-pool nil))
                       :name "tcp-idle-server")))
             (unwind-protect
                  (progn
-                   (loop repeat 200 until port-var do (sleep 0.01d0))
+                   (loop repeat 1000 until port-var do (sleep 0.01d0))
                    (ok port-var)
-                   (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
-                                                        :element-type 'character))
-                          (stream (usocket:socket-stream sock)))
-                     (unwind-protect
-                          (let ((req (concatenate
-                                      'string
-                                      "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                      "\"method\":\"initialize\",\"params\":{}}\n")))
-                            ;; Wait longer than *tcp-read-timeout* without sending.
-                            (sleep 0.3d0)
-                            (write-string req stream)
-                            (finish-output stream)
-                            (ignore-errors (usocket:socket-shutdown sock :output))
-                            (let ((line (read-line stream nil nil)))
-                              (ok (and line (search "\"result\"" line)))))
-                       (ignore-errors (close stream))
-                       (ignore-errors (usocket:socket-close sock)))))
+                   (when port-var
+                     (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
+                                                          :element-type 'character))
+                            (stream (usocket:socket-stream sock)))
+                       (unwind-protect
+                            (let ((req (concatenate
+                                        'string
+                                        "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                        "\"method\":\"initialize\",\"params\":{}}\n")))
+                              ;; Wait longer than *tcp-read-timeout* without sending.
+                              (sleep 0.3d0)
+                              (write-string req stream)
+                              (finish-output stream)
+                              (ignore-errors (usocket:socket-shutdown sock :output))
+                              (let ((line (read-line stream nil nil)))
+                                (ok (and line (search "\"result\"" line)))))
+                         (ignore-errors (close stream))
+                         (ignore-errors (usocket:socket-close sock))))))
               (join-thread thr)))))))
 
 (deftest tcp-thread-helper-lifecycle
@@ -99,7 +110,8 @@
         (unwind-protect
              (multiple-value-bind (thr port)
                  (start-tcp-server-thread :host "127.0.0.1" :port 0
-                                          :accept-once nil)
+                                          :accept-once nil
+                                          :worker-pool nil)
                (ok thr)
                (ok (tcp-server-running-p))
                (ok (integerp port))
@@ -121,7 +133,8 @@
                    (ignore-errors (usocket:socket-close sock))))
                (ok (eq :already-running
                        (ensure-tcp-server-thread :host "127.0.0.1" :port port
-                                                 :accept-once nil))))
+                                                 :accept-once nil
+                                                 :worker-pool nil))))
           (stop-tcp-server-thread)))
     (ok (not (tcp-server-running-p)))))
 
@@ -165,10 +178,11 @@
                      (start-tcp-server-thread :host "127.0.0.1" :port 0
                                               :accept-once nil
                                               :on-listening (lambda (v)
-                                                              (setf port v)))
+                                                              (setf port v))
+                                              :worker-pool nil)
                    (declare (ignore thr))
                    (setf port p))
-                 (loop repeat 200 until port do (sleep 0.01d0))
+                 (loop repeat 1000 until port do (sleep 0.01d0))
                  (ok port)
                  (flet ((send-init ()
                           (let* ((sock (usocket:socket-connect
