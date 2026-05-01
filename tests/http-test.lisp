@@ -20,7 +20,8 @@
                 #:http-session-active-requests
                 #:http-session-active-requests-lock)
   (:import-from #:usocket)
-  (:import-from #:bordeaux-threads))
+  (:import-from #:bordeaux-threads)
+  (:import-from #:cl-mcp/tests/test-helpers #:wait-for))
 
 (in-package #:cl-mcp/tests/http-test)
 
@@ -115,7 +116,7 @@ Uses Connection: close to avoid keep-alive hanging."
              (multiple-value-bind (acceptor port)
                  (start-http-server :host "127.0.0.1" :port 0 :token nil)
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (multiple-value-bind (status headers body)
                    (handler-case
                        (send-http-request
@@ -143,7 +144,7 @@ Uses Connection: close to avoid keep-alive hanging."
              (multiple-value-bind (acceptor port)
                  (start-http-server :host "127.0.0.1" :port 0 :token nil)
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (let ((status
                        (handler-case
                            (send-http-request
@@ -281,7 +282,7 @@ Uses Connection: close to avoid keep-alive hanging."
                  (start-http-server :host "127.0.0.1" :port 0
                                     :token "test-token")
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (multiple-value-bind (status headers)
                    (handler-case
                        (send-http-request
@@ -309,7 +310,7 @@ Uses Connection: close to avoid keep-alive hanging."
                  (start-http-server :host "127.0.0.1" :port 0
                                     :token "correct-token")
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (let ((status
                        (handler-case
                            (send-http-request
@@ -336,7 +337,7 @@ Uses Connection: close to avoid keep-alive hanging."
                  (start-http-server :host "127.0.0.1" :port 0
                                     :token "correct-token")
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (multiple-value-bind (status headers body)
                    (handler-case
                        (send-http-request
@@ -367,7 +368,7 @@ Uses Connection: close to avoid keep-alive hanging."
                  (start-http-server :host "127.0.0.1" :port 0
                                     :token "test-token")
                (declare (ignore acceptor))
-               (sleep 0.1d0)
+               (wait-for () (http-server-running-p))
                (let ((status
                        (handler-case
                            (send-http-request

@@ -12,7 +12,8 @@
                 #:tcp-server-running-p
                 #:*tcp-read-timeout*)
   (:import-from #:bordeaux-threads #:make-thread #:join-thread)
-  (:import-from #:usocket))
+  (:import-from #:usocket)
+  (:import-from #:cl-mcp/tests/test-helpers #:wait-for))
 
 (in-package #:cl-mcp/tests/tcp-test)
 
@@ -39,7 +40,7 @@
                   :name "tcp-test-server")))
         (unwind-protect
              (progn
-               (loop repeat 1000 until port-var do (sleep 0.01d0))
+               (wait-for (:timeout 10.0d0) port-var)
                (ok port-var)
                (when port-var
                  (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
@@ -81,7 +82,7 @@
                       :name "tcp-idle-server")))
             (unwind-protect
                  (progn
-                   (loop repeat 1000 until port-var do (sleep 0.01d0))
+                   (wait-for (:timeout 10.0d0) port-var)
                    (ok port-var)
                    (when port-var
                      (let* ((sock (usocket:socket-connect "127.0.0.1" port-var
@@ -182,7 +183,7 @@
                                               :worker-pool nil)
                    (declare (ignore thr))
                    (setf port p))
-                 (loop repeat 1000 until port do (sleep 0.01d0))
+                 (wait-for (:timeout 10.0d0) port)
                  (ok port)
                  (flet ((send-init ()
                           (let* ((sock (usocket:socket-connect
