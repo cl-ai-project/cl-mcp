@@ -1039,7 +1039,8 @@
                 'string
                 "{\"jsonrpc\":\"2.0\",\"id\":39,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"run-tests\","
-                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\"}}}")))
+                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\","
+                "\"reload\":false}}}")))
       (let* ((resp (%pjl req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -1068,7 +1069,8 @@
                 "\"params\":{\"name\":\"run-tests\","
                 "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\","
                 "\"tests\":[\"cl-mcp/tests/utils-strings-test::ensure-trailing-newline-adds-newline\","
-                "\"cl-mcp/tests/utils-strings-test::ensure-trailing-newline-preserves-existing\"]}}}")))
+                "\"cl-mcp/tests/utils-strings-test::ensure-trailing-newline-preserves-existing\"],"
+                "\"reload\":false}}}")))
       (let* ((resp (%pjl req))
              (obj (parse resp))
              (result (gethash "result" obj))
@@ -1092,7 +1094,8 @@
                 'string
                 "{\"jsonrpc\":\"2.0\",\"id\":3902,\"method\":\"tools/call\","
                 "\"params\":{\"name\":\"run-tests\","
-                "\"arguments\":{\"system\":\"cl-mcp/tests/test-runner-test-error\"}}}")))
+                "\"arguments\":{\"system\":\"cl-mcp/tests/test-runner-test-error\","
+                "\"reload\":false}}}")))
       (let* ((resp (%pjl req))
              (obj (parse resp))
              (result (gethash "result" obj))

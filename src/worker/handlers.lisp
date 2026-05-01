@@ -129,6 +129,7 @@ result_preview, and error_context."
          (framework (gethash "framework" params))
          (test (gethash "test" params))
          (tests (gethash "tests" params))
+         (reload (%bool-default params "reload" t))
          (timeout (let ((v (gethash "timeout_seconds" params)))
                     (and v (numberp v) (plusp v) v))))
     (unless system
@@ -137,7 +138,8 @@ result_preview, and error_context."
              (run-tests system
                         :framework framework
                         :test test
-                        :tests tests)))
+                        :tests tests
+                        :reload reload)))
       (let ((test-result (if timeout
                              (handler-case
                                  (sb-ext:with-timeout timeout

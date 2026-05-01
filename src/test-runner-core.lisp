@@ -167,86 +167,38 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
                                        (push assertion results)))))))
     (nreverse results)))
 
-(defun %coerce-test-symbol (test-name)
-  "Convert TEST-NAME to a fully qualified test symbol."
-  (cond
-    ((null test-name)
-     (error "Test name must not be NIL"))
-    ((symbolp test-name)
-     (unless (symbol-package test-name)
-       (error "Test symbol must be package-qualified: ~S" test-name))
-     test-name)
-    ((stringp test-name)
-     (let* ((name (string-upcase test-name))
-            (colon-pos (search "::" name)))
-       (unless colon-pos
-         (error "Test name must be fully qualified (pkg::name): ~A" test-name))
-       (let* ((pkg-name (subseq name 0 colon-pos))
-              (sym-name (subseq name (+ colon-pos 2)))
-              (pkg (find-package pkg-name)))
-         (unless pkg
-           (error "Test package not found: ~A" pkg-name))
-         (intern sym-name pkg))))
-    (t
-     (error "Test name must be a string or symbol: ~S" test-name))))
-
 (defun %normalize-tests-arg (tests)
-  "Normalize TESTS to a non-empty list of fully-qualified test symbols."
-  (let ((items (cond
-                 ((null tests) nil)
-                 ((vectorp tests) (coerce tests 'list))
-                 ((listp tests) tests)
-                 (t (error "tests must be an array of test names")))))
-    (when (and tests (null items))
-      (error "tests must contain at least one test name"))
-    (mapcar #'%coerce-test-symbol items)))
+  "Convert TESTS (list or array of strings/symbols) to a list of symbols."
+  (mapcar (lambda (x)
+            (if (stringp x)
+                (let* ((pos (position #\: x))
+                       (pkg-name (if pos (string-upcase (subseq x 0 pos)) "CL-USER"))
+                       (sym-name (if pos (string-upcase (subseq x (1+ pos))) (string-upcase x)))
+                       (pkg (find-package pkg-name)))
+                  (if pkg
+                      (multiple-value-bind (sym status) (find-symbol sym-name pkg)
+                        (if status
+                            sym
+                            (error "Symbol ~A not found in package ~A" sym-name pkg-name)))
+                      (error "Package ~A not found" pkg-name)))
+                x))
+          (if (vectorp tests) (coerce tests 'list) tests)))
 
-(defun %resolve-framework (system-name framework)
-  "Resolve FRAMEWORK argument to a backend keyword.
-When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
-  (cond
-    ((null framework)
-     (detect-test-framework system-name))
-    ((and (stringp framework)
-          (string-equal framework "auto"))
-     (detect-test-framework system-name))
-    ((stringp framework)
-     (intern (string-upcase framework) :keyword))
-    ((symbolp framework)
-     (intern (string-upcase (symbol-name framework)) :keyword))
-    (t
-     (error "framework must be a string or symbol: ~S" framework))))
+(defun %coerce-test-symbol (test-name)
+  "Coerce TEST-NAME (string or symbol) to a symbol."
+  (if (stringp test-name)
+      (first (%normalize-tests-arg (list test-name)))
+      test-name))
 
-(defparameter *load-error-tail-max-lines* 40
-  "Maximum number of trailing stderr lines attached to a test-system load failure.")
-
-(defparameter *load-error-tail-max-chars* 4000
-  "Maximum total characters of trailing stderr attached to a test-system load failure.")
-
-(defun %tail-lines (text max-lines max-chars)
-  "Return the last MAX-LINES lines of TEXT, capped at MAX-CHARS characters.
-Returns NIL when TEXT is empty or contains only whitespace. Used to
-extract the most actionable portion of captured compiler output for
-inclusion in load-failure error messages."
-  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) (or text ""))))
-    (when (plusp (length trimmed))
-      (let* ((lines (uiop:split-string trimmed :separator '(#\Newline)))
-             (n (length lines))
-             (start (max 0 (- n max-lines)))
-             (tail (subseq lines start))
-             (joined (format nil "~{~A~^~%~}" tail)))
-        (if (> (length joined) max-chars)
-            (let ((cut (max 0 (- (length joined) max-chars))))
-              (format nil "... (truncated)~%~A" (subseq joined cut)))
-            joined)))))
+(defun %resolve-framework (system-name framework-arg)
+  "Resolve the test framework to use.
+If FRAMEWORK-ARG is provided, use it. Otherwise detect from SYSTEM-NAME."
+  (if (and framework-arg (not (string= (princ-to-string framework-arg) "")))
+      (intern (string-upcase (princ-to-string framework-arg)) :keyword)
+      (detect-test-framework system-name)))
 
 (defun %format-load-error (system-name condition stderr)
-  "Format a test-system load-failure message.
-When STDERR contains captured compiler output, the tail of it is
-appended under a 'Compiler output (most recent):' header so the user
-can see the underlying reason (e.g., SBCL package-variance warnings)
-instead of just an opaque COMPILE-FILE-ERROR.
-Shows the condition type explicitly to aid root-cause diagnosis."
+  "Format a system load failure into a human-readable message."
   (let ((tail (%tail-lines stderr *load-error-tail-max-lines*
                            *load-error-tail-max-chars*))
         (ctype (type-of condition))
@@ -404,6 +356,18 @@ iteration proceed instead of crashing."
               (log-event :info "test-runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
+(defvar *load-error-tail-max-lines* 20)
+(defvar *load-error-tail-max-chars* 2000)
+
+(defun %tail-lines (string max-lines max-chars)
+  "Return the last MAX-LINES or MAX-CHARS of STRING."
+  (let* ((len (length string))
+         (start (max 0 (- len max-chars)))
+         (substring (subseq string start))
+         (lines (uiop:split-string substring :separator '(#\Newline))))
+    (format nil "~{~A~^~%~}"
+            (last lines (min (length lines) max-lines)))))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
@@ -498,23 +462,32 @@ a future Rove version returns them directly instead of crashing."
               (push assertion failure-details)))))
     (nreverse failure-details)))
 
-(defun run-rove-selected-tests (test-symbols)
+(defun run-rove-selected-tests (test-symbols &key (reload t))
   "Run Rove TEST-SYMBOLS and return structured results.
 Wraps rove:run-tests with error handling for Rove bugs (e.g., direct assertions
 without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
   (%ensure-rove-test-name-method)
   (log-event :info "test-runner" "framework" "rove" "selected_tests"
-             (format nil "~{~A~^, ~}" test-symbols))
+             (format nil "~{~A~^, ~}" test-symbols) "reload" reload)
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
+         (stats-pkg (find-package :rove/core/stats))
+         (suite-pkg (find-package :rove/core/suite))
+         (color-pkg (find-package :rove/misc/color))
          (rove-pkg (find-package :rove))
          (run-tests-fn (fdefinition (find-symbol "RUN-TESTS" rove-pkg)))
          (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
          (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
          (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
-         (_ (unless report-stream-sym
-              (error "Rove internal symbol *REPORT-STREAM* not found; incompatible Rove version?")))
+         (stats-sym (find-symbol "*STATS*" stats-pkg))
+         (rove-stdout-sym (find-symbol "*ROVE-STANDARD-OUTPUT*" suite-pkg))
+         (rove-stderr-sym (find-symbol "*ROVE-ERROR-OUTPUT*" suite-pkg))
+         (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
+         (color-sym (find-symbol "*ENABLE-COLORS*" color-pkg))
+         (with-context-sym (find-symbol "WITH-CONTEXT" stats-pkg))
+         (_ (unless (and report-stream-sym stats-sym rove-stdout-sym rove-stderr-sym with-context-sym)
+              (error "Rove internal symbols not found; incompatible Rove version?")))
          (start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
@@ -524,15 +497,26 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          rove-error)
     (declare (ignore successp _))
     (handler-case
-        ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
-        ;; Cannot use regular let because the symbol is resolved at runtime.
-        (setf (values successp results)
-              (progv (list report-stream-sym)
-                  (list (make-broadcast-stream))
-                (let ((*standard-output* stdout-stream)
-                      (*error-output* stderr-stream)
-                      (*test-debug-output* debug-stream))
-                  (funcall run-tests-fn test-symbols))))
+        ;; Extreme isolation for nested Rove calls to fix the "Inception" bug.
+        ;; Using rove/core/stats:with-context (nil) ensures a fresh, isolated
+        ;; test context that doesn't interfere with any parent Rove run.
+        (eval
+         `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+            (progv (list ',report-stream-sym
+                         ',rove-stdout-sym
+                         ',rove-stderr-sym
+                         ',last-report-sym
+                         ',color-sym)
+                (list (make-broadcast-stream)
+                      ,stdout-stream
+                      ,stderr-stream
+                      nil
+                      nil)
+              (let ((*standard-output* ,stdout-stream)
+                    (*error-output* ,stderr-stream)
+                    (*test-debug-output* ,debug-stream))
+                (setf (values successp results)
+                      (funcall ,run-tests-fn ',test-symbols))))))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test-runner" "message"
@@ -579,11 +563,12 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                 (setf (gethash "debug_output" ht) debug-output))
               ht))))))
 
-(defun run-rove-single-test (test-name)
+(defun run-rove-single-test (test-name &key (reload t))
   "Run a single Rove test by name and return structured results.
 TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
   (run-rove-selected-tests
-   (list (%coerce-test-symbol test-name))))
+   (list (%coerce-test-symbol test-name))
+   :reload reload))
 
 (defun %find-rove-test-sub-systems (system-name)
   "Return test sub-system names from SYSTEM-NAME's ASDF :depends-on.
@@ -599,16 +584,19 @@ sub-systems (my-proj/tests/foo-test) hold the actual Rove suites."
                           (uiop:string-prefix-p prefix dep)))
                    deps)))
 
-(defun run-rove-tests (system-name)
+(defun run-rove-tests (system-name &key (reload t))
   "Run tests using Rove and return structured results.
 Uses rove:run to ensure any :around methods (e.g., test environment setup)
 are invoked.  When the initial run returns zero counts (common with aggregate
 test systems whose rove:run keyword does not map to registered suites),
 detects test sub-systems from ASDF dependencies and runs each individually."
   (%ensure-rove-test-name-method)
-  (log-event :info "test-runner" "framework" "rove" "system" system-name)
+  (log-event :info "test-runner" "framework" "rove" "system" system-name "reload" reload)
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
+         (stats-pkg (find-package :rove/core/stats))
+         (suite-pkg (find-package :rove/core/suite))
+         (color-pkg (find-package :rove/misc/color))
          (rove-pkg (find-package :rove))
          (run-fn (fdefinition (find-symbol "RUN" rove-pkg)))
          (passed-tests-fn
@@ -620,9 +608,14 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" result-pkg)))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (last-report-sym (find-symbol "*LAST-SUITE-REPORT*" rove-pkg))
+         (stats-sym (find-symbol "*STATS*" stats-pkg))
+         (rove-stdout-sym (find-symbol "*ROVE-STANDARD-OUTPUT*" suite-pkg))
+         (rove-stderr-sym (find-symbol "*ROVE-ERROR-OUTPUT*" suite-pkg))
+         (color-sym (find-symbol "*ENABLE-COLORS*" color-pkg))
+         (with-context-sym (find-symbol "WITH-CONTEXT" stats-pkg))
          (pkgs-var (find-symbol "*PACKAGE-SUITES*"
                                 :rove/core/suite/package))
-         (_ (unless (and report-stream-sym last-report-sym)
+         (_ (unless (and report-stream-sym last-report-sym stats-sym rove-stdout-sym rove-stderr-sym with-context-sym)
               (error "Rove internal symbols not found (~A ~A); incompatible Rove version?"
                      report-stream-sym last-report-sym)))
          (start-time (get-internal-real-time))
@@ -634,16 +627,24 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          rove-error)
     (declare (ignore successp results _))
     (handler-case
-     ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
-     ;; Cannot use regular let because the symbol is resolved at runtime.
-     (setf (values successp results)
-             (progv (list report-stream-sym)
-                 (list (make-broadcast-stream))
-               (let ((*standard-output* stdout-stream)
-                     (*error-output* stderr-stream)
-                     (*test-debug-output* debug-stream))
-                 (funcall run-fn
-                          (intern (string-upcase system-name) :keyword)))))
+     ;; Deep isolation for nested Rove calls.
+     (eval
+      `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+         (progv (list ',report-stream-sym
+                      ',rove-stdout-sym
+                      ',rove-stderr-sym
+                      ',last-report-sym
+                      ',color-sym)
+             (list (make-broadcast-stream)
+                   ,stdout-stream
+                   ,stderr-stream
+                   nil
+                   nil)
+           (let ((*standard-output* ,stdout-stream)
+                 (*error-output* ,stderr-stream)
+                 (*test-debug-output* ,debug-stream))
+             (funcall ,run-fn
+                      (intern (string-upcase ,system-name) :keyword))))))
      (error (c) (setf rove-error (princ-to-string c))
             (log-event :error "test-runner" "message" "rove:run crashed"
                        "error" rove-error)))
@@ -707,10 +708,10 @@ the surrounding passed/failed/pending/failure-details bindings."
                          (let ((test-name (%safe-test-name test-name-fn test-fail))
                                (assertions
                                 (%rove-extract-assertions test-fail)))
-                           (dolist (a assertions)
-                             (setf (gethash "test_name" a)
+                           (dolist (assertion assertions)
+                             (setf (gethash "test_name" assertion)
                                      (princ-to-string test-name))
-                             (push a failure-details))))))))
+                             (push assertion failure-details))))))))
               (%extract-suites suite-results)
               ;; Fallback: aggregate test systems (e.g., with a custom
               ;; :perform test-op that calls rove:run on sub-packages)
@@ -741,16 +742,25 @@ the surrounding passed/failed/pending/failure-details bindings."
                               ;; triggers a real reload of deftest forms.
                               (ignore-errors
                                 (asdf/system-registry:clear-system sub-sys))
-                              ;; progv: bind late-resolved Rove special
-                              ;; (see M1 guard above for nil safety)
-                              (progv (list report-stream-sym)
-                                  (list (make-broadcast-stream))
-                                (let ((*standard-output* (make-broadcast-stream))
-                                      (*error-output* (make-broadcast-stream))
-                                      (*test-debug-output* (make-broadcast-stream)))
-                                  (funcall run-fn
-                                           (intern (string-upcase sub-sys)
-                                                   :keyword))))
+                              ;; progv: bind late-resolved Rove specials.
+                              (eval
+                               `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+                                  (progv (list ',report-stream-sym
+                                               ',rove-stdout-sym
+                                               ',rove-stderr-sym
+                                               ',last-report-sym
+                                               ',color-sym)
+                                      (list (make-broadcast-stream)
+                                            (make-broadcast-stream)
+                                            (make-broadcast-stream)
+                                            nil
+                                            nil)
+                                    (let ((*standard-output* (make-broadcast-stream))
+                                          (*error-output* (make-broadcast-stream))
+                                          (*test-debug-output* (make-broadcast-stream)))
+                                      (funcall ,run-fn
+                                               (intern (string-upcase ,sub-sys)
+                                                       :keyword))))))
                               (setf run-ok t))
                           (error (c)
                             (incf failed 1)
@@ -839,10 +849,11 @@ the surrounding passed/failed/pending/failure-details bindings."
 ;;; Main Entry Point
 ;;; ---------------------------------------------------------------------------
 
-(defun run-tests (system-name &key framework test tests)
+(defun run-tests (system-name &key framework test tests (reload t))
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
 If TEST is provided, run only that specific test.
 If TESTS is provided, run those specific tests (array/list of fully qualified names).
+If RELOAD is T (default), force-reload the system before running tests.
 Returns a hash table with structured results.
 
 If the implicit system-load step (%ENSURE-SYSTEM-LOADED) signals an
@@ -855,16 +866,18 @@ always receive a structured hash.  Errors raised after the load step
   ;; mask serious-condition subclasses or interactive-interrupt that
   ;; should bubble up as bugs rather than be silently bucketed into a
   ;; load-failure result.
-  (handler-case (%ensure-system-loaded system-name)
-    (simple-error (load-err)
-      (return-from run-tests
-        (make-load-failure-result system-name load-err))))
+  (when reload
+    (handler-case (%ensure-system-loaded system-name)
+      (simple-error (load-err)
+        (return-from run-tests
+          (make-load-failure-result system-name load-err)))))
   (let ((fw (%resolve-framework system-name framework))
         (selective-requested-p (or test tests)))
     (log-event :info "test-runner" "action" "run-tests" "system" system-name
                "framework" (string-downcase (symbol-name fw)) "test"
                (cond (test (princ-to-string test)) (tests "selected")
-                     (t "all")))
+                     (t "all"))
+               "reload" reload)
     (case fw
       (:rove
        (if (find-package :rove)
@@ -873,8 +886,8 @@ always receive a structured hash.  Errors raised after the load step
                       (if test
                           (list (%coerce-test-symbol test))
                           (%normalize-tests-arg tests))))
-                 (run-rove-selected-tests selected-tests))
-               (run-rove-tests system-name))
+                 (run-rove-selected-tests selected-tests :reload reload))
+               (run-rove-tests system-name :reload reload))
            (if selective-requested-p
                (error
                 "Selective test execution with TEST/TESTS requires Rove for system ~A"

@@ -63,6 +63,8 @@ Examples:
                :description "Run only this specific test (fully qualified: 'package::test-name')")
          (tests :type :array :required nil
                 :description "Run only these specific tests (array of 'package::test-name')")
+         (reload :type :boolean :required nil
+                 :description "Force-reload the system before running tests (default: true). Disable to speed up repeated runs if source hasn't changed.")
          (timeout-seconds :type :number :json-name "timeout_seconds" :required nil
                           :description "Maximum seconds to wait for the test run to complete (default: 300). Increase for large test suites."))
   :body
@@ -71,6 +73,7 @@ Examples:
                                    "framework" framework
                                    "test" test
                                    "tests" tests
+                                   "reload" reload
                                    "timeout_seconds" timeout-seconds))
     (let ((effective-timeout (or timeout-seconds 300)))
       (let ((test-result
@@ -79,7 +82,8 @@ Examples:
                     (run-tests system
                                :framework framework
                                :test test
-                               :tests tests))
+                               :tests tests
+                               :reload reload))
                 (sb-ext:timeout ()
                   (make-ht "passed" 0
                            "failed" 1
