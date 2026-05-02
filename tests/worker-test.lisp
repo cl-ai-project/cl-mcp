@@ -48,8 +48,10 @@
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
                  (declare (ignore thread))
-                 ;; Give server time to enter accept
-                 (sleep 0.1)
+                 ;; Yield so the accept thread can enter socket-accept.
+                 ;; Kernel listen queue handles the connect even if we lose
+                 ;; the race; this is just a scheduler hint.
+                 (sleep 0.01)
                  (let ((socket (usocket:socket-connect
                                 "127.0.0.1" port
                                 :element-type 'character)))
@@ -87,7 +89,7 @@
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
                  (declare (ignore thread))
-                 (sleep 0.1)
+                 (sleep 0.01)
                  (let ((socket (usocket:socket-connect
                                 "127.0.0.1" port
                                 :element-type 'character)))
@@ -123,7 +125,7 @@
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
                  (declare (ignore thread))
-                 (sleep 0.1)
+                 (sleep 0.01)
                  (let ((socket (usocket:socket-connect
                                 "127.0.0.1" port
                                 :element-type 'character)))
@@ -161,7 +163,7 @@
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
                  (declare (ignore thread))
-                 (sleep 0.1)
+                 (sleep 0.01)
                  (let ((socket (usocket:socket-connect
                                 "127.0.0.1" port
                                 :element-type 'character)))
@@ -199,7 +201,7 @@
                                (lambda () (start-accept-loop server))
                                :name "test-accept")))
                  (declare (ignore thread))
-                 (sleep 0.1)
+                 (sleep 0.01)
                  (let ((socket (usocket:socket-connect
                                 "127.0.0.1" port
                                 :element-type 'character)))
@@ -258,7 +260,7 @@ Cleans up server and socket on exit."
                                  (lambda () (start-accept-loop ,server))
                                  :name "test-handler-accept")))
                   (declare (ignore ,thread))
-                  (sleep 0.1)
+                  (sleep 0.01)
                   (let ((,socket (usocket:socket-connect
                                   "127.0.0.1" ,port
                                   :element-type 'character)))
@@ -613,7 +615,7 @@ Cleans up server and socket on exit."
                                 (lambda () (start-accept-loop server))
                                 :name "test-start-accept")))
                    (declare (ignore thread))
-                   (sleep 0.1)
+                   (sleep 0.01)
                    (let ((socket (usocket:socket-connect
                                   "127.0.0.1" tcp-port
                                   :element-type 'character)))
