@@ -70,17 +70,20 @@
             (ok (string-equal form-type "defparameter")
                 (format nil "Expected defparameter but got ~A" form-type)))))))
   (testing "clgrep-search with vector form-types filters rare form types correctly"
-    ;; Test with defmethod which has only 2 occurrences in the project
-    ;; This would have returned thousands of results before the fix
+    ;; Test with defmethod which is a rare form type project-wide.
+    ;; This would have returned thousands of results (capped at 200) before
+    ;; the fix because the form-types filter was silently dropped for vectors.
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
       (let ((results (clgrep-search "." :path "."
                                     :recursive t
                                     :form-types #("defmethod"))))
         (ok (listp results))
-        ;; Should find defmethod results (there are exactly 2 defmethod forms)
-        ;; Each form may have multiple line matches, but all should be defmethod
+        ;; Each defmethod form contributes one row per matched line, so the
+        ;; total grows with both form count and form length.  The threshold
+        ;; need only be small enough to catch the "filter silently dropped"
+        ;; regression (which would return the default 200-result cap).
         (ok (> (length results) 0) "Should find at least one defmethod")
-        (ok (< (length results) 20) "Should not return excessive results")
+        (ok (< (length results) 100) "Should not return excessive results")
         ;; All results must be defmethod
         (dolist (r results)
           (let ((form-type (cdr (assoc :form-type r))))
