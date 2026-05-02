@@ -1,12 +1,13 @@
 ;;;; tests-heavy.lisp — heavy-tier test aggregate.
 ;;;;
-;;;; Holds the three test families that dominate suite wall time
+;;;; Holds the four test families that dominate suite wall time
 ;;;; because each deftest spawns one or more child SBCLs (worker pool
 ;;;; tests) or stands up a full Hunchentoot server (http-test):
 ;;;;
 ;;;;   - cl-mcp/tests/pool-test
 ;;;;   - cl-mcp/tests/http-test
 ;;;;   - cl-mcp/tests/pool-kill-worker-test
+;;;;   - cl-mcp/tests/pool-startup-latency-test
 ;;;;
 ;;;; Run on demand: `(asdf:test-system :cl-mcp/tests-heavy)`.  Not
 ;;;; wired into upstream CI's fast lane (cl-mcp.asd's test-op points
@@ -18,7 +19,8 @@
   (:import-from #:rove)
   (:import-from #:cl-mcp/tests/pool-test)
   (:import-from #:cl-mcp/tests/http-test)
-  (:import-from #:cl-mcp/tests/pool-kill-worker-test))
+  (:import-from #:cl-mcp/tests/pool-kill-worker-test)
+  (:import-from #:cl-mcp/tests/pool-startup-latency-test))
 
 (in-package #:cl-mcp/tests-heavy)
 

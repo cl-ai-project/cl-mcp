@@ -1,15 +1,16 @@
 ;;;; tests-fast.lisp — fast-tier test aggregate.
 ;;;;
 ;;;; Drives upstream CI's `(asdf:test-system :cl-mcp)` (cl-mcp.asd
-;;;; routes its test-op here).  Excludes the three test families that
+;;;; routes its test-op here).  Excludes the four test families that
 ;;;; spawn many child SBCLs or run a full Hunchentoot lifecycle per
 ;;;; deftest:
 ;;;;
-;;;;   - cl-mcp/tests/pool-test            (~16 min, 70% of suite)
-;;;;   - cl-mcp/tests/http-test            (~3.6 min, 16% of suite)
-;;;;   - cl-mcp/tests/pool-kill-worker-test (~1.4 min, 6% of suite)
+;;;;   - cl-mcp/tests/pool-test
+;;;;   - cl-mcp/tests/http-test
+;;;;   - cl-mcp/tests/pool-kill-worker-test
+;;;;   - cl-mcp/tests/pool-startup-latency-test
 ;;;;
-;;;; Those three live in `cl-mcp/tests-heavy` and are runnable on
+;;;; Those four live in `cl-mcp/tests-heavy` and are runnable on
 ;;;; demand via `(asdf:test-system :cl-mcp/tests-heavy)`.  The
 ;;;; everything-aggregate `cl-mcp/tests` (in tests.lisp) still runs
 ;;;; the full suite.
@@ -18,16 +19,32 @@
   (:use #:cl)
   (:import-from #:rove)
   (:import-from #:cl-mcp/tests/bridge-test)
+  (:import-from #:cl-mcp/tests/cancel-test)
+  (:import-from #:cl-mcp/tests/asdf-tools-test)
+  (:import-from #:cl-mcp/tests/clhs-test)
   (:import-from #:cl-mcp/tests/code-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
+  (:import-from #:cl-mcp/tests/frame-inspector-test)
+  (:import-from #:cl-mcp/tests/inspect-test)
   (:import-from #:cl-mcp/tests/logging-test)
   (:import-from #:cl-mcp/tests/protocol-test)
+  (:import-from #:cl-mcp/tests/proxy-test)
   (:import-from #:cl-mcp/tests/repl-test)
+  (:import-from #:cl-mcp/tests/repl-error-context-test)
+  (:import-from #:cl-mcp/tests/repl-inspect-integration-test)
   (:import-from #:cl-mcp/tests/cst-test)
   (:import-from #:cl-mcp/tests/lisp-read-file-test)
   (:import-from #:cl-mcp/tests/lisp-edit-form-test)
   (:import-from #:cl-mcp/tests/lisp-patch-form-test)
+  (:import-from #:cl-mcp/tests/lenient-read-test)
+  (:import-from #:cl-mcp/tests/object-registry-test)
+  (:import-from #:cl-mcp/tests/package-context-test)
+  (:import-from #:cl-mcp/tests/response-builders-test)
+  (:import-from #:cl-mcp/tests/timeout-test)
+  (:import-from #:cl-mcp/tests/test-runner-test)
+  (:import-from #:cl-mcp/tests/tools-helpers-test)
+  (:import-from #:cl-mcp/tests/utils-paths-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)
@@ -44,6 +61,7 @@
   (:import-from #:cl-mcp/tests/utils-random-test)
   (:import-from #:cl-mcp/tests/system-loader-test)
   (:import-from #:cl-mcp/tests/worker-test)
+  (:import-from #:cl-mcp/tests/pool-env-config-test)
   (:import-from #:cl-mcp/tests/pool-status-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test))
 
