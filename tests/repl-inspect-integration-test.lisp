@@ -14,7 +14,9 @@
   (:import-from #:cl-mcp/src/inspect
                 #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/protocol
-                #:process-json-line))
+                #:process-json-line)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*))
 
 (in-package #:cl-mcp/tests/repl-inspect-integration-test)
 
@@ -118,59 +120,64 @@
 
 (deftest mcp-repl-eval-includes-result-object-id
   (testing "MCP repl-eval tool response includes result_object_id for non-primitives"
-    (with-fresh-registry
-     (lambda ()
-       (let* ((req (concatenate 'string
-                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
-                     "\"params\":{\"name\":\"repl-eval\","
-                     "\"arguments\":{\"code\":\"(list 1 2 3)\"}}}"))
-              (resp (process-json-line req))
-              (obj (yason:parse resp))
-              (result (gethash "result" obj))
-              (object-id (gethash "result_object_id" result)))
-         (ok object-id "Should have result_object_id")
-         (ok (integerp object-id) "result_object_id should be integer")
-         ;; Verify we can look up the object
-         (ok (lookup-object object-id) "Object should be in registry"))))))
+    ;; Force inline dispatch: the parent-side rove suite has no worker pool
+    ;; initialized, so let process-json-line execute the tool inline.
+    (let ((*use-worker-pool* nil))
+      (with-fresh-registry
+       (lambda ()
+         (let* ((req (concatenate 'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"repl-eval\","
+                       "\"arguments\":{\"code\":\"(list 1 2 3)\"}}}"))
+                (resp (process-json-line req))
+                (obj (yason:parse resp))
+                (result (gethash "result" obj))
+                (object-id (gethash "result_object_id" result)))
+           (ok object-id "Should have result_object_id")
+           (ok (integerp object-id) "result_object_id should be integer")
+           ;; Verify we can look up the object
+           (ok (lookup-object object-id) "Object should be in registry")))))))
 
 (deftest mcp-repl-eval-no-object-id-for-primitives
   (testing "MCP repl-eval tool response has no result_object_id for primitives"
-    (with-fresh-registry
-     (lambda ()
-       (let* ((req (concatenate 'string
-                     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
-                     "\"params\":{\"name\":\"repl-eval\","
-                     "\"arguments\":{\"code\":\"42\"}}}"))
-              (resp (process-json-line req))
-              (obj (yason:parse resp))
-              (result (gethash "result" obj)))
-         (ok (null (gethash "result_object_id" result))
-             "Should NOT have result_object_id for primitives"))))))
+    (let ((*use-worker-pool* nil))
+      (with-fresh-registry
+       (lambda ()
+         (let* ((req (concatenate 'string
+                       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                       "\"params\":{\"name\":\"repl-eval\","
+                       "\"arguments\":{\"code\":\"42\"}}}"))
+                (resp (process-json-line req))
+                (obj (yason:parse resp))
+                (result (gethash "result" obj)))
+           (ok (null (gethash "result_object_id" result))
+               "Should NOT have result_object_id for primitives")))))))
 
 (deftest mcp-inspect-object-tool
   (testing "MCP inspect-object tool works with registered objects"
-    (with-fresh-registry
-     (lambda ()
-       ;; First, create an object via repl-eval
-       (let* ((eval-req (concatenate 'string
-                          "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
-                          "\"params\":{\"name\":\"repl-eval\","
-                          "\"arguments\":{\"code\":\"(make-hash-table)\"}}}"))
-              (eval-resp (cl-mcp/src/protocol:process-json-line eval-req))
-              (eval-obj (yason:parse eval-resp))
-              (eval-result (gethash "result" eval-obj))
-              (object-id (gethash "result_object_id" eval-result)))
-         (ok object-id)
-         ;; Now inspect it
-         (let* ((inspect-req (format nil
-                               "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",~
-                                \"params\":{\"name\":\"inspect-object\",~
-                                \"arguments\":{\"id\":~A}}}"
-                               object-id))
-                (inspect-resp (cl-mcp/src/protocol:process-json-line inspect-req))
-                (inspect-obj (yason:parse inspect-resp))
-                (inspect-result (gethash "result" inspect-obj)))
-           (ok (string= "hash-table" (gethash "kind" inspect-result)))))))))
+    (let ((*use-worker-pool* nil))
+      (with-fresh-registry
+       (lambda ()
+         ;; First, create an object via repl-eval
+         (let* ((eval-req (concatenate 'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"repl-eval\","
+                            "\"arguments\":{\"code\":\"(make-hash-table)\"}}}"))
+                (eval-resp (cl-mcp/src/protocol:process-json-line eval-req))
+                (eval-obj (yason:parse eval-resp))
+                (eval-result (gethash "result" eval-obj))
+                (object-id (gethash "result_object_id" eval-result)))
+           (ok object-id)
+           ;; Now inspect it
+           (let* ((inspect-req (format nil
+                                 "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",~
+                                  \"params\":{\"name\":\"inspect-object\",~
+                                  \"arguments\":{\"id\":~A}}}"
+                                 object-id))
+                  (inspect-resp (cl-mcp/src/protocol:process-json-line inspect-req))
+                  (inspect-obj (yason:parse inspect-resp))
+                  (inspect-result (gethash "result" inspect-obj)))
+             (ok (string= "hash-table" (gethash "kind" inspect-result))))))))))
 
 ;;; Test error context locals include object_id
 
