@@ -27,7 +27,22 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 
 **Fallback** (stale image / package conflicts): `rove cl-mcp.asd` from Bash for a clean process.
 
-**Pre-PR**: `(asdf:compile-system :cl-mcp :force t)` to catch warnings, then run full test suite.
+**Test tiers** (`tests-fast.lisp`, `tests-heavy.lisp`, `tests.lisp`):
+
+- `(asdf:test-system :cl-mcp)` → routes to `cl-mcp/tests-fast` (fast tier, default).
+  Excludes `pool-test`, `http-test`, `pool-kill-worker-test` — the three families
+  whose per-deftest SBCL-spawn / Hunchentoot-lifecycle costs add up to ~21 min
+  of the ~22 min full suite. Fast tier finishes in ~30–60 s.
+- `(asdf:test-system :cl-mcp/tests-heavy)` → ad-hoc target for the three heavy
+  systems. Run before merging changes that touch worker-pool, HTTP, or
+  worker-lifecycle code. Expect ~20 min wall time.
+- `(asdf:test-system :cl-mcp/tests)` → everything-aggregate (legacy entry point);
+  imports both fast and heavy sub-systems.
+
+**Pre-PR**: `(asdf:compile-system :cl-mcp :force t)` to catch warnings, then run
+fast tier (`asdf:test-system :cl-mcp`). Run `cl-mcp/tests-heavy` if your change
+touches `src/pool.lisp`, `src/worker*`, `src/http.lisp`, or anything they
+depend on.
 
 **Linting** (required before commit):
 ```bash

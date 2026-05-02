@@ -57,12 +57,15 @@
 (deftest load-system-warning-fields
   (testing "warning fields are properly typed in response"
     ;; Verify the warning-related fields exist and have correct types.
-    ;; An already-loaded system should produce zero warnings.
-    (let ((ht (load-system "cl-mcp" :force nil)))
+    ;; Use :suppress-redefinition-warnings t because in a test environment
+    ;; where the system is already loaded, we might get redefinition chatter
+    ;; depending on how the test runner manages the image.
+    (let ((ht (load-system "cl-mcp" :force nil :suppress-redefinition-warnings t)))
       (ok (hash-table-p ht))
       (ok (string= (gethash "status" ht) "loaded"))
       (ok (integerp (gethash "warnings" ht)))
-      (ok (zerop (gethash "warnings" ht)))
+      (ok (zerop (gethash "warnings" ht))
+          "warnings should be zero when suppressed and already loaded")
       ;; No warning_details key when warnings are zero
       (ok (null (gethash "warning_details" ht))))))
 

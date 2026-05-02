@@ -11,9 +11,25 @@
                 #:initialize-pool
                 #:shutdown-pool)
   (:export #:spawn-available-p
-           #:with-pool))
+           #:with-pool
+           #:wait-for))
 
 (in-package #:cl-mcp/tests/test-helpers)
+
+(defmacro wait-for ((&key (timeout 5.0d0) (interval 0.01d0)) &body body)
+  "Wait for BODY to return non-nil, polling at INTERVAL until TIMEOUT.
+Returns the result of BODY if it became non-nil, or NIL if it timed out."
+  (let ((start-var (gensym "START"))
+        (result-var (gensym "RESULT")))
+    `(let ((,start-var (get-internal-real-time)))
+       (loop
+         (let ((,result-var (progn ,@body)))
+           (when ,result-var (return ,result-var))
+           (when (> (/ (- (get-internal-real-time) ,start-var)
+                       internal-time-units-per-second)
+                    ,timeout)
+             (return nil))
+           (sleep ,interval))))))
 
 (defun spawn-available-p ()
   "Check if we can spawn worker processes.

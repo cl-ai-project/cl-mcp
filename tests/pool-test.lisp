@@ -42,7 +42,8 @@
                 #:*reaper-threads-lock*)
   (:import-from #:cl-mcp/tests/test-helpers
                 #:spawn-available-p
-                #:with-pool))
+                #:with-pool
+                #:wait-for))
 
 (in-package #:cl-mcp/tests/pool-test)
 
@@ -522,7 +523,7 @@ in the cleanup form regardless of success or failure."
               ;; Kill with SIGKILL
               (sb-posix:kill pid sb-posix:sigkill)
               ;; Give the OS a moment to reap the process
-              (sleep 0.5)
+              (wait-for () (not (ignore-errors (sb-posix:kill pid 0))))
               ;; Step 3: Invoke crash recovery directly
               (cl-mcp/src/pool::%handle-worker-crash worker)
               ;; Step 4: Next proxy call should return reset notification
@@ -738,7 +739,7 @@ in the cleanup form regardless of success or failure."
             "worker is :bound")
         ;; Step 2: Force-crash the worker (SIGKILL the OS process)
         (sb-posix:kill old-pid sb-posix:sigkill)
-        (sleep 0.5)
+        (wait-for () (not (ignore-errors (sb-posix:kill old-pid 0))))
         ;; Mark it crashed so Path 1b triggers on next get-or-assign
         (setf (worker-state worker) :crashed)
         ;; Step 3: Request the same session again.
@@ -774,7 +775,7 @@ in the cleanup form regardless of success or failure."
         (ok (eq :bound (worker-state worker))
             "worker is :bound")
         (sb-posix:kill pid sb-posix:sigkill)
-        (sleep 0.5)
+        (wait-for () (not (ignore-errors (sb-posix:kill pid 0))))
         ;; Step 2: Start crash recovery in a background thread.
         ;; %handle-worker-crash will: grab lock, set :crashed, release
         ;; lock, kill worker, spawn replacement (~5s), then try to bind.
@@ -787,7 +788,7 @@ in the cleanup form regardless of success or failure."
           ;; (sets state to :crashed, then kill-worker sets :dead),
           ;; then release the session.
           ;; The spawn-worker call takes seconds, so we have a wide window.
-          (sleep 1)
+          (wait-for () (eq :dead (worker-state worker)))
           (ok (not (eq :bound (worker-state worker)))
               "worker state changed from :bound (recovery started)")
           (release-session "resurrection-test")
@@ -836,7 +837,10 @@ in the cleanup form regardless of success or failure."
                 (get-or-assign-worker "cap-test-B")
                 ;; Now at cap (2 workers). Replenish was triggered by both
                 ;; assignments.  Wait for any background replenish to settle.
-                (sleep 2)
+                (wait-for () (= (bordeaux-threads:with-lock-held
+                                    (cl-mcp/src/pool::*pool-lock*)
+                                  (length cl-mcp/src/pool::*all-workers*))
+                                2))
                 ;; Count total workers — should not exceed max-pool-size.
                 (let ((total (bordeaux-threads:with-lock-held
                                  (cl-mcp/src/pool::*pool-lock*)
@@ -868,7 +872,10 @@ in the cleanup form regardless of success or failure."
                   :name "assign-thread")))
           ;; Wait for spawn to start, then release the session
           ;; to trigger cancellation.
-          (sleep 0.5)
+          (wait-for ()
+            (bordeaux-threads:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+              (typep (gethash "cancel-test" cl-mcp/src/pool::*affinity-map*)
+                     'cl-mcp/src/pool::worker-placeholder)))
           (release-session "cancel-test")
           ;; Wait for the assignment thread to finish
           (bordeaux-threads:join-thread assign-thread)
@@ -896,7 +903,7 @@ in the cleanup form regardless of success or failure."
           (ok (integerp pid) "worker has valid pid")
           ;; Kill the worker process
           (sb-posix:kill pid sb-posix:sigkill)
-          (sleep 0.5)
+          (wait-for () (not (ignore-errors (sb-posix:kill pid 0))))
           ;; Trigger crash handler — threshold is 1, so this trips the breaker
           (cl-mcp/src/pool::%handle-worker-crash worker)
           ;; Session should be removed from affinity map
@@ -923,8 +930,9 @@ in the cleanup form regardless of success or failure."
         ;; Kill the worker
         (sb-posix:kill pid sb-posix:sigkill)
         ;; Wait for health monitor to detect and recover
-        ;; health-check at 0.1s + spawn time (~2s) + buffer
-        (sleep 5)
+        (wait-for (:timeout 10.0d0)
+          (let ((w (get-or-assign-worker "health-session")))
+            (and w (not (eql old-id (worker-id w))))))
         ;; A new worker should be assigned with a different ID
         (let ((new-worker (get-or-assign-worker "health-session")))
           (ok new-worker "new worker assigned after recovery")
@@ -1065,7 +1073,7 @@ both detect the same crash"
         (ok (integerp pid) "worker has valid pid")
         ;; Kill the worker
         (sb-posix:kill pid sb-posix:sigkill)
-        (sleep 0.5)
+        (wait-for () (not (ignore-errors (sb-posix:kill pid 0))))
         ;; Simulate health monitor detection first (pushes to crash-history)
         (cl-mcp/src/pool::%handle-worker-crash worker)
         ;; Verify crash-history-pushed-p flag is set
@@ -1104,8 +1112,9 @@ both detect the same crash"
               "1 standby after manual spawn")
           ;; Kill the standby worker's OS process to simulate death
           ;; between health checks
-          (sb-posix:kill (worker-pid standby) sb-posix:sigkill)
-          (sleep 0.5)
+          (let ((pid (worker-pid standby)))
+            (sb-posix:kill pid sb-posix:sigkill)
+            (wait-for () (not (ignore-errors (sb-posix:kill pid 0)))))
           ;; Assign a session — should detect dead standby and spawn fresh
           (let ((worker (get-or-assign-worker "dead-standby-test")))
             (ok worker "worker is returned")
@@ -1145,8 +1154,9 @@ send-root-to-session-worker failure"
           ;; Now simulate the failure scenario: kill the worker,
           ;; then request the session again.  The replacement worker
           ;; should also work correctly.
-          (sb-posix:kill (worker-pid worker) sb-posix:sigkill)
-          (sleep 0.5)
+          (let ((pid (worker-pid worker)))
+            (sb-posix:kill pid sb-posix:sigkill)
+            (wait-for () (not (ignore-errors (sb-posix:kill pid 0)))))
           (cl-mcp/src/pool::%handle-worker-crash worker)
           ;; Get the replacement worker
           (let ((new-worker (get-or-assign-worker "send-root-test")))
@@ -1175,8 +1185,9 @@ send-root-to-session-worker failure"
         ;; Assign and crash a real worker to exercise the production path
         (let ((worker (get-or-assign-worker "reaper-test")))
           (ok worker "worker assigned")
-          (sb-posix:kill (worker-pid worker) sb-posix:sigkill)
-          (sleep 0.5)
+          (let ((pid (worker-pid worker)))
+            (sb-posix:kill pid sb-posix:sigkill)
+            (wait-for () (not (ignore-errors (sb-posix:kill pid 0)))))
           (cl-mcp/src/pool::%handle-worker-crash worker))
         ;; Inject a slow sentinel reaper that takes ~1s
         (let ((sentinel
@@ -1218,9 +1229,12 @@ send-root-to-session-worker failure"
           (ok w1 "worker 1 assigned")
           (ok w2 "worker 2 assigned")
           ;; Kill both workers
-          (sb-posix:kill (worker-pid w1) sb-posix:sigkill)
-          (sb-posix:kill (worker-pid w2) sb-posix:sigkill)
-          (sleep 0.5)
+          (let ((p1 (worker-pid w1))
+                (p2 (worker-pid w2)))
+            (sb-posix:kill p1 sb-posix:sigkill)
+            (sb-posix:kill p2 sb-posix:sigkill)
+            (wait-for () (and (not (ignore-errors (sb-posix:kill p1 0)))
+                              (not (ignore-errors (sb-posix:kill p2 0))))))
           ;; Manually simulate health monitor crash detection:
           ;; First recovery should proceed (active-count = 0 < 1)
           (let ((recovery-started 0)
@@ -1262,4 +1276,6 @@ send-root-to-session-worker failure"
                 (format nil "exactly 1 recovery deferred (got ~D)"
                         recovery-deferred))
             ;; Wait for the recovery thread to finish
-            (sleep 5)))))))
+            (wait-for (:timeout 10.0d0)
+              (zerop (bordeaux-threads:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                       (length cl-mcp/src/pool::*recovery-threads*))))))))))
