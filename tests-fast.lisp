@@ -1,0 +1,59 @@
+;;;; tests-fast.lisp — fast-tier test aggregate.
+;;;;
+;;;; Drives upstream CI's `(asdf:test-system :cl-mcp)` (cl-mcp.asd
+;;;; routes its test-op here).  Excludes the three test families that
+;;;; spawn many child SBCLs or run a full Hunchentoot lifecycle per
+;;;; deftest:
+;;;;
+;;;;   - cl-mcp/tests/pool-test            (~16 min, 70% of suite)
+;;;;   - cl-mcp/tests/http-test            (~3.6 min, 16% of suite)
+;;;;   - cl-mcp/tests/pool-kill-worker-test (~1.4 min, 6% of suite)
+;;;;
+;;;; Those three live in `cl-mcp/tests-heavy` and are runnable on
+;;;; demand via `(asdf:test-system :cl-mcp/tests-heavy)`.  The
+;;;; everything-aggregate `cl-mcp/tests` (in tests.lisp) still runs
+;;;; the full suite.
+
+(defpackage #:cl-mcp/tests-fast
+  (:use #:cl)
+  (:import-from #:rove)
+  (:import-from #:cl-mcp/tests/bridge-test)
+  (:import-from #:cl-mcp/tests/code-test)
+  (:import-from #:cl-mcp/tests/core-test)
+  (:import-from #:cl-mcp/tests/fs-test)
+  (:import-from #:cl-mcp/tests/logging-test)
+  (:import-from #:cl-mcp/tests/protocol-test)
+  (:import-from #:cl-mcp/tests/repl-test)
+  (:import-from #:cl-mcp/tests/cst-test)
+  (:import-from #:cl-mcp/tests/lisp-read-file-test)
+  (:import-from #:cl-mcp/tests/lisp-edit-form-test)
+  (:import-from #:cl-mcp/tests/lisp-patch-form-test)
+  (:import-from #:cl-mcp/tests/validate-test)
+  (:import-from #:cl-mcp/tests/tcp-test)
+  (:import-from #:cl-mcp/tests/tools-test)
+  (:import-from #:cl-mcp/tests/define-tool-test)
+  (:import-from #:cl-mcp/tests/integration-test)
+  (:import-from #:cl-mcp/tests/parinfer-test)
+  (:import-from #:cl-mcp/tests/clgrep-utils-test)
+  (:import-from #:cl-mcp/tests/clgrep-test)
+  (:import-from #:cl-mcp/tests/utils-strings-test)
+  (:import-from #:cl-mcp/tests/utils-hash-test)
+  (:import-from #:cl-mcp/tests/utils-printing-test)
+  (:import-from #:cl-mcp/tests/utils-sanitize-test)
+  (:import-from #:cl-mcp/tests/utils-system-test)
+  (:import-from #:cl-mcp/tests/utils-random-test)
+  (:import-from #:cl-mcp/tests/system-loader-test)
+  (:import-from #:cl-mcp/tests/worker-test)
+  (:import-from #:cl-mcp/tests/pool-status-test)
+  (:import-from #:cl-mcp/tests/project-scaffold-test))
+
+(in-package #:cl-mcp/tests-fast)
+
+(defmethod asdf:perform :after ((op asdf:test-op)
+                                (system (eql (asdf:find-system :cl-mcp/tests-fast))))
+  (let ((test-packages (remove-if-not
+                        (lambda (dep)
+                          (and (stringp dep)
+                               (uiop:string-prefix-p "cl-mcp/tests/" dep)))
+                        (asdf:system-depends-on system))))
+    (rove:run test-packages)))
