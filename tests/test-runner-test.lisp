@@ -177,8 +177,15 @@
 ;;; ---------------------------------------------------------------------------
 
 (deftest run-tests-errors-on-missing-suite
-  (testing "run-tests signals error for non-existent suite"
-    (ok (signals (run-tests "non-existent-test-suite-xyz")))))
+ (testing "run-tests reports load-error framework for non-existent suite"
+  (let ((result (run-tests "non-existent-test-suite-xyz")))
+    (ok (hash-table-p result))
+    (ok (string= "load-error" (gethash "framework" result))
+     "framework should be load-error when suite cannot be loaded")
+    (ok (>= (gethash "failed" result) 1)
+     "load failure is reported as at least one failed test")
+    (ok (zerop (gethash "passed" result))
+     "no passes when the suite cannot be loaded"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Parameter Tests
