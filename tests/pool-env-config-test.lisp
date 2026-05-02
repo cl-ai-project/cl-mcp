@@ -75,15 +75,11 @@ is what %env-int observes."
 
 (deftest initialize-pool-rejects-warmup-above-max
   (testing "initialize-pool errors when *worker-pool-warmup* exceeds *max-pool-size*"
-    ;; Setf rather than let so the calling thread's binding is what
-    ;; the validation reads -- matches established style in pool-test.
-    (let ((saved-warmup cl-mcp/src/pool::*worker-pool-warmup*)
-          (saved-max cl-mcp/src/pool::*max-pool-size*))
-      (unwind-protect
-           (progn
-             (setf cl-mcp/src/pool::*worker-pool-warmup* 5
-                   cl-mcp/src/pool::*max-pool-size* 2)
-             (ok (signals (cl-mcp/src/pool:initialize-pool))
-                 "init signals when warmup > max"))
-        (setf cl-mcp/src/pool::*worker-pool-warmup* saved-warmup
-              cl-mcp/src/pool::*max-pool-size* saved-max)))))
+    ;; Plain dynamic binding works because the validation error is signaled
+    ;; on the calling thread before %schedule-replenish (which would spawn
+    ;; a background thread) runs.  No cross-thread binding propagation is
+    ;; needed for this path.
+    (let ((cl-mcp/src/pool::*worker-pool-warmup* 5)
+          (cl-mcp/src/pool::*max-pool-size* 2))
+      (ok (signals (cl-mcp/src/pool:initialize-pool))
+          "init signals when warmup > max"))))

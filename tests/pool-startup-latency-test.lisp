@@ -19,12 +19,18 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok #:skip)
+  (:import-from #:bordeaux-threads
+                #:with-lock-held)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-pool-warmup*
                 #:*health-check-interval-seconds*
                 #:*shutdown-replenish-wait-seconds*
                 #:initialize-pool
-                #:shutdown-pool)
+                #:shutdown-pool
+                #:get-or-assign-worker
+                #:release-session)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker)
   (:import-from #:cl-mcp/src/run
                 #:run)
   (:import-from #:cl-mcp/tests/test-helpers
@@ -78,10 +84,13 @@ a background replenish thread)"
 the warmup target within a generous bound"
     (unless (spawn-available-p)
       (skip "sbcl not available"))
-    ;; Bound is loose because cold-cache spawn is several seconds per
-    ;; worker and a prior test's in-flight replenish can still own
-    ;; *replenish-running* for one extra spawn after this test starts.
     (%with-fast-pool-defaults (:warmup 2)
+      ;; Defensive reset: if a prior test aborted before its replenish
+      ;; thread settled, *replenish-running* may still be t and
+      ;; %schedule-replenish would skip the spawn.  The pool is not
+      ;; running here so this cannot race a real replenish thread.
+      (with-lock-held (cl-mcp/src/pool::*pool-lock*)
+        (setf cl-mcp/src/pool::*replenish-running* nil))
       (unwind-protect
            (progn
              (initialize-pool)
@@ -114,14 +123,54 @@ the warmup target within a generous bound"
     (%with-fast-pool-defaults (:warmup 2)
       (let ((in (make-string-input-stream +initialize-line+))
             (out (make-string-output-stream)))
-        (let ((elapsed
-                (%elapsed-seconds
-                 (lambda ()
-                   (run :transport :stdio :in in :out out
-                        :worker-pool t)))))
-          (let ((response (get-output-stream-string out)))
-            (ok (search "\"protocolVersion\"" response)
-                "stdio response includes protocolVersion")
-            (ok (< elapsed 3.0)
-                (format nil "stdio initialize took ~,3F s (bound 3.0)"
-                        elapsed))))))))
+        (unwind-protect
+             (let ((elapsed
+                     (%elapsed-seconds
+                      (lambda ()
+                        (run :transport :stdio :in in :out out
+                             :worker-pool t)))))
+               (let ((response (get-output-stream-string out)))
+                 (ok (search "\"protocolVersion\"" response)
+                     "stdio response includes protocolVersion")
+                 (ok (< elapsed 3.0)
+                     (format nil "stdio initialize took ~,3F s (bound 3.0)"
+                             elapsed))))
+          ;; Drain any in-flight replenish so subsequent tests start clean.
+          ;; *shutdown-replenish-wait-seconds* is intentionally short here
+          ;; for the latency assertion, so spawn-worker may still be running
+          ;; in the background after run's shutdown-pool returns.  The
+          ;; replenish loop self-terminates once *pool-running* is nil.
+          (loop repeat 600  ; 60 s ceiling
+                while cl-mcp/src/pool::*replenish-running*
+                do (sleep 0.1)))))))
+
+(deftest first-tools-call-with-no-standby-completes-within-deadline
+  (testing "with warmup=0, the first get-or-assign-worker call must
+complete within *worker-startup-timeout* + buffer.  Pins the on-demand
+spawn path that PR #108's async warmup left as the load-bearing
+fallback when standbys are not yet ready."
+    (unless (spawn-available-p)
+      (skip "sbcl not available"))
+    (%with-fast-pool-defaults (:warmup 0)
+      (unwind-protect
+           (progn
+             (initialize-pool)
+             (let* ((deadline-s
+                      (+ cl-mcp/src/worker-client::*worker-startup-timeout* 5))
+                    (assigned nil)
+                    (elapsed
+                      (%elapsed-seconds
+                       (lambda ()
+                         (setf assigned
+                               (get-or-assign-worker "probe-session"))))))
+               (ok (typep assigned 'worker)
+                   "first call returns a worker instance")
+               (ok (< elapsed deadline-s)
+                   (format nil
+                           "first get-or-assign-worker took ~,3F s (bound ~D)"
+                           elapsed deadline-s))
+               (let ((again (get-or-assign-worker "probe-session")))
+                 (ok (eq again assigned)
+                     "second call for same session returns same worker"))))
+        (ignore-errors (release-session "probe-session"))
+        (shutdown-pool)))))
