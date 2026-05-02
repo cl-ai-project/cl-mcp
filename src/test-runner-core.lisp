@@ -171,9 +171,12 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
   "Convert TESTS (list or array of strings/symbols) to a list of symbols."
   (mapcar (lambda (x)
             (if (stringp x)
-                (let* ((pos (position #\: x))
-                       (pkg-name (if pos (string-upcase (subseq x 0 pos)) "CL-USER"))
-                       (sym-name (if pos (string-upcase (subseq x (1+ pos))) (string-upcase x)))
+                (let* ((dcolon (search "::" x))
+                       (scolon (and (not dcolon) (position #\: x)))
+                       (sep-pos (or dcolon scolon))
+                       (sep-len (cond (dcolon 2) (scolon 1) (t 0)))
+                       (pkg-name (if sep-pos (string-upcase (subseq x 0 sep-pos)) "CL-USER"))
+                       (sym-name (if sep-pos (string-upcase (subseq x (+ sep-pos sep-len))) (string-upcase x)))
                        (pkg (find-package pkg-name)))
                   (if pkg
                       (multiple-value-bind (sym status) (find-symbol sym-name pkg)
@@ -492,32 +495,38 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
          (debug-stream (make-string-output-stream))
-         successp
          results
          rove-error)
-    (declare (ignore successp _))
+    (declare (ignore _))
     (handler-case
         ;; Extreme isolation for nested Rove calls to fix the "Inception" bug.
         ;; rove/core/stats:with-context binds its first arg as a LET variable,
         ;; so we must pass a fresh gensym — passing NIL produces an illegal
         ;; (let ((nil ...)) ...) at compile time.
-        (eval
-         `(,(find-symbol "WITH-CONTEXT" stats-pkg) (,(gensym "ROVE-CTX"))
-            (progv (list ',report-stream-sym
-                         ',rove-stdout-sym
-                         ',rove-stderr-sym
-                         ',last-report-sym
-                         ',color-sym)
-                (list (make-broadcast-stream)
-                      ,stdout-stream
-                      ,stderr-stream
-                      nil
-                      nil)
-              (let ((*standard-output* ,stdout-stream)
-                    (*error-output* ,stderr-stream)
-                    (*test-debug-output* ,debug-stream))
-                (setf (values successp results)
-                      (funcall ,run-tests-fn ',test-symbols))))))
+        ;;
+        ;; rove:run-tests returns (values success result-list).  Capture
+        ;; the result list via NTH-VALUE on the EVAL — assigning to the
+        ;; lexical RESULTS from inside the EVAL'd form does NOT work, since
+        ;; EVAL operates in the null lexical environment.
+        (setf results
+              (nth-value
+               1
+               (eval
+                `(,(find-symbol "WITH-CONTEXT" stats-pkg) (,(gensym "ROVE-CTX"))
+                   (progv (list ',report-stream-sym
+                                ',rove-stdout-sym
+                                ',rove-stderr-sym
+                                ',last-report-sym
+                                ',color-sym)
+                       (list (make-broadcast-stream)
+                             ,stdout-stream
+                             ,stderr-stream
+                             nil
+                             nil)
+                     (let ((*standard-output* ,stdout-stream)
+                           (*error-output* ,stderr-stream)
+                           (*test-debug-output* ,debug-stream))
+                       (funcall ,run-tests-fn ',test-symbols)))))))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test-runner" "message"
