@@ -498,10 +498,11 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
     (declare (ignore successp _))
     (handler-case
         ;; Extreme isolation for nested Rove calls to fix the "Inception" bug.
-        ;; Using rove/core/stats:with-context (nil) ensures a fresh, isolated
-        ;; test context that doesn't interfere with any parent Rove run.
+        ;; rove/core/stats:with-context binds its first arg as a LET variable,
+        ;; so we must pass a fresh gensym — passing NIL produces an illegal
+        ;; (let ((nil ...)) ...) at compile time.
         (eval
-         `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+         `(,(find-symbol "WITH-CONTEXT" stats-pkg) (,(gensym "ROVE-CTX"))
             (progv (list ',report-stream-sym
                          ',rove-stdout-sym
                          ',rove-stderr-sym
@@ -627,18 +628,21 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          rove-error)
     (declare (ignore successp results _))
     (handler-case
-     ;; Deep isolation for nested Rove calls.
+     ;; Deep isolation for nested Rove calls.  with-context binds its first
+     ;; arg as a LET variable, so we pass a fresh gensym — NIL would produce
+     ;; an illegal (let ((nil ...)) ...) at compile time.
      (eval
-      `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+      ;; Note: do NOT progv-bind *last-suite-report* — rove:run writes into
+      ;; it and the wrapper reads it after the eval completes.  A progv
+      ;; binding would unwind on exit and discard rove's report.
+      `(,(find-symbol "WITH-CONTEXT" stats-pkg) (,(gensym "ROVE-CTX"))
          (progv (list ',report-stream-sym
                       ',rove-stdout-sym
                       ',rove-stderr-sym
-                      ',last-report-sym
                       ',color-sym)
              (list (make-broadcast-stream)
                    ,stdout-stream
                    ,stderr-stream
-                   nil
                    nil)
            (let ((*standard-output* ,stdout-stream)
                  (*error-output* ,stderr-stream)
@@ -743,17 +747,19 @@ the surrounding passed/failed/pending/failure-details bindings."
                               (ignore-errors
                                 (asdf/system-registry:clear-system sub-sys))
                               ;; progv: bind late-resolved Rove specials.
+                              ;; gensym for with-context binding: NIL is illegal as a let var.
+                              ;; See note above: do NOT progv-bind
+                              ;; *last-suite-report*.  We read it after the
+                              ;; eval to extract sub-system results.
                               (eval
-                               `(,(find-symbol "WITH-CONTEXT" stats-pkg) (nil)
+                               `(,(find-symbol "WITH-CONTEXT" stats-pkg) (,(gensym "ROVE-CTX"))
                                   (progv (list ',report-stream-sym
                                                ',rove-stdout-sym
                                                ',rove-stderr-sym
-                                               ',last-report-sym
                                                ',color-sym)
                                       (list (make-broadcast-stream)
                                             (make-broadcast-stream)
                                             (make-broadcast-stream)
-                                            nil
                                             nil)
                                     (let ((*standard-output* (make-broadcast-stream))
                                           (*error-output* (make-broadcast-stream))
