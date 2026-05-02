@@ -168,37 +168,54 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
     (nreverse results)))
 
 (defun %normalize-tests-arg (tests)
-  "Convert TESTS (list or array of strings/symbols) to a list of symbols."
-  (mapcar (lambda (x)
-            (if (stringp x)
-                (let* ((dcolon (search "::" x))
-                       (scolon (and (not dcolon) (position #\: x)))
-                       (sep-pos (or dcolon scolon))
-                       (sep-len (cond (dcolon 2) (scolon 1) (t 0)))
-                       (pkg-name (if sep-pos (string-upcase (subseq x 0 sep-pos)) "CL-USER"))
-                       (sym-name (if sep-pos (string-upcase (subseq x (+ sep-pos sep-len))) (string-upcase x)))
-                       (pkg (find-package pkg-name)))
-                  (if pkg
-                      (multiple-value-bind (sym status) (find-symbol sym-name pkg)
-                        (if status
-                            sym
-                            (error "Symbol ~A not found in package ~A" sym-name pkg-name)))
-                      (error "Package ~A not found" pkg-name)))
-                x))
-          (if (vectorp tests) (coerce tests 'list) tests)))
+  "Normalize TESTS to a non-empty list of fully-qualified test symbols."
+  (let ((items (cond
+                 ((null tests) nil)
+                 ((vectorp tests) (coerce tests 'list))
+                 ((listp tests) tests)
+                 (t (error "tests must be an array of test names")))))
+    (when (and tests (null items))
+      (error "tests must contain at least one test name"))
+    (mapcar #'%coerce-test-symbol items)))
 
 (defun %coerce-test-symbol (test-name)
-  "Coerce TEST-NAME (string or symbol) to a symbol."
-  (if (stringp test-name)
-      (first (%normalize-tests-arg (list test-name)))
-      test-name))
+  "Convert TEST-NAME to a fully qualified test symbol."
+  (cond
+    ((null test-name)
+     (error "Test name must not be NIL"))
+    ((symbolp test-name)
+     (unless (symbol-package test-name)
+       (error "Test symbol must be package-qualified: ~S" test-name))
+     test-name)
+    ((stringp test-name)
+     (let* ((name (string-upcase test-name))
+            (colon-pos (search "::" name)))
+       (unless colon-pos
+         (error "Test name must be fully qualified (pkg::name): ~A" test-name))
+       (let* ((pkg-name (subseq name 0 colon-pos))
+              (sym-name (subseq name (+ colon-pos 2)))
+              (pkg (find-package pkg-name)))
+         (unless pkg
+           (error "Test package not found: ~A" pkg-name))
+         (intern sym-name pkg))))
+    (t
+     (error "Test name must be a string or symbol: ~S" test-name))))
 
-(defun %resolve-framework (system-name framework-arg)
-  "Resolve the test framework to use.
-If FRAMEWORK-ARG is provided, use it. Otherwise detect from SYSTEM-NAME."
-  (if (and framework-arg (not (string= (princ-to-string framework-arg) "")))
-      (intern (string-upcase (princ-to-string framework-arg)) :keyword)
-      (detect-test-framework system-name)))
+(defun %resolve-framework (system-name framework)
+  "Resolve FRAMEWORK argument to a backend keyword.
+When FRAMEWORK is NIL or \"auto\", detect from SYSTEM-NAME."
+  (cond
+    ((null framework)
+     (detect-test-framework system-name))
+    ((and (stringp framework)
+          (string-equal framework "auto"))
+     (detect-test-framework system-name))
+    ((stringp framework)
+     (intern (string-upcase framework) :keyword))
+    ((symbolp framework)
+     (intern (string-upcase (symbol-name framework)) :keyword))
+    (t
+     (error "framework must be a string or symbol: ~S" framework))))
 
 (defun %format-load-error (system-name condition stderr)
   "Format a system load failure into a human-readable message."
@@ -362,14 +379,22 @@ iteration proceed instead of crashing."
 (defvar *load-error-tail-max-lines* 20)
 (defvar *load-error-tail-max-chars* 2000)
 
-(defun %tail-lines (string max-lines max-chars)
-  "Return the last MAX-LINES or MAX-CHARS of STRING."
-  (let* ((len (length string))
-         (start (max 0 (- len max-chars)))
-         (substring (subseq string start))
-         (lines (uiop:split-string substring :separator '(#\Newline))))
-    (format nil "~{~A~^~%~}"
-            (last lines (min (length lines) max-lines)))))
+(defun %tail-lines (text max-lines max-chars)
+  "Return the last MAX-LINES lines of TEXT, capped at MAX-CHARS characters.
+Returns NIL when TEXT is empty or contains only whitespace. Used to
+extract the most actionable portion of captured compiler output for
+inclusion in load-failure error messages."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) (or text ""))))
+    (when (plusp (length trimmed))
+      (let* ((lines (uiop:split-string trimmed :separator '(#\Newline)))
+             (n (length lines))
+             (start (max 0 (- n max-lines)))
+             (tail (subseq lines start))
+             (joined (format nil "~{~A~^~%~}" tail)))
+        (if (> (length joined) max-chars)
+            (let ((cut (max 0 (- (length joined) max-chars))))
+              (format nil "... (truncated)~%~A" (subseq joined cut)))
+            joined)))))
 
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
