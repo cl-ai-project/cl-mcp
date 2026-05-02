@@ -31,6 +31,8 @@
   (:import-from #:cl-mcp/tests/system-loader-test)
   (:import-from #:cl-mcp/tests/worker-test)
   (:import-from #:cl-mcp/tests/pool-test)
+  (:import-from #:cl-mcp/tests/pool-startup-latency-test)
+  (:import-from #:cl-mcp/tests/pool-env-config-test)
   (:import-from #:cl-mcp/tests/pool-status-test)
   (:import-from #:cl-mcp/tests/pool-kill-worker-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test))

@@ -91,13 +91,47 @@
 ;;; Configuration
 ;;; ---------------------------------------------------------------------------
 
-(defvar *worker-pool-warmup* 1
-  "Number of standby workers to pre-spawn and maintain.")
+(defun %env-int (name default &key (min nil))
+  "Read an integer from the environment variable NAME.  Return DEFAULT
+when NAME is unset or empty.  When the value is unparseable -- or,
+with MIN given, below MIN -- emit a warning and return DEFAULT.
 
-(defvar *max-pool-size* 16
+Used to seed pool-tuning defvars from the environment so operators
+can tune cl-mcp without editing source.  Each fresh SBCL process
+reads the environment once at load time."
+  (let ((s (uiop:getenv name)))
+    (cond
+      ((or (null s) (zerop (length s))) default)
+      (t
+       (handler-case
+           (let ((n (parse-integer s)))
+             (cond
+               ((and min (< n min))
+                (warn "~A=~A is below ~D; using default ~D"
+                      name n min default)
+                default)
+               (t n)))
+         (error ()
+           (warn "~A=~S is not an integer; using default ~D"
+                 name s default)
+           default))))))
+
+(defvar *worker-pool-warmup*
+  (%env-int "CL_MCP_WORKER_POOL_WARMUP" 1 :min 0)
+  "Number of standby workers to pre-spawn and maintain.
+Default 1; override with the CL_MCP_WORKER_POOL_WARMUP env var (must
+be a non-negative integer).  Set to 0 to disable pre-spawning;
+workers are then spawned on demand as sessions arrive.  This is the
+right setting when an MCP client has a tight handshake-timeout
+budget and no spare warmup time on a cold FASL cache.")
+
+(defvar *max-pool-size*
+  (%env-int "CL_MCP_MAX_POOL_SIZE" 16 :min 1)
   "Maximum total number of workers (bound + standby).  Prevents
 unbounded resource consumption from unlimited session creation.
-Each SBCL worker uses ~100-500MB memory.")
+Each SBCL worker uses ~100-500MB memory.
+Default 16; override with the CL_MCP_MAX_POOL_SIZE env var (must
+be a positive integer).  Must be >= *worker-pool-warmup*.")
 
 (defvar *health-check-interval-seconds* 10.0d0
   "Seconds between health monitor iterations while the pool is running.")
@@ -348,7 +382,11 @@ the effective size under *pool-lock*."
 
 (defun %schedule-replenish ()
   "Spawn a background thread to replenish standby workers if needed.
-Skips if a replenish thread is already running."
+Skips if a replenish thread is already running.  Captures the
+caller's dynamic bindings for *worker-pool-warmup* and *max-pool-size*
+and re-binds them inside the replenish thread, so callers (including
+tests) can let-bind these vars and have the value honoured -- SBCL's
+bt:make-thread does not propagate dynamic bindings to the new thread."
   (let ((should-start nil))
     (bt:with-lock-held (*pool-lock*)
       (when (and (not *replenish-running*)
@@ -356,8 +394,14 @@ Skips if a replenish thread is already running."
         (setf *replenish-running* t
               should-start t)))
     (when should-start
-      (bt:make-thread #'%replenish-standbys
-                      :name "pool-replenish"))))
+      (let ((warmup *worker-pool-warmup*)
+            (max-size *max-pool-size*))
+        (bt:make-thread
+         (lambda ()
+           (let ((*worker-pool-warmup* warmup)
+                 (*max-pool-size* max-size))
+             (%replenish-standbys)))
+         :name "pool-replenish")))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- crash recovery
@@ -640,15 +684,19 @@ by the spawned thread."
   "Serializes concurrent calls to initialize-pool.")
 
 (defun initialize-pool ()
-  "Initialize the worker pool, spawning warm standby workers and
-starting the health monitor.  Safe to call multiple times (shuts
-down any existing pool first).  Registers shutdown-pool in
-sb-ext:*exit-hooks* so that workers are cleaned up if the parent
-process exits.
+  "Initialize the worker pool and start the health monitor.  Safe to
+call multiple times (shuts down any existing pool first).  Registers
+shutdown-pool in sb-ext:*exit-hooks* so that workers are cleaned up
+if the parent process exits.
 
-Serialized by *init-lock* to prevent concurrent initialization.
-Warmup spawns occur outside *pool-lock* to avoid holding the global
-lock during potentially slow subprocess launches."
+Returns once internal state is set up; warm standby workers spawn
+asynchronously on a replenish thread so the caller is not blocked
+on subprocess launches.  This lets cl-mcp:run :transport :stdio log
+stdio.start and answer the MCP initialize handshake within
+milliseconds, regardless of *worker-pool-warmup*.  The pool grows
+to *worker-pool-warmup* standbys in the background.
+
+Serialized by *init-lock* to prevent concurrent initialization."
   (bt:with-lock-held (*init-lock*)
     ;; Validate configuration
     (unless (and (integerp *max-pool-size*) (plusp *max-pool-size*))
@@ -678,32 +726,19 @@ lock during potentially slow subprocess launches."
             *all-workers* nil
             *recovery-threads* nil)
       (clrhash *crash-history*))
-    ;; Spawn warmup standbys OUTSIDE *pool-lock* to avoid blocking
-    ;; the global lock during subprocess launches
-    (let ((spawned nil))
-      (dotimes (i *worker-pool-warmup*)
-        (handler-case
-            (let ((w (spawn-worker)))
-              (push w spawned)
-              (log-event :info "pool.standby.init"
-                         "worker_id" (worker-id w)
-                         "index" i))
-          (error (e)
-            (log-event :warn "pool.standby.init.failed"
-                       "index" i
-                       "error" (princ-to-string e)))))
-      ;; Register all spawned workers under lock
-      (bt:with-lock-held (*pool-lock*)
-        (dolist (w spawned)
-          (push w *standby-workers*)
-          (push w *all-workers*))))
-    ;; Start health monitor
+    ;; Start health monitor.  Sets *pool-running* to T, which gates
+    ;; the replenish thread below: %replenish-standbys exits early
+    ;; if *pool-running* is NIL, so the monitor must come up first.
     (%start-health-monitor)
     ;; Register exit hook to prevent orphan workers on parent exit
     (pushnew 'shutdown-pool sb-ext:*exit-hooks*)
+    ;; Hand off warmup to the existing standby-replenishment machinery,
+    ;; which spawns workers on a background thread up to
+    ;; *worker-pool-warmup* and respects *max-pool-size*.  Each spawn
+    ;; logs pool.standby.spawned as it lands.
+    (%schedule-replenish)
     (log-event :info "pool.initialized"
-               "warmup" *worker-pool-warmup*
-               "standbys" (length *standby-workers*))))
+               "warmup_target" *worker-pool-warmup*)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API -- shutdown

@@ -196,6 +196,21 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `MCP_LOG_FILE` | Log to file (timestamped with PID) | (stderr only) |
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
+| `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
+| `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
+
+### Tuning warmup for cold-start handshakes
+
+The worker pool warms its standbys asynchronously once `cl-mcp:run`
+returns control to the MCP transport, so the stdio handshake is not
+blocked on subprocess launches. If you still see your MCP client
+report `Failed to connect` on a cold FASL cache — for example the
+first cl-mcp invocation after a system upgrade — set
+`CL_MCP_WORKER_POOL_WARMUP=0` to skip pre-spawning entirely. Workers
+are then created on demand the first time a session needs one,
+trading first-eval latency for the smallest possible startup
+footprint. Once your client establishes the session you can ignore
+the warmup; the pool will grow as sessions arrive.
 
 ## Security Model
 
