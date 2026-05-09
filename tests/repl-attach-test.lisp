@@ -255,15 +255,24 @@ Tears down the connection and the server in an unwind-protect."
 (deftest with-attach-dispatch/captures-stdout-and-stderr
   (testing "stdout and stderr from the attached image are captured"
     (%with-attach-fixture ()
-(let* ((res (%dispatch 12 "repl-eval"
+      (let* ((res (%dispatch 12 "repl-eval"
                              (make-ht "code"
                                       "(progn (format t \"hi-out\") (format *error-output* \"hi-err\") (+ 7 8))"
                                       "package" "CL-USER")))
              (stdout (gethash "stdout" res))
              (stderr (gethash "stderr" res)))
         (ok (search "hi-out" stdout))
-        (ok (search "hi-err" stderr))))))
-
+        (ok (search "hi-err" stderr)))))
+  (testing "trace-output and terminal-io from the attached image are captured into stdout"
+    (%with-attach-fixture ()
+      (let* ((res (%dispatch 13 "repl-eval"
+                             (make-ht "code"
+                                      "(progn (format *trace-output* \"hi-trace\") (format *terminal-io* \"hi-term\") :ok)"
+                                      "package" "CL-USER")))
+             (stdout (gethash "stdout" res)))
+        ;; Both should land in stdout because we bound them to the same s-stdout or s-io (which writes to s-stdout)
+        (ok (search "hi-trace" stdout))
+        (ok (search "hi-term" stdout))))))
 (deftest with-attach-dispatch/captures-error-context
   (testing "an error in the attached image lands in error_context"
     (%with-attach-fixture ()
