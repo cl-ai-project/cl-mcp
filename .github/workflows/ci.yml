@@ -34,6 +34,20 @@ jobs:
           ros install sbcl-bin/2.5.0
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
+      - name: Vendor slynk-client
+        # slynk-client is not carried by any Quicklisp distribution. Drop it
+        # into Roswell's local-projects so ASDF can resolve it during
+        # `ros install` and the test run. Pin the SHA for build determinism.
+        env:
+          SLYNK_CLIENT_URL: https://github.com/fade/slynk-client.git
+          SLYNK_CLIENT_REV: f232d4dbbed03ff62ef8419eea580d2dfb9999de
+        run: |
+          set -eu
+          target="$HOME/.roswell/local-projects/slynk-client"
+          mkdir -p "$(dirname "$target")"
+          git clone "$SLYNK_CLIENT_URL" "$target"
+          git -C "$target" checkout "$SLYNK_CLIENT_REV"
+
       - name: Install Dependencies
         run: |
           ros --version
