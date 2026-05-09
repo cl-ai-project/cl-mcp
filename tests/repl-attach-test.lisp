@@ -40,13 +40,18 @@ not)."
      (error () t)))
 
 (defmacro %with-clean-env (&body body)
-  "Bind *attach-config* to NIL and unset CL_MCP_SLYNK_ATTACH for the
-duration of BODY, restoring the previous environment after."
+  "Bind *attach-config* to NIL and clear CL_MCP_SLYNK_ATTACH for the
+duration of BODY, restoring the previous environment after.  Uses an
+empty string rather than NIL because `(setf (uiop:getenv ...) nil)' is
+not portable: on SBCL it routes to `sb-posix:setenv' which signals a
+TYPE-ERROR on a NIL value.  `set-attach-from-env' treats an empty
+value identically to an unset variable, so the observable semantics
+are the same."
   `(let ((*attach-config* nil)
          (saved (uiop:getenv "CL_MCP_SLYNK_ATTACH")))
      (unwind-protect
           (progn
-            (setf (uiop:getenv "CL_MCP_SLYNK_ATTACH") nil)
+            (setf (uiop:getenv "CL_MCP_SLYNK_ATTACH") "")
             ,@body)
        (setf (uiop:getenv "CL_MCP_SLYNK_ATTACH") (or saved "")))))
 
