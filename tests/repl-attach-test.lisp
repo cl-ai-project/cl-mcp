@@ -21,9 +21,15 @@
                 #:attach-disconnect
                 #:with-attach-dispatch)
   (:import-from #:cl-mcp/src/run
-                #:run))
+                #:run)
+  (:export #:*suite-loaded*))
 
 (in-package #:cl-mcp/tests/repl-attach-test)
+
+(defparameter *suite-loaded* t
+  "Sentinel that lets the aggregator package express a named
+import-from dependency on this suite.  Pure marker; carries no
+runtime semantics.")
 
 (defmacro %signals-error (&body body)
   "Run BODY and return T if it signalled a CL:ERROR, NIL otherwise.

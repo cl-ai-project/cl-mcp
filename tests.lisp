@@ -13,7 +13,8 @@
   (:import-from #:cl-mcp/tests/logging-test)
   (:import-from #:cl-mcp/tests/protocol-test)
   (:import-from #:cl-mcp/tests/proxy-test)
-  (:import-from #:cl-mcp/tests/repl-attach-test)
+  (:import-from #:cl-mcp/tests/repl-attach-test
+                #:*suite-loaded*)
   (:import-from #:cl-mcp/tests/repl-test)
   (:import-from #:cl-mcp/tests/repl-error-context-test)
   (:import-from #:cl-mcp/tests/repl-inspect-integration-test)
