@@ -132,7 +132,14 @@ validation:
 
           3. **No Arbitrary Eval**:
              - Do not use `(eval ...)` in `src/protocol.lisp` or `src/fs.lisp`.
-             - Only `src/repl.lisp` is authorized to use `eval`.
+             - `src/repl.lisp` is authorized to use `eval` for the in-process REPL tool.
+             - `src/attach.lisp` is authorized to mention `eval` *inside* the
+               quasiquoted rex form built by `%build-wrapping-form`. That `eval`
+               is a symbol on the wire; it runs in the user-supplied remote
+               Slynk image, never in the cl-mcp host process. Attach mode is an
+               alternate transport for `repl-eval`, so it inherits the same
+               authorization. No other use of `eval` in `src/attach.lisp` is
+               permitted.
 
       - name: logging_conventions
         prompt: |
