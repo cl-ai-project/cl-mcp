@@ -137,6 +137,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 - Use `print_level`/`print_length` for complex structures
 - Use `timeout_seconds` to prevent hangs
 - Check `stderr` for compiler warnings after compiling
+- **TUI & Stream Isolation**: In `attach` mode, all standard streams (including `*terminal-io*`, `*debug-io*`, and `*trace-output*`) are fully isolated and captured. This makes it safe to evaluate code for TUI applications or live-running systems without corrupting the display or leaking output to the host terminal. Captured output from these streams appears in the `stdout` result.
 
 ## Debugging
 

@@ -247,6 +247,11 @@ UAT need.
 - **Concurrency is serialised per connection.** `slime-eval` is
   synchronous, so cl-mcp serialises concurrent `repl-eval` calls on a
   single connection with a `bordeaux-threads` lock.
+- **Robust IO Isolation.** All standard Common Lisp streams (including
+  `*terminal-io*`, `*debug-io*`, and `*trace-output*`) are dynamically
+  shadowed and captured during evaluation. This prevents "leaks" to the
+  host terminal, making attach mode safe for developing TUI applications
+  or interacting with images that have global Slynk redirection active.
 - **Network errors fail closed.** If the connection drops mid-call, the
   call returns an `isError` result and the cached connection is
   discarded; the next call reconnects on demand. There is no automatic

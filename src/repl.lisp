@@ -26,6 +26,8 @@
 (define-tool "repl-eval" :description
  "Evaluate Common Lisp forms and return the last value as printed text.
 Use this for testing, inspection, debugging, or exploring runtime state.
+Evaluation is safe for TUI applications and live systems; all standard streams
+(including *terminal-io* and *trace-output*) are isolated and captured in stdout.
 Provide an existing package (e.g., CL-USER) and set print_level/print_length when needed.
 WARNING: Definitions created here are TRANSIENT and lost on server restart.
 To modify code permanently, you MUST use 'lisp-edit-form' or 'fs-write-file'
