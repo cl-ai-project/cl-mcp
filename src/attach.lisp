@@ -49,6 +49,14 @@ the worker pool."
   (host nil :type (or null string))
   (port nil :type (or null integer)))
 
+(setf (documentation #'attach-config-host 'function)
+      "Return the hostname or IP literal of the attached Slynk listener
+(e.g. \"127.0.0.1\").  No IPv6 literal support in v1.")
+
+(setf (documentation #'attach-config-port 'function)
+      "Return the TCP port of the attached Slynk listener; an integer
+in the range 1-65535.")
+
 (defvar *attach-config* nil
   "Either NIL (attach disabled, the default) or an `attach-config'
 struct describing the Slynk listener to route to.  Bound by
