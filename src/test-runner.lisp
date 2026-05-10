@@ -63,7 +63,7 @@ Examples:
                :description "Run only this specific test (fully qualified: 'package::test-name')")
          (tests :type :array :required nil
                 :description "Run only these specific tests (array of 'package::test-name')")
-         (reload :type :boolean :required nil
+         (reload :type :boolean :required nil :default t
                  :description "Force-reload the system before running tests (default: true). Disable to speed up repeated runs if source hasn't changed.")
          (timeout-seconds :type :number :json-name "timeout_seconds" :required nil
                           :description "Maximum seconds to wait for the test run to complete (default: 300). Increase for large test suites."))

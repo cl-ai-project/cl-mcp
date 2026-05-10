@@ -1118,6 +1118,62 @@
       (let ((obj (parse (%pjl req))))
         (ok (%tool-call-failed-p obj) "should fail on missing system arg")))))
 
+(deftest tools-call-run-tests-defaults-reload-to-true
+  (testing "tools/call run-tests passes :reload t when client omits the key"
+    ;; A missing :default t on the reload arg spec caused omitted reload
+    ;; to extract as NIL and forward with the key present, bypassing the
+    ;; worker's %bool-default fallback and skipping %ensure-system-loaded.
+    (let ((captured :not-called)
+          (real-fn (fdefinition 'cl-mcp/src/test-runner-core:run-tests))
+          (req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":3960,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\","
+                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\"}}}")))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'cl-mcp/src/test-runner-core:run-tests)
+                   (lambda (system &rest args &key (reload nil reload-p) &allow-other-keys)
+                     (declare (ignore system args))
+                     (setf captured (if reload-p reload :not-supplied))
+                     (cl-mcp/src/tools/helpers:make-ht
+                      "passed" 0 "failed" 0 "pending" 0 "duration_ms" 0
+                      "framework" "rove" "failed_tests" #())))
+             (let ((obj (parse (%pjl req))))
+               (ok (null (%tool-call-failed-p obj))
+                   "dispatch should succeed with stubbed run-tests")
+               (ok (eq captured t)
+                   (format nil "expected :reload t, got ~S" captured))))
+        (setf (fdefinition 'cl-mcp/src/test-runner-core:run-tests) real-fn)))))
+
+(deftest tools-call-run-tests-honors-explicit-reload-false
+  (testing "tools/call run-tests passes :reload nil when client sets it false"
+    ;; Companion to the default-true regression test: verify the fix
+    ;; doesn't over-correct by forcing reload=t regardless of the request.
+    (let ((captured :not-called)
+          (real-fn (fdefinition 'cl-mcp/src/test-runner-core:run-tests))
+          (req (concatenate
+                'string
+                "{\"jsonrpc\":\"2.0\",\"id\":3961,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"run-tests\","
+                "\"arguments\":{\"system\":\"cl-mcp/tests/utils-strings-test\","
+                "\"reload\":false}}}")))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'cl-mcp/src/test-runner-core:run-tests)
+                   (lambda (system &rest args &key (reload nil reload-p) &allow-other-keys)
+                     (declare (ignore system args))
+                     (setf captured (if reload-p reload :not-supplied))
+                     (cl-mcp/src/tools/helpers:make-ht
+                      "passed" 0 "failed" 0 "pending" 0 "duration_ms" 0
+                      "framework" "rove" "failed_tests" #())))
+             (let ((obj (parse (%pjl req))))
+               (ok (null (%tool-call-failed-p obj))
+                   "dispatch should succeed with stubbed run-tests")
+               (ok (eq captured nil)
+                   (format nil "expected :reload nil, got ~S" captured))))
+        (setf (fdefinition 'cl-mcp/src/test-runner-core:run-tests) real-fn)))))
+
 (deftest tools-list-includes-tool-descriptors
   (testing "tools/list exposes descriptors for critical tools"
     (multiple-value-bind (obj result tools)
