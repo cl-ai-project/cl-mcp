@@ -17,7 +17,11 @@
                 #:register-all-handlers)
   (:import-from #:cl-mcp/src/worker/main)
   (:import-from #:cl-mcp/src/worker-client
-                #:worker-spawn-failed))
+                #:worker-spawn-failed)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-write-file)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*))
 
 (in-package #:cl-mcp/tests/worker-test)
 
@@ -969,36 +973,37 @@ Cleans up server and socket on exit."
 ;;; handshake" failures arrive with no diagnostic context.
 ;;; ---------------------------------------------------------------------------
 
-(defun %write-fake-sbcl (path stderr-message)
-  "Write an executable shell script to PATH that prints STDERR-MESSAGE on
-stderr and exits 1.  Used to simulate a child process that dies before
-emitting a handshake."
-  (with-open-file (out path :direction :output
-                            :if-exists :supersede
-                            :if-does-not-exist :create)
-    (format out "#!/bin/sh~%")
-    (format out "printf '%s' ~S 1>&2~%" stderr-message)
-    (format out "exit 1~%"))
-  (sb-posix:chmod path #o755)
-  path)
+(defun %write-fake-sbcl (relative-path stderr-message)
+  "Write an executable shell script to RELATIVE-PATH (under project root)
+that prints STDERR-MESSAGE on stderr and exits 1.  Used to simulate a
+child process that dies before emitting a handshake.  Returns the
+absolute pathname namestring of the written script.
+
+Uses cl-mcp/src/fs:fs-write-file (required wrapper for filesystem
+writes) rather than raw with-open-file."
+  (let ((script (format nil "#!/bin/sh~%printf '%s' ~S 1>&2~%exit 1~%"
+                        stderr-message)))
+    (fs-write-file relative-path script)
+    (let ((abs (namestring (merge-pathnames relative-path *project-root*))))
+      (sb-posix:chmod abs #o755)
+      abs)))
 
 (deftest spawn-worker-includes-child-stderr-in-error
   (testing "spawn-worker surfaces child stderr in WORKER-SPAWN-FAILED message"
-    (let ((script-path (format nil "/tmp/cl-mcp-fake-sbcl-~A.sh"
-                               (sb-posix:getpid)))
+    (let ((rel-path (format nil "tests/tmp/cl-mcp-fake-sbcl-~A.sh"
+                            (sb-posix:getpid)))
           (marker "FAKE-SBCL-DIED: simulated load failure here"))
-      (unwind-protect
-          (progn
-            (%write-fake-sbcl script-path marker)
-            (let ((cl-mcp/src/worker-client::*cached-sbcl-path* script-path)
-                  (cl-mcp/src/worker-client::*cached-ros-path* script-path)
-                  (caught-message nil))
-              (handler-case (cl-mcp/src/worker-client:spawn-worker)
-                (worker-spawn-failed (c)
-                  (setf caught-message
-                        (cl-mcp/src/worker-client::worker-spawn-failed-message c))))
-              (ok caught-message
-                  "spawn signals WORKER-SPAWN-FAILED")
-              (ok (and caught-message (search marker caught-message))
-                  "error message includes child stderr marker")))
-        (ignore-errors (delete-file script-path))))))
+      (let ((script-path (%write-fake-sbcl rel-path marker)))
+        (unwind-protect
+             (let ((cl-mcp/src/worker-client::*cached-sbcl-path* script-path)
+                   (cl-mcp/src/worker-client::*cached-ros-path* script-path)
+                   (caught-message nil))
+               (handler-case (cl-mcp/src/worker-client:spawn-worker)
+                 (worker-spawn-failed (c)
+                   (setf caught-message
+                         (cl-mcp/src/worker-client::worker-spawn-failed-message c))))
+               (ok caught-message
+                   "spawn signals WORKER-SPAWN-FAILED")
+               (ok (and caught-message (search marker caught-message))
+                   "error message includes child stderr marker"))
+          (ignore-errors (delete-file script-path)))))))
