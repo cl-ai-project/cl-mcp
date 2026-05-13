@@ -1,4 +1,4 @@
-;;;; tests-heavy.lisp — heavy-tier test aggregate.
+;;;; tests/heavy.lisp — heavy-tier test aggregate.
 ;;;;
 ;;;; Holds the four test families that dominate suite wall time
 ;;;; because each deftest spawns one or more child SBCLs (worker pool
@@ -9,12 +9,12 @@
 ;;;;   - cl-mcp/tests/pool-kill-worker-test
 ;;;;   - cl-mcp/tests/pool-startup-latency-test
 ;;;;
-;;;; Run on demand: `(asdf:test-system :cl-mcp/tests-heavy)`.  Not
+;;;; Run on demand: `(asdf:test-system :cl-mcp/tests/heavy)`.  Not
 ;;;; wired into upstream CI's fast lane (cl-mcp.asd's test-op points
-;;;; at cl-mcp/tests-fast).  See `.planning/phases/999-worker-image-cache/`
+;;;; at cl-mcp/tests/fast).  See `.planning/phases/999-worker-image-cache/`
 ;;;; for the parking-lot plan to make these cheap enough to unify.
 
-(defpackage #:cl-mcp/tests-heavy
+(defpackage #:cl-mcp/tests/heavy
   (:use #:cl)
   (:import-from #:rove)
   (:import-from #:cl-mcp/tests/pool-test)
@@ -22,10 +22,10 @@
   (:import-from #:cl-mcp/tests/pool-kill-worker-test)
   (:import-from #:cl-mcp/tests/pool-startup-latency-test))
 
-(in-package #:cl-mcp/tests-heavy)
+(in-package #:cl-mcp/tests/heavy)
 
 (defmethod asdf:perform :after ((op asdf:test-op)
-                                (system (eql (asdf:find-system :cl-mcp/tests-heavy))))
+                                (system (eql (asdf:find-system :cl-mcp/tests/heavy))))
   (let ((test-packages (remove-if-not
                         (lambda (dep)
                           (and (stringp dep)

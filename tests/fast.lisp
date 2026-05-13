@@ -1,4 +1,4 @@
-;;;; tests-fast.lisp — fast-tier test aggregate.
+;;;; tests/fast.lisp — fast-tier test aggregate.
 ;;;;
 ;;;; Drives upstream CI's `(asdf:test-system :cl-mcp)` (cl-mcp.asd
 ;;;; routes its test-op here).  Excludes the four test families that
@@ -10,12 +10,12 @@
 ;;;;   - cl-mcp/tests/pool-kill-worker-test
 ;;;;   - cl-mcp/tests/pool-startup-latency-test
 ;;;;
-;;;; Those four live in `cl-mcp/tests-heavy` and are runnable on
-;;;; demand via `(asdf:test-system :cl-mcp/tests-heavy)`.  The
+;;;; Those four live in `cl-mcp/tests/heavy` and are runnable on
+;;;; demand via `(asdf:test-system :cl-mcp/tests/heavy)`.  The
 ;;;; everything-aggregate `cl-mcp/tests` (in tests.lisp) still runs
 ;;;; the full suite.
 
-(defpackage #:cl-mcp/tests-fast
+(defpackage #:cl-mcp/tests/fast
   (:use #:cl)
   (:import-from #:rove)
   (:import-from #:cl-mcp/tests/bridge-test)
@@ -65,10 +65,10 @@
   (:import-from #:cl-mcp/tests/pool-status-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test))
 
-(in-package #:cl-mcp/tests-fast)
+(in-package #:cl-mcp/tests/fast)
 
 (defmethod asdf:perform :after ((op asdf:test-op)
-                                (system (eql (asdf:find-system :cl-mcp/tests-fast))))
+                                (system (eql (asdf:find-system :cl-mcp/tests/fast))))
   (let ((test-packages (remove-if-not
                         (lambda (dep)
                           (and (stringp dep)

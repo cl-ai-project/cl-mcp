@@ -21,6 +21,6 @@
                "hunchentoot"
                "cl-mcp/main")
   ;; Default test-op runs the fast tier (excludes pool-test, http-test,
-  ;; pool-kill-worker-test).  Run those via `(asdf:test-system :cl-mcp/tests-heavy)`,
+  ;; pool-kill-worker-test).  Run those via `(asdf:test-system :cl-mcp/tests/heavy)`,
   ;; or the everything-aggregate via `(asdf:test-system :cl-mcp/tests)`.
-  :in-order-to ((test-op (test-op "cl-mcp/tests-fast"))))
+  :in-order-to ((test-op (test-op "cl-mcp/tests/fast"))))
