@@ -26,9 +26,14 @@
 
 (defmethod asdf:perform :after ((op asdf:test-op)
                                 (system (eql (asdf:find-system :cl-mcp/tests/heavy))))
+  ;; See the rationale comment on the matching method in tests/fast.lisp:
+  ;; iterate per-package because rove:run on a list swallows non-tail failures.
   (let ((test-packages (remove-if-not
                         (lambda (dep)
                           (and (stringp dep)
                                (uiop:string-prefix-p "cl-mcp/tests/" dep)))
-                        (asdf:system-depends-on system))))
-    (rove:run test-packages)))
+                        (asdf:system-depends-on system)))
+        (all-passed t))
+    (dolist (pkg test-packages all-passed)
+      (unless (rove:run pkg)
+        (setf all-passed nil)))))

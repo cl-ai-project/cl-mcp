@@ -69,9 +69,17 @@
 
 (defmethod asdf:perform :after ((op asdf:test-op)
                                 (system (eql (asdf:find-system :cl-mcp/tests/fast))))
+  ;; rove:run expects a single system designator.  Passing the whole list
+  ;; runs only the tail package's tests reliably and discards earlier
+  ;; failures from both the printed summary and the return value, so a
+  ;; broken test anywhere except the last package would silently leave
+  ;; asdf:test-system returning T.  Iterate explicitly and AND-combine.
   (let ((test-packages (remove-if-not
                         (lambda (dep)
                           (and (stringp dep)
                                (uiop:string-prefix-p "cl-mcp/tests/" dep)))
-                        (asdf:system-depends-on system))))
-    (rove:run test-packages)))
+                        (asdf:system-depends-on system)))
+        (all-passed t))
+    (dolist (pkg test-packages all-passed)
+      (unless (rove:run pkg)
+        (setf all-passed nil)))))
