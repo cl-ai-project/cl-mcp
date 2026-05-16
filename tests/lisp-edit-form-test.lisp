@@ -618,6 +618,24 @@ then clean up."
       (error ()
         (skip "cl-interpol not available")))))
 
+(deftest lisp-edit-form-ignores-blank-readtable
+  (testing "blank readtable arguments are treated as omitted"
+    (with-temp-file "tests/tmp/edit-form-blank-readtable.lisp"
+        (format nil "(defun greet ()~%  :hello)~%")
+      (lambda (path)
+        (let ((args (make-hash-table :test #'equal)))
+          (setf (gethash "file_path" args) path
+                (gethash "form_type" args) "defun"
+                (gethash "form_name" args) "greet"
+                (gethash "operation" args) "replace"
+                (gethash "content" args) (format nil "(defun greet ()~%  :hi)~%")
+                (gethash "readtable" args) "")
+          (cl-mcp/src/lisp-edit-form::lisp-edit-form-handler
+           (cl-mcp/src/state:make-state) 1 args))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":hi" updated))
+          (ok (null (search ":hello" updated))))))))
+
 (deftest lisp-edit-form-auto-detects-in-readtable
   (testing "in-readtable form triggers automatic readtable switching"
     (handler-case

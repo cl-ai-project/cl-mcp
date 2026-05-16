@@ -233,6 +233,24 @@
       (error ()
         (skip "cl-interpol not available")))))
 
+(deftest lisp-read-file-ignores-blank-readtable
+  (testing "blank readtable arguments are treated as omitted"
+    (with-temp-lisp-file "tests/tmp/lisp-read-blank-readtable.lisp"
+        (format nil "(defun greet ()~%  :hello)~%")
+      (lambda (path)
+        (let ((args (make-hash-table :test #'equal)))
+          (setf (gethash "path" args) path
+                (gethash "readtable" args) "")
+          (let* ((response (cl-mcp/src/lisp-read-file::lisp-read-file-handler
+                            (cl-mcp/src/state:make-state) 1 args))
+                 (result (gethash "result" response))
+                 (content (and result (gethash "content" result)))
+                 (text (and (vectorp content)
+                            (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            (ok (stringp text))
+            (ok (search "(defun greet" text))))))))
+
 (deftest lisp-read-file-auto-detects-in-readtable
   (testing "in-readtable form triggers automatic readtable switching"
     (handler-case

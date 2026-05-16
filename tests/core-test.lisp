@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%parse-readtable-designator)
   (:import-from #:cl-mcp/src/core #:version)
   (:import-from #:cl-mcp/src/run))
 
@@ -21,6 +23,12 @@
     (let ((in (make-string-input-stream ""))
           (out (make-string-output-stream)))
       (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out))))))
+
+(deftest parse-readtable-designator-blank
+  (testing "blank readtable arguments are ignored"
+    (ok (null (%parse-readtable-designator nil)))
+    (ok (null (%parse-readtable-designator "")))
+    (ok (null (%parse-readtable-designator "   ")))))
 
 (deftest stdio-one-message
   (testing "run processes one line from :in and writes to :out"

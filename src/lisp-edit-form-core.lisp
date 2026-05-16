@@ -134,23 +134,26 @@ editor-hints.named-readtables package."
 Handles three forms:
   \"pkg:sym\"  or \"pkg::sym\" → interned symbol in PKG
   \":keyword\" or \"keyword\"  → keyword symbol
-Returns NIL if READTABLE-STRING is NIL."
-  (when readtable-string
-    (let ((colon-pos (position #\: readtable-string)))
-      (if (and colon-pos (plusp colon-pos))
-          (let* ((pkg-name (subseq readtable-string 0 colon-pos))
-                 (sym-start (if (and (< (1+ colon-pos) (length readtable-string))
-                                     (char= (char readtable-string (1+ colon-pos)) #\:))
-                                (+ colon-pos 2)
-                                (1+ colon-pos)))
-                 (sym-name (subseq readtable-string sym-start))
-                 (pkg (find-package (string-upcase pkg-name))))
-            (if pkg
-                (intern (string-upcase sym-name) pkg)
-                (error "Package ~A not found for readtable ~A"
-                       pkg-name readtable-string)))
-          (intern (string-upcase (string-left-trim ":" readtable-string))
-                  :keyword)))))
+Returns NIL if READTABLE-STRING is NIL or blank."
+  (let ((trimmed (and (stringp readtable-string)
+                      (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                   readtable-string))))
+    (when (and trimmed (plusp (length trimmed)))
+      (let ((colon-pos (position #\: trimmed)))
+        (if (and colon-pos (plusp colon-pos))
+            (let* ((pkg-name (subseq trimmed 0 colon-pos))
+                   (sym-start (if (and (< (1+ colon-pos) (length trimmed))
+                                       (char= (char trimmed (1+ colon-pos)) #\:))
+                                  (+ colon-pos 2)
+                                  (1+ colon-pos)))
+                   (sym-name (subseq trimmed sym-start))
+                   (pkg (find-package (string-upcase pkg-name))))
+              (if pkg
+                  (intern (string-upcase sym-name) pkg)
+                  (error "Package ~A not found for readtable ~A"
+                         pkg-name readtable-string)))
+            (intern (string-upcase (string-left-trim ":" trimmed))
+                    :keyword))))))
 
 (defun %strip-name-prefix (name)
   "Strip reader macro prefixes (#: : \"...\") from NAME for form-name matching.
