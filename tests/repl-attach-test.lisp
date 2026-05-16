@@ -353,6 +353,36 @@ Tears down the connection and the server in an unwind-protect."
              (text (gethash "text" (aref (gethash "content" res) 0))))
         (ok (search ":PRESENT" text))))))
 
+(deftest with-attach-dispatch/unreadable-result-does-not-drop-wire
+  (testing "evaluating a form that returns a CLOS instance without a
+custom print-object survives the wire and a follow-up call succeeds.
+Regression test for the second-order attach-mode wire drop: slynk-
+client serialises responses with prin1 and reads them back with
+read-from-string, so a `#<...>' default print would otherwise
+reader-error on the dispatcher thread and exit the cl-mcp process
+under --disable-debugger."
+    (%with-attach-fixture ()
+      ;; First call defines a bare CLOS class in the attached image and
+      ;; returns a fresh instance.  Its default print-object emits
+      ;; `#<UNREADABLE-PROBE {address}>'.
+      (let* ((res (%dispatch 31 "repl-eval"
+                             (make-ht "code"
+                                      "(progn
+                                         (defclass unreadable-probe () ())
+                                         (make-instance 'unreadable-probe))"
+                                      "package" "CL-USER")))
+             (text (gethash "text" (aref (gethash "content" res) 0))))
+        ;; The printed form survives -- the dispatcher reads it back as
+        ;; a string instead of crashing on the raw `#<...>'.
+        (ok (search "UNREADABLE-PROBE" text)))
+      ;; Follow-up call on the same session must complete -- proves the
+      ;; connection and dispatcher thread survived the previous response.
+      (let* ((res (%dispatch 32 "repl-eval"
+                             (make-ht "code" "(+ 40 2)"
+                                      "package" "CL-USER")))
+             (text (gethash "text" (aref (gethash "content" res) 0))))
+        (ok (search "42" text))))))
+
 ;;; -- :slynk-attach keyword on cl-mcp:run -----------------------------------
 
 (defun %apply-attach (spec supplied-p)

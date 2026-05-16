@@ -318,7 +318,25 @@ the back door.  `do*' uses ordinary CL operators only."
                    (setf ,s-raw (eval ,s-eval-form))))
                (let ((*print-readably* nil)
                      (*print-circle* t))
-                 (setf ,s-printed (prin1-to-string ,s-raw))))
+                 (setf ,s-printed (prin1-to-string ,s-raw))
+                 ;; Collapse the raw slot of the wire 5-tuple to the
+                 ;; printed string.  slynk-client serialises the
+                 ;; response with `prin1' and reads it back with
+                 ;; `read-from-string'; if the eval'd form returns a
+                 ;; value whose default `print-object' emits
+                 ;; `#<...>' unreadable syntax (CLOS instance,
+                 ;; structure, hash-table, function, condition, etc.),
+                 ;; the dispatcher reader signals
+                 ;; `simple-reader-error' on the wire.  Neither
+                 ;; slime-net-read nor slime-dispatch-events's top
+                 ;; loop catches it, and `--disable-debugger' then
+                 ;; calls `exit' on the unhandled condition from the
+                 ;; dispatcher thread, terminating the entire cl-mcp
+                 ;; process with no logged diagnostic.  The raw slot
+                 ;; was already a degraded copy (prin1/read round
+                 ;; trip), so substituting the printed string is no
+                 ;; worse and immune to unreadable syntax.
+                 (setf ,s-raw ,s-printed)))
            (error (,s-condition)
              (setf ,s-err-ctx
                    (list :condition-type (princ-to-string (type-of ,s-condition))
