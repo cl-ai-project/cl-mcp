@@ -17,12 +17,17 @@
 
 set -eu
 
-# Pinned slynk-client commit (tip of fade/slynk-client master at the
-# time PR-A's smoke confirmation landed -- see 01-STATE.md).  Bump
+# Pinned slynk-client commit.  Currently the tip of
+# fade/slynk-client's `feature/dispatcher-robust-to-unreadable-events'
+# branch, which wraps the dispatcher loop in handler-case so a reader
+# error on one inbound wire message (e.g. a `:new-features' broadcast
+# from a richly-loaded slynk listener that names packages the client
+# does not have) is logged and skipped rather than killing the cl-mcp
+# process from the dispatcher thread under --disable-debugger.  Bump
 # only when the cl-mcp suite has been re-verified against a newer
 # revision.
 SLYNK_CLIENT_REPO="${SLYNK_CLIENT_REPO:-git@github.com:fade/slynk-client.git}"
-SLYNK_CLIENT_COMMIT="${SLYNK_CLIENT_COMMIT:-f232d4dbbed03ff62ef8419eea580d2dfb9999de}"
+SLYNK_CLIENT_COMMIT="${SLYNK_CLIENT_COMMIT:-32691172ee0a5619f084145c0304464f5c4b67c3}"
 
 # Where to put it.  Order of preference:
 #   1. $LISP_WORKSPACE if set (developer-controlled workspace root).
