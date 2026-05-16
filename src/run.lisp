@@ -10,7 +10,8 @@
                 #:parse-attach-spec
                 #:set-attach-from-env
                 #:attach-config-host
-                #:attach-config-port)
+                #:attach-config-port
+                #:attach-disconnect-all)
   (:import-from #:cl-mcp/src/pool #:initialize-pool #:shutdown-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
   (:import-from #:cl-mcp/src/worker-client
@@ -145,6 +146,7 @@ consulted via `set-attach-from-env'."
                                (return))))))))
            (log-event :info "stdio.stop")
            t)
+       (ignore-errors (attach-disconnect-all :reason "stdio-shutdown"))
        (when *use-worker-pool* (ignore-errors (shutdown-pool)))))
     (:tcp
      (log-event :info "tcp.start" "host" host "port" port)

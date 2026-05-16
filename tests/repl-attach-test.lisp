@@ -19,6 +19,7 @@
                 #:set-attach-from-env
                 #:attach-active-p
                 #:attach-disconnect
+                #:attach-disconnect-all
                 #:with-attach-dispatch)
   (:import-from #:cl-mcp/src/run
                 #:run)
@@ -219,6 +220,30 @@ exporting it from the attach package."
                                                  :port port)))
         (attach-disconnect "never-opened" :reason "test")
         (ok t)))))
+
+(deftest attach-disconnect-all/closes-every-cached-session
+  (testing "attach-disconnect-all clears every session in the cache"
+    (%with-slynk-fixture (port)
+      (let ((*attach-config* (make-attach-config :host "127.0.0.1"
+                                                 :port port))
+            (conns (symbol-value
+                    (find-symbol "*SESSION-CONNECTIONS*"
+                                 :cl-mcp/src/attach))))
+        (%open-conn "sess-A")
+        (%open-conn "sess-B")
+        (%open-conn "sess-C")
+        (ok (= 3 (hash-table-count conns)))
+        (let ((closed (attach-disconnect-all :reason "test-shutdown")))
+          (ok (= 3 closed))
+          (ok (zerop (hash-table-count conns))))))))
+
+(deftest attach-disconnect-all/empty-cache-is-noop
+  (testing "calling attach-disconnect-all with an empty cache returns 0"
+    (let ((conns (symbol-value
+                  (find-symbol "*SESSION-CONNECTIONS*"
+                               :cl-mcp/src/attach))))
+      (clrhash conns)
+      (ok (zerop (attach-disconnect-all :reason "test-empty"))))))
 
 ;;; -- with-attach-dispatch --------------------------------------------------
 

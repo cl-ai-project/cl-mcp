@@ -37,6 +37,7 @@
            #:set-attach-from-env
            #:attach-active-p
            #:attach-disconnect
+           #:attach-disconnect-all
            #:with-attach-dispatch))
 
 (in-package #:cl-mcp/src/attach)
@@ -199,6 +200,24 @@ end, manual reset) is preserved."
                    "session" session-id
                    "reason" reason))))
   nil)
+
+(defun attach-disconnect-all (&key (reason "shutdown"))
+  "Close every cached Slynk attach connection, logging each one and
+returning the count of sessions closed.  Intended as a shutdown hook
+so the cl-mcp process delivers a graceful TCP FIN to the attached
+Slynk listener rather than letting the OS tear the socket down on
+process exit, which surfaces on the listener side as a
+\"Connection reset by peer\" log entry with a full backtrace."
+  (let (session-ids)
+    (with-lock-held (*session-connections-lock*)
+      (maphash (lambda (k v)
+                 (declare (ignore v))
+                 (push k session-ids))
+               *session-connections*))
+    (dolist (sid session-ids)
+      (handler-case (attach-disconnect sid :reason reason)
+        (error () nil)))
+    (length session-ids)))
 
 (defun %build-wrapping-form (code-string package-name)
   "Return a single s-expression to send to the attached Slynk server.
