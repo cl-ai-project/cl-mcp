@@ -91,6 +91,8 @@
         (description (getf parsed-spec :description)))
     `(setf (gethash ,json-name properties)
            (make-ht "type" ,(%type-to-json-type type)
+                    ,@(when (eq type :array)
+                        '("items" (make-ht "type" "string")))
                     ,@(when enum
                         `("enum" (vector ,@enum)))
                     ,@(when description

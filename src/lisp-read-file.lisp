@@ -23,6 +23,8 @@
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%parse-readtable-designator)
   (:import-from #:cl-ppcre
                 #:scan
                 #:create-scanner)
@@ -531,29 +533,13 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
   (let ((file-result
-         (lisp-read-file path
-                         :collapsed collapsed
-                         :name-pattern name_pattern
-                         :content-pattern content_pattern
-                         :offset offset
-                         :limit limit
-                         :readtable (when readtable
-                                      (let ((colon-pos (position #\: readtable)))
-                                        (if colon-pos
-                                            ;; Package-qualified: "pkg:sym" or "pkg::sym"
-                                            (let* ((pkg-name (subseq readtable 0 colon-pos))
-                                                   (sym-start (if (and (< (1+ colon-pos) (length readtable))
-                                                                       (char= (char readtable (1+ colon-pos)) #\:))
-                                                                  (+ colon-pos 2)
-                                                                  (1+ colon-pos)))
-                                                   (sym-name (subseq readtable sym-start))
-                                                   (pkg (find-package (string-upcase pkg-name))))
-                                              (if pkg
-                                                  (intern (string-upcase sym-name) pkg)
-                                                  (error "Package ~A not found for readtable ~A"
-                                                         pkg-name readtable)))
-                                            ;; Keyword symbol (no colon prefix)
-                                            (intern (string-upcase readtable) :keyword)))))))
+          (lisp-read-file path
+                          :collapsed collapsed
+                          :name-pattern name_pattern
+                          :content-pattern content_pattern
+                          :offset offset
+                          :limit limit
+                          :readtable (%parse-readtable-designator readtable))))
     (result id
             (make-ht "content" (text-content (gethash "content" file-result))
                      "text" (gethash "content" file-result)

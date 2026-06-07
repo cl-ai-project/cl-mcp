@@ -47,6 +47,14 @@
             (make-ht "content" (text-content output)
                      "output" output))))
 
+(define-tool "test-array"
+  :description "Test array args."
+  :args ((tags :type :array :description "Tags"))
+  :body
+  (result id
+          (make-ht "content" (text-content "ok")
+                   "tags" tags)))
+
 ;;; Tests
 
 (deftest define-tool-creates-handler
@@ -70,6 +78,18 @@
         (ok (gethash "message" props))
         (ok (vectorp required))
         (ok (find "message" required :test #'string=))))))
+
+(deftest define-tool-array-schema
+  (testing "array args include items schema"
+    (let* ((desc (test-array-descriptor))
+           (schema (gethash "inputSchema" desc))
+           (props (gethash "properties" schema))
+           (array-prop (gethash "tags" props))
+           (items (gethash "items" array-prop)))
+      (ok (hash-table-p array-prop))
+      (ok (string= "array" (gethash "type" array-prop)))
+      (ok (hash-table-p items))
+      (ok (string= "string" (gethash "type" items))))))
 
 (deftest define-tool-registers-tool
   (testing "define-tool registers the tool in the registry"
