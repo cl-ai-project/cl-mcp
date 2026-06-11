@@ -7,19 +7,13 @@
 The core system lives under `src/`, grouped by responsibility (`log`, `repl`, `protocol`, `tcp`, `core`, `run`). Each file is serially loaded via `cl-mcp.asd`; add new packages here and export symbols explicitly. Tests reside in `tests/` with mirrored filenames (`*-test.lisp`) for Rove. Helper clients and bridges are in `scripts/`. Keep assets such as sample transcripts or captures under `tests/fixtures/` if introduced.
 
 ## Build, Test, and Development Commands
-Use cl-mcp REPL, invoke individual suites with `(rove:run 'cl-mcp/tests/<package>)` via `repl-eval` so tests run inside the agent without shelling out.
+Use cl-mcp REPL, invoke individual suites with `run-tests` so tests run inside the agent without shelling out.
 
 ### Temporary Debug Logging
 - When cl-mcp shows unintended behavior or hits errors that are hard to diagnose, record each occurrence to a temp file immediately.
 - Use a per-session temp log (for example, `/tmp/cl-mcp-debug-<timestamp>.log`) and append entries instead of overwriting.
 - For every entry, include at least: timestamp, command/tool invocation, relevant inputs, observed error/output, and stack trace or restart information when available.
 - Redact secrets before writing logs, and reference the temp log in follow-up debugging notes, issues, or PRs.
-
-### Running Individual Tests
-- From the MCP REPL, wrap the test invocation so stdout is captured:  
-  `(with-output-to-string (*standard-output*) (rove:run-test 'cl-mcp/tests/integration-test::repl-eval-printlength))`
-- The wrapper lets you see per-assertion output even when the REPL only returns the final value. Replace the test symbol to target other cases.
-- In sandboxed environments where TCP bind is denied, expect `tests/tcp-test.lisp` to fail; run other suites individually to iterate.
 
 ## Coding Style & Naming Conventions
 Follow the Google Common Lisp Style Guide: 2-space indent, ≤100 columns, blank line between top-level forms. Each `*.lisp` begins with `(in-package ...)` then module-specific `declaim`. Use lower-case lisp-case for functions, `-p` predicates, `+constants+`, and `*specials*`. Avoid runtime `eval` and dynamic symbol interning; prefer restarts over `signal`. Public functions and classes require docstrings; document conditions and restarts in situ.
