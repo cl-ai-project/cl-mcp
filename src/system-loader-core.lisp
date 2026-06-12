@@ -224,6 +224,28 @@ DEFUN' lines are noise that drown real warnings."
             (setf *last-compiler-stderr*
                   (ignore-errors (get-output-stream-string stderr)))))))))
 
+(defun %delete-system-fasls (system-name)
+  "Delete the cached fasls under SYSTEM-NAME's output-translation
+directory.  ASDF's :FORCE T only forces the named system, not its
+dependencies — for package-inferred systems the actual code lives in
+dependency subsystems, so forcing the top system alone recompiles
+nothing, and a source edit landing in the same second as the previous
+compile is masked by second-granularity FILE-WRITE-DATE.  Deleting the
+fasls makes recompilation unconditional.  Returns the number of files
+deleted (0 when the system or its cache directory is absent)."
+  (let* ((system (asdf:find-system system-name nil))
+         (source-dir (and system (asdf:system-source-directory system))))
+    (if (null source-dir)
+        0
+        (let ((deleted 0))
+          (dolist (fasl (directory
+                         (merge-pathnames
+                          "**/*.fasl"
+                          (asdf:apply-output-translations source-dir)))
+                  deleted)
+            (when (ignore-errors (delete-file fasl) t)
+              (incf deleted)))))))
+
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
                                        (:timeout-seconds (or null (real (0))))
@@ -237,8 +259,11 @@ DEFUN' lines are noise that drown real warnings."
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
-changed files are picked up. When CLEAR-FASLS is true, forces full
-recompilation from source. TIMEOUT-SECONDS must be a positive number
+changed files are picked up. When CLEAR-FASLS is true, deletes the
+system's cached fasls (its output-translation directory) before
+loading, guaranteeing recompilation from source — including
+package-inferred dependency subsystems that :FORCE T alone would not
+rebuild. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds.
 
 SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
@@ -267,6 +292,8 @@ registering it."
         (%load-with-timeout
          (lambda ()
            (flet ((%do-load ()
+                    (when clear-fasls
+                      (%delete-system-fasls system-name))
                     (let ((cleared-prior-p
                             (when (and force
                                        (member system-name
