@@ -260,3 +260,55 @@
                            :suppress-redefinition-warnings nil)))
       (ok (hash-table-p ht))
       (ok (string= "loaded" (gethash "status" ht))))))
+
+(deftest load-system-clear-fasls-recompiles-package-inferred
+  (testing "clear_fasls recompiles dependency subsystems regardless of timestamps"
+    ;; ASDF's :FORCE T only forces the NAMED system, not its
+    ;; dependencies.  For package-inferred systems the actual code
+    ;; lives in dependency subsystems (\"fixture/src/main\"), so a
+    ;; source rewrite landing in the same second as the previous
+    ;; compile is masked by second-granularity FILE-WRITE-DATE and
+    ;; the stale fasl gets reloaded.  clear_fasls must delete the
+    ;; cached fasls so recompilation happens unconditionally.
+    (let* ((dir (merge-pathnames "clmcp-clear-fasls-fixture/"
+                                 (uiop:temporary-directory)))
+           (src-dir (merge-pathnames "src/" dir))
+           (asd (merge-pathnames "clmcp-clear-fasls-fixture.asd" dir))
+           (main (merge-pathnames "main.lisp" src-dir)))
+      (unwind-protect
+          (flet ((write-main (value)
+                   (with-open-file (out main :direction :output
+                                             :if-exists :supersede)
+                     (format out "(defpackage #:clmcp-clear-fasls-fixture/src/main~%~
+                                    (:use #:cl)~%  (:export #:answer))~%~
+                                  (in-package #:clmcp-clear-fasls-fixture/src/main)~%~
+                                  (defun answer () ~A)~%"
+                             value))))
+            (uiop:delete-directory-tree dir :validate t
+                                            :if-does-not-exist :ignore)
+            (ensure-directories-exist src-dir)
+            (with-open-file (out asd :direction :output
+                                     :if-exists :supersede)
+              (write-string "(asdf:defsystem \"clmcp-clear-fasls-fixture\"
+  :class :package-inferred-system
+  :depends-on (\"clmcp-clear-fasls-fixture/src/main\"))" out))
+            (write-main 1)
+            (asdf:load-asd asd)
+            (ok (string= "loaded"
+                         (gethash "status"
+                                  (load-system "clmcp-clear-fasls-fixture"))))
+            (ok (= 1 (funcall (find-symbol
+                               "ANSWER" "CLMCP-CLEAR-FASLS-FIXTURE/SRC/MAIN"))))
+            ;; Rewrite the dependency subsystem's source immediately —
+            ;; almost always within the same second as the compile above,
+            ;; which is exactly the case clear_fasls must defeat.
+            (write-main 2)
+            (ok (string= "loaded"
+                         (gethash "status"
+                                  (load-system "clmcp-clear-fasls-fixture"
+                                               :clear-fasls t))))
+            (ok (= 2 (funcall (find-symbol
+                               "ANSWER" "CLMCP-CLEAR-FASLS-FIXTURE/SRC/MAIN")))
+                "clear_fasls must pick up a same-second source rewrite"))
+        (uiop:delete-directory-tree dir :validate t
+                                        :if-does-not-exist :ignore)))))
