@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/worker/handlers
                 #:register-all-handlers)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:register-project-root-source-registry)
   (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:*log-context*)
@@ -99,6 +100,10 @@ the directory does not exist."
             (progn
               (setf *project-root* dir)
               (uiop/os:chdir dir)
+              ;; Make the project's own .asd win ASDF resolution (see the
+              ;; helper's docstring). Runs at worker startup when the root is
+              ;; known via MCP_PROJECT_ROOT.
+              (register-project-root-source-registry dir)
               (log-event :info "worker.project-root.set"
                          "path" (namestring dir))
               dir)

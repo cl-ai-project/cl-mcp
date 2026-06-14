@@ -21,7 +21,8 @@
   (:import-from #:cl-mcp/src/inspect
                 #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:register-project-root-source-registry)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
@@ -240,6 +241,11 @@ Returns a success payload."
           (setf dir-path resolved)))
       (setf *project-root* dir-path)
       (uiop/os:chdir dir-path)
+      ;; Re-point ASDF resolution at the new project root (see the helper's
+      ;; docstring). This is what fixes dynamic fs-set-project-root and reused
+      ;; pool workers: without it a same-named system already reachable via the
+      ;; inherited registry keeps winning after a root change.
+      (register-project-root-source-registry dir-path)
       (log-event :info "worker.project-root.set" "path" (namestring dir-path))
       (make-ht "content" (text-content
                           (format nil "Project root set to ~A" (namestring dir-path)))
