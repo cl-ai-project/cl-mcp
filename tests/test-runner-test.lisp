@@ -265,9 +265,15 @@
                             :tests '("cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol"))))))
 
 (deftest run-tests-tests-array-rejects-nil-element
-  (testing "run-tests rejects NIL entries in :tests"
-    (ok (signals (run-tests "cl-mcp/tests/clhs-test"
-                            :tests '(nil))))))
+  (testing "run-tests reports NIL entries in :tests as a structured :unresolved result"
+    (let ((result (run-tests "cl-mcp/tests/clhs-test" :tests '(nil))))
+      (ok (hash-table-p result))
+      (ok (string= "unresolved" (gethash "framework" result))
+          "a NIL test entry yields a structured :unresolved result, not an RPC error")
+      (ok (>= (gethash "failed" result) 1)
+          "unresolved resolution is reported as at least one failure")
+      (ok (zerop (gethash "passed" result))
+          "no passes when the test name cannot be resolved"))))
 
 (deftest run-tests-failure-includes-assertion-details
   (testing "run-tests includes description, form, and values in failure details"

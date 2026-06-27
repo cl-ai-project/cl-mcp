@@ -96,6 +96,25 @@ Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
                 (princ-to-string source))))
     ht))
 
+(define-condition test-resolution-error (error)
+  ((system-name :initarg :system-name :initform nil
+                :reader test-resolution-error-system-name)
+   (detail :initarg :detail :initform "could not resolve the requested test(s)"
+           :reader test-resolution-error-detail)
+   (hint :initarg :hint :initform nil
+         :reader test-resolution-error-hint))
+  (:report (lambda (condition stream)
+             (format stream "~A~@[~%Hint: ~A~]"
+                     (test-resolution-error-detail condition)
+                     (test-resolution-error-hint condition))))
+  (:documentation "Signaled when run-tests cannot resolve the requested test
+target: no FiveAM suite matches the system, or a test name cannot be resolved
+to a loaded test.  run-tests catches this and converts it via
+MAKE-RESOLUTION-FAILURE-RESULT into a structured :unresolved result, so callers
+(especially AI agents) get a machine-readable category and recovery hint
+instead of an opaque RPC-level error.  Framework-internal bugs and environment
+errors are NOT signaled this way; they propagate so real failures stay visible."))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Rove Backend
 ;;; ---------------------------------------------------------------------------
@@ -168,37 +187,53 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
     (nreverse results)))
 
 (defun %coerce-test-symbol (test-name)
-  "Convert TEST-NAME to a fully qualified test symbol."
+  "Convert TEST-NAME to a fully qualified test symbol.
+Signals TEST-RESOLUTION-ERROR (not a plain error) for unusable test names so
+run-tests can report a structured :unresolved result.  Shared by the Rove and
+FiveAM selective paths, giving both frameworks the same resolution semantics."
   (cond
     ((null test-name)
-     (error "Test name must not be NIL"))
+     (error 'test-resolution-error :detail "Test name must not be NIL"))
     ((symbolp test-name)
      (unless (symbol-package test-name)
-       (error "Test symbol must be package-qualified: ~S" test-name))
+       (error 'test-resolution-error
+              :detail (format nil "Test symbol must be package-qualified: ~S"
+                              test-name)))
      test-name)
     ((stringp test-name)
      (let* ((name (string-upcase test-name))
             (colon-pos (search "::" name)))
        (unless colon-pos
-         (error "Test name must be fully qualified (pkg::name): ~A" test-name))
+         (error 'test-resolution-error
+                :detail (format nil "Test name must be fully qualified (pkg::name): ~A"
+                                test-name)
+                :hint "Use the form \"package::test-name\"."))
        (let* ((pkg-name (subseq name 0 colon-pos))
               (sym-name (subseq name (+ colon-pos 2)))
               (pkg (find-package pkg-name)))
          (unless pkg
-           (error "Test package not found: ~A" pkg-name))
+           (error 'test-resolution-error
+                  :detail (format nil "Test package not found: ~A" pkg-name)
+                  :hint "Load the system that defines the test package first."))
          (intern sym-name pkg))))
     (t
-     (error "Test name must be a string or symbol: ~S" test-name))))
+     (error 'test-resolution-error
+            :detail (format nil "Test name must be a string or symbol: ~S"
+                            test-name)))))
 
 (defun %normalize-tests-arg (tests)
-  "Normalize TESTS to a non-empty list of fully-qualified test symbols."
+  "Normalize TESTS to a non-empty list of fully-qualified test symbols.
+Signals TEST-RESOLUTION-ERROR for malformed input so run-tests reports a
+structured :unresolved result."
   (let ((items (cond
                  ((null tests) nil)
                  ((vectorp tests) (coerce tests 'list))
                  ((listp tests) tests)
-                 (t (error "tests must be an array of test names")))))
+                 (t (error 'test-resolution-error
+                           :detail "tests must be an array of test names")))))
     (when (and tests (null items))
-      (error "tests must contain at least one test name"))
+      (error 'test-resolution-error
+             :detail "tests must contain at least one test name"))
     (mapcar #'%coerce-test-symbol items)))
 
 (defun %resolve-framework (system-name framework)
@@ -282,6 +317,33 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
                   worker, then retry run-tests."
              (or (ignore-errors (princ-to-string condition))
                  "unprintable condition"))))))
+
+(defun make-resolution-failure-result (condition)
+  "Convert a TEST-RESOLUTION-ERROR into a structured test-result so RUN-TESTS
+returns a normal MCP response (framework :unresolved, failed:1 with a synthetic
+TEST-RESOLUTION entry) instead of letting the condition propagate as an opaque
+RPC-level error.  Mirrors MAKE-LOAD-FAILURE-RESULT for load failures so every
+run-tests outcome is a machine-readable structured hash, and the same
+representation covers both Rove and FiveAM target-resolution failures."
+  (let ((system-name (test-resolution-error-system-name condition))
+        (detail (test-resolution-error-detail condition))
+        (hint (test-resolution-error-hint condition)))
+    (make-test-result
+     :passed 0
+     :failed 1
+     :pending 0
+     :framework :unresolved
+     :duration 0
+     :failed-tests
+     (vector
+      (make-failure-detail
+       :test-name "TEST-RESOLUTION"
+       :description (if system-name
+                        (format nil "Could not resolve tests for ~A" system-name)
+                        "Could not resolve the requested test(s)")
+       :reason (if hint
+                   (format nil "~A~%~%Hint: ~A" detail hint)
+                   detail))))))
 
 (defun %extract-defpackage-names-from-file (pathname)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -863,36 +925,70 @@ Uses dynamic symbol resolution so FiveAM is an optional dependency."
        :reason (or (and (stringp reason) reason)
                    (princ-to-string (or reason "no reason given")))))))
 
+(defun %fiveam-result-test-case (result)
+  "Return the FiveAM TEST-CASE object that RESULT belongs to, or NIL.
+Every assertion result FiveAM produces carries the test-case it ran under;
+this is used to group per-assertion results back into per-test counts.
+Uses dynamic symbol resolution so FiveAM is an optional dependency."
+  (let* ((pkg (find-package :fiveam))
+         (slot-sym (and pkg (find-symbol "TEST-CASE" pkg))))
+    (when (and slot-sym result)
+      (ignore-errors (slot-value result slot-sym)))))
+
 (defun %fiveam-extract-results (results-list)
-  "Extract counts and failure details from a list of FiveAM test results.
+  "Extract per-test counts and failure details from a list of FiveAM results.
 Returns (values passed failed pending failure-details).
+
+FiveAM produces one result object per assertion (IS check), so results are
+grouped back by their owning test-case to count per test, matching the Rove
+backend's semantics: a test with several passing assertions counts as one
+PASS, a test with any failing assertion counts as one FAIL, and a skipped
+test counts as one PENDING.  FAILURE-DETAILS keeps one entry per failing
+assertion (each carrying its owning test name), like the Rove path.
 Uses dynamic type checks so FiveAM is an optional dependency."
-  (let ((passed 0) (failed 0) (pending 0) (failure-details nil)
-        (test-passed-class (and (find-package :fiveam)
-                                (find-class (find-symbol "TEST-PASSED" :fiveam) nil)))
-        (test-failure-class (and (find-package :fiveam)
-                                  (find-class (find-symbol "TEST-FAILURE" :fiveam) nil)))
+  (let ((test-failure-class (and (find-package :fiveam)
+                                 (find-class (find-symbol "TEST-FAILURE" :fiveam) nil)))
         (test-skipped-class (and (find-package :fiveam)
-                                  (find-class (find-symbol "TEST-SKIPPED" :fiveam) nil))))
+                                 (find-class (find-symbol "TEST-SKIPPED" :fiveam) nil)))
+        (groups (make-hash-table :test 'eq))
+        (order nil)
+        (passed 0) (failed 0) (pending 0) (failure-details nil))
+    ;; Group assertion results by their owning test-case, preserving the
+    ;; order in which each test first appears.
     (dolist (result results-list)
-      (cond
-        ((and test-passed-class (typep result test-passed-class))
-         (incf passed))
-        ((and test-failure-class (typep result test-failure-class))
-         (incf failed)
-         (push (%fiveam-extract-failure-detail result) failure-details))
-        ((and test-skipped-class (typep result test-skipped-class))
-         (incf pending))
-        (t
-         (incf passed))))
+      (let ((test-case (%fiveam-result-test-case result)))
+        (unless (nth-value 1 (gethash test-case groups))
+          (push test-case order))
+        (push result (gethash test-case groups))))
+    ;; Classify each test by the strongest outcome among its assertions:
+    ;; any failure -> FAIL, else any skip -> PENDING, else PASS.
+    (dolist (test-case (nreverse order))
+      (let* ((test-results (nreverse (gethash test-case groups)))
+             (failures (remove-if-not
+                        (lambda (r)
+                          (and test-failure-class (typep r test-failure-class)))
+                        test-results))
+             (skipped (and test-skipped-class
+                           (some (lambda (r) (typep r test-skipped-class))
+                                 test-results))))
+        (cond
+          (failures
+           (incf failed)
+           (dolist (r failures)
+             (push (%fiveam-extract-failure-detail r) failure-details)))
+          (skipped (incf pending))
+          (t (incf passed)))))
     (values passed failed pending (nreverse failure-details))))
 
 (defun %find-fiveam-suites-for-system (system-name)
-  "Find FiveAM test suites relevant to SYSTEM-NAME.
-Returns a list of suite symbols from *TOPLEVEL-SUITES* that either:
-- Match the system-name or any of its sub-system package names
-- Or are all top-level suites when no specific match is found
-Uses dynamic symbol resolution so FiveAM is an optional dependency."
+  "Find FiveAM test suites whose name matches SYSTEM-NAME.
+Returns suite symbols from *TOPLEVEL-SUITES* whose name equals SYSTEM-NAME
+or starts with a SYSTEM-NAME sub-system prefix (\"name/\" or \"name-\").
+Returns NIL when nothing matches; the caller signals rather than silently
+running every unrelated suite in the image (FiveAM suites are registered
+globally, independent of the ASDF system, so a blanket run would execute
+other systems' suites too).  Uses dynamic symbol resolution so FiveAM is
+an optional dependency."
   (let* ((fiveam-pkg (find-package :fiveam))
          (toplevel-suites-var (and fiveam-pkg
                                     (find-symbol "*TOPLEVEL-SUITES*" fiveam-pkg)))
@@ -900,18 +996,16 @@ Uses dynamic symbol resolution so FiveAM is an optional dependency."
            (if (and toplevel-suites-var (boundp toplevel-suites-var))
                (copy-list (symbol-value toplevel-suites-var))
                nil))
-         (system-prefix (string-upcase system-name))
-         (matching-suites
-           (remove-if-not
-            (lambda (suite-sym)
-              (let ((suite-name (symbol-name suite-sym)))
-                (or (string-equal suite-name system-prefix)
-                    (uiop:string-prefix-p (concatenate 'string system-prefix "/")
-                                          suite-name)
-                    (uiop:string-prefix-p (concatenate 'string system-prefix "-")
-                                          suite-name))))
-            all-suites)))
-    (or matching-suites all-suites)))
+         (system-prefix (string-upcase system-name)))
+    (remove-if-not
+     (lambda (suite-sym)
+       (let ((suite-name (symbol-name suite-sym)))
+         (or (string-equal suite-name system-prefix)
+             (uiop:string-prefix-p (concatenate 'string system-prefix "/")
+                                   suite-name)
+             (uiop:string-prefix-p (concatenate 'string system-prefix "-")
+                                   suite-name))))
+     all-suites)))
 
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
@@ -935,75 +1029,95 @@ Uses dynamic symbol resolution so FiveAM is an optional dependency."
         (%with-fiveam-variables (lambda () (funcall run-fn test-spec)))
         (error "FiveAM package not found; cannot run tests"))))
 
-(defun run-fiveam-tests (system-name)
-  "Run all FiveAM test suites and return structured results.
-Discovers suites via package naming conventions from SYSTEM-NAME."
-  (log-event :info "test-runner" "framework" "fiveam" "system" system-name)
-  (let* ((start-time (get-internal-real-time))
+(defun %fiveam-attach-output (ht stdout stderr debug-output)
+  "Attach captured STDOUT/STDERR/DEBUG-OUTPUT to a FiveAM result hash HT.
+Each stream is added only when non-empty, mirroring the Rove backend.
+Returns HT."
+  (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+  (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+  (when (plusp (length debug-output))
+    (setf (gethash "debug_output" ht) debug-output))
+  ht)
+
+(defun %fiveam-run-and-collect (specs crash-test-names)
+  "Run each FiveAM spec in SPECS with output capture and return a result hash.
+SPECS is a list of suite/test symbols passed to %FIVEAM-RUN.  On a runner
+crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
+designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
+stream-capture, crash-handling, and result-assembly logic lives in one place."
+  (let ((start-time (get-internal-real-time))
          (stdout-stream (make-string-output-stream))
          (stderr-stream (make-string-output-stream))
          (debug-stream (make-string-output-stream))
-         (suite-symbols (%find-fiveam-suites-for-system system-name))
          all-results)
-    (handler-case
-        (dolist (suite-sym suite-symbols)
-          (let ((suite-results
-                  (let ((*standard-output* stdout-stream)
-                        (*error-output* stderr-stream)
-                        (*test-debug-output* debug-stream))
-                    (%fiveam-run suite-sym))))
-            (setf all-results (append all-results suite-results))))
-      (error (c)
-        (let ((end-time (get-internal-real-time))
-              (duration-ms
-               (round (* 1000 (/ (- end-time start-time)
-                                 internal-time-units-per-second)))))
-          (return-from run-fiveam-tests
-            (let ((ht (make-test-result
-                       :passed 0 :failed 1
-                       :failed-tests
-                       (vector (make-failure-detail
-                                :test-name system-name
-                                :reason (format nil "FiveAM runner crashed: ~A"
-                                                (princ-to-string c))))
-                       :framework :fiveam :duration duration-ms)))
-              (let ((stdout (%truncate-test-output
-                             (get-output-stream-string stdout-stream)))
-                    (stderr (%truncate-test-output
-                             (get-output-stream-string stderr-stream)))
-                    (debug-output (get-output-stream-string debug-stream)))
-                (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-                (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
-                (when (plusp (length debug-output))
-                  (setf (gethash "debug_output" ht) debug-output))
-                ht))))))
-    (let* ((end-time (get-internal-real-time))
-           (duration-ms
-            (round (* 1000 (/ (- end-time start-time)
-                              internal-time-units-per-second))))
-           (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
-           (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output (get-output-stream-string debug-stream)))
+    (flet ((duration-ms ()
+             (round (* 1000 (/ (- (get-internal-real-time) start-time)
+                               internal-time-units-per-second))))
+           (stdout () (%truncate-test-output
+                       (get-output-stream-string stdout-stream)))
+           (stderr () (%truncate-test-output
+                       (get-output-stream-string stderr-stream)))
+           (debug-output () (get-output-stream-string debug-stream)))
+      (handler-case
+          (dolist (spec specs)
+            (let ((results
+                    (let ((*standard-output* stdout-stream)
+                          (*error-output* stderr-stream)
+                          (*test-debug-output* debug-stream))
+                      (%fiveam-run spec))))
+              (when results
+                (setf all-results (append all-results results)))))
+        (error (c)
+          (return-from %fiveam-run-and-collect
+            (%fiveam-attach-output
+             (make-test-result
+              :passed 0 :failed (length crash-test-names)
+              :failed-tests
+              (mapcar (lambda (name)
+                        (make-failure-detail
+                         :test-name (princ-to-string name)
+                         :reason (format nil "FiveAM runner crashed: ~A"
+                                         (princ-to-string c))))
+                      crash-test-names)
+              :framework :fiveam :duration (duration-ms))
+             (stdout) (stderr) (debug-output)))))
       (multiple-value-bind (passed failed pending failure-details)
           (%fiveam-extract-results all-results)
-        (let ((ht (make-test-result
-                   :passed passed :failed failed :pending pending
-                   :failed-tests failure-details
-                   :framework :fiveam :duration duration-ms)))
-          (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-          (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
-          (when (plusp (length debug-output))
-            (setf (gethash "debug_output" ht) debug-output))
-          ht)))))
+        (%fiveam-attach-output
+         (make-test-result
+          :passed passed :failed failed :pending pending
+          :failed-tests failure-details
+          :framework :fiveam :duration (duration-ms))
+         (stdout) (stderr) (debug-output))))))
+
+(defun run-fiveam-tests (system-name)
+  "Run the FiveAM suites whose name matches SYSTEM-NAME and return results.
+Signals an error when no suite name matches SYSTEM-NAME instead of running
+every suite registered in the image, so an explicit system name is never
+silently widened into a full-image run.  When suite names do not follow the
+system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
+  (log-event :info "test-runner" "framework" "fiveam" "system" system-name)
+  (let ((suite-symbols (%find-fiveam-suites-for-system system-name)))
+    (unless suite-symbols
+      (error 'test-resolution-error
+             :system-name system-name
+             :detail (format nil "No FiveAM suite matches system ~A.  FiveAM ~
+                      suites are registered globally and are not tied to the ~
+                      ASDF system, so cl-mcp will not run every suite in the ~
+                      image." system-name)
+             :hint "Name a suite that matches the system, or pass TEST/TESTS to run specific tests."))
+    (%fiveam-run-and-collect suite-symbols (list system-name))))
 
 (defun %resolve-fiveam-test-symbol (test-sym)
   "Resolve TEST-SYM to a symbol that FiveAM's test table recognizes.
 FiveAM stores tests keyed by symbol identity (EQ).  When a test was
-defined in package A, the key is the symbol interned in A.  If
-direct lookup fails, fall back to looking up the same name interned
-in the FIVEAM package (common when tests are defined via FiveAM's
-own macro expansion).  Uses dynamic symbol resolution so FiveAM is
-an optional dependency."
+defined in package A, the key is the symbol interned in A.  If direct
+lookup fails, fall back to the same name already present in the FIVEAM
+package (common when tests are defined via FiveAM's own macro expansion).
+Uses FIND-SYMBOL rather than INTERN so a missing test name never pollutes
+the FIVEAM package with a junk symbol.  Signals TEST-RESOLUTION-ERROR when
+the test cannot be resolved, so run-tests reports a structured :unresolved
+result.  Uses dynamic symbol resolution so FiveAM is an optional dependency."
   (let* ((fiveam-pkg (find-package :fiveam))
          (get-test-fn (and fiveam-pkg
                            (fdefinition (find-symbol "GET-TEST" fiveam-pkg)))))
@@ -1011,13 +1125,18 @@ an optional dependency."
       ((and get-test-fn (funcall get-test-fn test-sym))
        test-sym)
       ((and fiveam-pkg get-test-fn)
-       (let ((fiveam-sym (intern (symbol-name test-sym) fiveam-pkg)))
-         (if (funcall get-test-fn fiveam-sym)
+       (let ((fiveam-sym (find-symbol (symbol-name test-sym) fiveam-pkg)))
+         (if (and fiveam-sym (funcall get-test-fn fiveam-sym))
              fiveam-sym
-             (error "Test ~S not found in FiveAM registry.  Tests must be loaded first."
-                    test-sym))))
+             (error 'test-resolution-error
+                    :detail (format nil "Test ~S not found in FiveAM registry."
+                                    test-sym)
+                    :hint "Load the system that defines the test first."))))
       (t
-       (error "FiveAM package not found; cannot resolve test symbol: ~S" test-sym)))))
+       (error 'test-resolution-error
+              :detail (format nil "FiveAM package not found; cannot resolve test symbol: ~S"
+                              test-sym)
+              :hint "Load FiveAM and the test system first.")))))
 
 (defun run-fiveam-selected-tests (test-symbols)
   "Run specific FiveAM tests by symbol and return structured results.
@@ -1026,64 +1145,7 @@ TEST-SYMBOLS is a list of fully qualified symbols naming tests or suites."
           (mapcar #'%resolve-fiveam-test-symbol test-symbols)))
     (log-event :info "test-runner" "framework" "fiveam" "selected_tests"
                (format nil "~{~A~^, ~}" resolved-symbols))
-    (let* ((start-time (get-internal-real-time))
-           (stdout-stream (make-string-output-stream))
-           (stderr-stream (make-string-output-stream))
-           (debug-stream (make-string-output-stream))
-           all-results)
-      (handler-case
-          (dolist (test-sym resolved-symbols)
-            (let ((results
-                    (let ((*standard-output* stdout-stream)
-                          (*error-output* stderr-stream)
-                          (*test-debug-output* debug-stream))
-                      (%fiveam-run test-sym))))
-              (when results
-                (setf all-results (append all-results results)))))
-        (error (c)
-          (let ((end-time (get-internal-real-time))
-                (duration-ms
-                 (round (* 1000 (/ (- end-time start-time)
-                                   internal-time-units-per-second)))))
-            (return-from run-fiveam-selected-tests
-              (let ((ht (make-test-result
-                         :passed 0 :failed (length test-symbols)
-                         :failed-tests
-                         (mapcar (lambda (sym)
-                                   (make-failure-detail
-                                    :test-name (princ-to-string sym)
-                                    :reason (format nil "Test runner crashed: ~A"
-                                                    (princ-to-string c))))
-                                 test-symbols)
-                         :framework :fiveam :duration duration-ms)))
-                (let ((stdout (%truncate-test-output
-                               (get-output-stream-string stdout-stream)))
-                      (stderr (%truncate-test-output
-                               (get-output-stream-string stderr-stream)))
-                      (debug-output (get-output-stream-string debug-stream)))
-                  (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-                  (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
-                  (when (plusp (length debug-output))
-                    (setf (gethash "debug_output" ht) debug-output))
-                  ht))))))
-      (let* ((end-time (get-internal-real-time))
-             (duration-ms
-              (round (* 1000 (/ (- end-time start-time)
-                                internal-time-units-per-second))))
-             (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
-             (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
-             (debug-output (get-output-stream-string debug-stream)))
-        (multiple-value-bind (passed failed pending failure-details)
-            (%fiveam-extract-results all-results)
-          (let ((ht (make-test-result
-                     :passed passed :failed failed :pending pending
-                     :failed-tests failure-details
-                     :framework :fiveam :duration duration-ms)))
-            (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-            (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
-            (when (plusp (length debug-output))
-              (setf (gethash "debug_output" ht) debug-output))
-            ht))))))
+    (%fiveam-run-and-collect resolved-symbols test-symbols)))
 
 (defun run-tests (system-name &key framework test tests)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
@@ -1091,10 +1153,15 @@ If TEST is provided, run only that specific test.
 If TESTS is provided, run those specific tests (array/list of fully qualified names).
 Returns a hash table with structured results.
 
-If the implicit system-load step (%ENSURE-SYSTEM-LOADED) signals an
-error, the failure is converted via MAKE-LOAD-FAILURE-RESULT so callers
-always receive a structured hash.  Errors raised after the load step
-(e.g., framework-internal errors) still propagate normally."
+Two failure categories are converted into structured hashes so callers always
+receive machine-readable data rather than an opaque RPC error:
+  - System-load failures (%ENSURE-SYSTEM-LOADED) -> MAKE-LOAD-FAILURE-RESULT
+    (framework :load-error).
+  - Test-target resolution failures, signaled as TEST-RESOLUTION-ERROR by the
+    Rove and FiveAM paths (no matching suite, unknown test name, missing test
+    package) -> MAKE-RESOLUTION-FAILURE-RESULT (framework :unresolved).
+Other errors (framework-internal bugs) still propagate normally so genuine
+failures remain visible."
   (when (and test tests) (error "Specify either TEST or TESTS, not both"))
   ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
   ;; so simple-error is the precise contract.  Catching plain ERROR would
@@ -1105,56 +1172,59 @@ always receive a structured hash.  Errors raised after the load step
     (simple-error (load-err)
       (return-from run-tests
         (make-load-failure-result system-name load-err))))
-  (let ((fw (%resolve-framework system-name framework))
-        (selective-requested-p (or test tests)))
-    (log-event :info "test-runner" "action" "run-tests" "system" system-name
-               "framework" (string-downcase (symbol-name fw)) "test"
-               (cond (test (princ-to-string test)) (tests "selected")
-                     (t "all")))
-    (case fw
-      (:rove
-       (if (find-package :rove)
-           (if selective-requested-p
-               (let ((selected-tests
-                      (if test
-                          (list (%coerce-test-symbol test))
-                          (%normalize-tests-arg tests))))
-                 (run-rove-selected-tests selected-tests))
-               (run-rove-tests system-name))
-           (if selective-requested-p
-               (error
-                "Selective test execution with TEST/TESTS requires Rove for system ~A"
-                system-name)
-               (progn
-                (log-event :warn "test-runner" "message"
-                           "Rove not loaded, using ASDF fallback")
-                (run-asdf-fallback system-name)))))
-      (:fiveam
-       (if (find-package :fiveam)
-           (if selective-requested-p
-               (let ((selected-tests
-                      (if test
-                          (list (%coerce-test-symbol test))
-                          (%normalize-tests-arg tests))))
-                 (run-fiveam-selected-tests selected-tests))
-               (run-fiveam-tests system-name))
-           (if selective-requested-p
-               (error
-                "Selective test execution with TEST/TESTS requires FiveAM for system ~A"
-                system-name)
-               (progn
-                (log-event :warn "test-runner" "message"
-                           "FiveAM not loaded, using ASDF fallback")
-                (run-asdf-fallback system-name)))))
-      (:prove
-       (when selective-requested-p
-         (error
-          "Selective test execution is currently supported only with Rove"))
-       (log-event :warn "test-runner" "message"
-                  "Prove support not yet implemented")
-       (run-asdf-fallback system-name))
-      (t
-       (when selective-requested-p
-         (error
-          "Selective test execution is currently supported only with Rove"))
-       (run-asdf-fallback system-name)))))
+  (handler-case
+      (let ((fw (%resolve-framework system-name framework))
+            (selective-requested-p (or test tests)))
+        (log-event :info "test-runner" "action" "run-tests" "system" system-name
+                   "framework" (string-downcase (symbol-name fw)) "test"
+                   (cond (test (princ-to-string test)) (tests "selected")
+                         (t "all")))
+        (case fw
+          (:rove
+           (if (find-package :rove)
+               (if selective-requested-p
+                   (let ((selected-tests
+                          (if test
+                              (list (%coerce-test-symbol test))
+                              (%normalize-tests-arg tests))))
+                     (run-rove-selected-tests selected-tests))
+                   (run-rove-tests system-name))
+               (if selective-requested-p
+                   (error
+                    "Selective test execution with TEST/TESTS requires Rove for system ~A"
+                    system-name)
+                   (progn
+                    (log-event :warn "test-runner" "message"
+                               "Rove not loaded, using ASDF fallback")
+                    (run-asdf-fallback system-name)))))
+          (:fiveam
+           (if (find-package :fiveam)
+               (if selective-requested-p
+                   (let ((selected-tests
+                          (if test
+                              (list (%coerce-test-symbol test))
+                              (%normalize-tests-arg tests))))
+                     (run-fiveam-selected-tests selected-tests))
+                   (run-fiveam-tests system-name))
+               (if selective-requested-p
+                   (error
+                    "Selective test execution with TEST/TESTS requires FiveAM for system ~A"
+                    system-name)
+                   (progn
+                    (log-event :warn "test-runner" "message"
+                               "FiveAM not loaded, using ASDF fallback")
+                    (run-asdf-fallback system-name)))))
+          (:prove
+           (when selective-requested-p
+             (error
+              "Selective test execution is currently supported only with Rove"))
+           (log-event :warn "test-runner" "message"
+                      "Prove support not yet implemented")
+           (run-asdf-fallback system-name))
+          (t
+           (when selective-requested-p
+             (error
+              "Selective test execution is currently supported only with Rove"))
+           (run-asdf-fallback system-name))))
+    (test-resolution-error (e)
+      (make-resolution-failure-result e))))
