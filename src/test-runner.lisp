@@ -27,7 +27,7 @@
 
 Supports multiple test frameworks with automatic detection:
 - Rove: Full structured results with failure details
-- FiveAM: (planned) Structured results
+- FiveAM: Full structured results with failure details
 - ASDF fallback: Text output capture
 
 Returns:

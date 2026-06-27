@@ -250,6 +250,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
           (with-output-to-string (s)
             (format s "~A~%"
                     (cond ((string= framework-name "load-error") "✗ LOAD FAILED")
+                          ((string= framework-name "unresolved") "✗ UNRESOLVED")
                           ((string= framework-name "timeout") "✗ TIMEOUT")
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
