@@ -463,7 +463,7 @@ iteration proceed instead of crashing."
                       (or (ignore-errors (funcall ,desc-fn obj))
                           "<assertion>")))))
             (when method
-              (log-event :info "test-runner"
+              (log-event :info "test.runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
 (defun %ensure-system-loaded (system-name)
@@ -565,7 +565,7 @@ a future Rove version returns them directly instead of crashing."
 Wraps rove:run-tests with error handling for Rove bugs (e.g., direct assertions
 without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
   (%ensure-rove-test-name-method)
-  (log-event :info "test-runner" "framework" "rove" "selected_tests"
+  (log-event :info "test.runner" "framework" "rove" "selected_tests"
              (format nil "~{~A~^, ~}" test-symbols))
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
@@ -597,7 +597,7 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                   (funcall run-tests-fn test-symbols))))
       (error (c)
         (setf rove-error (princ-to-string c))
-        (log-event :error "test-runner" "message"
+        (log-event :error "test.runner" "message"
                    "rove:run-tests crashed" "error" rove-error)))
     (let* ((end-time (get-internal-real-time))
            (duration-ms
@@ -668,7 +668,7 @@ are invoked.  When the initial run returns zero counts (common with aggregate
 test systems whose rove:run keyword does not map to registered suites),
 detects test sub-systems from ASDF dependencies and runs each individually."
   (%ensure-rove-test-name-method)
-  (log-event :info "test-runner" "framework" "rove" "system" system-name)
+  (log-event :info "test.runner" "framework" "rove" "system" system-name)
   (let* ((result-pkg (find-package :rove/core/result))
          (reporter-pkg (find-package :rove/reporter))
          (rove-pkg (find-package :rove))
@@ -707,7 +707,7 @@ detects test sub-systems from ASDF dependencies and runs each individually."
                  (funcall run-fn
                           (intern (string-upcase system-name) :keyword)))))
      (error (c) (setf rove-error (princ-to-string c))
-            (log-event :error "test-runner" "message" "rove:run crashed"
+            (log-event :error "test.runner" "message" "rove:run crashed"
                        "error" rove-error)))
     (let* ((end-time (get-internal-real-time))
            (duration-ms
@@ -784,7 +784,7 @@ the surrounding passed/failed/pending/failure-details bindings."
                 (let ((sub-systems
                        (%find-rove-test-sub-systems system-name)))
                   (when sub-systems
-                    (log-event :info "test-runner" "message"
+                    (log-event :info "test.runner" "message"
                                "zero counts from aggregate system, retrying sub-systems"
                                "count" (length sub-systems))
                     (dolist (sub-sys sub-systems)
@@ -822,7 +822,7 @@ the surrounding passed/failed/pending/failure-details bindings."
                                                    "Sub-system crashed: ~A"
                                                    (princ-to-string c)))
                                   failure-details)
-                            (log-event :warn "test-runner" "message"
+                            (log-event :warn "test.runner" "message"
                                        "sub-system test error"
                                        "sub-system" sub-sys
                                        "error"
@@ -851,7 +851,7 @@ the surrounding passed/failed/pending/failure-details bindings."
 
 (defun run-asdf-fallback (system-name)
   "Run tests using asdf:test-system with text output capture."
-  (log-event :info "test-runner" "framework" "asdf-fallback" "system" system-name)
+  (log-event :info "test.runner" "framework" "asdf-fallback" "system" system-name)
   (let ((output (make-string-output-stream))
         (error-output (make-string-output-stream))
         (debug-stream (make-string-output-stream))
@@ -1096,7 +1096,7 @@ Signals an error when no suite name matches SYSTEM-NAME instead of running
 every suite registered in the image, so an explicit system name is never
 silently widened into a full-image run.  When suite names do not follow the
 system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
-  (log-event :info "test-runner" "framework" "fiveam" "system" system-name)
+  (log-event :info "test.runner" "framework" "fiveam" "system" system-name)
   (let ((suite-symbols (%find-fiveam-suites-for-system system-name)))
     (unless suite-symbols
       (error 'test-resolution-error
@@ -1143,7 +1143,7 @@ result.  Uses dynamic symbol resolution so FiveAM is an optional dependency."
 TEST-SYMBOLS is a list of fully qualified symbols naming tests or suites."
   (let ((resolved-symbols
           (mapcar #'%resolve-fiveam-test-symbol test-symbols)))
-    (log-event :info "test-runner" "framework" "fiveam" "selected_tests"
+    (log-event :info "test.runner" "framework" "fiveam" "selected_tests"
                (format nil "~{~A~^, ~}" resolved-symbols))
     (%fiveam-run-and-collect resolved-symbols test-symbols)))
 
@@ -1175,7 +1175,7 @@ failures remain visible."
   (handler-case
       (let ((fw (%resolve-framework system-name framework))
             (selective-requested-p (or test tests)))
-        (log-event :info "test-runner" "action" "run-tests" "system" system-name
+        (log-event :info "test.runner" "action" "run-tests" "system" system-name
                    "framework" (string-downcase (symbol-name fw)) "test"
                    (cond (test (princ-to-string test)) (tests "selected")
                          (t "all")))
@@ -1194,7 +1194,7 @@ failures remain visible."
                     "Selective test execution with TEST/TESTS requires Rove for system ~A"
                     system-name)
                    (progn
-                    (log-event :warn "test-runner" "message"
+                    (log-event :warn "test.runner" "message"
                                "Rove not loaded, using ASDF fallback")
                     (run-asdf-fallback system-name)))))
           (:fiveam
@@ -1211,14 +1211,14 @@ failures remain visible."
                     "Selective test execution with TEST/TESTS requires FiveAM for system ~A"
                     system-name)
                    (progn
-                    (log-event :warn "test-runner" "message"
+                    (log-event :warn "test.runner" "message"
                                "FiveAM not loaded, using ASDF fallback")
                     (run-asdf-fallback system-name)))))
           (:prove
            (when selective-requested-p
              (error
               "Selective test execution is currently supported only with Rove"))
-           (log-event :warn "test-runner" "message"
+           (log-event :warn "test.runner" "message"
                       "Prove support not yet implemented")
            (run-asdf-fallback system-name))
           (t
