@@ -333,12 +333,13 @@ Input:
 - `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, or `"auto"` for auto-detect)
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
+- `tests` (array of strings, optional): Run only the listed fully qualified tests
 
 Output:
 - `passed` (integer): Number of passed tests
 - `failed` (integer): Number of failed tests
-- `pending` (integer): Number of pending/skipped tests (Rove only)
-- `framework` (string): Framework used (`"rove"` or `"asdf"`)
+- `pending` (integer): Number of pending/skipped tests (when reported by the framework)
+- `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `duration_ms` (integer): Execution time in milliseconds
 - `failed_tests` (array, when failures exist): Detailed failure information including:
   - `test_name`: Name of the failing test
@@ -355,11 +356,14 @@ Example requests:
 
 // Run a single test
 {"method":"tools/call","params":{"name":"run-tests","arguments":{"system":"cl-mcp/tests/clhs-test","test":"cl-mcp/tests/clhs-test::clhs-lookup-symbol-returns-hash-table"}}}
+
+// Force FiveAM and run selected tests
+{"method":"tools/call","params":{"name":"run-tests","arguments":{"system":"my-project/tests","framework":"fiveam","tests":["my-project/tests::one-test","my-project/tests::another-test"]}}}
 ```
 
 Notes:
 - **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
-- Auto-detects Rove framework when loaded; falls back to ASDF `test-system` for text capture
+- Auto-detects Rove or FiveAM when available; falls back to ASDF `test-system` for text capture
 - Single test execution requires the test package to be loaded first
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
 
