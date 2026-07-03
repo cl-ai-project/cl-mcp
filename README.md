@@ -12,7 +12,7 @@ system loading, file operations, code introspection, and structure-aware editing
 - **Sandboxed file operations** — read/write/list files restricted to the project root and ASDF system source directories, preventing accidental access outside the project
 - **Structure-aware Lisp editing** — replace, insert, and patch top-level forms using Eclector CST parsing with automatic parinfer repair, preserving formatting and comments
 - **Code intelligence** — symbol lookup, metadata, and cross-references via `sb-introspect`; Lisp-aware file viewing with collapsed signatures and pattern-based expansion
-- **Structured test runner** — run Rove tests with pass/fail counts, failure details, and source locations
+- **Structured test runner** — run Rove and FiveAM tests with pass/fail counts, failure details, and source locations
 - **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with automatic crash recovery, circuit breaker, and per-session affinity
 - **Three transports** — stdio, TCP (multi-client), and Streamable HTTP (for Claude Code)
 
@@ -21,7 +21,7 @@ For the full list of tools with input/output schemas, see [docs/tools.md](docs/t
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (optional; pure ASDF also works)
-- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `clhs` (loaded on-demand by `clhs-lookup` tool).
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `fiveam` (for running FiveAM suites), `clhs` (loaded on-demand by `clhs-lookup` tool).
 
 ## Quick Start
 

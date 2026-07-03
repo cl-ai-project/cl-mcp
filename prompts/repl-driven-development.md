@@ -154,9 +154,11 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 
 ## Testing
 
-**Preferred: `run-tests` tool** for structured results (pass/fail counts, failure details).
+**Preferred: `run-tests` tool** for structured Rove/FiveAM results (pass/fail counts, failure details).
 - Run system: `{"system": "my-system/tests"}`
 - Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (package must be loaded first)
+- Run selected tests: `{"system": "my-system/tests", "tests": ["my-system/tests::first-test", "my-system/tests::second-test"]}`
+- Force framework when auto-detection is ambiguous: `{"system": "my-system/tests", "framework": "fiveam"}`
 - Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
 - Response includes `stdout`/`stderr` fields (structured data only, NOT shown in summary text)
 - **Print debugging**: `format t` output goes to `stdout` (not visible in summary). To see debug prints in the summary, write to `*test-debug-output*`:
@@ -165,7 +167,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
   ```
   Output from this stream appears in both the `debug_output` field and the content text summary.
 
-**Fallback via `repl-eval`**: `(rove:run :my-system/tests)` after `load-system`.
+**Fallback via `repl-eval`**: use the project's native runner after `load-system`, such as `(rove:run :my-system/tests)` or `(fiveam:run! :my-system/tests)`.
 
 **Rove testing pitfalls:**
 - Rove's `signals` assertion does **not** reliably catch conditions raised inside `restart-case`. Use `handler-case` wrappers instead:
