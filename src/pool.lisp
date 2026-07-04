@@ -1394,4 +1394,11 @@ max_pool_size, warmup_target, workers (vector of per-worker hashes)."
             (gethash "max_pool_size" info) *max-pool-size*
             (gethash "warmup_target" info) *worker-pool-warmup*
             (gethash "workers" info) workers)
+      (with-lock-held (*pool-lock*)
+        (setf (gethash "init_owner_session" info)
+                (and *runtime-owner* (car *runtime-owner*))
+              (gethash "init_owner_worker" info)
+                (and *runtime-owner* (worker-id (cdr *runtime-owner*)))
+              (gethash "init_disabled" info) (if *runtime-init-disabled* t nil)
+              (gethash "init_failures" info) *runtime-init-failures*))
       info)))

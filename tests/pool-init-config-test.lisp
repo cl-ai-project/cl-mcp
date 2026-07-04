@@ -290,3 +290,15 @@ restore.  A NIL value unsets the variable."
             (setf (gethash 77 cl-mcp/src/pool::*init-attributable-crashes*) t))
           (ok (cl-mcp/src/pool::%init-attributable-crash-p w)
               "marked worker is init-attributable"))))))
+
+(deftest pool-status-includes-init-fields
+  (testing "pool-status-info exposes runtime init fields"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((info (cl-mcp/src/pool:pool-status-info)))
+          (ok (nth-value 1 (gethash "init_owner_session" info))
+              "init_owner_session key present")
+          (ok (nth-value 1 (gethash "init_disabled" info))
+              "init_disabled key present")
+          (ok (nth-value 1 (gethash "init_failures" info))
+              "init_failures key present"))))))
