@@ -8,7 +8,8 @@
   (:import-from #:rove #:deftest #:testing #:ok #:skip)
   (:import-from #:cl-mcp/src/worker/init-hook
                 #:*asdf-load-lock*
-                #:with-asdf-load-lock))
+                #:with-asdf-load-lock)
+  (:import-from #:cl-mcp/src/worker/handlers))
 
 (in-package #:cl-mcp/tests/worker-init-hook-test)
 
@@ -27,3 +28,23 @@
           (dolist (th threads) (bt:join-thread th))))
       (ok (= max-inside 1)
           "at most one thread was inside the load-lock critical section"))))
+
+(deftest load-system-handler-waits-on-lock
+  (testing "%handle-load-system blocks while *asdf-load-lock* is held, then completes"
+    (let ((started nil) (finished nil))
+      (bt:acquire-lock cl-mcp/src/worker/init-hook:*asdf-load-lock*)
+      (let ((th (bt:make-thread
+                 (lambda ()
+                   (setf started t)
+                   (let ((p (make-hash-table :test 'equal)))
+                     (setf (gethash "system" p) "alexandria"
+                           (gethash "force" p) nil)
+                     (cl-mcp/src/worker/handlers::%handle-load-system p))
+                   (setf finished t))
+                 :name "handler-under-lock")))
+        (sleep 0.2)
+        (ok started "handler thread started")
+        (ok (not finished) "handler is blocked while the load lock is held")
+        (bt:release-lock cl-mcp/src/worker/init-hook:*asdf-load-lock*)
+        (bt:join-thread th)
+        (ok finished "handler completed after the lock was released")))))
