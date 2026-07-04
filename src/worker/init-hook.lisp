@@ -58,3 +58,25 @@ Keys: init_state, app_port, last_init_error, started_at."
             (gethash "last_init_error" ht) (getf *init-state* :error)
             (gethash "started_at" ht) (getf *init-state* :started-at))
       ht)))
+
+(defun %resolve-entry (spec)
+  "Resolve a \"PKG:SYMBOL\" or \"PKG::SYMBOL\" string to a callable.
+Uses find-package / find-symbol / fdefinition only -- no read, eval, or
+intern -- honoring the project's no-runtime-eval style rule.  Signals an
+error if the package or symbol is missing or the symbol is not fbound."
+  (let* ((dbl (search "::" spec))
+         (colon (or dbl (position #\: spec))))
+    (unless colon
+      (error "init entry ~S must be of the form PKG:SYMBOL" spec))
+    (let* ((pkg-name (string-upcase (subseq spec 0 colon)))
+           (sym-name (string-upcase (subseq spec (+ colon (if dbl 2 1)))))
+           (pkg (find-package pkg-name)))
+      (unless pkg
+        (error "init entry: package ~A not found" pkg-name))
+      (let ((sym (find-symbol sym-name pkg)))
+        (unless sym
+          (error "init entry: symbol ~A not found in package ~A"
+                 sym-name pkg-name))
+        (unless (fboundp sym)
+          (error "init entry: ~A is not fbound" sym))
+        (fdefinition sym)))))

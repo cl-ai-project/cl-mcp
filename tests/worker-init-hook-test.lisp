@@ -67,3 +67,28 @@
     (let ((s (cl-mcp/src/worker/init-hook::init-state-snapshot)))
       (ok (string= (gethash "init_state" s) "failed") "failed")
       (ok (string= (gethash "last_init_error" s) "boom") "error recorded"))))
+
+(defun a-test-entry-thunk () 4242)
+
+(deftest resolve-entry
+  (testing "PKG:SYM and PKG::SYM resolve to the fdefinition; bad specs error"
+    (let ((fn (cl-mcp/src/worker/init-hook::%resolve-entry
+               "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST:A-TEST-ENTRY-THUNK")))
+      (ok (functionp fn) "resolves to a function")
+      (ok (eql (funcall fn) 4242) "funcalls the resolved thunk"))
+    (ok (functionp
+         (cl-mcp/src/worker/init-hook::%resolve-entry
+          "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST::A-TEST-ENTRY-THUNK"))
+        "double-colon form resolves")
+    (ok (handler-case
+            (progn (cl-mcp/src/worker/init-hook::%resolve-entry "no-colon") nil)
+          (error () t))
+        "spec without a colon errors")
+    (ok (handler-case
+            (progn (cl-mcp/src/worker/init-hook::%resolve-entry "NOSUCHPKG:FOO") nil)
+          (error () t))
+        "missing package errors")
+    (ok (handler-case
+            (progn (cl-mcp/src/worker/init-hook::%resolve-entry "CL:NO-SUCH-SYMBOL-XYZ") nil)
+          (error () t))
+        "missing symbol errors")))
