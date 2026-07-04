@@ -10,7 +10,7 @@
                 #:*worker-init-config*)
   (:import-from #:cl-mcp/src/worker-client
                 #:make-worker #:spawn-worker #:kill-worker
-                #:worker-session-id #:worker-state))
+                #:worker-session-id #:worker-state #:worker-rpc))
 
 (in-package #:cl-mcp/tests/pool-init-config-test)
 
@@ -158,3 +158,59 @@ restore.  A NIL value unsets the variable."
           (cl-mcp/src/pool::%release-runtime-owner-if w1)
           (ok (null cl-mcp/src/pool::*runtime-owner*)
               "owner release clears *runtime-owner*"))))))
+
+(deftest ensure-runtime-init-drives-a-real-worker
+  (testing "%ensure-runtime-init elects and drives init to a terminal state"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (cl-mcp/src/pool::%with-owner-reset
+          (lambda ()
+            (let ((worker (spawn-worker)))
+              (unwind-protect
+                   (let ((cl-mcp/src/pool::*worker-init-config*
+                           (list :system nil :entry nil
+                                 :eval "(+ 1 2)" :package "CL-USER"
+                                 :max-failures 1 :mode "singleton")))
+                     (setf (worker-session-id worker) "sx"
+                           (worker-state worker) :bound)
+                     (cl-mcp/src/pool::%ensure-runtime-init worker "sx")
+                     ;; Poll worker/init-status directly until terminal.
+                     (let ((state nil))
+                       (loop repeat 60
+                             for r = (ignore-errors
+                                       (worker-rpc worker "worker/init-status"
+                                                   nil :timeout 5))
+                             when r do (setf state (gethash "init_state" r))
+                             until (member state '("running" "failed")
+                                            :test #'equal)
+                             do (sleep 0.05))
+                       (ok (equal state "running")
+                           "init reached running for a trivial eval")))
+                (ignore-errors (kill-worker worker)))))))))
+
+(deftest ensure-runtime-init-failed-accounting
+  (testing "a failing init counts toward failures, disables at max, releases ownership"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (cl-mcp/src/pool::%with-owner-reset
+          (lambda ()
+            (let ((worker (spawn-worker)))
+              (unwind-protect
+                   (let ((cl-mcp/src/pool::*worker-init-config*
+                           (list :system nil :entry nil
+                                 :eval "(error \"boom\")" :package "CL-USER"
+                                 :max-failures 1 :mode "singleton")))
+                     (setf (worker-session-id worker) "sf"
+                           (worker-state worker) :bound)
+                     (cl-mcp/src/pool::%ensure-runtime-init worker "sf")
+                     (loop repeat 100
+                           until (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                   cl-mcp/src/pool::*runtime-init-disabled*)
+                           do (sleep 0.05))
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           cl-mcp/src/pool::*runtime-init-disabled*)
+                         "init disabled after max soft failures")
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           (null cl-mcp/src/pool::*runtime-owner*))
+                         "ownership released after failure"))
+                (ignore-errors (kill-worker worker)))))))))
