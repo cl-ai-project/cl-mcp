@@ -49,6 +49,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
+           #:*worker-init-config*
            #:*health-check-interval-seconds*
            #:*shutdown-replenish-wait-seconds*
            #:initialize-pool
@@ -116,6 +117,12 @@ reads the environment once at load time."
                  name s default)
            default))))))
 
+(defun %env-string (name)
+  "Return the environment variable NAME as a string, or NIL when unset or
+empty."
+  (let ((s (uiop:getenv name)))
+    (and s (plusp (length s)) s)))
+
 (defvar *worker-pool-warmup*
   (%env-int "CL_MCP_WORKER_POOL_WARMUP" 1 :min 0)
   "Number of standby workers to pre-spawn and maintain.
@@ -138,6 +145,23 @@ be a positive integer).  Must be >= *worker-pool-warmup*.")
 
 (defvar *shutdown-replenish-wait-seconds* 0.05d0
   "Polling interval (seconds) while waiting for replenish thread shutdown.")
+
+(defvar *worker-init-config* nil
+  "Parsed worker-init-hook config, or NIL when the feature is off.
+A plist: (:system S :entry E :eval EV :package P :max-failures N :mode M).")
+
+(defun %parse-worker-init-config ()
+  "Read MCP_WORKER_INIT_* from the environment into a config plist, or NIL
+when MCP_WORKER_INIT_SYSTEM is unset (feature off).  MCP_WORKER_INIT_SYSTEM
+is the master gate, mirroring MCP_WORKER_SWANK."
+  (let ((system (%env-string "MCP_WORKER_INIT_SYSTEM")))
+    (when system
+      (list :system system
+            :entry (%env-string "MCP_WORKER_INIT_ENTRY")
+            :eval (%env-string "MCP_WORKER_INIT_EVAL")
+            :package (or (%env-string "MCP_WORKER_INIT_PACKAGE") "CL-USER")
+            :max-failures (%env-int "MCP_WORKER_INIT_MAX_FAILURES" 1 :min 1)
+            :mode (or (%env-string "MCP_WORKER_INIT_MODE") "singleton")))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Global pool state
@@ -724,7 +748,8 @@ Serialized by *init-lock* to prevent concurrent initialization."
       (setf *affinity-map* (make-hash-table :test 'equal)
             *standby-workers* nil
             *all-workers* nil
-            *recovery-threads* nil)
+            *recovery-threads* nil
+            *worker-init-config* (%parse-worker-init-config))
       (clrhash *crash-history*))
     ;; Start health monitor.  Sets *pool-running* to T, which gates
     ;; the replenish thread below: %replenish-standbys exits early

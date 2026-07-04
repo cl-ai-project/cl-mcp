@@ -51,6 +51,7 @@
   (:import-from #:cl-mcp/tests/pool-env-config-test)
   (:import-from #:cl-mcp/tests/pool-status-test)
   (:import-from #:cl-mcp/tests/pool-kill-worker-test)
+  (:import-from #:cl-mcp/tests/pool-init-config-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test))
 
 (in-package #:cl-mcp/tests)
