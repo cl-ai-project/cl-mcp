@@ -25,3 +25,36 @@ work on spawned helper threads.")
 (defmacro with-asdf-load-lock (&body body)
   "Evaluate BODY holding *ASDF-LOAD-LOCK*."
   `(bt:with-lock-held (*asdf-load-lock*) ,@body))
+
+(defvar *init-lock* (bt:make-lock "worker-init-state")
+  "Protects *INIT-STATE*.")
+
+(defvar *init-state* (list :state :idle :app-port nil :error nil :started-at nil)
+  "Init progress: :state is one of :idle :loading :running :failed.")
+
+(defun %reset-init-state ()
+  "Reset init state to :idle (used by tests and re-arming)."
+  (bt:with-lock-held (*init-lock*)
+    (setf *init-state* (list :state :idle :app-port nil :error nil
+                             :started-at nil))))
+
+(defun %set-init-state (state &key app-port error)
+  "Transition init state.  STATE is a keyword; APP-PORT/ERROR update the
+corresponding fields when provided."
+  (bt:with-lock-held (*init-lock*)
+    (setf (getf *init-state* :state) state)
+    (when (eq state :loading)
+      (setf (getf *init-state* :started-at) (get-universal-time)))
+    (when app-port (setf (getf *init-state* :app-port) app-port))
+    (when error (setf (getf *init-state* :error) error))))
+
+(defun init-state-snapshot ()
+  "Return a hash-table snapshot of init state for pool-status / RPC.
+Keys: init_state, app_port, last_init_error, started_at."
+  (bt:with-lock-held (*init-lock*)
+    (let ((ht (make-hash-table :test 'equal)))
+      (setf (gethash "init_state" ht) (string-downcase (getf *init-state* :state))
+            (gethash "app_port" ht) (getf *init-state* :app-port)
+            (gethash "last_init_error" ht) (getf *init-state* :error)
+            (gethash "started_at" ht) (getf *init-state* :started-at))
+      ht)))

@@ -48,3 +48,22 @@
         (bt:release-lock cl-mcp/src/worker/init-hook:*asdf-load-lock*)
         (bt:join-thread th)
         (ok finished "handler completed after the lock was released")))))
+
+(deftest init-state-transitions
+  (testing "state starts idle, moves to loading/running/failed, snapshots as a hash-table"
+    (cl-mcp/src/worker/init-hook::%reset-init-state)
+    (let ((s0 (cl-mcp/src/worker/init-hook::init-state-snapshot)))
+      (ok (string= (gethash "init_state" s0) "idle") "starts idle"))
+    (cl-mcp/src/worker/init-hook::%set-init-state :loading)
+    (ok (string= (gethash "init_state"
+                          (cl-mcp/src/worker/init-hook::init-state-snapshot))
+                 "loading")
+        "loading")
+    (cl-mcp/src/worker/init-hook::%set-init-state :running :app-port 13000)
+    (let ((s (cl-mcp/src/worker/init-hook::init-state-snapshot)))
+      (ok (string= (gethash "init_state" s) "running") "running")
+      (ok (eql (gethash "app_port" s) 13000) "app_port recorded"))
+    (cl-mcp/src/worker/init-hook::%set-init-state :failed :error "boom")
+    (let ((s (cl-mcp/src/worker/init-hook::init-state-snapshot)))
+      (ok (string= (gethash "init_state" s) "failed") "failed")
+      (ok (string= (gethash "last_init_error" s) "boom") "error recorded"))))
