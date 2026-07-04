@@ -214,3 +214,67 @@ restore.  A NIL value unsets the variable."
                            (null cl-mcp/src/pool::*runtime-owner*))
                          "ownership released after failure"))
                 (ignore-errors (kill-worker worker)))))))))
+
+(deftest kill-session-worker-rearms-quarantined-runtime
+  (testing "pool-kill-worker clears the disable latch (reachable quarantine: owner nil, disabled t)"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((w (make-worker :id 30 :state :bound :session-id "kso"))
+              (cl-mcp/src/pool::*worker-init-config*
+                (list :system "x" :entry nil :eval nil :package "CL-USER"
+                      :max-failures 1 :mode "singleton")))
+          (unwind-protect
+               (progn
+                 ;; Reachable quarantine: disabled=t => owner=nil; a session still has a worker.
+                 (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                   (setf (gethash "kso" cl-mcp/src/pool::*affinity-map*) w
+                         cl-mcp/src/pool::*runtime-owner* nil
+                         cl-mcp/src/pool::*runtime-init-disabled* t
+                         cl-mcp/src/pool::*runtime-init-failures* 5))
+                 (cl-mcp/src/pool:kill-session-worker "kso")
+                 (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                   (ok (null cl-mcp/src/pool::*runtime-init-disabled*)
+                       "init re-armed (disabled cleared) by pool-kill-worker")
+                   (ok (zerop cl-mcp/src/pool::*runtime-init-failures*)
+                       "failure count reset")))
+            (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+              (remhash "kso" cl-mcp/src/pool::*affinity-map*))))))))
+
+(deftest kill-session-worker-releases-owner
+  (testing "killing the owner session releases runtime ownership (healthy owner)"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((w (make-worker :id 31 :state :bound :session-id "kow"))
+              (cl-mcp/src/pool::*worker-init-config*
+                (list :system "x" :max-failures 1 :mode "singleton")))
+          (unwind-protect
+               (progn
+                 (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                   (setf (gethash "kow" cl-mcp/src/pool::*affinity-map*) w
+                         cl-mcp/src/pool::*runtime-owner* (cons "kow" w)))
+                 (cl-mcp/src/pool:kill-session-worker "kow")
+                 (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                       (null cl-mcp/src/pool::*runtime-owner*))
+                     "ownership released on owner kill"))
+            (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+              (remhash "kow" cl-mcp/src/pool::*affinity-map*))))))))
+
+(deftest get-or-assign-fires-runtime-init
+  (testing "get-or-assign-worker elects a runtime owner when init config is set"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (%with-env '(("MCP_WORKER_INIT_SYSTEM" . "alexandria")
+                     ("MCP_WORKER_INIT_EVAL" . "(+ 1 2)")
+                     ("CL_MCP_WORKER_POOL_WARMUP" . "0"))
+          (lambda ()
+            (unwind-protect
+                 (progn
+                   (cl-mcp/src/pool:initialize-pool)
+                   (let ((w (cl-mcp/src/pool:get-or-assign-worker "sess-init")))
+                     (ok w "worker assigned on demand")
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           (and cl-mcp/src/pool::*runtime-owner*
+                                (string= (car cl-mcp/src/pool::*runtime-owner*)
+                                         "sess-init")))
+                         "runtime owner elected for the session")))
+              (ignore-errors (cl-mcp/src/pool:shutdown-pool))))))))

@@ -746,7 +746,10 @@ to prevent recovery threads from spawning orphan workers."
                       (log-event :info "pool.worker.recovered"
                                  "old_worker_id" (worker-id crashed-worker)
                                  "new_worker_id" (worker-id new-worker)
-                                 "session" session-id))))
+                                 "session" session-id)
+                      (when *worker-init-config*
+                        (ignore-errors
+                         (%ensure-runtime-init new-worker session-id))))))
                (when (and new-worker (not registered))
                  (ignore-errors (kill-worker new-worker)))))
          (error (e)
@@ -1170,6 +1173,9 @@ cannot be created."
           (%schedule-replenish)
           (error "Worker ~A crashed during project root setup for session ~A"
                  (worker-id worker) session-id)))
+      ;; Fire the init hook only when THIS call newly bound a worker.
+      (when (and (or assigned-from-standby need-spawn) *worker-init-config*)
+        (ignore-errors (%ensure-runtime-init worker session-id)))
       worker)))
 
 ;;; ---------------------------------------------------------------------------
@@ -1196,7 +1202,9 @@ impending kill as a crash."
            (setf (worker-state worker-to-kill) :released)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+           (setf *all-workers* (remove worker-to-kill *all-workers*))
+           (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker-to-kill))
+             (setf *runtime-owner* nil)))
           ((and entry (typep entry 'worker-placeholder))
            (setf (worker-placeholder-cancelled entry) t)
            (remhash session-id *affinity-map*)
@@ -1235,7 +1243,16 @@ worker was bound, :PLACEHOLDER if a spawn was in progress (cancelled)."
            (setf (worker-state worker-to-kill) :released)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+           (setf *all-workers* (remove worker-to-kill *all-workers*))
+           (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker-to-kill))
+             (setf *runtime-owner* nil))
+           ;; pool-kill-worker is the documented re-arm for a quarantined
+           ;; runtime.  disabled=t implies owner=nil, so clearing the latch
+           ;; unconditionally (when the feature is on) cannot disturb a live
+           ;; healthy owner, and it lets the next bind re-attempt init.
+           (when *worker-init-config*
+             (setf *runtime-init-disabled* nil
+                   *runtime-init-failures* 0)))
           ((and entry (typep entry 'worker-placeholder))
            (setf (worker-placeholder-cancelled entry) t
                  kill-result :placeholder)
