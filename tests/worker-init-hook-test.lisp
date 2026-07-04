@@ -9,7 +9,13 @@
   (:import-from #:cl-mcp/src/worker/init-hook
                 #:*asdf-load-lock*
                 #:with-asdf-load-lock)
-  (:import-from #:cl-mcp/src/worker/handlers))
+  (:import-from #:cl-mcp/src/worker/handlers
+                #:register-all-handlers)
+  (:import-from #:cl-mcp/src/worker/server
+                #:make-worker-server
+                #:server-port
+                #:start-accept-loop
+                #:stop-server))
 
 (in-package #:cl-mcp/tests/worker-init-hook-test)
 
@@ -92,3 +98,90 @@
             (progn (cl-mcp/src/worker/init-hook::%resolve-entry "CL:NO-SUCH-SYMBOL-XYZ") nil)
           (error () t))
         "missing symbol errors")))
+
+(defun socket-available-p ()
+  "Return T if we can bind a TCP socket on localhost."
+  (handler-case
+      (let ((sock (usocket:socket-listen "127.0.0.1" 0
+                                         :reuse-address t
+                                         :element-type 'character)))
+        (unwind-protect t (ignore-errors (usocket:socket-close sock))))
+    (error () nil)))
+
+(defparameter *entry-ran* nil)
+
+(defun integration-entry-thunk () (setf *entry-ran* t) 12345)
+
+(defun %rpc (stream id method &optional params)
+  "Send one JSON-RPC line and read one response line; return the parsed hash."
+  (let ((req (make-hash-table :test 'equal)))
+    (setf (gethash "jsonrpc" req) "2.0"
+          (gethash "id" req) id
+          (gethash "method" req) method)
+    (when params (setf (gethash "params" req) params))
+    (yason:encode req stream) (terpri stream) (force-output stream)
+    (yason:parse (read-line stream))))
+
+(deftest init-start-then-status-integration
+  (testing "worker/init-start acks fast; init runs the entry; status reaches running"
+    (if (not (socket-available-p))
+        (skip "socket unavailable")
+        (let ((server (make-worker-server :port 0)))
+          (register-all-handlers server)
+          (setf *entry-ran* nil)
+          (cl-mcp/src/worker/init-hook::%reset-init-state)
+          (unwind-protect
+               (let ((port (server-port server)))
+                 (bt:make-thread (lambda () (start-accept-loop server))
+                                 :name "test-init-accept")
+                 (sleep 0.1)
+                 (let ((socket (usocket:socket-connect "127.0.0.1" port
+                                                       :element-type 'character)))
+                   (unwind-protect
+                        (let* ((stream (usocket:socket-stream socket))
+                               (params (make-hash-table :test 'equal)))
+                          (setf (gethash "entry" params)
+                                "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST:INTEGRATION-ENTRY-THUNK")
+                          (let ((ack (%rpc stream 1 "worker/init-start" params)))
+                            (ok (gethash "accepted" (gethash "result" ack))
+                                "init-start acked with accepted=t"))
+                          (let ((final nil))
+                            (loop repeat 50
+                                  for st = (gethash "result"
+                                            (%rpc stream 2 "worker/init-status"))
+                                  for state = (gethash "init_state" st)
+                                  do (setf final state)
+                                  until (member state '("running" "failed")
+                                                :test #'string=)
+                                  do (sleep 0.05))
+                            (ok (string= final "running") "init reached running")
+                            (ok *entry-ran* "entry thunk executed")
+                            (ok (eql (gethash "app_port"
+                                              (gethash "result"
+                                                       (%rpc stream 3
+                                                             "worker/init-status")))
+                                     12345)
+                                "app_port recorded")))
+                     (ignore-errors (usocket:socket-close socket)))))
+            (stop-server server))))))
+
+(deftest init-eval-failure-records-failed
+  (testing "an erroring eval form drives init to :failed with the message recorded"
+    (cl-mcp/src/worker/init-hook::%reset-init-state)
+    (let ((params (make-hash-table :test 'equal)))
+      (setf (gethash "eval" params) "(error \"boom\")")
+      ;; %run-init runs synchronously here and never signals out; on an
+      ;; eval error it records :failed via the outer handler-case.
+      (cl-mcp/src/worker/init-hook::%run-init params))
+    (let ((s (cl-mcp/src/worker/init-hook::init-state-snapshot)))
+      (ok (string= (gethash "init_state" s) "failed") "init state is failed")
+      (let ((err (gethash "last_init_error" s)))
+        (ok err "last_init_error is non-nil")
+        (ok (and (stringp err) (search "boom" err)) "message mentions boom")
+        ;; These two discriminate the %maybe-eval fix: if it reverted to
+        ;; dumping the raw error-context plist, the string would be long and
+        ;; would contain the :RESTARTS key.  The clean short message must not.
+        (ok (< (length err) 80)
+            "message is the clean short string, not a raw plist dump")
+        (ok (null (search "RESTARTS" (string-upcase err)))
+            "no raw error-context plist leaked")))))

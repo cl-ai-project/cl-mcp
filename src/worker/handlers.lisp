@@ -41,7 +41,9 @@
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
-                #:with-asdf-load-lock)
+                #:with-asdf-load-lock
+                #:handle-init-start
+                #:handle-init-status)
   (:export #:register-all-handlers))
 
 (in-package #:cl-mcp/src/worker/handlers)
@@ -272,5 +274,7 @@ Returns a success payload."
   (register-method server "worker/code-find-references" #'%handle-code-find-references)
   (register-method server "worker/inspect-object" #'%handle-inspect-object)
   (register-method server "worker/set-project-root" #'%handle-set-project-root)
-  (log-event :info "worker.handlers.registered" "count" 8)
+  (register-method server "worker/init-start" #'handle-init-start)
+  (register-method server "worker/init-status" #'handle-init-status)
+  (log-event :info "worker.handlers.registered" "count" 10)
   server)

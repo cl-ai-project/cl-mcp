@@ -10,8 +10,15 @@
   (:use #:cl)
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held)
+  (:import-from #:cl-mcp/src/system-loader-core #:load-system)
+  (:import-from #:cl-mcp/src/repl-core #:repl-eval)
+  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
+  (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*asdf-load-lock*
-           #:with-asdf-load-lock))
+           #:with-asdf-load-lock
+           #:handle-init-start
+           #:handle-init-status))
 
 (in-package #:cl-mcp/src/worker/init-hook)
 
@@ -80,3 +87,69 @@ error if the package or symbol is missing or the symbol is not fbound."
         (unless (fboundp sym)
           (error "init entry: ~A is not fbound" sym))
         (fdefinition sym)))))
+
+(defun %maybe-eval (form-string package-name)
+  "Run FORM-STRING via repl-core:repl-eval in PACKAGE-NAME.  Signals an
+error if the evaluation produced an error-context, so the outer
+handler-case records a :failed init.  Routing through repl-eval (not raw
+eval) reuses the sanctioned evaluator.  repl-eval returns its error-context
+as a plist keyed by keywords (:message, :condition-type, ...), so we pull
+:message for a clean failure string."
+  (let ((pkg (or (find-package (string-upcase package-name)) *package*)))
+    (multiple-value-bind (printed raw stdout stderr err-ctx)
+        (repl-eval form-string :package pkg)
+      (declare (ignore printed raw stdout stderr))
+      (when err-ctx
+        (error "init eval failed: ~A"
+               (or (and (listp err-ctx) (getf err-ctx :message))
+                   err-ctx))))))
+
+(defun %run-init (params)
+  "Background-thread init runner.  Holds *ASDF-LOAD-LOCK* for the whole
+load so it cannot overlap a concurrent load-system/run-tests.  Loads with
+timeout=NIL (the direct branch -- no spawned thread, no destroy-thread
+mid-compile).  Never signals out of this function: on any error it records
+a :failed init and leaves the worker fully usable."
+  (let ((system (gethash "system" params))
+        (evalform (gethash "eval" params))
+        (entry (gethash "entry" params))
+        (pkg (or (gethash "package" params) "CL-USER")))
+    (%set-init-state :loading)
+    (handler-case
+        (with-asdf-load-lock
+          (when system
+            (load-system system :force nil :timeout-seconds nil))
+          (when evalform
+            (%maybe-eval evalform pkg))
+          (let ((port nil))
+            ;; Entry contract: the thunk MUST return promptly (e.g. a
+            ;; clackup with :use-thread t that starts the server on its own
+            ;; thread and returns) and MUST NOT re-enter WITH-ASDF-LOAD-LOCK
+            ;; or otherwise block -- the worker-global load lock is held for
+            ;; this whole body, so a blocking or re-entrant entry would
+            ;; deadlock every other load site.  A direct LOAD-SYSTEM call
+            ;; from the entry is safe: the lock lives at the handler layer,
+            ;; not inside load-system itself.
+            (when entry
+              (setf port (funcall (%resolve-entry entry))))
+            (%set-init-state :running
+                             :app-port (and (integerp port) port))
+            (log-event :info "worker.init.done"
+                       "app_port" (and (integerp port) port))))
+      (serious-condition (e)
+        (let ((msg (or (ignore-errors (sanitize-error-message e)) "init failed")))
+          (%set-init-state :failed :error msg)
+          (ignore-errors
+            (log-event :warn "worker.init.failed" "error" msg)))))))
+
+(defun handle-init-start (params)
+  "worker/init-start handler.  Spawns the init runner on a background
+thread and returns an ACK immediately, so the parent's RPC does not block
+on the (heavy) load and no long stream-lock is held."
+  (bt:make-thread (lambda () (%run-init params)) :name "mcp-worker-init")
+  (make-ht "accepted" t))
+
+(defun handle-init-status (params)
+  "worker/init-status handler.  Returns the current init state snapshot."
+  (declare (ignore params))
+  (init-state-snapshot))
