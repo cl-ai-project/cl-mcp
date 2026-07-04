@@ -142,3 +142,19 @@ restore.  A NIL value unsets the variable."
                      "reclaims once the owner session is gone"))
             (remhash "own" cl-mcp/src/pool::*affinity-map*)
             (remhash "oth" cl-mcp/src/pool::*affinity-map*)))))))
+
+(deftest release-runtime-owner
+  (testing "release clears ownership only for the owning worker"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((w1 (make-worker :id 1 :state :bound :session-id "s1"))
+              (w2 (make-worker :id 2 :state :bound :session-id "s2")))
+          (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+            (cl-mcp/src/pool::%elect-runtime-owner w1 "s1"))
+          ;; releasing a non-owner does nothing
+          (cl-mcp/src/pool::%release-runtime-owner-if w2)
+          (ok cl-mcp/src/pool::*runtime-owner* "non-owner release is a no-op")
+          ;; releasing the owner clears it
+          (cl-mcp/src/pool::%release-runtime-owner-if w1)
+          (ok (null cl-mcp/src/pool::*runtime-owner*)
+              "owner release clears *runtime-owner*"))))))

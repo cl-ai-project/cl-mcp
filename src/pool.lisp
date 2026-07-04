@@ -279,6 +279,16 @@ one holder of the fixed port."
                "session" session-id "owner_session" (car current))
     nil))
 
+(defun %release-runtime-owner-if (worker)
+  "Clear *runtime-owner* if WORKER is the current owner.  Takes *pool-lock*.
+Called (from paths NOT already holding the lock) when an owner worker is
+released, killed, or removed on crash."
+  (bt:with-lock-held (*pool-lock*)
+    (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+      (log-event :info "pool.runtime-owner.released"
+                 "worker_id" (worker-id worker))
+      (setf *runtime-owner* nil))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Placeholder struct -- coordinates concurrent spawn requests
 ;;; ---------------------------------------------------------------------------
