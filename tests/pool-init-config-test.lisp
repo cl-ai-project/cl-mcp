@@ -7,7 +7,8 @@
   (:use #:cl)
   (:import-from #:rove #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/pool
-                #:*worker-init-config*))
+                #:*worker-init-config*)
+  (:import-from #:cl-mcp/src/worker-client))
 
 (in-package #:cl-mcp/tests/pool-init-config-test)
 
@@ -42,3 +43,13 @@ restore.  A NIL value unsets the variable."
           (ok (string= (getf cfg :entry) "recurya/dev:start-dev-runtime!")
               "entry parsed")
           (ok (eql (getf cfg :max-failures) 1) "max-failures parsed"))))))
+
+(deftest init-vars-are-denylisted
+  (testing "MCP_WORKER_INIT_* are excluded from inherited worker env"
+    (let ((denylist cl-mcp/src/worker-client::*worker-env-denylist*))
+      (ok (member "MCP_WORKER_INIT_SYSTEM" denylist :test #'string=)
+          "SYSTEM denylisted")
+      (ok (member "MCP_WORKER_INIT_ENTRY" denylist :test #'string=)
+          "ENTRY denylisted")
+      (ok (member "MCP_WORKER_INIT_EVAL" denylist :test #'string=)
+          "EVAL denylisted"))))
