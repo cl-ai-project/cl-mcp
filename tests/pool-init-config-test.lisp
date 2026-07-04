@@ -278,3 +278,15 @@ restore.  A NIL value unsets the variable."
                                          "sess-init")))
                          "runtime owner elected for the session")))
               (ignore-errors (cl-mcp/src/pool:shutdown-pool))))))))
+
+(deftest init-crash-excluded-from-breaker
+  (testing "%init-attributable-crash-p reflects the marked set"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((w (make-worker :id 77 :state :crashed)))
+          (ok (not (cl-mcp/src/pool::%init-attributable-crash-p w))
+              "unmarked worker is not init-attributable")
+          (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+            (setf (gethash 77 cl-mcp/src/pool::*init-attributable-crashes*) t))
+          (ok (cl-mcp/src/pool::%init-attributable-crash-p w)
+              "marked worker is init-attributable"))))))

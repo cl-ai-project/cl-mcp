@@ -294,6 +294,13 @@ released, killed, or removed on crash."
                  "worker_id" (worker-id worker))
       (setf *runtime-owner* nil))))
 
+(defun %init-attributable-crash-p (worker)
+  "T if WORKER's crash was attributed to a cl-mcp-triggered init.  Must be
+called with *pool-lock* held (reads *init-attributable-crashes*).  Such
+crashes are excluded from the crash circuit breaker so a bad web-server
+init cannot brick a session's repl-eval/load-system."
+  (gethash (worker-id worker) *init-attributable-crashes*))
+
 (defun %init-params (config)
   "Build the worker/init-start params hash-table from CONFIG plist."
   (let ((ht (make-hash-table :test 'equal)))
@@ -679,26 +686,27 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (setf history
-                   (remove-if (lambda (ts) (< ts window-start)) history))
-             (push now history)
-             (setf (gethash session-id *crash-history*) history)
-             ;; Mark that crash-history was pushed for this worker to
-             ;; prevent double-counting when get-or-assign-worker also
-             ;; encounters this crashed worker in Path 1b.
-             (setf (worker-crash-history-pushed-p crashed-worker) t)
-             (when (>= (length history) *crash-breaker-threshold*)
-               (log-event :error "pool.circuit-breaker.tripped"
-                          "session" session-id
-                          "crashes" (length history)
-                          "window_seconds" *crash-breaker-window*)
-               ;; Clear crash history to prevent stale data if session
-               ;; ID is reused or session reconnects later.
-               (remhash session-id *crash-history*)
-               (when (eql (gethash session-id *affinity-map*) crashed-worker)
-                 (remhash session-id *affinity-map*))
-               (setf *all-workers* (remove crashed-worker *all-workers*))
-               (return-from %handle-worker-crash)))))
+             (unless (%init-attributable-crash-p crashed-worker)
+               (setf history
+                     (remove-if (lambda (ts) (< ts window-start)) history))
+               (push now history)
+               (setf (gethash session-id *crash-history*) history)
+               ;; Mark that crash-history was pushed for this worker to
+               ;; prevent double-counting when get-or-assign-worker also
+               ;; encounters this crashed worker in Path 1b.
+               (setf (worker-crash-history-pushed-p crashed-worker) t)
+               (when (>= (length history) *crash-breaker-threshold*)
+                 (log-event :error "pool.circuit-breaker.tripped"
+                            "session" session-id
+                            "crashes" (length history)
+                            "window_seconds" *crash-breaker-window*)
+                 ;; Clear crash history to prevent stale data if session
+                 ;; ID is reused or session reconnects later.
+                 (remhash session-id *crash-history*)
+                 (when (eql (gethash session-id *affinity-map*) crashed-worker)
+                   (remhash session-id *affinity-map*))
+                 (setf *all-workers* (remove crashed-worker *all-workers*))
+                 (return-from %handle-worker-crash))))))
        (handler-case
            (let ((new-worker nil) (registered nil))
              (unwind-protect
@@ -1060,7 +1068,8 @@ cannot be created."
          ;; worker (prevents double-counting in the race window where
          ;; the health monitor detects the crash first).
          (when (and (eq :crashed (worker-state entry))
-                    (not (worker-crash-history-pushed-p entry)))
+                    (not (worker-crash-history-pushed-p entry))
+                    (not (%init-attributable-crash-p entry)))
            (let* ((now (get-universal-time))
                   (window-start (- now *crash-breaker-window*))
                   (history (gethash session-id *crash-history*)))
