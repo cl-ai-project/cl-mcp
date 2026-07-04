@@ -226,6 +226,59 @@ halting recovery for a session.")
   "Maximum number of concurrent crash recovery threads.
 Prevents resource exhaustion when many workers crash simultaneously.")
 
+(defvar *runtime-owner* nil
+  "The current runtime owner as (SESSION-ID . WORKER), or NIL.  The owner
+is the single worker permitted to run a singleton init (bind the fixed
+app port).  Guarded by *pool-lock*.")
+
+(defvar *runtime-init-failures* 0
+  "Count of soft init failures for the current runtime.  Guarded by *pool-lock*.")
+
+(defvar *runtime-init-disabled* nil
+  "When T, init is not (re-)attempted until re-armed (pool-kill-worker /
+config reload).  Guarded by *pool-lock*.")
+
+(defvar *init-attributable-crashes* (make-hash-table :test 'eql)
+  "Set of worker IDs whose crash happened during a cl-mcp-triggered init.
+Such crashes are excluded from the crash circuit breaker.  Guarded by
+*pool-lock*.")
+
+(defun %with-owner-reset (thunk)
+  "Test helper: reset ownership/failure state under *pool-lock*, then run THUNK."
+  (bt:with-lock-held (*pool-lock*)
+    (setf *runtime-owner* nil
+          *runtime-init-failures* 0
+          *runtime-init-disabled* nil)
+    (clrhash *init-attributable-crashes*))
+  (funcall thunk))
+
+(defun %elect-runtime-owner (worker session-id)
+  "Grant runtime ownership to WORKER for SESSION-ID and return T, else NIL.
+MUST be called with *pool-lock* held (reads/writes *runtime-owner*).
+Grant iff the current owner is NIL, is the SAME session, or the current
+owner's worker is dead AND its session is gone from *affinity-map*.
+NEVER migrate to a different session while the OWNER SESSION is still
+alive (present in *affinity-map*), even if that session's current worker
+has crashed and is being recovered -- this keeps the app and the
+developer's repl-eval/load-system in the same process and keeps exactly
+one holder of the fixed port."
+  (let ((current *runtime-owner*))
+    (when (or (null current)
+              (string= (car current) session-id)
+              ;; Reclaim to a DIFFERENT session only when the previous owner's
+              ;; worker is dead AND its session is gone from the affinity map.
+              ;; Never migrate the runtime to another still-live session -- that
+              ;; would land the developer's hot-reload in the wrong process (L4).
+              (and (not (%worker-process-alive-p (cdr current)))
+                   (not (gethash (car current) *affinity-map*))))
+      (setf *runtime-owner* (cons session-id worker))
+      (log-event :info "pool.runtime-owner.elected"
+                 "session" session-id "worker_id" (worker-id worker))
+      (return-from %elect-runtime-owner t))
+    (log-event :info "pool.init.skipped-not-owner"
+               "session" session-id "owner_session" (car current))
+    nil))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Placeholder struct -- coordinates concurrent spawn requests
 ;;; ---------------------------------------------------------------------------

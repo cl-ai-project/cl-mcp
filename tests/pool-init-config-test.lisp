@@ -8,7 +8,9 @@
   (:import-from #:rove #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-init-config*)
-  (:import-from #:cl-mcp/src/worker-client))
+  (:import-from #:cl-mcp/src/worker-client
+                #:make-worker #:spawn-worker #:kill-worker
+                #:worker-session-id #:worker-state))
 
 (in-package #:cl-mcp/tests/pool-init-config-test)
 
@@ -72,3 +74,71 @@ restore.  A NIL value unsets the variable."
                 (progn (cl-mcp/src/pool::%warn-if-init-without-pool nil) t)
               (warning () nil))
             "no warning when INIT unset (even with pool disabled)")))))
+
+(defun %socket-available-p ()
+  "Return T if we can bind a TCP socket on localhost."
+  (handler-case
+      (let ((s (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+                                                     :element-type 'character)))
+        (unwind-protect t (ignore-errors (usocket:socket-close s))))
+    (error () nil)))
+
+(deftest elect-runtime-owner-rules
+  (testing "grant when owner nil; re-grant same session; reclaim when owner dead"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        ;; Fake workers with NIL process-info are treated as NOT alive by
+        ;; %worker-process-alive-p, so they model a dead owner.
+        (let ((w-a (make-worker :id 1 :state :bound :session-id "sess-a"))
+              (w-b (make-worker :id 2 :state :bound :session-id "sess-b")))
+          (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+            (ok (cl-mcp/src/pool::%elect-runtime-owner w-a "sess-a")
+                "grants when owner is nil")
+            (ok (cl-mcp/src/pool::%elect-runtime-owner w-a "sess-a")
+                "re-grants to the same session")
+            (ok (cl-mcp/src/pool::%elect-runtime-owner w-b "sess-b")
+                "reclaims when the current owner process is dead")))))))
+
+(deftest elect-refuses-live-other-session
+  (testing "election refuses to migrate to a different session while the owner process is alive"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (cl-mcp/src/pool::%with-owner-reset
+          (lambda ()
+            (let ((owner (spawn-worker))
+                  (other (make-worker :id 999 :state :bound :session-id "s-other")))
+              (unwind-protect
+                   (progn
+                     (setf (worker-session-id owner) "s-owner"
+                           (worker-state owner) :bound)
+                     (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                       (ok (cl-mcp/src/pool::%elect-runtime-owner owner "s-owner")
+                           "owner elected")
+                       (ok (not (cl-mcp/src/pool::%elect-runtime-owner other "s-other"))
+                           "refuses a different session while the owner is alive")
+                       (ok (eq (cdr cl-mcp/src/pool::*runtime-owner*) owner)
+                           "owner unchanged after a refused election")))
+                (ignore-errors (kill-worker owner)))))))))
+
+(deftest elect-refuses-live-session-with-dead-worker
+  (testing "no migration to a different session while the owner session is alive (L4)"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((w-owner (make-worker :id 10 :state :crashed :session-id "own"))
+              (w-other (make-worker :id 11 :state :bound :session-id "oth")))
+          (unwind-protect
+               (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                 ;; owner session "own" elected and still present in the affinity map;
+                 ;; its worker is dead (nil process-info => not alive)
+                 (setf (gethash "own" cl-mcp/src/pool::*affinity-map*) w-owner)
+                 (ok (cl-mcp/src/pool::%elect-runtime-owner w-owner "own") "owner elected")
+                 (ok (not (cl-mcp/src/pool::%elect-runtime-owner w-other "oth"))
+                     "refuses a different session while the owner session is still alive")
+                 (ok (string= (car cl-mcp/src/pool::*runtime-owner*) "own")
+                     "owner unchanged after refused migration")
+                 ;; once the owner session leaves the map, reclaim is allowed
+                 (remhash "own" cl-mcp/src/pool::*affinity-map*)
+                 (ok (cl-mcp/src/pool::%elect-runtime-owner w-other "oth")
+                     "reclaims once the owner session is gone"))
+            (remhash "own" cl-mcp/src/pool::*affinity-map*)
+            (remhash "oth" cl-mcp/src/pool::*affinity-map*)))))))
