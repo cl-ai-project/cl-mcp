@@ -45,6 +45,7 @@
   (:import-from #:cl-mcp/tests/utils-random-test)
   (:import-from #:cl-mcp/tests/system-loader-test)
   (:import-from #:cl-mcp/tests/worker-test)
+  (:import-from #:cl-mcp/tests/worker-init-hook-test)
   (:import-from #:cl-mcp/tests/pool-test)
   (:import-from #:cl-mcp/tests/pool-startup-latency-test)
   (:import-from #:cl-mcp/tests/pool-env-config-test)
