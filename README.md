@@ -201,6 +201,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_WORKER_INIT_SYSTEM` | ASDF system to load in the elected owner worker at bind (master gate for the init hook) | (unset = off) |
 | `MCP_WORKER_INIT_ENTRY` | `PKG:SYMBOL` nullary thunk run after the load (preferred activation) | (none) |
 | `MCP_WORKER_INIT_EVAL` | Lisp form run via repl-eval as an escape hatch | (none) |
+| `MCP_WORKER_INIT_PACKAGE` | Package used to read/eval `MCP_WORKER_INIT_EVAL` | `CL-USER` |
 | `MCP_WORKER_INIT_MAX_FAILURES` | Soft init failures before init auto-retry latches off | `1` |
 | `MCP_WORKER_INIT_MODE` | `singleton` (one owner binds a fixed port). v1 supports `singleton` only | `singleton` |
 
@@ -243,6 +244,20 @@ endpoint. `pool-kill-worker` restarts the runtime without dropping `/mcp`.
 Example (recurya): add a nullary `recurya/dev:start-dev-runtime!` thunk that
 starts the DB and web server, then set `MCP_WORKER_INIT_SYSTEM=recurya/dev`
 and `MCP_WORKER_INIT_ENTRY=recurya/dev:start-dev-runtime!`.
+
+Known v1 limitations:
+
+- **Single dev runtime / single session.** `singleton` mode is designed for one
+  developer session driving one fixed-port app. Ownership is bound to the owner
+  session and never migrates to a different *live* session, so hot-reload stays
+  in the app's process. A narrow multi-session race remains (if the owner's
+  worker crashes during the same window that a second session binds), so two
+  concurrent sessions against one init runtime is not supported in v1; a future
+  per-worker/ephemeral-port mode is planned for that.
+- **Reset is not instantaneous.** `pool-kill-worker` re-arms the runtime, but the
+  app is re-initialized lazily on the session's next tool call (not eagerly), so
+  the app is briefly down after a reset until the next MCP request. The parent
+  `/mcp` endpoint stays up throughout.
 
 ## Security Model
 
