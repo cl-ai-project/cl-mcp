@@ -53,3 +53,22 @@ restore.  A NIL value unsets the variable."
           "ENTRY denylisted")
       (ok (member "MCP_WORKER_INIT_EVAL" denylist :test #'string=)
           "EVAL denylisted"))))
+
+(deftest pool-off-guard-warns
+  (testing "%warn-if-init-without-pool warns only when INIT set AND pool disabled"
+    (%with-env '(("MCP_WORKER_INIT_SYSTEM" . "recurya/dev"))
+      (lambda ()
+        (ok (handler-case
+                (progn (cl-mcp/src/pool::%warn-if-init-without-pool nil) nil)
+              (warning () t))
+            "warns when INIT set and pool disabled")
+        (ok (handler-case
+                (progn (cl-mcp/src/pool::%warn-if-init-without-pool t) t)
+              (warning () nil))
+            "no warning when pool enabled")))
+    (%with-env '(("MCP_WORKER_INIT_SYSTEM" . nil))
+      (lambda ()
+        (ok (handler-case
+                (progn (cl-mcp/src/pool::%warn-if-init-without-pool nil) t)
+              (warning () nil))
+            "no warning when INIT unset (even with pool disabled)")))))

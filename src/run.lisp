@@ -5,7 +5,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:process-json-line #:make-state)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
-  (:import-from #:cl-mcp/src/pool #:initialize-pool #:shutdown-pool)
+  (:import-from #:cl-mcp/src/pool
+                #:initialize-pool #:shutdown-pool #:%warn-if-init-without-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited #:+max-json-line-bytes+
@@ -36,6 +37,7 @@ NIL runs all tools in-process.  When not supplied, the current value of
 *use-worker-pool* is used (which defaults to T unless MCP_NO_WORKER_POOL=1)."
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+  (%warn-if-init-without-pool *use-worker-pool*)
   (ecase transport
     (:stdio
      (when *use-worker-pool* (initialize-pool))

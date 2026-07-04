@@ -50,6 +50,7 @@
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
            #:*worker-init-config*
+           #:%warn-if-init-without-pool
            #:*health-check-interval-seconds*
            #:*shutdown-replenish-wait-seconds*
            #:initialize-pool
@@ -162,6 +163,18 @@ is the master gate, mirroring MCP_WORKER_SWANK."
             :package (or (%env-string "MCP_WORKER_INIT_PACKAGE") "CL-USER")
             :max-failures (%env-int "MCP_WORKER_INIT_MAX_FAILURES" 1 :min 1)
             :mode (or (%env-string "MCP_WORKER_INIT_MODE") "singleton")))))
+
+(defun %warn-if-init-without-pool (pool-enabled-p)
+  "Warn (and log) when MCP_WORKER_INIT_SYSTEM is set while the worker pool
+is disabled (POOL-ENABLED-P is NIL) -- the init hook is inert in that
+configuration, so a silent no-op would look like a broken web server.
+Called from the transport entry points after the pool-enabled decision."
+  (when (and (%env-string "MCP_WORKER_INIT_SYSTEM") (not pool-enabled-p))
+    (log-event :warn "pool.init-hook.inert"
+               "reason" "MCP_WORKER_INIT_* set but worker pool disabled")
+    (warn "MCP_WORKER_INIT_* is set but the worker pool is disabled ~
+(MCP_NO_WORKER_POOL=1 or :worker-pool nil): the worker init hook is inert. ~
+Enable the pool to use it.")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Global pool state
