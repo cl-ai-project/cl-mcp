@@ -258,6 +258,11 @@ Known v1 limitations:
   app is re-initialized lazily on the session's next tool call (not eagerly), so
   the app is briefly down after a reset until the next MCP request. The parent
   `/mcp` endpoint stays up throughout.
+- **Soft-failure retry is worker-scoped.** `MCP_WORKER_INIT_MAX_FAILURES` counts
+  init failures across a session's worker (re)binds (e.g. successive hard-crash
+  recoveries). A *soft* init failure (the app reports an error but the worker
+  stays alive) keeps the runtime owned by that session (no migration) but is not
+  auto-retried on the same worker — recover it with `pool-kill-worker`.
 
 ## Security Model
 

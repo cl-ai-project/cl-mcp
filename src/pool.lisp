@@ -315,11 +315,16 @@ init cannot brick a session's repl-eval/load-system."
 Runs on a short-lived background thread with backoff (0.1s -> 2s cap; no
 hard wall-clock deadline -- a slow cold-FASL init legitimately stays
 :loading and is resolved by the operator via pool-kill-worker).  All state
-mutations are guarded on this worker still being the runtime owner, so an
-external kill / reassignment is not misattributed as an init failure.  A
-crash while we still own is init-attributable (excluded from the crash
-breaker).  Any other abnormal exit still releases ownership so the runtime
-is never stranded."
+mutations are guarded on this worker still being the runtime owner.
+
+On terminal :running or (soft) :failed the worker is still alive, so the
+eager init-attributable mark is cleared -- a later crash of it is a
+workload crash that SHOULD feed the breaker.  On a soft :failed BELOW
+max-failures, ownership is RETAINED (so no other live session can migrate
+the singleton runtime in); it is released only once quarantined
+(disabled=t), preserving the disabled=t => owner=nil invariant.  A crash
+DURING init is init-attributable (excluded from the breaker) and disables
+further init."
   (handler-case
       (let ((delay 0.1))
         (loop
@@ -332,34 +337,40 @@ is never stranded."
                (log-event :info "pool.init.running"
                           "session" session-id
                           "app_port" (gethash "app_port" st))
+               (bt:with-lock-held (*pool-lock*)
+                 (remhash (worker-id worker) *init-attributable-crashes*))
                (return))
               ((equal state "failed")
                (log-event :warn "pool.init.failed"
                           "session" session-id
                           "error" (gethash "last_init_error" st))
-               (bt:with-lock-held (*pool-lock*)
-                 ;; Only account against the runtime we still own.
-                 (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
-                   (incf *runtime-init-failures*)
-                   (when (>= *runtime-init-failures* max-failures)
-                     (setf *runtime-init-disabled* t)
-                     (log-event :warn "pool.init.disabled"
-                                "failures" *runtime-init-failures*))))
-               (%release-runtime-owner-if worker)
+               (let ((release nil))
+                 (bt:with-lock-held (*pool-lock*)
+                   ;; init terminally soft-failed but the worker is alive -> a
+                   ;; later crash is a workload crash: clear the eager mark.
+                   (remhash (worker-id worker) *init-attributable-crashes*)
+                   (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+                     (incf *runtime-init-failures*)
+                     (when (>= *runtime-init-failures* max-failures)
+                       (setf *runtime-init-disabled* t
+                             release t)
+                       (log-event :warn "pool.init.disabled"
+                                  "failures" *runtime-init-failures*))))
+                 ;; Release ownership ONLY once quarantined; below max we keep
+                 ;; ownership so a different live session cannot take over.
+                 (when release
+                   (%release-runtime-owner-if worker)))
                (return))
               (t nil)))))
     (worker-crashed ()
       (bt:with-lock-held (*pool-lock*)
         (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
-          ;; init-attributable hard crash: exclude from breaker, disable init.
           (setf (gethash (worker-id worker) *init-attributable-crashes*) t
                 *runtime-init-disabled* t)
           (log-event :warn "pool.init.hard-crash"
                      "session" session-id "worker_id" (worker-id worker))))
       (%release-runtime-owner-if worker))
     (serious-condition (e)
-      ;; version skew (worker-rpc-error "method not found"), malformed status,
-      ;; etc. -- never leave *runtime-owner* stranded.
       (log-event :warn "pool.init.monitor-error"
                  "session" session-id "error" (princ-to-string e))
       (%release-runtime-owner-if worker))))
@@ -369,12 +380,19 @@ is never stranded."
 fire-and-forget worker/init-start RPC (fast ack) and spawn a monitor
 thread.  No-op when the feature is off or init is disabled.  Must be
 called at the :bound transition, after the handshake.  Holds *pool-lock*
-only across the election, not across the RPC."
+only across the election, not across the RPC.
+
+On election, the worker is marked init-attributable EAGERLY (under the
+same lock the crash path checks) so that a crash during init is excluded
+from the circuit breaker even if the health monitor detects the dead
+worker before the init monitor does."
   (let ((config nil) (granted nil))
     (bt:with-lock-held (*pool-lock*)
       (setf config *worker-init-config*)
       (when (and config (not *runtime-init-disabled*))
-        (setf granted (%elect-runtime-owner worker session-id))))
+        (setf granted (%elect-runtime-owner worker session-id))
+        (when granted
+          (setf (gethash (worker-id worker) *init-attributable-crashes*) t))))
     (when granted
       (handler-case
           (progn
@@ -393,6 +411,10 @@ only across the election, not across the RPC."
                      "session" session-id "worker_id" (worker-id worker))
           (%release-runtime-owner-if worker))
         (error (e)
+          ;; A non-crash init-start failure means init never ran; drop the
+          ;; eager mark so a later crash of this (still-live) worker counts.
+          (bt:with-lock-held (*pool-lock*)
+            (remhash (worker-id worker) *init-attributable-crashes*))
           (log-event :warn "pool.init.start-failed"
                      "session" session-id "error" (princ-to-string e))
           (%release-runtime-owner-if worker))))))

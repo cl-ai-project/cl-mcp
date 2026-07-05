@@ -10,7 +10,7 @@
                 #:*worker-init-config*)
   (:import-from #:cl-mcp/src/worker-client
                 #:make-worker #:spawn-worker #:kill-worker
-                #:worker-session-id #:worker-state #:worker-rpc))
+                #:worker-session-id #:worker-state #:worker-rpc #:worker-id))
 
 (in-package #:cl-mcp/tests/pool-init-config-test)
 
@@ -322,3 +322,65 @@ restore.  A NIL value unsets the variable."
             (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
                   (zerop cl-mcp/src/pool::*runtime-init-failures*))
                 "failure count reset")))))))
+
+(deftest init-attributable-marked-eagerly-cleared-on-success
+  (testing "election marks the worker init-attributable immediately; success clears it"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (cl-mcp/src/pool::%with-owner-reset
+          (lambda ()
+            (let ((worker (spawn-worker)))
+              (unwind-protect
+                   (let ((cl-mcp/src/pool::*worker-init-config*
+                           (list :system nil :entry nil :eval "(+ 1 2)"
+                                 :package "CL-USER" :max-failures 1 :mode "singleton")))
+                     (setf (worker-session-id worker) "se"
+                           (worker-state worker) :bound)
+                     (cl-mcp/src/pool::%ensure-runtime-init worker "se")
+                     ;; EAGER: the worker-id is marked init-attributable right away
+                     ;; (before init could even crash).
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           (gethash (worker-id worker)
+                                    cl-mcp/src/pool::*init-attributable-crashes*))
+                         "worker marked init-attributable at election")
+                     ;; After init reaches running the eager mark is cleared.
+                     (loop repeat 100
+                           until (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                   (null (gethash (worker-id worker)
+                                            cl-mcp/src/pool::*init-attributable-crashes*)))
+                           do (sleep 0.05))
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           (null (gethash (worker-id worker)
+                                    cl-mcp/src/pool::*init-attributable-crashes*)))
+                         "mark cleared once init reaches running"))
+                (ignore-errors (kill-worker worker)))))))))
+
+(deftest soft-init-failure-below-max-keeps-ownership
+  (testing "a soft init failure below max-failures keeps ownership (no migration)"
+    (if (not (%socket-available-p))
+        (rove:skip "socket unavailable")
+        (cl-mcp/src/pool::%with-owner-reset
+          (lambda ()
+            (let ((worker (spawn-worker)))
+              (unwind-protect
+                   (let ((cl-mcp/src/pool::*worker-init-config*
+                           (list :system nil :entry nil :eval "(error \"boom\")"
+                                 :package "CL-USER" :max-failures 3 :mode "singleton")))
+                     (setf (worker-session-id worker) "sk"
+                           (worker-state worker) :bound)
+                     (cl-mcp/src/pool::%ensure-runtime-init worker "sk")
+                     (loop repeat 100
+                           until (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                   (plusp cl-mcp/src/pool::*runtime-init-failures*))
+                           do (sleep 0.05))
+                     (ok (= 1 (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                cl-mcp/src/pool::*runtime-init-failures*))
+                         "one soft failure recorded")
+                     (ok (not (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                cl-mcp/src/pool::*runtime-init-disabled*))
+                         "not disabled (below max)")
+                     (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                           (and cl-mcp/src/pool::*runtime-owner*
+                                (string= (car cl-mcp/src/pool::*runtime-owner*) "sk")))
+                         "ownership retained on soft failure below max"))
+                (ignore-errors (kill-worker worker)))))))))
