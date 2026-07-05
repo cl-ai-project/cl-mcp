@@ -118,7 +118,14 @@ a :failed init and leaves the worker fully usable."
     (handler-case
         (with-asdf-load-lock
           (when system
-            (load-system system :force nil :timeout-seconds nil))
+            (let* ((result (load-system system :force nil :timeout-seconds nil))
+                   (status (and (hash-table-p result) (gethash "status" result))))
+              ;; load-system returns a status hash (does NOT signal) on compile
+              ;; error / missing system; surface a non-"loaded" status as a
+              ;; failed init instead of falsely reporting :running.
+              (unless (equal status "loaded")
+                (error "init system ~A failed to load (status: ~A)"
+                       system (or status "unknown")))))
           (when evalform
             (%maybe-eval evalform pkg))
           (let ((port nil))

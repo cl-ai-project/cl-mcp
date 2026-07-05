@@ -302,3 +302,23 @@ restore.  A NIL value unsets the variable."
               "init_disabled key present")
           (ok (nth-value 1 (gethash "init_failures" info))
               "init_failures key present"))))))
+
+(deftest kill-session-worker-rearms-when-no-worker
+  (testing "pool-kill-worker re-arms even when the session's worker was already reaped"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let ((cl-mcp/src/pool::*worker-init-config*
+                (list :system "x" :max-failures 1 :mode "singleton")))
+          ;; Reachable quarantine after an init hard-crash whose worker the
+          ;; health monitor already reaped: disabled=t, owner=nil, NO affinity entry.
+          (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+            (setf cl-mcp/src/pool::*runtime-init-disabled* t
+                  cl-mcp/src/pool::*runtime-init-failures* 3))
+          (let ((result (cl-mcp/src/pool:kill-session-worker "gone-session")))
+            (ok (eq result :no-worker) "no worker was bound to the session")
+            (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                  (null cl-mcp/src/pool::*runtime-init-disabled*))
+                "init re-armed even though kill found no worker")
+            (ok (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                  (zerop cl-mcp/src/pool::*runtime-init-failures*))
+                "failure count reset")))))))

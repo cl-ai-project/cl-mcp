@@ -138,8 +138,8 @@
                  (let ((socket (usocket:socket-connect "127.0.0.1" port
                                                        :element-type 'character)))
                    (unwind-protect
-                        (let* ((stream (usocket:socket-stream socket))
-                               (params (make-hash-table :test 'equal)))
+                        (let ((stream (usocket:socket-stream socket))
+                              (params (make-hash-table :test 'equal)))
                           (setf (gethash "entry" params)
                                 "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST:INTEGRATION-ENTRY-THUNK")
                           (let ((ack (%rpc stream 1 "worker/init-start" params)))
@@ -185,3 +185,15 @@
             "message is the clean short string, not a raw plist dump")
         (ok (null (search "RESTARTS" (string-upcase err)))
             "no raw error-context plist leaked")))))
+
+(deftest run-init-fails-on-bad-system
+  (testing "%run-init records :failed (not :running) when the system fails to load"
+    (cl-mcp/src/worker/init-hook::%reset-init-state)
+    (let ((params (make-hash-table :test 'equal)))
+      (setf (gethash "system" params) "no-such-system-xyz-98765")
+      (cl-mcp/src/worker/init-hook::%run-init params)
+      (let ((s (cl-mcp/src/worker/init-hook::init-state-snapshot)))
+        (ok (string= (gethash "init_state" s) "failed")
+            "a bad system load yields :failed, not :running")
+        (ok (gethash "last_init_error" s)
+            "last_init_error is set")))))
