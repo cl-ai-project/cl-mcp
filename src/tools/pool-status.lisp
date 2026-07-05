@@ -37,6 +37,14 @@ tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
              (format s "~&Max pool size: ~A, Warmup target: ~A"
                      (gethash "max_pool_size" info)
                      (gethash "warmup_target" info))
+             (when (or (gethash "init_owner_session" info)
+                       (gethash "init_disabled" info)
+                       (plusp (or (gethash "init_failures" info) 0)))
+               (format s "~&Init hook: owner=~A~@[ (worker #~A)~] disabled=~A failures=~A"
+                       (or (gethash "init_owner_session" info) "none")
+                       (gethash "init_owner_worker" info)
+                       (if (gethash "init_disabled" info) "true" "false")
+                       (gethash "init_failures" info)))
              (let ((workers (gethash "workers" info)))
                (when (and workers (plusp (length workers)))
                  (format s "~&~%Workers:")

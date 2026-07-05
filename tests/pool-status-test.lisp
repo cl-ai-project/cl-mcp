@@ -56,3 +56,51 @@
           (ok (numberp (gethash "warmup_target" result)))
           (ok (arrayp (gethash "workers" result)))
           (ok (gethash "content" result)))))))
+
+(defun %pool-status-text (result)
+  "Extract the summary text from a pool-status tool RESULT hash-table."
+  (gethash "text" (aref (gethash "content" result) 0)))
+
+(deftest pool-status-text-omits-init-hook-line-when-inactive
+  (testing "pool-status text has no Init hook line when the hook is not engaged"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (let* ((handler (get-tool-handler "pool-status"))
+               (state (make-state))
+               (response (funcall handler state 1 nil))
+               (result (gethash "result" response))
+               (text (%pool-status-text result)))
+          (ok (not (search "Init hook:" text))
+              "no Init hook line when owner is nil, not disabled, zero failures"))))))
+
+(deftest pool-status-text-includes-init-hook-line-when-owner-set
+  (testing "pool-status text shows the Init hook line with owner/worker/failures when an owner is elected"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+          (setf cl-mcp/src/pool::*runtime-owner*
+                  (cons "sess-xyz" (cl-mcp/src/worker-client:make-worker :id 42))
+                cl-mcp/src/pool::*runtime-init-failures* 2))
+        (let* ((handler (get-tool-handler "pool-status"))
+               (state (make-state))
+               (response (funcall handler state 1 nil))
+               (result (gethash "result" response))
+               (text (%pool-status-text result)))
+          (ok (search "Init hook: owner=sess-xyz (worker #42) disabled=false failures=2" text)
+              "Init hook line renders owner, worker id, disabled, and failures"))))))
+
+(deftest pool-status-text-includes-init-hook-line-when-disabled-only
+  (testing "pool-status text shows the Init hook line when disabled with no owner"
+    (cl-mcp/src/pool::%with-owner-reset
+      (lambda ()
+        (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+          (setf cl-mcp/src/pool::*runtime-init-disabled* t))
+        (let* ((handler (get-tool-handler "pool-status"))
+               (state (make-state))
+               (response (funcall handler state 1 nil))
+               (result (gethash "result" response))
+               (text (%pool-status-text result)))
+          (ok (search "Init hook: owner=none disabled=true failures=0" text)
+              "Init hook line shows owner=none and no worker suffix when owner is nil")
+          (ok (not (search "(worker #" text))
+              "no worker suffix when init_owner_worker is nil"))))))
