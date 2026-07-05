@@ -7,7 +7,8 @@
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/pool
-                #:initialize-pool #:shutdown-pool #:release-session)
+                #:initialize-pool #:shutdown-pool #:release-session
+                #:%warn-if-init-without-pool)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -480,6 +481,8 @@ Returns the acceptor instance and port number."
 
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+
+  (%warn-if-init-without-pool *use-worker-pool*)
 
   ;; Configure authentication
   (setf *http-auth-token*

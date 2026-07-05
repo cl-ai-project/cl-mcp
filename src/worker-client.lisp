@@ -186,10 +186,17 @@ Handles both LF and CRLF line endings."
 ;;; ---------------------------------------------------------------------------
 
 (defparameter *worker-env-denylist*
-  '("MCP_WORKER_SECRET" "MCP_WORKER_ID" "MCP_PARENT_PID" "MCP_LOG_FILE")
+  '("MCP_WORKER_SECRET" "MCP_WORKER_ID" "MCP_PARENT_PID" "MCP_LOG_FILE"
+    ;; The parent is the sole reader of these; the worker receives init
+    ;; params via RPC.  Denylisting prevents init forms that embed secrets
+    ;; from leaking into every worker's environment.
+    "MCP_WORKER_INIT_SYSTEM" "MCP_WORKER_INIT_ENTRY" "MCP_WORKER_INIT_EVAL"
+    "MCP_WORKER_INIT_PACKAGE" "MCP_WORKER_INIT_MAX_FAILURES"
+    "MCP_WORKER_INIT_MODE")
   "Environment variables that must NOT be inherited from the parent.
 MCP_WORKER_SECRET/ID/PARENT_PID are set explicitly per-worker.
-MCP_LOG_FILE is excluded so workers don't write to the parent's log file.")
+MCP_LOG_FILE is excluded so workers don't write to the parent's log file.
+MCP_WORKER_INIT_* are read only by the parent and passed as RPC params.")
 
 (defun %build-environment (secret id)
   "Build the environment for worker processes.

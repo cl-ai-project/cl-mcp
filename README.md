@@ -198,6 +198,12 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
 | `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
 | `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
+| `MCP_WORKER_INIT_SYSTEM` | ASDF system to load in the elected owner worker at bind (master gate for the init hook) | (unset = off) |
+| `MCP_WORKER_INIT_ENTRY` | `PKG:SYMBOL` nullary thunk run after the load (preferred activation) | (none) |
+| `MCP_WORKER_INIT_EVAL` | Lisp form run via repl-eval as an escape hatch | (none) |
+| `MCP_WORKER_INIT_PACKAGE` | Package used to read/eval `MCP_WORKER_INIT_EVAL` | `CL-USER` |
+| `MCP_WORKER_INIT_MAX_FAILURES` | Soft init failures before init auto-retry latches off | `1` |
+| `MCP_WORKER_INIT_MODE` | `singleton` (one owner binds a fixed port). v1 supports `singleton` only | `singleton` |
 
 ### Tuning warmup for cold-start handshakes
 
@@ -211,6 +217,52 @@ are then created on demand the first time a session needs one,
 trading first-eval latency for the smallest possible startup
 footprint. Once your client establishes the session you can ignore
 the warmup; the pool will grow as sessions arrive.
+
+### Running an app inside a worker (init hook)
+
+Set `MCP_WORKER_INIT_SYSTEM` (and optionally `MCP_WORKER_INIT_ENTRY`) to have
+the pool run a startup routine inside the single worker elected as the
+"runtime owner" when a session binds it. This lets an app (e.g. a web server)
+run in the same process that serves `repl-eval`/`load-system`, so hot-reload
+lands in the app's process, while the parent keeps the persistent `/mcp`
+endpoint. `pool-kill-worker` restarts the runtime without dropping `/mcp`.
+
+- The init runs on a background thread under a worker-global ASDF load lock,
+  so it never races a `load-system` RPC.
+- Init failures never trip the crash circuit breaker; a failed init leaves a
+  plain, usable REPL worker. Check `pool-status` (`init_owner_session`,
+  `init_disabled`, `init_failures`) to see runtime state.
+- Requires the pool enabled (do not set `MCP_NO_WORKER_POOL=1`); cl-mcp warns
+  at startup if the init vars are set while the pool is disabled.
+- The init form must be bind-robust and idempotent, and should pass
+  `:address "127.0.0.1"` for a localhost-only dev server. Do not embed
+  secrets in `MCP_WORKER_INIT_EVAL`.
+- Reloading code with `load-system :force t` while the app is serving live
+  requests can race in-flight request threads (class/method redefinition);
+  reload between requests or quiesce the app's acceptor first.
+
+Example (recurya): add a nullary `recurya/dev:start-dev-runtime!` thunk that
+starts the DB and web server, then set `MCP_WORKER_INIT_SYSTEM=recurya/dev`
+and `MCP_WORKER_INIT_ENTRY=recurya/dev:start-dev-runtime!`.
+
+Known v1 limitations:
+
+- **Single dev runtime / single session.** `singleton` mode is designed for one
+  developer session driving one fixed-port app. Ownership is bound to the owner
+  session and never migrates to a different *live* session, so hot-reload stays
+  in the app's process. A narrow multi-session race remains (if the owner's
+  worker crashes during the same window that a second session binds), so two
+  concurrent sessions against one init runtime is not supported in v1; a future
+  per-worker/ephemeral-port mode is planned for that.
+- **Reset is not instantaneous.** `pool-kill-worker` re-arms the runtime, but the
+  app is re-initialized lazily on the session's next tool call (not eagerly), so
+  the app is briefly down after a reset until the next MCP request. The parent
+  `/mcp` endpoint stays up throughout.
+- **Soft-failure retry is worker-scoped.** `MCP_WORKER_INIT_MAX_FAILURES` counts
+  init failures across a session's worker (re)binds (e.g. successive hard-crash
+  recoveries). A *soft* init failure (the app reports an error but the worker
+  stays alive) keeps the runtime owned by that session (no migration) but is not
+  auto-retried on the same worker — recover it with `pool-kill-worker`.
 
 ## Security Model
 

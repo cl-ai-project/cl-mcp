@@ -37,6 +37,7 @@
                 #:worker-last-crash-reason
                 #:worker-last-exit-status
                 #:worker-last-exit-code
+                #:worker-crashed
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/proxy
@@ -49,6 +50,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
+           #:*worker-init-config*
+           #:%warn-if-init-without-pool
            #:*health-check-interval-seconds*
            #:*shutdown-replenish-wait-seconds*
            #:initialize-pool
@@ -116,6 +119,12 @@ reads the environment once at load time."
                  name s default)
            default))))))
 
+(defun %env-string (name)
+  "Return the environment variable NAME as a string, or NIL when unset or
+empty."
+  (let ((s (uiop:getenv name)))
+    (and s (plusp (length s)) s)))
+
 (defvar *worker-pool-warmup*
   (%env-int "CL_MCP_WORKER_POOL_WARMUP" 1 :min 0)
   "Number of standby workers to pre-spawn and maintain.
@@ -138,6 +147,35 @@ be a positive integer).  Must be >= *worker-pool-warmup*.")
 
 (defvar *shutdown-replenish-wait-seconds* 0.05d0
   "Polling interval (seconds) while waiting for replenish thread shutdown.")
+
+(defvar *worker-init-config* nil
+  "Parsed worker-init-hook config, or NIL when the feature is off.
+A plist: (:system S :entry E :eval EV :package P :max-failures N :mode M).")
+
+(defun %parse-worker-init-config ()
+  "Read MCP_WORKER_INIT_* from the environment into a config plist, or NIL
+when MCP_WORKER_INIT_SYSTEM is unset (feature off).  MCP_WORKER_INIT_SYSTEM
+is the master gate, mirroring MCP_WORKER_SWANK."
+  (let ((system (%env-string "MCP_WORKER_INIT_SYSTEM")))
+    (when system
+      (list :system system
+            :entry (%env-string "MCP_WORKER_INIT_ENTRY")
+            :eval (%env-string "MCP_WORKER_INIT_EVAL")
+            :package (or (%env-string "MCP_WORKER_INIT_PACKAGE") "CL-USER")
+            :max-failures (%env-int "MCP_WORKER_INIT_MAX_FAILURES" 1 :min 1)
+            :mode (or (%env-string "MCP_WORKER_INIT_MODE") "singleton")))))
+
+(defun %warn-if-init-without-pool (pool-enabled-p)
+  "Warn (and log) when MCP_WORKER_INIT_SYSTEM is set while the worker pool
+is disabled (POOL-ENABLED-P is NIL) -- the init hook is inert in that
+configuration, so a silent no-op would look like a broken web server.
+Called from the transport entry points after the pool-enabled decision."
+  (when (and (%env-string "MCP_WORKER_INIT_SYSTEM") (not pool-enabled-p))
+    (log-event :warn "pool.init-hook.inert"
+               "reason" "MCP_WORKER_INIT_* set but worker pool disabled")
+    (warn "MCP_WORKER_INIT_* is set but the worker pool is disabled ~
+(MCP_NO_WORKER_POOL=1 or :worker-pool nil): the worker init hook is inert. ~
+Enable the pool to use it.")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Global pool state
@@ -188,6 +226,198 @@ halting recovery for a session.")
 (defparameter *max-concurrent-recoveries* 4
   "Maximum number of concurrent crash recovery threads.
 Prevents resource exhaustion when many workers crash simultaneously.")
+
+(defvar *runtime-owner* nil
+  "The current runtime owner as (SESSION-ID . WORKER), or NIL.  The owner
+is the single worker permitted to run a singleton init (bind the fixed
+app port).  Guarded by *pool-lock*.")
+
+(defvar *runtime-init-failures* 0
+  "Count of soft init failures for the current runtime.  Guarded by *pool-lock*.")
+
+(defvar *runtime-init-disabled* nil
+  "When T, init is not (re-)attempted until re-armed (pool-kill-worker /
+config reload).  Guarded by *pool-lock*.")
+
+(defvar *init-attributable-crashes* (make-hash-table :test 'eql)
+  "Set of worker IDs whose crash happened during a cl-mcp-triggered init.
+Such crashes are excluded from the crash circuit breaker.  Guarded by
+*pool-lock*.")
+
+(defun %with-owner-reset (thunk)
+  "Test helper: reset ownership/failure state under *pool-lock*, then run THUNK."
+  (bt:with-lock-held (*pool-lock*)
+    (setf *runtime-owner* nil
+          *runtime-init-failures* 0
+          *runtime-init-disabled* nil)
+    (clrhash *init-attributable-crashes*))
+  (funcall thunk))
+
+(defun %elect-runtime-owner (worker session-id)
+  "Grant runtime ownership to WORKER for SESSION-ID and return T, else NIL.
+MUST be called with *pool-lock* held (reads/writes *runtime-owner*).
+Grant iff the current owner is NIL, is the SAME session, or the current
+owner's worker is dead AND its session is gone from *affinity-map*.
+NEVER migrate to a different session while the OWNER SESSION is still
+alive (present in *affinity-map*), even if that session's current worker
+has crashed and is being recovered -- this keeps the app and the
+developer's repl-eval/load-system in the same process and keeps exactly
+one holder of the fixed port."
+  (let ((current *runtime-owner*))
+    (when (or (null current)
+              (string= (car current) session-id)
+              ;; Reclaim to a DIFFERENT session only when the previous owner's
+              ;; worker is dead AND its session is gone from the affinity map.
+              ;; Never migrate the runtime to another still-live session -- that
+              ;; would land the developer's hot-reload in the wrong process (L4).
+              (and (not (%worker-process-alive-p (cdr current)))
+                   (not (gethash (car current) *affinity-map*))))
+      ;; A new runtime (no prior owner, or a different session) starts with a
+      ;; clean soft-failure count; a same-session re-election preserves it.
+      (unless (and current (string= (car current) session-id))
+        (setf *runtime-init-failures* 0))
+      (setf *runtime-owner* (cons session-id worker))
+      (log-event :info "pool.runtime-owner.elected"
+                 "session" session-id "worker_id" (worker-id worker))
+      (return-from %elect-runtime-owner t))
+    (log-event :info "pool.init.skipped-not-owner"
+               "session" session-id "owner_session" (car current))
+    nil))
+
+(defun %release-runtime-owner-if (worker)
+  "Clear *runtime-owner* if WORKER is the current owner.  Takes *pool-lock*.
+Called (from paths NOT already holding the lock) when an owner worker is
+released, killed, or removed on crash."
+  (bt:with-lock-held (*pool-lock*)
+    (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+      (log-event :info "pool.runtime-owner.released"
+                 "worker_id" (worker-id worker))
+      (setf *runtime-owner* nil))))
+
+(defun %init-attributable-crash-p (worker)
+  "T if WORKER's crash was attributed to a cl-mcp-triggered init.  Must be
+called with *pool-lock* held (reads *init-attributable-crashes*).  Such
+crashes are excluded from the crash circuit breaker so a bad web-server
+init cannot brick a session's repl-eval/load-system."
+  (gethash (worker-id worker) *init-attributable-crashes*))
+
+(defun %init-params (config)
+  "Build the worker/init-start params hash-table from CONFIG plist."
+  (let ((ht (make-hash-table :test 'equal)))
+    (setf (gethash "system" ht) (getf config :system)
+          (gethash "entry" ht) (getf config :entry)
+          (gethash "eval" ht) (getf config :eval)
+          (gethash "package" ht) (getf config :package))
+    ht))
+
+(defun %monitor-init (worker session-id max-failures)
+  "Poll worker/init-status until terminal, updating failure/disable state.
+Runs on a short-lived background thread with backoff (0.1s -> 2s cap; no
+hard wall-clock deadline -- a slow cold-FASL init legitimately stays
+:loading and is resolved by the operator via pool-kill-worker).  All state
+mutations are guarded on this worker still being the runtime owner.
+
+On terminal :running or (soft) :failed the worker is still alive, so the
+eager init-attributable mark is cleared -- a later crash of it is a
+workload crash that SHOULD feed the breaker.  On a soft :failed BELOW
+max-failures, ownership is RETAINED (so no other live session can migrate
+the singleton runtime in); it is released only once quarantined
+(disabled=t), preserving the disabled=t => owner=nil invariant.  A crash
+DURING init is init-attributable (excluded from the breaker) and disables
+further init."
+  (handler-case
+      (let ((delay 0.1))
+        (loop
+          (sleep delay)
+          (setf delay (min (* delay 1.5) 2.0))
+          (let* ((st (worker-rpc worker "worker/init-status" nil :timeout 5))
+                 (state (and (hash-table-p st) (gethash "init_state" st))))
+            (cond
+              ((equal state "running")
+               (log-event :info "pool.init.running"
+                          "session" session-id
+                          "app_port" (gethash "app_port" st))
+               (bt:with-lock-held (*pool-lock*)
+                 (remhash (worker-id worker) *init-attributable-crashes*))
+               (return))
+              ((equal state "failed")
+               (log-event :warn "pool.init.failed"
+                          "session" session-id
+                          "error" (gethash "last_init_error" st))
+               (let ((release nil))
+                 (bt:with-lock-held (*pool-lock*)
+                   ;; init terminally soft-failed but the worker is alive -> a
+                   ;; later crash is a workload crash: clear the eager mark.
+                   (remhash (worker-id worker) *init-attributable-crashes*)
+                   (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+                     (incf *runtime-init-failures*)
+                     (when (>= *runtime-init-failures* max-failures)
+                       (setf *runtime-init-disabled* t
+                             release t)
+                       (log-event :warn "pool.init.disabled"
+                                  "failures" *runtime-init-failures*))))
+                 ;; Release ownership ONLY once quarantined; below max we keep
+                 ;; ownership so a different live session cannot take over.
+                 (when release
+                   (%release-runtime-owner-if worker)))
+               (return))
+              (t nil)))))
+    (worker-crashed ()
+      (bt:with-lock-held (*pool-lock*)
+        (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+          (setf (gethash (worker-id worker) *init-attributable-crashes*) t
+                *runtime-init-disabled* t)
+          (log-event :warn "pool.init.hard-crash"
+                     "session" session-id "worker_id" (worker-id worker))))
+      (%release-runtime-owner-if worker))
+    (serious-condition (e)
+      (log-event :warn "pool.init.monitor-error"
+                 "session" session-id "error" (princ-to-string e))
+      (%release-runtime-owner-if worker))))
+
+(defun %ensure-runtime-init (worker session-id)
+  "Elect WORKER as runtime owner for SESSION-ID and, if elected, send a
+fire-and-forget worker/init-start RPC (fast ack) and spawn a monitor
+thread.  No-op when the feature is off or init is disabled.  Must be
+called at the :bound transition, after the handshake.  Holds *pool-lock*
+only across the election, not across the RPC.
+
+On election, the worker is marked init-attributable EAGERLY (under the
+same lock the crash path checks) so that a crash during init is excluded
+from the circuit breaker even if the health monitor detects the dead
+worker before the init monitor does."
+  (let ((config nil) (granted nil))
+    (bt:with-lock-held (*pool-lock*)
+      (setf config *worker-init-config*)
+      (when (and config (not *runtime-init-disabled*))
+        (setf granted (%elect-runtime-owner worker session-id))
+        (when granted
+          (setf (gethash (worker-id worker) *init-attributable-crashes*) t))))
+    (when granted
+      (handler-case
+          (progn
+            (worker-rpc worker "worker/init-start" (%init-params config)
+                        :timeout 5)
+            (let ((max-failures (getf config :max-failures 1)))
+              (bt:make-thread
+               (lambda () (%monitor-init worker session-id max-failures))
+               :name (format nil "pool-init-monitor-~A" (worker-id worker)))))
+        (worker-crashed ()
+          (bt:with-lock-held (*pool-lock*)
+            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+              (setf (gethash (worker-id worker) *init-attributable-crashes*) t
+                    *runtime-init-disabled* t)))
+          (log-event :warn "pool.init.hard-crash"
+                     "session" session-id "worker_id" (worker-id worker))
+          (%release-runtime-owner-if worker))
+        (error (e)
+          ;; A non-crash init-start failure means init never ran; drop the
+          ;; eager mark so a later crash of this (still-live) worker counts.
+          (bt:with-lock-held (*pool-lock*)
+            (remhash (worker-id worker) *init-attributable-crashes*))
+          (log-event :warn "pool.init.start-failed"
+                     "session" session-id "error" (princ-to-string e))
+          (%release-runtime-owner-if worker))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Placeholder struct -- coordinates concurrent spawn requests
@@ -478,26 +708,27 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (setf history
-                   (remove-if (lambda (ts) (< ts window-start)) history))
-             (push now history)
-             (setf (gethash session-id *crash-history*) history)
-             ;; Mark that crash-history was pushed for this worker to
-             ;; prevent double-counting when get-or-assign-worker also
-             ;; encounters this crashed worker in Path 1b.
-             (setf (worker-crash-history-pushed-p crashed-worker) t)
-             (when (>= (length history) *crash-breaker-threshold*)
-               (log-event :error "pool.circuit-breaker.tripped"
-                          "session" session-id
-                          "crashes" (length history)
-                          "window_seconds" *crash-breaker-window*)
-               ;; Clear crash history to prevent stale data if session
-               ;; ID is reused or session reconnects later.
-               (remhash session-id *crash-history*)
-               (when (eql (gethash session-id *affinity-map*) crashed-worker)
-                 (remhash session-id *affinity-map*))
-               (setf *all-workers* (remove crashed-worker *all-workers*))
-               (return-from %handle-worker-crash)))))
+             (unless (%init-attributable-crash-p crashed-worker)
+               (setf history
+                     (remove-if (lambda (ts) (< ts window-start)) history))
+               (push now history)
+               (setf (gethash session-id *crash-history*) history)
+               ;; Mark that crash-history was pushed for this worker to
+               ;; prevent double-counting when get-or-assign-worker also
+               ;; encounters this crashed worker in Path 1b.
+               (setf (worker-crash-history-pushed-p crashed-worker) t)
+               (when (>= (length history) *crash-breaker-threshold*)
+                 (log-event :error "pool.circuit-breaker.tripped"
+                            "session" session-id
+                            "crashes" (length history)
+                            "window_seconds" *crash-breaker-window*)
+                 ;; Clear crash history to prevent stale data if session
+                 ;; ID is reused or session reconnects later.
+                 (remhash session-id *crash-history*)
+                 (when (eql (gethash session-id *affinity-map*) crashed-worker)
+                   (remhash session-id *affinity-map*))
+                 (setf *all-workers* (remove crashed-worker *all-workers*))
+                 (return-from %handle-worker-crash))))))
        (handler-case
            (let ((new-worker nil) (registered nil))
              (unwind-protect
@@ -545,7 +776,10 @@ to prevent recovery threads from spawning orphan workers."
                       (log-event :info "pool.worker.recovered"
                                  "old_worker_id" (worker-id crashed-worker)
                                  "new_worker_id" (worker-id new-worker)
-                                 "session" session-id))))
+                                 "session" session-id)
+                      (when *worker-init-config*
+                        (ignore-errors
+                         (%ensure-runtime-init new-worker session-id))))))
                (when (and new-worker (not registered))
                  (ignore-errors (kill-worker new-worker)))))
          (error (e)
@@ -724,7 +958,12 @@ Serialized by *init-lock* to prevent concurrent initialization."
       (setf *affinity-map* (make-hash-table :test 'equal)
             *standby-workers* nil
             *all-workers* nil
-            *recovery-threads* nil)
+            *recovery-threads* nil
+            *worker-init-config* (%parse-worker-init-config))
+      (setf *runtime-owner* nil
+            *runtime-init-failures* 0
+            *runtime-init-disabled* nil)
+      (clrhash *init-attributable-crashes*)
       (clrhash *crash-history*))
     ;; Start health monitor.  Sets *pool-running* to T, which gates
     ;; the replenish thread below: %replenish-standbys exits early
@@ -851,7 +1090,8 @@ cannot be created."
          ;; worker (prevents double-counting in the race window where
          ;; the health monitor detects the crash first).
          (when (and (eq :crashed (worker-state entry))
-                    (not (worker-crash-history-pushed-p entry)))
+                    (not (worker-crash-history-pushed-p entry))
+                    (not (%init-attributable-crash-p entry)))
            (let* ((now (get-universal-time))
                   (window-start (- now *crash-breaker-window*))
                   (history (gethash session-id *crash-history*)))
@@ -964,6 +1204,9 @@ cannot be created."
           (%schedule-replenish)
           (error "Worker ~A crashed during project root setup for session ~A"
                  (worker-id worker) session-id)))
+      ;; Fire the init hook only when THIS call newly bound a worker.
+      (when (and (or assigned-from-standby need-spawn) *worker-init-config*)
+        (ignore-errors (%ensure-runtime-init worker session-id)))
       worker)))
 
 ;;; ---------------------------------------------------------------------------
@@ -990,7 +1233,9 @@ impending kill as a crash."
            (setf (worker-state worker-to-kill) :released)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+           (setf *all-workers* (remove worker-to-kill *all-workers*))
+           (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker-to-kill))
+             (setf *runtime-owner* nil)))
           ((and entry (typep entry 'worker-placeholder))
            (setf (worker-placeholder-cancelled entry) t)
            (remhash session-id *affinity-map*)
@@ -1029,12 +1274,22 @@ worker was bound, :PLACEHOLDER if a spawn was in progress (cancelled)."
            (setf (worker-state worker-to-kill) :released)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           (setf *all-workers* (remove worker-to-kill *all-workers*)))
+           (setf *all-workers* (remove worker-to-kill *all-workers*))
+           (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker-to-kill))
+             (setf *runtime-owner* nil)))
           ((and entry (typep entry 'worker-placeholder))
            (setf (worker-placeholder-cancelled entry) t
                  kill-result :placeholder)
            (remhash session-id *affinity-map*)
-           (remhash session-id *crash-history*)))))
+           (remhash session-id *crash-history*)))
+        ;; pool-kill-worker is the documented re-arm for a quarantined runtime.
+        ;; It must fire even when the crashed owner worker was already reaped
+        ;; from the affinity map (so kill found :no-worker).  disabled=t implies
+        ;; owner=nil, so clearing the latch unconditionally (feature on) cannot
+        ;; disturb a live healthy owner.
+        (when *worker-init-config*
+          (setf *runtime-init-disabled* nil
+                *runtime-init-failures* 0))))
     (when worker-to-kill
       (log-event :info "pool.session.worker-killed"
                  "session" session-id
@@ -1162,4 +1417,11 @@ max_pool_size, warmup_target, workers (vector of per-worker hashes)."
             (gethash "max_pool_size" info) *max-pool-size*
             (gethash "warmup_target" info) *worker-pool-warmup*
             (gethash "workers" info) workers)
+      (with-lock-held (*pool-lock*)
+        (setf (gethash "init_owner_session" info)
+                (and *runtime-owner* (car *runtime-owner*))
+              (gethash "init_owner_worker" info)
+                (and *runtime-owner* (worker-id (cdr *runtime-owner*)))
+              (gethash "init_disabled" info) (if *runtime-init-disabled* t nil)
+              (gethash "init_failures" info) *runtime-init-failures*))
       info)))

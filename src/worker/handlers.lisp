@@ -40,6 +40,10 @@
                 #:build-inspect-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
+  (:import-from #:cl-mcp/src/worker/init-hook
+                #:with-asdf-load-lock
+                #:handle-init-start
+                #:handle-init-status)
   (:export #:register-all-handlers))
 
 (in-package #:cl-mcp/src/worker/handlers)
@@ -104,7 +108,8 @@ result_preview, and error_context."
 
 (defun %handle-load-system (params)
   "Load an ASDF system.  Returns the same structure as define-tool
-\"load-system\"."
+\"load-system\".  Holds *ASDF-LOAD-LOCK* so it cannot overlap a
+concurrent worker/init load or another load-system."
   (let ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
@@ -113,10 +118,11 @@ result_preview, and error_context."
       (error "system is required"))
     (when (and timeout-seconds (not (plusp timeout-seconds)))
       (error "timeout_seconds must be a positive number"))
-    (let ((ht (load-system system
-                           :force force
-                           :clear-fasls clear-fasls
-                           :timeout-seconds (or timeout-seconds 120))))
+    (let ((ht (with-asdf-load-lock
+                (load-system system
+                             :force force
+                             :clear-fasls clear-fasls
+                             :timeout-seconds (or timeout-seconds 120)))))
       (build-load-system-response system ht))))
 
 ;;; ---------------------------------------------------------------------------
@@ -125,7 +131,9 @@ result_preview, and error_context."
 
 (defun %handle-run-tests (params)
   "Run tests for a system.  Returns the same structure as define-tool
-\"run-tests\".  Honors timeout_seconds to limit test execution time."
+\"run-tests\".  Honors timeout_seconds to limit test execution time.
+Holds *ASDF-LOAD-LOCK* during the test run so it cannot overlap a
+concurrent load."
   (let ((system (gethash "system" params))
          (framework (gethash "framework" params))
          (test (gethash "test" params))
@@ -135,10 +143,11 @@ result_preview, and error_context."
     (unless system
       (error "system is required"))
     (flet ((do-run ()
-             (run-tests system
-                        :framework framework
-                        :test test
-                        :tests tests)))
+             (with-asdf-load-lock
+               (run-tests system
+                          :framework framework
+                          :test test
+                          :tests tests))))
       (let ((test-result (if timeout
                              (handler-case
                                  (sb-ext:with-timeout timeout
@@ -265,5 +274,7 @@ Returns a success payload."
   (register-method server "worker/code-find-references" #'%handle-code-find-references)
   (register-method server "worker/inspect-object" #'%handle-inspect-object)
   (register-method server "worker/set-project-root" #'%handle-set-project-root)
-  (log-event :info "worker.handlers.registered" "count" 8)
+  (register-method server "worker/init-start" #'handle-init-start)
+  (register-method server "worker/init-status" #'handle-init-status)
+  (log-event :info "worker.handlers.registered" "count" 10)
   server)
