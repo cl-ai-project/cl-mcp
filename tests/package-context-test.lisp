@@ -133,6 +133,30 @@
      (ok (null (find-package "CL-MCP-TEST-SYNTH-UNWIND"))
       "package deleted after non-local exit")))))
 
+(deftest discovery-survives-unreadable-vendored-file
+ (testing "discovery does not abort when a vendored file signals a plain error on read"
+  (call-with-temp-project
+   (lambda (root)
+     ;; No matching defpackage exists anywhere in this project, so
+     ;; DISCOVER-PACKAGE-SPEC's FIND-IF cannot short-circuit before reaching
+     ;; the poison file -- the full walk (and thus the poison file) is
+     ;; guaranteed to be visited, making this a deterministic reproduction
+     ;; (unlike a fixture where a matching defpackage sits earlier in the
+     ;; scan order and hides the bug via short-circuiting).
+     (write-source root ".bundle-libs/software/fake-lib/impl-allegro.lisp"
+                   "#+(version>= 9) (defun guarded () nil)")
+     (ok (null (discover-package-spec "FD010-NOT-DEFINED-ANYWHERE-PKG"))
+      "returns NIL instead of signaling on the poisoned vendored file")))))
+
+(deftest package-specs-in-file-tolerates-feature-expr-error
+ (testing "%package-specs-in-file returns NIL instead of signaling on a bad feature expr"
+  (call-with-temp-project
+   (lambda (root)
+     (let ((path (write-source root ".bundle-libs/software/fake-lib/impl-allegro.lisp"
+                                "#+(version>= 9) (defun guarded () nil)")))
+       (ok (null (cl-mcp/src/package-context::%package-specs-in-file path))
+        "poison file yields NIL, no signal"))))))
+
 (deftest call-with-file-package-context-uses-text
  (testing "infers package context from inline text without re-reading disk"
   (call-with-temp-project

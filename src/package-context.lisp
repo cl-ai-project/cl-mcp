@@ -32,8 +32,11 @@
   "Source file extensions scanned for package definitions.")
 
 (defparameter *package-context-skip-directories*
-  '(".git" ".qlot" "qlot" ".cache")
-  "Directory basenames skipped during package spec discovery.")
+  '(".git" ".qlot" "qlot" ".cache" ".bundle-libs" "bundle-libs")
+  "Directory basenames skipped during package spec discovery.
+Includes vendored/bundled dependency directories (e.g. .bundle-libs) whose
+sources are not authored by the project and may contain implementation-
+specific forms this reader cannot tolerate.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
@@ -211,6 +214,11 @@ have begun, to avoid descending into the rest of the file."
       nil)
     #+sbcl
     (sb-int:simple-reader-package-error ()
+      nil)
+    ;; Implementation-specific reader conditionals in vendored sources (e.g.
+    ;; a bare Allegro #+(version>= 9) in bordeaux-threads' impl-allegro.lisp)
+    ;; signal a plain SIMPLE-ERROR from CL:READ, not a READER-ERROR.
+    (error ()
       nil)))
 
 (defun discover-package-spec (package-name &key source-path)
