@@ -253,15 +253,26 @@ STORAGE-CONDITION clause rather than the input guard."
                                   (princ-to-string e))
                           t))))))
 
-(deftest macroexpand-readtable-reports-missing-named-readtables
-  (testing "requesting a readtable without named-readtables loaded says so"
+(deftest macroexpand-rejects-an-unresolvable-readtable
+  (testing "an unresolvable readtable designator produces an actionable error"
     (ok (handler-case
             (progn (macroexpand-source "(double-it 1)"
                                        :package *fixture-package*
-                                       :readtable "no-such-pkg:no-such-rt")
+                                       :readtable "no-such-readtable-xyzzy")
                    nil)
-          (error (e) (and (search "named-readtables" (princ-to-string e)) t)))
-        "the message must name the actual cause, not a generic not-found")))
+          (error (e)
+            (let ((message (princ-to-string e)))
+              ;; Which branch reports this depends on whether named-readtables
+              ;; happens to be loaded, and that varies with suite order -- an
+              ;; earlier version of this test asserted one branch's wording and
+              ;; was green alone but red in the full suite.  What must hold
+              ;; either way is that the message names what could not be
+              ;; resolved.  The branches themselves are covered directly by
+              ;; PARSE-READTABLE-NAME-HANDLES-EVERY-DESIGNATOR-FORM.
+              (and (or (search "no-such-readtable-xyzzy" message)
+                       (search "named-readtables" message))
+                   t))))
+        "the message must identify what could not be resolved")))
 
 (deftest parse-readtable-name-handles-every-designator-form
   (testing "the designator shapes resolve without interning anything"

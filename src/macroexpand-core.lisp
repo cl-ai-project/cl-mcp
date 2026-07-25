@@ -117,23 +117,27 @@ loaded in this image."))
 Signals when SOURCE holds more than one form.  The caller slices this
 text out of a file by form address, so a second form means the slice was
 wrong, and silently expanding only the first would return a plausible but
-incorrect answer.
+incorrect answer.  Note that the rejected trailing form is read, and
+therefore #.-evaluated, before the rejection.
 
 *READ-EVAL* is deliberately left enabled: real sources contain #. and
 this tool already runs the macro's expander, so reader evaluation adds no
-new class of exposure.  Note that the reject path below still reads (and
-therefore #.-evaluates) the offending trailing form before refusing it —
-rejection happens after reading, not before."
+new class of exposure."
   (let ((*package* package)
         (*readtable* (or readtable *readtable*)))
     (with-input-from-string (stream source)
-      (let ((form (read stream)))
-        ;; STREAM is its own eof-value here: no read datum can ever be EQ to
-        ;; the stream object, so this distinguishes a real second form from
-        ;; end of input.  Testing mere truthiness would fire on both.
-        (unless (eq (read stream nil stream) stream)
-          (error "SOURCE contains more than one form; expected exactly one."))
-        form))))
+      (handler-case
+          (let ((form (read stream)))
+            ;; STREAM is its own eof-value here: no read datum can ever be EQ
+            ;; to the stream object, so this distinguishes a real second form
+            ;; from end of input.  Testing mere truthiness would fire on both.
+            (unless (eq (read stream nil stream) stream)
+              (error "SOURCE contains more than one form; expected exactly one."))
+            form)
+        (end-of-file ()
+          ;; The default report prints the stream object, which leaks an
+          ;; internal #<STRING-INPUT-STREAM ...> into agent-facing text.
+          (error "SOURCE ended mid-form -- check for unbalanced parentheses."))))))
 
 (defun %expand-once (form)
   "Expand FORM one step.  Returns (values expansion steps)."
