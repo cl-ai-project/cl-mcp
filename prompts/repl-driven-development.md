@@ -22,6 +22,7 @@ EXPLORE -> EXPERIMENT -> PERSIST -> VERIFY
 | Patch form | `lisp-patch-form` | `form_type`, `form_name`, `old_text`, `new_text` |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` or `code` (string) |
+| Expand macro | `lisp-macroexpand` | `path`+`form_type`+`form_name`, or `code`; `sub_form`, `level` |
 | Language spec | `clhs-lookup` | `query` (symbol or section) |
 | Run tests | `run-tests` | `system`, `test`/`tests` (optional) |
 | Diagnose pool | `pool-status`  | (no args) |
@@ -46,9 +47,13 @@ Tools run in two process types when the worker pool is enabled (default):
 - Diagnostics: `pool-status`, `pool-kill-worker`
 
 **Worker process** (isolated, one per session):
-- `repl-eval`, `load-system`, `run-tests`
+- `repl-eval`, `load-system`, `run-tests`, `lisp-macroexpand`
 - `code-find`, `code-describe`, `code-find-references`
 - `inspect-object`
+
+`lisp-macroexpand` splits across both: the parent resolves `path`/`form_type`/`form_name`
+against the CST to locate the form's source text, then the worker expands it, because only
+the worker image has the macro's definition loaded.
 
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).
@@ -86,6 +91,11 @@ Tools run in two process types when the worker pool is enabled (default):
   - Replace/insert form -> `lisp-edit-form` (structural, parinfer auto-repair)
   - Small text change -> `lisp-patch-form` (token-efficient, no auto-repair)
   - New file -> `fs-write-file` (minimal), then `lisp-edit-form`
+- **EXPAND MACROS**
+  - Macro call in a file -> `lisp-macroexpand` with `path`+`form_type`+`form_name`
+  - Macro call nested inside a defun -> add `sub_form` with the macro's name
+  - Call site you compose yourself -> `lisp-macroexpand` with `code`+`package`
+  - Requires the macro's system to be loaded (`load-system`) in the worker
 - **REFERENCE**
   - CL language spec -> `clhs-lookup` (symbol or section number)
 
@@ -214,3 +224,18 @@ Call `fs-set-project-root` with your working directory, or set `MCP_PROJECT_ROOT
 
 ### Parenthesis Mismatch
 Use `lisp-check-parens` to find exact position (line, column). Fix with `lisp-edit-form`.
+
+### lisp-macroexpand returns "NOT EXPANDED" or a package error
+- The macro must be **defined in the worker image**, not just present on disk. Run
+  `load-system` first; after editing a `defmacro`, reload before expanding.
+- "NOT EXPANDED" means the form's head has no macro definition — it is not a silent no-op.
+
+### lisp-macroexpand limitations
+- Expansion uses a **null lexical environment**, so a form wrapped in `macrolet` or
+  `symbol-macrolet` may expand differently than the compiler sees it.
+- `sub_form` cannot be combined with `readtable` (a custom readtable forces the standard CL
+  reader, which does not record sub-form positions), nor with `code` (there is no enclosing
+  form to search in).
+- `level: "all"` can produce very large output; `loop` and `defun` expand down to special
+  forms. Start with the default `once`.
+- Expanding runs the macro's expander function, i.e. arbitrary code, in the worker process.
