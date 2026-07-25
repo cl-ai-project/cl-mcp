@@ -374,9 +374,10 @@ EOF
 
 **設計上の要点:**
 - worker とインラインフォールバックの両方がこの1つの関数を呼ぶ。JSON も MCP も知らない。
-- `*print-circle*` を **NIL** にして `#1=` 共有マーカーを消す。ハングは
-  `*print-level*` を有限値で束縛することで防ぐ（`*print-level*` が有限なら
-  循環構造も `#` で打ち切られ、無限再帰しない）。
+- `*print-circle*` は**通常 NIL** にして `#1=` 共有マーカーを消す。ただし
+  **循環している場合に限り T にする**。SBCL のプリティプリンタは `quote` 略記で
+  `*print-level*` を尊重せず、自己参照構造を渡すと制御スタックを食い尽くして
+  プロセスごと落ちるため、`*print-level*` の有限束縛だけでは守れない（実測確認済み）。
 - パッケージが存在しなければ**スタブを合成せず**、行動可能なエラーを出す。
   スタブ上で展開すると「何も起きなかった」結果が静かに返り、呼び出し側を誤らせる。
 
@@ -431,7 +432,9 @@ Under *PRINT-CIRCLE* the sharing would surface as #1= / #1# markers."
 
 (defmacro cyclic-expansion-macro ()
   "Test macro whose expansion is a self-referential list.
-Exercises the *PRINT-LEVEL* backstop that replaces *PRINT-CIRCLE*."
+Exercises the circularity check that decides whether to switch
+*PRINT-CIRCLE* on.  Without it SBCL's pretty printer exhausts the control
+stack on this input and takes the whole process down."
   (let ((cell (list 'quote nil)))
     (setf (second cell) cell)
     cell))
@@ -500,13 +503,14 @@ Exercises the *PRINT-LEVEL* backstop that replaces *PRINT-CIRCLE*."
       (ok (null (find-if #'upper-case-p printed))
           "symbols print in lower case"))))
 
-(deftest macroexpand-source-does-not-hang-on-cyclic-expansion
-  (testing "a self-referential expansion is bounded by *print-level*, not hung"
+(deftest macroexpand-source-does-not-crash-on-cyclic-expansion
+  (testing "a self-referential expansion prints with circle markers instead of crashing"
     (multiple-value-bind (printed expanded-p)
         (macroexpand-source "(cyclic-expansion-macro)"
                             :package *fixture-package* :print-level 5)
       (ok expanded-p)
-      (ok (search "#" printed) "the depth-limit marker should appear")
+      (ok (search "#1=" printed)
+          "circle notation is switched on for a genuinely circular form")
       (ok (< (length printed) 200) "output must be bounded"))))
 
 (deftest macroexpand-source-truncates-long-output
@@ -599,9 +603,10 @@ Expected: `Component "cl-mcp/src/macroexpand-core" not found` 系のエラーで
 
 (defparameter *expansion-print-level* 50
   "Default `*print-level*` for printed macro expansions.
-Must stay finite: it is the backstop that keeps a self-referential
-expansion from making the printer recurse forever, replacing the
-`*print-circle*` guard that `repl-eval` relies on.")
+Must stay finite so a pathologically deep expansion cannot produce
+unbounded output.  Note that it does NOT protect against a circular
+expansion — SBCL's pretty printer ignores it for the QUOTE abbreviation.
+That case is handled by `%circular-p` in `%print-expansion`.")
 ```
 
 - [ ] **Step 5: 括弧を検証する**
@@ -750,14 +755,45 @@ FORM and 0 otherwise."
 ```
 
 ```lisp
+(defun %circular-p (form)
+  "Return T when FORM contains a cycle reachable through conses.
+
+Only conses are traversed.  A cycle through a literal vector or structure
+is not something this guards against; macro expansions do not produce
+those, and walking them would cost more than it saves.
+
+Finished nodes are memoized, so a heavily shared but acyclic expansion
+costs one visit per distinct cons instead of blowing up exponentially."
+  (let ((on-path (make-hash-table :test #'eq))
+        (finished (make-hash-table :test #'eq)))
+    (labels ((walk (node)
+               (cond
+                 ((not (consp node)) nil)
+                 ((gethash node on-path) t)
+                 ((gethash node finished) nil)
+                 (t
+                  (setf (gethash node on-path) t)
+                  (let ((found (or (walk (car node)) (walk (cdr node)))))
+                    (remhash node on-path)
+                    (setf (gethash node finished) t)
+                    found)))))
+      (walk form))))
+```
+
+```lisp
 (defun %print-expansion (form package print-level print-length)
   "Print FORM as readable source relative to PACKAGE.
-*PRINT-CIRCLE* is deliberately NIL so shared-structure markers such as
-#1= do not pollute the output.  *PRINT-LEVEL* is bound to a finite value
-instead, and that is what keeps a cyclic expansion from hanging the
-printer."
+
+*PRINT-CIRCLE* is normally NIL so that shared-structure markers such as
+#1= do not pollute the output: backquote expansions share literals all
+the time and those markers make the result hard to read.
+
+It is switched on only for a genuinely circular FORM.  *PRINT-LEVEL*
+cannot be relied on to bound that case, because SBCL's pretty printer
+does not honour it for the QUOTE abbreviation and would exhaust the
+control stack, killing the whole worker process."
   (let ((*package* package)
-        (*print-circle* nil)
+        (*print-circle* (%circular-p form))
         (*print-level* (max 1 (or print-level *expansion-print-level*)))
         (*print-length* (max 1 (or print-length *expansion-print-length*)))
         (*print-case* :downcase)
