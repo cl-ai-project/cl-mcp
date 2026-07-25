@@ -291,10 +291,14 @@ expander function, i.e. arbitrary code, in the isolated worker process."
  ;; HANDLER-CASE takes the first matching clause, so a lone ERROR clause would
  ;; catch validation failures too and strip them of the protocol-aware
  ;; treatment define-tool's own handler gives them.  lisp-edit-form avoids
- ;; that by raising its one validation error outside the HANDLER-CASE; here
- ;; the validations live inside %COLLECT-EXPANSION-SOURCES, which the inline
- ;; function needs as well, so the clause is spelled out instead.  Same
- ;; treatment, reached explicitly rather than by ordering.
+ ;; that by raising its one validation error outside the HANDLER-CASE, and
+ ;; that was available here too -- these are pure argument checks, touching
+ ;; neither disk nor CST, so they could have been hoisted ahead of it.  It
+ ;; was rejected because %COLLECT-EXPANSION-SOURCES has to keep them
+ ;; regardless: the exported function and the tests call it directly.  One
+ ;; set of rules would then live in two places, free to drift apart.
+ ;; Spelling the clause out keeps them in one place -- same treatment,
+ ;; reached explicitly rather than by ordering.
  (handler-case
      (with-proxy-dispatch (id "worker/macroexpand"
                               (progn
