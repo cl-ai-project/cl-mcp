@@ -50,7 +50,9 @@
   (:import-from #:cl-mcp/src/tools/pool-kill-worker
                 #:pool-kill-worker)
   (:import-from #:cl-mcp/src/project-scaffold
-                #:project-scaffold))
+                #:project-scaffold)
+  (:import-from #:cl-mcp/src/lisp-macroexpand
+                #:lisp-macroexpand))
 
 (in-package #:cl-mcp/src/tools/all)
 

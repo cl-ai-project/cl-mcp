@@ -13,7 +13,15 @@
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-source
                 #:macroexpand-forms
-                #:macroexpand-package-error))
+                #:macroexpand-package-error)
+  (:import-from #:cl-mcp/src/lisp-macroexpand
+                #:lisp-macroexpand)
+  ;; *PROJECT-ROOT* must be the real special, not a same-named symbol interned
+  ;; here: the file-mode tests LET-bind it, and a lexical binding of a fresh
+  ;; symbol would leave the guardrail in %NORMALIZE-PATHS looking at whatever
+  ;; the test process happened to have.
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*))
 
 (in-package #:cl-mcp/tests/lisp-macroexpand-test)
 
@@ -51,6 +59,10 @@ stack on this input and takes the whole process down."
   (let ((cell (list 'quote nil)))
     (setf (second cell) cell)
     cell))
+
+(defmacro define-thing (name value)
+  "Test macro that expands into a DEFPARAMETER, for top-level addressing tests."
+  `(defparameter ,name ,value))
 
 (defmacro exploding-macro ()
   "Test macro whose expander signals, to check per-entry error reporting."
@@ -286,3 +298,142 @@ STORAGE-CONDITION clause rather than the input guard."
       (ok (handler-case (progn (parse "no-such-pkg:x") nil)
             (error (e) (and (search "no-such-pkg" (princ-to-string e)) t)))
           "an absent package is named in the error"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Parent-side addressing.  Files are written under tests/tmp/ (gitignored)
+;;; and removed afterwards; tests/fixtures/ is untracked and unused.
+;;; ---------------------------------------------------------------------------
+
+(defun project-path (relative)
+  "Return an absolute namestring under the cl-mcp project for RELATIVE."
+  (uiop:native-namestring
+   (uiop:merge-pathnames* relative (asdf:system-source-directory :cl-mcp))))
+
+(defun call-with-temp-source (relative content thunk)
+  "Write CONTENT to RELATIVE under the project, call THUNK with the
+absolute path, then delete the file."
+  (let ((absolute (project-path relative)))
+    (ensure-directories-exist absolute)
+    (with-open-file (out absolute :direction :output :if-exists :supersede)
+      (write-string content out))
+    (unwind-protect (funcall thunk absolute)
+      (ignore-errors (delete-file absolute)))))
+
+(defun response-text (payload)
+  "Return the content[0].text string of a tool response PAYLOAD."
+  (gethash "text" (aref (gethash "content" payload) 0)))
+
+(deftest lisp-macroexpand-file-mode-top-level
+  (testing "the addressed top-level form is expanded when sub_form is omitted"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-toplevel.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(define-thing *thing-a* 1)
+
+(define-thing *thing-b* 2)
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "define-thing"
+                                           :form-name "*thing-b*"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload)) "exactly one form addressed")
+           (ok (search "defparameter" text) "the macro expanded")
+           (ok (search "*thing-b*" text) "the second definition was selected")
+           (ok (null (search "*thing-a*" text))
+               "the first definition was not selected")))))))
+
+(deftest lisp-macroexpand-file-mode-sub-form
+  (testing "sub_form expands a macro call nested inside the addressed form"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-subform.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun uses-double (n)
+  (let ((base n))
+    (double-it base)))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "uses-double"
+                                           :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload)))
+           (ok (search "(* 2 base)" text)
+               "the nested call was expanded, not the enclosing defun")))))))
+
+(deftest lisp-macroexpand-sub-form-multiple-matches
+  (testing "every matching sub-form is expanded and labelled with its position"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-multi.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun uses-double-twice (a b)
+  (list (double-it a)
+        (double-it b)))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "uses-double-twice"
+                                           :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 2 (gethash "count" payload)) "both calls were expanded")
+           (ok (search "(* 2 a)" text))
+           (ok (search "(* 2 b)" text))
+           (ok (search "[1/2]" text)
+               "labels carry the position out of the total")))))))
+
+(deftest lisp-macroexpand-rejects-sub-form-with-readtable
+  (testing "sub_form combined with readtable fails with an actionable message"
+    (ok (handler-case
+            (progn (lisp-macroexpand :path "irrelevant.lisp"
+                                     :form-type "defun"
+                                     :form-name "f"
+                                     :sub-form "g"
+                                     :readtable "some-syntax")
+                   nil)
+          (error (e) (and (search "sub_form" (princ-to-string e)) t)))
+        "the error should name the offending argument")))
+
+(deftest lisp-macroexpand-requires-exactly-one-mode
+  (testing "path and code are mutually exclusive, and one of them is required"
+    (ok (handler-case (progn (lisp-macroexpand) nil)
+          (error () t))
+        "neither path nor code is rejected")
+    (ok (handler-case (progn (lisp-macroexpand :path "a.lisp" :code "(f)") nil)
+          (error () t))
+        "both path and code is rejected")))
+
+(deftest lisp-macroexpand-code-mode
+  (testing "code mode expands a caller-supplied form without touching disk"
+    (let* ((payload (lisp-macroexpand :code "(double-it 5)"
+                                      :package *fixture-package*))
+           (text (response-text payload)))
+      (ok (search "(* 2 5)" text)))))
+
+(deftest lisp-macroexpand-rejects-an-unknown-level
+  (testing "an unknown level is a validation error, not a generic internal error"
+    (ok (handler-case
+            (progn (lisp-macroexpand :code "(double-it 1)"
+                                     :package *fixture-package*
+                                     :level "sideways")
+                   nil)
+          (cl-mcp/src/tools/helpers:arg-validation-error (e)
+            (and (search "once" (princ-to-string e)) t)))
+        "the message should list the accepted levels")))
+
+(deftest lisp-macroexpand-missing-package-matches-the-worker-shape
+  (testing "an absent package returns the same minimal payload the worker returns"
+    (let ((payload (lisp-macroexpand :code "(double-it 1)"
+                                     :package "NO-SUCH-PACKAGE-XYZZY")))
+      (ok (gethash "isError" payload))
+      (ok (search "load-system" (response-text payload))
+          "the actionable message survives instead of being wrapped")
+      (ok (null (gethash "expansions" payload))
+          "minimal shape: no expansions key, matching %handle-macroexpand"))))
