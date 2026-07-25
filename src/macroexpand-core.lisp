@@ -22,9 +22,12 @@
 (defparameter *expansion-print-level* 50
   "Default `*print-level*` for printed macro expansions.
 Must stay finite so a pathologically deep expansion cannot produce
-unbounded output.  Note that it does NOT protect against a circular
-expansion — SBCL's pretty printer ignores it for the QUOTE abbreviation.
-That case is handled by `%circular-p` in `%print-expansion`.")
+unbounded nesting depth.  It does not bound overall output size — a wide
+but shallow form can still print length^level elements — so
+`*expansion-max-output-length*` is the actual size guard.  Note also that
+this does NOT protect against a circular expansion — SBCL's pretty
+printer ignores it for the QUOTE abbreviation.  That case is handled by
+`%circular-p` in `%print-expansion`.")
 
 (defparameter *expansion-print-length* 1000
   "Default `*print-length*` for printed macro expansions.")
@@ -89,10 +92,11 @@ the system that defines it is probably not loaded."
 Looks the name up in whichever named-readtables package is loaded, so
 this file does not have to depend on the parent-only tool layer.
 
-NOTE: src/cst.lisp and src/lisp-edit-form-core.lisp each carry their own
-copy of this lookup.  Extracting one shared helper is worth doing, but it
-touches two well-tested modules and is deliberately left out of this
-change."
+TODO(satoshi.imai@pocket-change.jp, 2026-07-26): extract
+src/utils/readtables.lisp -- src/cst.lisp and src/lisp-edit-form-core.lisp
+each carry their own copy of this lookup.  Extracting one shared helper is
+worth doing, but it touches two well-tested modules and is deliberately
+left out of this change."
   (when (and designator (stringp designator) (string/= designator ""))
     (let ((package (or (find-package "NAMED-READTABLES")
                        (find-package "EDITOR-HINTS.NAMED-READTABLES"))))
@@ -117,7 +121,9 @@ incorrect answer.
 
 *READ-EVAL* is deliberately left enabled: real sources contain #. and
 this tool already runs the macro's expander, so reader evaluation adds no
-new class of exposure."
+new class of exposure.  Note that the reject path below still reads (and
+therefore #.-evaluates) the offending trailing form before refusing it —
+rejection happens after reading, not before."
   (let ((*package* package)
         (*readtable* (or readtable *readtable*)))
     (with-input-from-string (stream source)
@@ -199,19 +205,26 @@ standard reader syntax, so \"#1=(list 1 . #1#)\" reads fine — and
 MACROEXPAND-ALL walks the whole tree, exhausting the control stack on
 such input.
 
-The check is on the INPUT, deliberately, not on the expansion.  A
-circular expansion is harmless here: MACROEXPAND-ALL has already returned
-by then, the EQUAL below terminates as long as one side is finite, and
-%PRINT-EXPANSION detects circularity on its own.  Levels \"once\" and
-\"full\" only look at the head, so they accept circular input without
-this restriction."
+The check is on the INPUT, and it is NOT a complete guarantee.  An
+expander can build a circular expansion out of acyclic input, and
+MACROEXPAND-ALL will descend into it and exhaust the control stack
+mid-walk.  That case is caught by the STORAGE-CONDITION clause in
+MACROEXPAND-FORMS, which is therefore load bearing and must not be
+removed.  Level \"all\" also has no step cap of its own:
+*MAX-EXPANSION-STEPS* applies to \"full\" only.
+
+Levels \"once\" and \"full\" only look at the head, so they accept
+circular input without this restriction."
   (when (%circular-p form)
     (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
   (let ((expansion (sb-cltl2:macroexpand-all form)))
     (values expansion (if (equal expansion form) 0 1))))
 
 (defun %expand (form level)
-  "Expand FORM according to LEVEL.  Returns (values expansion steps)."
+  "Expand FORM according to LEVEL.  Returns (values expansion steps
+capped-p).  CAPPED-P is only meaningful for LEVEL \"full\" (T when
+*MAX-EXPANSION-STEPS* was reached before a fixpoint); it is NIL for
+\"once\" and \"all\", which have no step cap of their own."
   (cond
     ((string-equal level "once") (%expand-once form))
     ((string-equal level "full") (%expand-full form))
@@ -228,8 +241,8 @@ the time and those markers make the result hard to read.
 
 It is switched on only for a genuinely circular FORM.  *PRINT-LEVEL*
 cannot be relied on to bound that case, because SBCL's pretty printer
-does not honour it for the QUOTE abbreviation and would exhaust the
-control stack, killing the whole worker process."
+does not honour it for the QUOTE abbreviation, and the printing would
+never terminate."
   (let ((*package* package)
         (*print-circle* (%circular-p form))
         (*print-level* (max 1 (or print-level *expansion-print-level*)))
@@ -295,26 +308,32 @@ apply to the whole request."
     (unless (member effective-level '("once" "full" "all") :test #'string-equal)
       (error "Unknown level ~S: expected \"once\", \"full\" or \"all\"."
              effective-level))
-    (loop for (label . source) in entries
-          collect (list* :label label
-                         (handler-case
-                             (%expand-one-entry source resolved-package
-                                                resolved-readtable
-                                                effective-level
-                                                print-level print-length
-                                                max-output-length)
-                           ;; SERIOUS-CONDITION, not ERROR: a runaway expansion
-                           ;; raises CONTROL-STACK-EXHAUSTED, which is a
-                           ;; STORAGE-CONDITION and would otherwise escape this
-                           ;; handler and take down the whole request.
-                           (serious-condition (condition)
-                             (list :printed nil
-                                   :expanded-p nil
-                                   :steps 0
-                                   :steps-capped-p nil
-                                   :truncated-p nil
-                                   :error (sanitize-for-json
-                                           (princ-to-string condition)))))))))
+    (flet ((failure (condition)
+             (list :printed nil
+                   :expanded-p nil
+                   :steps 0
+                   :steps-capped-p nil
+                   :truncated-p nil
+                   :error (sanitize-for-json (princ-to-string condition)))))
+      (loop for (label . source) in entries
+            collect (list* :label label
+                           (handler-case
+                               (%expand-one-entry source resolved-package
+                                                  resolved-readtable
+                                                  effective-level
+                                                  print-level print-length
+                                                  max-output-length)
+                             ;; STORAGE-CONDITION is named explicitly rather than
+                             ;; catching all of SERIOUS-CONDITION.  A runaway
+                             ;; expansion raises CONTROL-STACK-EXHAUSTED, which is
+                             ;; not an ERROR and must be caught here.  But
+                             ;; SB-EXT:TIMEOUT is a SERIOUS-CONDITION too, and a
+                             ;; deadline the caller set must abort the request --
+                             ;; turning it into a per-entry note that the loop then
+                             ;; ignores would silently defeat every enclosing
+                             ;; WITH-TIMEOUT.
+                             (storage-condition (condition) (failure condition))
+                             (error (condition) (failure condition))))))))
 
 (defun macroexpand-source (source &key package level readtable
                                        print-level print-length

@@ -56,6 +56,15 @@ stack on this input and takes the whole process down."
   "Test macro whose expander signals, to check per-entry error reporting."
   (error "expander failed on purpose"))
 
+(defmacro circular-expansion-under-list ()
+  "Test macro whose expansion is circular under a LIST head, not a QUOTE.
+MACROEXPAND-ALL refuses to descend into QUOTE, so a cycle hidden there is
+survivable by accident; this one is not, and exercises the
+STORAGE-CONDITION clause rather than the input guard."
+  (let ((cell (list 'list 1)))
+    (setf (cddr cell) cell)
+    cell))
+
 (defmacro self-reproducing-macro ()
   "Test macro that expands into itself, to exercise the expansion cap."
   '(self-reproducing-macro))
@@ -223,6 +232,17 @@ stack on this input and takes the whole process down."
       (ok (string= "(* 2 4)" (getf (second results) :printed))
           "the entry after the runaway is still expanded"))))
 
+(deftest macroexpand-all-survives-a-circular-expansion
+  (testing "a cycle built by the expander is reported, not fatal"
+    (let ((results (macroexpand-forms
+                    (list (cons "cyclic" "(circular-expansion-under-list)")
+                          (cons "sane" "(double-it 4)"))
+                    :package *fixture-package* :level "all")))
+      (ok (getf (first results) :error)
+          "the input guard cannot catch this; the storage-condition clause must")
+      (ok (string= "(* 2 4)" (getf (second results) :printed))
+          "the batch continues after it"))))
+
 (deftest macroexpand-source-rejects-multiple-forms
   (testing "more than one form in SOURCE is an error, not a silent truncation"
     (ok (handler-case
@@ -233,16 +253,25 @@ stack on this input and takes the whole process down."
                                   (princ-to-string e))
                           t))))))
 
-(deftest macroexpand-readtable-argument-is-validated
-  (testing "an unresolvable readtable designator gives an actionable error"
+(deftest macroexpand-readtable-reports-missing-named-readtables
+  (testing "requesting a readtable without named-readtables loaded says so"
     (ok (handler-case
             (progn (macroexpand-source "(double-it 1)"
                                        :package *fixture-package*
                                        :readtable "no-such-pkg:no-such-rt")
                    nil)
-          (error (e)
-            (let ((message (princ-to-string e)))
-              (and (or (search "no-such-pkg" message)
-                       (search "named-readtables" message))
-                   t))))
-        "the message should name the package or say named-readtables is absent")))
+          (error (e) (and (search "named-readtables" (princ-to-string e)) t)))
+        "the message must name the actual cause, not a generic not-found")))
+
+(deftest parse-readtable-name-handles-every-designator-form
+  (testing "the designator shapes resolve without interning anything"
+    (flet ((parse (designator)
+             (cl-mcp/src/macroexpand-core::%parse-readtable-name designator)))
+      (ok (eq :standard (parse "standard")))
+      (ok (eq :standard (parse ":standard")))
+      (ok (eq :standard (parse "  :standard  "))
+          "surrounding whitespace is trimmed")
+      (ok (eq 'cl-user::probe-symbol (parse "cl-user::probe-symbol")))
+      (ok (handler-case (progn (parse "no-such-pkg:x") nil)
+            (error (e) (and (search "no-such-pkg" (princ-to-string e)) t)))
+          "an absent package is named in the error"))))
