@@ -16,6 +16,11 @@
                 #:macroexpand-package-error)
   (:import-from #:cl-mcp/src/lisp-macroexpand
                 #:lisp-macroexpand)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/state
+                #:make-state
+                #:protocol-version)
   ;; *PROJECT-ROOT* must be the real special, not a same-named symbol interned
   ;; here: the file-mode tests LET-bind it, and a lexical binding of a fresh
   ;; symbol would leave the guardrail in %NORMALIZE-PATHS looking at whatever
@@ -323,6 +328,23 @@ absolute path, then delete the file."
   "Return the content[0].text string of a tool response PAYLOAD."
   (gethash "text" (aref (gethash "content" payload) 0)))
 
+(defun call-macroexpand-tool (args-plist &key protocol-version)
+  "Invoke the generated lisp-macroexpand tool handler and return its response.
+
+ARGS-PLIST holds the JSON argument names and values.  These tests go
+through the handler rather than through LISP-MACROEXPAND because the
+behaviour under test — which failures are argument validation and which
+are operational — lives in the DEFINE-TOOL body, not in the function.
+The worker pool is disabled so the inline branch runs."
+  (let ((state (make-state))
+        (args (make-hash-table :test #'equal))
+        (*use-worker-pool* nil))
+    (loop for (key value) on args-plist by #'cddr
+          do (setf (gethash key args) value))
+    (when protocol-version
+      (setf (protocol-version state) protocol-version))
+    (cl-mcp/src/lisp-macroexpand::lisp-macroexpand-handler state 1 args)))
+
 (deftest lisp-macroexpand-file-mode-top-level
   (testing "the addressed top-level form is expanded when sub_form is omitted"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
@@ -437,3 +459,123 @@ absolute path, then delete the file."
           "the actionable message survives instead of being wrapped")
       (ok (null (gethash "expansions" payload))
           "minimal shape: no expansions key, matching %handle-macroexpand"))))
+
+(deftest lisp-macroexpand-rejects-sub-form-with-code
+  (testing "sub_form in code mode is rejected instead of silently ignored"
+    (ok (handler-case
+            (progn (lisp-macroexpand :code "(list (double-it 1))"
+                                     :package *fixture-package*
+                                     :sub-form "double-it")
+                   nil)
+          (cl-mcp/src/tools/helpers:arg-validation-error (e)
+            (and (search "sub_form" (princ-to-string e)) t)))
+        "the error should name the offending argument")
+    (ok (handler-case
+            (progn (lisp-macroexpand :path "a.lisp" :code "(f)"
+                                     :sub-form "double-it")
+                   nil)
+          (cl-mcp/src/tools/helpers:arg-validation-error (e)
+            (and (search "not both" (princ-to-string e)) t)))
+        "the more fundamental path/code conflict is reported first")))
+
+(deftest lisp-macroexpand-finds-a-sub-form-behind-a-comment
+  (testing "a comment between the open paren and the operator does not hide the call"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-comment-head.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun uses-double-after-comment (n)
+  ( ;; deliberately awkward formatting
+   double-it n))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "uses-double-after-comment"
+                                           :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload))
+               "the call is found rather than silently missed")
+           (ok (search "(* 2 n)" text))))))))
+
+(deftest lisp-macroexpand-tool-reports-a-missing-form-without-a-wrapper
+  (testing "a wrong form_name reads like lisp-edit-form's, not like an internal error"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-missing-form.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(define-thing *thing-a* 1)
+"
+       (lambda (path)
+         (let* ((response (call-macroexpand-tool
+                           (list "path" path
+                                 "form_type" "define-thing"
+                                 "form_name" "no-such-thing-xyzzy")))
+                (message (gethash "message" (gethash "error" response))))
+           (ok (search "not found" message)
+               "the actionable message survives")
+           (ok (null (search "Internal error during" message))
+               "and is not wrapped as an internal error"))
+         (let* ((response (call-macroexpand-tool
+                           (list "path" path
+                                 "form_type" "define-thing"
+                                 "form_name" "no-such-thing-xyzzy")
+                           :protocol-version "2025-11-25"))
+                (payload (gethash "result" response))
+                (text (response-text payload)))
+           (ok (gethash "isError" payload)
+               "newer protocols get a tool-execution error, not a protocol error")
+           (ok (search "not found" text))
+           (ok (null (search "Internal error during" text)))))))))
+
+(deftest lisp-macroexpand-tool-keeps-validation-errors-distinct
+  (testing "the generic error clause must not swallow ARG-VALIDATION-ERROR"
+    ;; ARG-VALIDATION-ERROR is a subtype of ERROR, so a lone (error ...) clause
+    ;; in the tool body would catch it first and report a validation failure as
+    ;; an operational one.  The two paths use different JSON-RPC codes, which
+    ;; is what distinguishes them here: -32602 is validation, -32603 is the
+    ;; generic clause.
+    (let* ((response (call-macroexpand-tool
+                      (list "code" "(double-it 1)"
+                            "package" *fixture-package*
+                            "level" "sideways")))
+           (error-object (gethash "error" response)))
+      (ok error-object "a validation failure is reported as a JSON-RPC error")
+      (ok (= -32602 (gethash "code" error-object))
+          "-32602, not the generic clause's -32603")
+      (ok (search "once" (gethash "message" error-object))
+          "the accepted levels are listed"))
+    (let* ((response (call-macroexpand-tool
+                      (list "code" "(double-it 1)"
+                            "package" *fixture-package*
+                            "level" "sideways")
+                      :protocol-version "2025-11-25"))
+           (payload (gethash "result" response)))
+      (ok (gethash "isError" payload))
+      (ok (search "once" (response-text payload))))))
+
+(deftest lisp-macroexpand-validation-messages-render-cleanly
+  (testing "no validation message reaches the caller with a literal tilde"
+    ;; ARG-VALIDATION-ERROR's report prints :MESSAGE verbatim through ~A, so a
+    ;; "~" line continuation written in a plain string literal is never
+    ;; processed and shows up in agent-facing text.  Only a FORMAT NIL control
+    ;; string gets the continuation it looks like it has.  None of these calls
+    ;; touch the disk: every one is rejected before path resolution.
+    (dolist (arguments (list (list :path "a.lisp" :code "(f)")
+                             (list)
+                             (list :code "(f)" :sub-form "double-it")
+                             (list :path "a.lisp")
+                             (list :path "a.lisp" :form-type "defun")
+                             (list :path "a.lisp" :form-type "defun"
+                                   :form-name "f" :sub-form "g"
+                                   :readtable "some-syntax")))
+      (let ((message (handler-case (progn (apply #'lisp-macroexpand arguments)
+                                          nil)
+                       (cl-mcp/src/tools/helpers:arg-validation-error (e)
+                         (princ-to-string e)))))
+        (ok (stringp message)
+            (format nil "rejected: ~S" arguments))
+        (ok (null (find #\~ message))
+            (format nil "no literal tilde in: ~A" message))))))

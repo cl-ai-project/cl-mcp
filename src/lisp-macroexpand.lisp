@@ -16,7 +16,13 @@
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content #:arg-validation-error)
+                #:make-ht #:result #:rpc-error #:text-content
+                #:arg-validation-error #:validation-message #:tool-error)
+  (:import-from #:cl-mcp/src/state
+                #:protocol-version)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json
+                #:sanitize-error-message)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-macroexpand-response)
   (:import-from #:cl-mcp/src/proxy
@@ -72,10 +78,15 @@ package-context teardown and only their SYMBOL-NAME is reliable."
   (let ((wanted (%bare-symbol-name sub-form))
         (found '()))
     (labels ((head-name (node)
-               (let ((children (cst-node-children node)))
-                 (when children
-                   (let ((head (cst-node-value (first children))))
-                     (and (symbolp head) (symbol-name head))))))
+               ;; Skip :SKIPPED children: a comment between the open paren and
+               ;; the operator is legal, and taking it as the head would make
+               ;; the search silently miss the form.
+               (let ((head (find-if (lambda (child)
+                                      (eq (cst-node-kind child) :expr))
+                                    (cst-node-children node))))
+                 (when head
+                   (let ((value (cst-node-value head)))
+                     (and (symbolp value) (symbol-name value))))))
              (walk (node)
                (when (eq (cst-node-kind node) :expr)
                  (let ((name (head-name node)))
@@ -128,9 +139,12 @@ Returns (values ENTRIES PACKAGE-NAME NOTE)."
            :message "form_name is required when 'path' is given."))
   (when (and sub-form readtable)
     (error 'arg-validation-error :arg-name "sub_form"
-           :message "sub_form cannot be combined with 'readtable': a custom ~
-readtable forces the standard CL reader, which does not record sub-form ~
-positions. Drop one of the two arguments."))
+           ;; FORMAT NIL, not a bare literal: ARG-VALIDATION-ERROR's report
+           ;; prints :MESSAGE verbatim with ~A, so a "~" line continuation in
+           ;; a plain string would reach the user as a literal tilde.
+           :message (format nil "sub_form cannot be combined with 'readtable': ~
+a custom readtable forces the standard CL reader, which does not record ~
+sub-form positions. Drop one of the two arguments.")))
   (let ((designator (%parse-readtable-designator readtable)))
     (multiple-value-bind (absolute relative original nodes target snippet
                           form-type-string file-package-name)
@@ -158,12 +172,17 @@ Returns (values ENTRIES PACKAGE-NAME NOTE), where ENTRIES is a list of
 (LABEL . SOURCE) conses.  Exactly one of PATH and CODE must be supplied."
   (when (and path code)
     (error 'arg-validation-error :arg-name "code"
-           :message "Provide either 'path' (with form_type and form_name) or ~
-'code', not both."))
+           ;; FORMAT NIL, not a bare literal: see %COLLECT-FILE-SOURCES.
+           :message (format nil "Provide either 'path' (with form_type and ~
+form_name) or 'code', not both.")))
   (when (and (null path) (null code))
     (error 'arg-validation-error :arg-name "path"
-           :message "Provide either 'path' (with form_type and form_name) or ~
-'code'."))
+           :message (format nil "Provide either 'path' (with form_type and ~
+form_name) or 'code'.")))
+  (when (and code sub-form)
+    (error 'arg-validation-error :arg-name "sub_form"
+           :message (format nil "sub_form applies to 'path' mode only: with ~
+'code' there is no enclosing form to search in. Drop one of the two.")))
   (if code
       (values (list (cons nil code))
               (or package "COMMON-LISP-USER")
@@ -263,27 +282,51 @@ expander function, i.e. arbitrary code, in the isolated worker process."
   (max_output_length :type :integer :description
    "Maximum characters per expansion (default 50000)"))
  :body
- (with-proxy-dispatch (id "worker/macroexpand"
-                         (progn
-                           (%validate-level level)
-                           (multiple-value-bind (entries package-name note)
-                               (%collect-expansion-sources
-                                :path path :form-type form_type
-                                :form-name form_name :sub-form sub_form
-                                :code code :package package
-                                :readtable readtable)
-                             (make-ht "forms" (%entries->json entries)
-                                      "package" package-name
-                                      "note" note
-                                      "level" (or level "once")
-                                      "readtable" readtable
-                                      "print_level" print_level
-                                      "print_length" print_length
-                                      "max_output_length" max_output_length))))
-   (result id
-           (lisp-macroexpand :path path :form-type form_type
-                             :form-name form_name :sub-form sub_form
-                             :code code :package package :level level
-                             :readtable readtable :print-level print_level
-                             :print-length print_length
-                             :max-output-length max_output_length))))
+ ;; Mirrors lisp-edit-form's tool body: an expected operational failure --
+ ;; above all "Form <type> <name> not found", the most likely way to address
+ ;; this tool wrongly -- is presented as its own message instead of behind
+ ;; define-tool's generic "Internal error during ..." wrapper.
+ ;;
+ ;; ARG-VALIDATION-ERROR is a subtype of ERROR and MUST stay listed first:
+ ;; HANDLER-CASE takes the first matching clause, so a lone ERROR clause would
+ ;; catch validation failures too and strip them of the protocol-aware
+ ;; treatment define-tool's own handler gives them.  lisp-edit-form avoids
+ ;; that by raising its one validation error outside the HANDLER-CASE; here
+ ;; the validations live inside %COLLECT-EXPANSION-SOURCES, which the inline
+ ;; function needs as well, so the clause is spelled out instead.  Same
+ ;; treatment, reached explicitly rather than by ordering.
+ (handler-case
+     (with-proxy-dispatch (id "worker/macroexpand"
+                              (progn
+                                (%validate-level level)
+                                (multiple-value-bind (entries package-name note)
+                                    (%collect-expansion-sources
+                                     :path path :form-type form_type
+                                     :form-name form_name :sub-form sub_form
+                                     :code code :package package
+                                     :readtable readtable)
+                                  (make-ht "forms" (%entries->json entries)
+                                           "package" package-name
+                                           "note" note
+                                           "level" (or level "once")
+                                           "readtable" readtable
+                                           "print_level" print_level
+                                           "print_length" print_length
+                                           "max_output_length" max_output_length))))
+       (result id
+               (lisp-macroexpand :path path :form-type form_type
+                                 :form-name form_name :sub-form sub_form
+                                 :code code :package package :level level
+                                 :readtable readtable :print-level print_level
+                                 :print-length print_length
+                                 :max-output-length max_output_length)))
+   (arg-validation-error (e)
+     (tool-error id (validation-message e)
+                 :protocol-version (protocol-version state)))
+   (error (e)
+     (let ((msg (sanitize-for-json
+                 (sanitize-error-message (format nil "~A" e)))))
+       (if (and (protocol-version state)
+                (string>= (protocol-version state) "2025-11-25"))
+           (result id (make-ht "content" (text-content msg) "isError" t))
+           (rpc-error id -32603 msg))))))
