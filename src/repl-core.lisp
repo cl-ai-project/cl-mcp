@@ -129,6 +129,7 @@ on large outputs)."
           (*print-escape* t)
           (*print-gensym* t)
           (*print-array* t)
+          (*print-pretty* t)
           (*read-default-float-format* 'single-float))
       (let ((*standard-output* stdout)
             (*error-output* stderr)

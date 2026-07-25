@@ -650,6 +650,13 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
       (declare (ignore value))
       (ok (string= printed "(1 2 3)")))))
 
+(deftest repl-eval-print-pretty-isolated-from-user-code
+  (testing "user (setf *print-pretty*) inside repl-eval does not change the global value"
+    (let ((before *print-pretty*))
+      (repl-eval "(setf *print-pretty* nil)")
+      (ok (eq *print-pretty* before)
+          "global *print-pretty* must be unchanged after evaluation"))))
+
 (deftest repl-eval-unbalanced-parens-clean-error
   (testing "unbalanced parentheses return a short hint without a backtrace"
     (let ((result (repl-eval "(defun foo (x")))
