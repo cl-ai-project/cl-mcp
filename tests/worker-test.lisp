@@ -367,6 +367,43 @@ Cleans up server and socket on exit."
             (ok (gethash "type" result) "result has type")
             (ok (gethash "content" result) "result has content")))))))
 
+(deftest worker-macroexpand-expands-form
+  (testing "worker/macroexpand expands a form in an existing package"
+    (with-handler-server (stream)
+      (let ((entry (make-hash-table :test 'equal))
+            (params (make-hash-table :test 'equal)))
+        (setf (gethash "label" entry) "probe")
+        (setf (gethash "source" entry) "(when t 1)")
+        (setf (gethash "forms" params) (vector entry))
+        (setf (gethash "package" params) "COMMON-LISP-USER")
+        (setf (gethash "level" params) "once")
+        (let* ((response (%send-and-receive stream 300 "worker/macroexpand" params))
+               (result (%result-of response)))
+          (ok result "response has a result")
+          (when result
+            (ok (gethash "content" result) "result has content")
+            (ok (= 1 (gethash "count" result)) "one expansion returned")
+            (let ((text (gethash "text" (aref (gethash "content" result) 0))))
+              (ok (search "if" text) "(when t 1) expands into an IF"))))))))
+
+(deftest worker-macroexpand-missing-package-is-actionable
+  (testing "worker/macroexpand reports an absent package as a tool error"
+    (with-handler-server (stream)
+      (let ((entry (make-hash-table :test 'equal))
+            (params (make-hash-table :test 'equal)))
+        (setf (gethash "label" entry) "probe")
+        (setf (gethash "source" entry) "(when t 1)")
+        (setf (gethash "forms" params) (vector entry))
+        (setf (gethash "package" params) "NO-SUCH-PACKAGE-XYZZY")
+        (let* ((response (%send-and-receive stream 301 "worker/macroexpand" params))
+               (result (%result-of response)))
+          (ok result "handled as a tool-error payload, not a transport failure")
+          (when result
+            (ok (gethash "isError" result) "isError is set")
+            (let ((text (gethash "text" (aref (gethash "content" result) 0))))
+              (ok (search "load-system" text)
+                  "the message tells the caller how to recover"))))))))
+
 (deftest worker-code-find-not-found
   (testing "worker/code-find returns error for nonexistent symbol"
     (with-handler-server (stream)
