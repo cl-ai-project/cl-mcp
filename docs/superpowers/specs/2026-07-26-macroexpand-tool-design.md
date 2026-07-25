@@ -186,6 +186,13 @@ parent 側で解析済み S 式を渡さないのは、parent が持つのがス
 
 新規 worker handler は `%handle-macroexpand` 1つ。
 
+展開と整形のロジックは `src/macroexpand-core.lisp` に純粋関数として切り出し、
+worker handler と、`MCP_NO_WORKER_POOL=1` 時のインラインフォールバックの
+**両方が同じ関数を呼ぶ**。これは既存の `repl-core` / `code-core` /
+`test-runner-core` と同じ慣習であり、二経路の挙動がずれるのを防ぐ。
+`macroexpand-core` は JSON も MCP も知らず、`(ラベル . ソース)` のリストを受けて
+plist のリストを返す。
+
 ### 5.3 入力
 
 モードは排他。
@@ -254,8 +261,16 @@ parent 側で解析済み S 式を渡さないのは、parent が持つのがス
    実務上 `macrolet` は稀だが、正確さのため明記する
 2. **`level: all` の出力肥大**。`macroexpand-all` は `loop` や `defun` まで
    特殊形式へ展開するため巨大化しうる。既定は `once` とし、`all` は明示指定のみ
-3. **カスタムリードテーブル**。`readtable` パラメータで対応するが、指定が必要
-4. **任意コード実行**。展開は expander 関数を走らせる。worker 隔離下で
+3. **カスタムリードテーブル**。`readtable` パラメータで対応するが、指定が必要。
+   さらに **`readtable` と `sub_form` は併用できない**: `readtable` を指定すると
+   `parse-top-level-forms` は Eclector ではなく標準 CL リーダー経路
+   （`%read-remaining-with-cl-reader`）を通り、`cst-node-children` が常に NIL になるため
+   サブフォームを走査できない。併用時は行動可能なエラーを返す
+4. **worker 側での再読込**。parent はソーステキストを切り出して渡すだけなので、
+   worker 側の読み取りも同じ `readtable` を必要とする。`macroexpand-core` は
+   自前の軽量な named-readtable 解決を持つ（`lisp-edit-form-core` はツール層寄りで
+   worker から引くには重すぎるため）
+5. **任意コード実行**。展開は expander 関数を走らせる。worker 隔離下で
    `repl-eval` と同等であり新規リスクは増えないが、ツール説明に明記する
 
 ## 7. テスト戦略
@@ -267,7 +282,9 @@ parent 側で解析済み S 式を渡さないのは、parent が持つのがス
 - 新規: 長い結果に `*print-pretty*` の改行が入ること
 - 回帰保護: `repl-eval-print-circle-prevents-hang` が引き続き通ること
 
-**Phase C**（`tests/lisp-macroexpand-test.lisp`、fixture は `tests/fixtures/` に追加）
+**Phase C**（`tests/lisp-macroexpand-test.lisp`。テスト対象ファイルは `tests/tmp/` に一時生成する
+— `tests/fixtures/` は git 未追跡かつ参照ゼロの死んだディレクトリで、実際の慣習は
+`tests/tmp/` + `with-temp-file` パターン）
 
 - file モード top-level
 - file モード `sub_form`（単一マッチ・複数マッチ）
@@ -288,13 +305,29 @@ parent 側で解析済み S 式を渡さないのは、parent が持つのがス
 
 ### PR 2（Phase C）
 
-- `src/lisp-macroexpand.lisp`（新規）— parent 側アドレッシング + ツール定義
+- `src/macroexpand-core.lisp`（新規）— 展開と整形の純粋ロジック。worker handler と
+  インラインフォールバックの両方が共有する（`repl-core` / `code-core` と同じ慣習）
+- `src/lisp-macroexpand.lisp`（新規）— parent 側アドレッシング + `define-tool`
+- `src/tools/response-builders.lisp` — `build-macroexpand-response` 追加
 - `src/worker/handlers.lisp` — `%handle-macroexpand` 追加、`register-all-handlers` に登録
-- `cl-mcp.asd` — 依存追加
-- `src/tools/all.lisp` — import 追加（登録の副作用トリガ）
+  （ハードコードされた `"count" 10` を 11 に更新すること）
+- `src/tools/all.lisp` — import 追加。**これがないとツールモジュールは静かにロードされず、
+  エラーも警告もなく `tools/list` に現れない**
+- `main.lisp` — `:import-from` と `:export` に追加（既存15ツール全てがこの慣習に従う）
+- `tests.lisp`（**リポジトリルート**、`tests/` ではない）— `(:import-from #:cl-mcp/tests/lisp-macroexpand-test)`
+  を追加。これがないと `rove cl-mcp.asd` と CI から不可視になる
+- `cl-mcp.asd` — `#+sbcl (require :sb-cltl2)` を既存の `(require :sb-posix)` の隣に追加。
+  contrib は FASL ロード前に存在している必要があるため（同ファイルのコメント参照）
 - `tests/lisp-macroexpand-test.lisp`（新規）
-- `tests/fixtures/` — マクロ定義入り fixture
 - `prompts/repl-driven-development.md` — ツール表に追記
+
+**`cl-mcp.asd` について**: このシステムは `:class :package-inferred-system` で
+`:components` を一切持たない。ファイル追加そのものでは `.asd` の編集は不要で、
+`src/<n>.lisp` が定義するパッケージ名 `cl-mcp/src/<n>` がパスと一致していれば
+他ファイルの `:import-from` 経由で自動的にロードされる。上記の `require` 追加は
+SBCL contrib の事前ロードという別の理由による。なお `CLAUDE.md` の
+「Add new files by updating cl-mcp.asd dependencies」と `AGENTS.md` の
+「extend the cl-mcp/tests ASDF component list」は**いずれも現状と合っていない**。
 
 ## 9. 採用しなかった案
 
