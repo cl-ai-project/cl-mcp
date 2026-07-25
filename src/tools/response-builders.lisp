@@ -7,7 +7,7 @@
 (defpackage #:cl-mcp/src/tools/response-builders
   (:use #:cl)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:text-content)
+                #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p #:register-object)
   (:import-from #:cl-mcp/src/inspect
@@ -25,7 +25,8 @@
            #:build-code-find-response
            #:build-code-describe-response
            #:build-code-find-references-response
-           #:build-inspect-response))
+           #:build-inspect-response
+           #:build-macroexpand-response))
 
 (in-package #:cl-mcp/src/tools/response-builders)
 
@@ -365,3 +366,76 @@ Returns a response with content added, or an isError payload."
         (setf (gethash "content" inspection-result)
               (text-content (format-inspect-elements inspection-result)))
         inspection-result)))
+
+(defun %macroexpand-result->ht (result)
+  "Convert one MACROEXPAND-FORMS plist into a JSON-ready hash-table."
+  (make-ht "label" (getf result :label)
+           "printed" (getf result :printed)
+           "expanded" (json-bool (getf result :expanded-p))
+           "steps" (getf result :steps)
+           "steps_capped" (json-bool (getf result :steps-capped-p))
+           "truncated" (json-bool (getf result :truncated-p))
+           "error" (getf result :error)))
+
+(defun %expansion-summary (result level)
+  "Return the one-line status shown above an expanded RESULT at LEVEL.
+
+Hitting the step limit must be loud: the form below it is still a macro
+call, and rendering that as a finished expansion would mislead the caller
+into thinking the macro bottomed out.  Level \"all\" reports no step
+count because it walks the whole tree rather than stepping the head."
+  (cond
+    ((getf result :steps-capped-p)
+     (format nil "STOPPED at the ~D-step expansion limit: the result below is ~
+STILL A MACRO CALL, not a fully expanded form"
+             (getf result :steps)))
+    ((string-equal level "all")
+     "expanded (full code walk)")
+    (t
+     (format nil "expanded in ~D step~:P" (getf result :steps)))))
+
+(defun %format-macroexpand-text (results level package note)
+  "Render RESULTS as the agent-facing content text.
+Everything a caller needs must appear here: MCP clients display only
+content[].text, so anything left in a sibling JSON field is invisible."
+  (with-output-to-string (stream)
+    (format stream "lisp-macroexpand (level: ~A, package: ~A)~%"
+            (or level "once")
+            (or package "COMMON-LISP-USER"))
+    (when note
+      (format stream "~A~%" note))
+    (loop for result in results
+          for index from 1
+          do (format stream "~%[~D] ~A~%" index (or (getf result :label) "form"))
+             (cond
+               ((getf result :error)
+                (format stream "ERROR: ~A~%" (getf result :error)))
+               ((not (getf result :expanded-p))
+                (format stream
+                        "NOT EXPANDED: the head of this form has no macro ~
+definition in this image. If you expected a macro, load its system with ~
+'load-system' first.~%~A~%"
+                        (getf result :printed)))
+               (t
+                (format stream "~A~A~%~A~%"
+                        (%expansion-summary result level)
+                        (if (getf result :truncated-p) " (truncated)" "")
+                        (getf result :printed)))))))
+
+(defun build-macroexpand-response (results &key level package note)
+  "Build the standard lisp-macroexpand response hash-table.
+RESULTS is the list of plists returned by MACROEXPAND-FORMS.  NOTE is an
+optional advisory line (for example, that the sub-form match list was
+capped) that must be visible to the caller."
+  (let ((payload (make-ht "content" (text-content
+                                     (%format-macroexpand-text results level
+                                                               package note))
+                          "level" (or level "once")
+                          "package" package
+                          "note" note
+                          "count" (length results)
+                          "expansions" (map 'vector #'%macroexpand-result->ht
+                                            results))))
+    (when (some (lambda (result) (getf result :error)) results)
+      (setf (gethash "isError" payload) t))
+    payload))
