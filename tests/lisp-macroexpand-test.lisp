@@ -10,8 +10,6 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok)
-  (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-source
                 #:macroexpand-forms
@@ -33,10 +31,13 @@
   `(double-it (double-it ,x)))
 
 (defmacro shared-literal-macro ()
-  "Test macro whose expansion shares one literal in two places.
-Under *PRINT-CIRCLE* the sharing would surface as #1= / #1# markers."
-  (let ((shared "shared"))
-    `(list ,shared ,shared)))
+  "Test macro whose expansion shares one CONS in two places.
+Under *PRINT-CIRCLE* the sharing would surface as #1= / #1# markers.  The
+shared object must be a cons, not a string: %CIRCULAR-P only traverses
+conses, so a shared string would never reach its memoization path and the
+test would pass without exercising anything."
+  (let ((shared (list 'quote (list 1 2))))
+    (list 'list shared shared)))
 
 (defmacro big-list-macro ()
   "Test macro whose expansion is deliberately long, for truncation tests."
@@ -54,6 +55,10 @@ stack on this input and takes the whole process down."
 (defmacro exploding-macro ()
   "Test macro whose expander signals, to check per-entry error reporting."
   (error "expander failed on purpose"))
+
+(defmacro self-reproducing-macro ()
+  "Test macro that expands into itself, to exercise the expansion cap."
+  '(self-reproducing-macro))
 
 (defparameter *fixture-package* "CL-MCP/TESTS/LISP-MACROEXPAND-TEST"
   "Name of this test package, used as the expansion package.")
@@ -156,7 +161,7 @@ stack on this input and takes the whole process down."
       (ok (string= "(* 2 2)" (getf (third results) :printed))
           "the entry after the failure is still expanded"))))
 
-(deftest macroexpand-source-reports-expander-errors
+(deftest macroexpand-forms-reports-expander-errors
   (testing "an error signaled by the macro expander is reported, not swallowed"
     (let ((results (macroexpand-forms (list (cons "boom" "(exploding-macro)"))
                                       :package *fixture-package*)))
@@ -164,3 +169,80 @@ stack on this input and takes the whole process down."
           "the failure is recorded on the entry")
       (ok (search "on purpose" (getf (first results) :error))
           "the expander's own message reaches the caller"))))
+
+(deftest circular-check-survives-a-long-flat-list
+  (testing "a long quoted literal does not exhaust the control stack"
+    (let ((source (with-output-to-string (out)
+                    (write-string "(quote (" out)
+                    (dotimes (i 60000)
+                      (format out "~D " i))
+                    (write-string "))" out))))
+      (multiple-value-bind (printed expanded-p steps truncated-p)
+          (macroexpand-source source :package "CL-USER"
+                                     :max-output-length 200)
+        (declare (ignore expanded-p steps))
+        (ok (stringp printed) "a 60000-element literal is ordinary input")
+        (ok truncated-p)))))
+
+(deftest macroexpand-full-reports-when-it-hits-the-cap
+  (testing "a self-reproducing macro is capped and says so"
+    (multiple-value-bind (printed expanded-p steps truncated-p capped-p)
+        (macroexpand-source "(self-reproducing-macro)"
+                            :package *fixture-package* :level "full")
+      (declare (ignore printed truncated-p))
+      (ok expanded-p)
+      (ok (= steps cl-mcp/src/macroexpand-core:*max-expansion-steps*))
+      (ok capped-p
+          "the result is still a macro call and must not read as a fixpoint"))))
+
+(deftest macroexpand-all-refuses-circular-source
+  (testing "level all rejects circular source text instead of exhausting the stack"
+    (let ((results (macroexpand-forms
+                    (list (cons "circular" "#1=(list 1 . #1#)"))
+                    :package "CL-USER" :level "all")))
+      (ok (getf (first results) :error)
+          "the failure is reported on the entry, not raised at the caller")
+      (ok (search "circular" (getf (first results) :error))))))
+
+(deftest macroexpand-once-accepts-circular-source
+  (testing "once and full accept circular source, since they only look at the head"
+    (multiple-value-bind (printed expanded-p)
+        (macroexpand-source "#1=(list 1 . #1#)" :package "CL-USER")
+      (declare (ignore expanded-p))
+      (ok (search "#1=" printed)
+          "printed with circle notation; nothing hangs or crashes"))))
+
+(deftest macroexpand-all-survives-a-runaway-macro
+  (testing "a self-reproducing macro at level all is reported, not fatal"
+    (let ((results (macroexpand-forms
+                    (list (cons "runaway" "(self-reproducing-macro)")
+                          (cons "sane" "(double-it 4)"))
+                    :package *fixture-package* :level "all")))
+      (ok (getf (first results) :error)
+          "stack exhaustion is a STORAGE-CONDITION and must still be caught")
+      (ok (string= "(* 2 4)" (getf (second results) :printed))
+          "the entry after the runaway is still expanded"))))
+
+(deftest macroexpand-source-rejects-multiple-forms
+  (testing "more than one form in SOURCE is an error, not a silent truncation"
+    (ok (handler-case
+            (progn (macroexpand-source "(double-it 1) (double-it 2)"
+                                       :package *fixture-package*)
+                   nil)
+          (error (e) (and (search "more than one form"
+                                  (princ-to-string e))
+                          t))))))
+
+(deftest macroexpand-readtable-argument-is-validated
+  (testing "an unresolvable readtable designator gives an actionable error"
+    (ok (handler-case
+            (progn (macroexpand-source "(double-it 1)"
+                                       :package *fixture-package*
+                                       :readtable "no-such-pkg:no-such-rt")
+                   nil)
+          (error (e)
+            (let ((message (princ-to-string e)))
+              (and (or (search "no-such-pkg" message)
+                       (search "named-readtables" message))
+                   t))))
+        "the message should name the package or say named-readtables is absent")))

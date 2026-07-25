@@ -14,7 +14,8 @@
            #:macroexpand-package-error-name
            #:*expansion-print-level*
            #:*expansion-print-length*
-           #:*expansion-max-output-length*))
+           #:*expansion-max-output-length*
+           #:*max-expansion-steps*))
 
 (in-package #:cl-mcp/src/macroexpand-core)
 
@@ -58,43 +59,75 @@ Signals MACROEXPAND-PACKAGE-ERROR when NAME names no existing package."
 
 (defun %parse-readtable-name (designator)
   "Convert the DESIGNATOR string into a symbol for FIND-READTABLE.
-Accepts \"pkg:sym\", \"pkg::sym\", \":kw\" and bare \"kw\"."
-  (let ((colon (position #\: designator)))
-    (cond
-      ((null colon)
-       (intern (string-upcase designator) :keyword))
-      ((zerop colon)
-       (intern (string-upcase (string-left-trim ":" designator)) :keyword))
-      (t
-       (let* ((package-name (subseq designator 0 colon))
-              (symbol-name (string-left-trim ":" (subseq designator colon)))
-              (package (or (find-package (string-upcase package-name))
-                           (error "Package ~A not found for readtable ~A"
-                                  package-name designator))))
-         (intern (string-upcase symbol-name) package))))))
+Accepts \"pkg:sym\", \"pkg::sym\", \":kw\" and bare \"kw\".
+
+Uses FIND-SYMBOL rather than INTERN: the argument is caller-controlled,
+and interning it would let a stream of bad values grow the package table
+without bound.  A readtable registered with DEFREADTABLE always has its
+name symbol interned already, so nothing valid is lost."
+  (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) designator))
+         (colon (position #\: trimmed)))
+    (flet ((lookup (name package)
+             (or (find-symbol (string-upcase name) package)
+                 (error "Readtable name ~A is not interned in ~A; ~
+the system that defines it is probably not loaded."
+                        name (package-name package)))))
+      (cond
+        ((null colon)
+         (lookup trimmed (find-package :keyword)))
+        ((zerop colon)
+         (lookup (string-left-trim ":" trimmed) (find-package :keyword)))
+        (t
+         (let ((package (or (find-package
+                             (string-upcase (subseq trimmed 0 colon)))
+                            (error "Package ~A not found for readtable ~A"
+                                   (subseq trimmed 0 colon) designator))))
+           (lookup (string-left-trim ":" (subseq trimmed colon)) package)))))))
 
 (defun %resolve-readtable (designator)
   "Return the named readtable for DESIGNATOR, or NIL when it is absent.
 Looks the name up in whichever named-readtables package is loaded, so
-this file does not have to depend on the parent-only tool layer."
+this file does not have to depend on the parent-only tool layer.
+
+NOTE: src/cst.lisp and src/lisp-edit-form-core.lisp each carry their own
+copy of this lookup.  Extracting one shared helper is worth doing, but it
+touches two well-tested modules and is deliberately left out of this
+change."
   (when (and designator (stringp designator) (string/= designator ""))
-    (let* ((package (or (find-package "NAMED-READTABLES")
-                        (find-package "EDITOR-HINTS.NAMED-READTABLES")))
-           (finder (and package (find-symbol "FIND-READTABLE" package)))
-           (table (and finder
-                       (ignore-errors
-                        (funcall finder (%parse-readtable-name designator))))))
-      (unless table
-        (error "Readtable ~A not found. Load the system that defines it first."
-               designator))
-      table)))
+    (let ((package (or (find-package "NAMED-READTABLES")
+                       (find-package "EDITOR-HINTS.NAMED-READTABLES"))))
+      (unless package
+        (error "A 'readtable' was requested but named-readtables is not ~
+loaded in this image."))
+      (let* ((finder (find-symbol "FIND-READTABLE" package))
+             (name (%parse-readtable-name designator))
+             (table (and finder (ignore-errors (funcall finder name)))))
+        (unless table
+          (error "Readtable ~A not found. Load the system that defines it first."
+                 designator))
+        table))))
 
 (defun %read-source (source package readtable)
-  "Read the first form in SOURCE with *PACKAGE* bound to PACKAGE."
+  "Read the single form in SOURCE with *PACKAGE* bound to PACKAGE.
+
+Signals when SOURCE holds more than one form.  The caller slices this
+text out of a file by form address, so a second form means the slice was
+wrong, and silently expanding only the first would return a plausible but
+incorrect answer.
+
+*READ-EVAL* is deliberately left enabled: real sources contain #. and
+this tool already runs the macro's expander, so reader evaluation adds no
+new class of exposure."
   (let ((*package* package)
         (*readtable* (or readtable *readtable*)))
     (with-input-from-string (stream source)
-      (read stream))))
+      (let ((form (read stream)))
+        ;; STREAM is its own eof-value here: no read datum can ever be EQ to
+        ;; the stream object, so this distinguishes a real second form from
+        ;; end of input.  Testing mere truthiness would fire on both.
+        (unless (eq (read stream nil stream) stream)
+          (error "SOURCE contains more than one form; expected exactly one."))
+        form))))
 
 (defun %expand-once (form)
   "Expand FORM one step.  Returns (values expansion steps)."
@@ -104,25 +137,76 @@ this file does not have to depend on the parent-only tool layer."
 
 (defun %expand-full (form)
   "Repeatedly expand FORM while its head is a macro.
-Returns (values expansion steps).  Stops at *MAX-EXPANSION-STEPS* so a
-self-reproducing macro cannot loop forever."
+Returns (values expansion steps capped-p).  CAPPED-P is T when
+*MAX-EXPANSION-STEPS* was reached, i.e. the result is still a macro call
+rather than a fixpoint — the caller must not present it as fully expanded."
   (let ((current form)
         (steps 0))
     (loop
       (when (>= steps *max-expansion-steps*)
-        (return))
+        (return (values current steps t)))
       (multiple-value-bind (expansion expanded-p)
           (macroexpand-1 current)
         (unless expanded-p
-          (return))
+          (return (values current steps nil)))
         (setf current expansion)
-        (incf steps)))
-    (values current steps)))
+        (incf steps)))))
+
+(defun %circular-p (form)
+  "Return T when FORM contains a cycle reachable through conses.
+
+Only conses are traversed.  A cycle through a literal vector or structure
+is not something this guards against; macro expansions do not produce
+those, and walking them would cost more than it saves.
+
+The cdr spine is walked iteratively and only cars recurse, so stack depth
+is bounded by nesting rather than by list length.  That matters: a long
+quoted literal such as a generated lookup table is ordinary input here,
+and recursing along its spine would exhaust the control stack.
+
+Finished nodes are memoized, so a heavily shared but acyclic expansion
+costs one visit per distinct cons instead of blowing up exponentially."
+  (let ((on-path (make-hash-table :test #'eq))
+        (finished (make-hash-table :test #'eq)))
+    (labels ((walk (node)
+               (let ((spine '())
+                     (found nil))
+                 (loop
+                   (cond
+                     ((not (consp node)) (return))
+                     ((gethash node on-path) (setf found t) (return))
+                     ((gethash node finished) (return))
+                     (t
+                      (setf (gethash node on-path) t)
+                      (push node spine)
+                      (when (walk (car node))
+                        (setf found t)
+                        (return))
+                      (setf node (cdr node)))))
+                 (dolist (visited spine)
+                   (remhash visited on-path)
+                   (setf (gethash visited finished) t))
+                 found)))
+      (walk form))))
 
 (defun %expand-all (form)
   "Walk FORM with SB-CLTL2:MACROEXPAND-ALL, expanding nested macros.
 Returns (values expansion steps), where STEPS is 1 when the walk changed
-FORM and 0 otherwise."
+FORM and 0 otherwise.
+
+Refuses a circular FORM.  Source text really can be circular — #n= is
+standard reader syntax, so \"#1=(list 1 . #1#)\" reads fine — and
+MACROEXPAND-ALL walks the whole tree, exhausting the control stack on
+such input.
+
+The check is on the INPUT, deliberately, not on the expansion.  A
+circular expansion is harmless here: MACROEXPAND-ALL has already returned
+by then, the EQUAL below terminates as long as one side is finite, and
+%PRINT-EXPANSION detects circularity on its own.  Levels \"once\" and
+\"full\" only look at the head, so they accept circular input without
+this restriction."
+  (when (%circular-p form)
+    (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
   (let ((expansion (sb-cltl2:macroexpand-all form)))
     (values expansion (if (equal expansion form) 0 1))))
 
@@ -134,30 +218,6 @@ FORM and 0 otherwise."
     ((string-equal level "all") (%expand-all form))
     (t (error "Unknown level ~S: expected \"once\", \"full\" or \"all\"."
               level))))
-
-(defun %circular-p (form)
-  "Return T when FORM contains a cycle reachable through conses.
-
-Only conses are traversed.  A cycle through a literal vector or structure
-is not something this guards against; macro expansions do not produce
-those, and walking them would cost more than it saves.
-
-Finished nodes are memoized, so a heavily shared but acyclic expansion
-costs one visit per distinct cons instead of blowing up exponentially."
-  (let ((on-path (make-hash-table :test #'eq))
-        (finished (make-hash-table :test #'eq)))
-    (labels ((walk (node)
-               (cond
-                 ((not (consp node)) nil)
-                 ((gethash node on-path) t)
-                 ((gethash node finished) nil)
-                 (t
-                  (setf (gethash node on-path) t)
-                  (let ((found (or (walk (car node)) (walk (cdr node)))))
-                    (remhash node on-path)
-                    (setf (gethash node finished) t)
-                    found)))))
-      (walk form))))
 
 (defun %print-expansion (form package print-level print-length)
   "Print FORM as readable source relative to PACKAGE.
@@ -174,6 +234,7 @@ control stack, killing the whole worker process."
         (*print-circle* (%circular-p form))
         (*print-level* (max 1 (or print-level *expansion-print-level*)))
         (*print-length* (max 1 (or print-length *expansion-print-length*)))
+        (*print-lines* nil)
         (*print-case* :downcase)
         (*print-pretty* t)
         (*print-right-margin* 100)
@@ -200,7 +261,7 @@ sanitization so the limit applies to the characters actually emitted."
   "Expand SOURCE in the already-resolved PACKAGE.
 Returns the tail of the result plist (everything except :LABEL)."
   (let ((form (%read-source source package readtable)))
-    (multiple-value-bind (expansion steps)
+    (multiple-value-bind (expansion steps capped-p)
         (%expand form level)
       (multiple-value-bind (printed truncated-p)
           (%truncate (%print-expansion expansion package print-level print-length)
@@ -208,6 +269,7 @@ Returns the tail of the result plist (everything except :LABEL)."
         (list :printed printed
               :expanded-p (plusp steps)
               :steps steps
+              :steps-capped-p capped-p
               :truncated-p truncated-p
               :error nil)))))
 
@@ -217,9 +279,11 @@ Returns the tail of the result plist (everything except :LABEL)."
   "Expand every entry of ENTRIES, a list of (LABEL . SOURCE) conses.
 
 Returns a list of plists in the same order, each with the keys
-:LABEL :PRINTED :EXPANDED-P :STEPS :TRUNCATED-P :ERROR.  A failure in one
-entry is recorded in that entry's :ERROR and does not abort the batch, so
-a caller can render every entry uniformly.
+:LABEL :PRINTED :EXPANDED-P :STEPS :STEPS-CAPPED-P :TRUNCATED-P :ERROR.
+A failure in one entry is recorded in that entry's :ERROR and does not
+abort the batch, so a caller can render every entry uniformly.  That
+includes stack exhaustion from a runaway expansion, which is a
+STORAGE-CONDITION rather than an ERROR.
 
 PACKAGE is a package-name string; NIL means CL-USER.  LEVEL is \"once\"
 (default), \"full\" or \"all\".  Both the package and the level are
@@ -239,10 +303,15 @@ apply to the whole request."
                                                 effective-level
                                                 print-level print-length
                                                 max-output-length)
-                           (error (condition)
+                           ;; SERIOUS-CONDITION, not ERROR: a runaway expansion
+                           ;; raises CONTROL-STACK-EXHAUSTED, which is a
+                           ;; STORAGE-CONDITION and would otherwise escape this
+                           ;; handler and take down the whole request.
+                           (serious-condition (condition)
                              (list :printed nil
                                    :expanded-p nil
                                    :steps 0
+                                   :steps-capped-p nil
                                    :truncated-p nil
                                    :error (sanitize-for-json
                                            (princ-to-string condition)))))))))
@@ -251,10 +320,10 @@ apply to the whole request."
                                        print-level print-length
                                        max-output-length)
   "Expand the single form in SOURCE.
-Returns (values printed expanded-p steps truncated-p).  This is a thin
-convenience wrapper over MACROEXPAND-FORMS so both entry points share one
-implementation; unlike MACROEXPAND-FORMS it re-signals a per-entry
-failure as an error instead of returning it in a plist."
+Returns (values printed expanded-p steps truncated-p steps-capped-p).
+This is a thin convenience wrapper over MACROEXPAND-FORMS so both entry
+points share one implementation; unlike MACROEXPAND-FORMS it re-signals a
+per-entry failure as an error instead of returning it in a plist."
   (let ((entry (first (macroexpand-forms (list (cons nil source))
                                          :package package
                                          :level level
@@ -267,4 +336,5 @@ failure as an error instead of returning it in a plist."
     (values (getf entry :printed)
             (getf entry :expanded-p)
             (getf entry :steps)
-            (getf entry :truncated-p))))
+            (getf entry :truncated-p)
+            (getf entry :steps-capped-p))))
