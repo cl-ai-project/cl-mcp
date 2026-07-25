@@ -8,6 +8,7 @@
 ;; cl-mcp FASL — including from the bare-SBCL worker, whose dep graph would
 ;; not otherwise pull in sb-posix transitively (see %build-sbcl-args).
 #+sbcl (require :sb-posix)
+#+sbcl (require :sb-cltl2)
 
 ;; Tell ASDF that eclector.parse-result package is provided by eclector
 (asdf:register-system-packages "eclector"
