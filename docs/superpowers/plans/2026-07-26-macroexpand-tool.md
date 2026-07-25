@@ -920,9 +920,13 @@ git commit -m "$(cat <<'EOF'
 feat(macroexpand): add the pure expansion core
 
 worker handler とインラインフォールバックが共有する展開・整形ロジック。
-*print-circle* は NIL にして共有マーカーを排除し、ハング防止は
-*print-level* の有限束縛で担保する。パッケージ不在時はスタブを合成せず
-行動可能なエラーを返す。
+*print-circle* は通常 NIL にして共有マーカーを排除し、循環を検出した場合に
+限り有効化する。SBCL のプリティプリンタは quote 略記で *print-level* を
+尊重せず、自己参照構造を渡すと制御スタックを食い尽くしてプロセスごと
+落ちるため、*print-level* の有限束縛だけでは守れない。
+
+パッケージ不在時はスタブを合成せず行動可能なエラーを返す。スタブ上で
+展開すると「何も起きなかった」結果が静かに返り、呼び出し側を誤らせる。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
