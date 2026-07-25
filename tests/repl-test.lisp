@@ -233,7 +233,7 @@
         ;; Output text with ANSI color codes (ESC[32m = green, ESC[0m = reset)
         (repl-eval "(progn (format t \"~C[32mgreen~C[0m\" (code-char 27) (code-char 27)) :ok)")
       (declare (ignore value stderr))
-      (ok (string= printed ":OK"))
+      (ok (string= printed ":ok"))
       ;; ANSI codes should be stripped, leaving just "green"
       (ok (string= stdout "green"))
       ;; Verify no ESC character remains
@@ -245,7 +245,7 @@
         ;; Output with control characters (bell, backspace)
         (repl-eval "(progn (format t \"hello~Cworld~Ctest\" (code-char 7) (code-char 8)) :ok)")
       (declare (ignore value stderr))
-      (ok (string= printed ":OK"))
+      (ok (string= printed ":ok"))
       ;; Control chars should be removed
       (ok (string= stdout "helloworldtest"))
       ;; Verify no control chars remain (except allowed ones)
@@ -618,6 +618,37 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
           "should be truncated")
       (ok (not (%has-control-chars-p printed))
           "truncated output should be sanitized"))))
+
+(deftest repl-eval-prints-relative-to-eval-package
+  (testing "result symbols print relative to the eval package, not the caller's"
+    (multiple-value-bind (printed value)
+        (repl-eval "'cl-mcp-print-package-probe" :package "CL-USER")
+      (declare (ignore value))
+      (ok (string= printed "cl-mcp-print-package-probe")
+          "a symbol interned in the eval package prints unqualified and downcased"))))
+
+(deftest repl-eval-prints-downcased
+  (testing "symbols print in lower case so results can be pasted back into source"
+    (multiple-value-bind (printed value)
+        (repl-eval "(list :alpha :beta)")
+      (declare (ignore value))
+      (ok (string= printed "(:alpha :beta)")))))
+
+(deftest repl-eval-pretty-prints-wide-results
+  (testing "results wider than the right margin are broken across lines"
+    (multiple-value-bind (printed value)
+        (repl-eval "(list (make-list 12 :initial-element :aaaaaaaaaa)
+                          (make-list 12 :initial-element :bbbbbbbbbb))")
+      (declare (ignore value))
+      (ok (find #\Newline printed)
+          "output wider than *print-right-margin* should contain a newline"))))
+
+(deftest repl-eval-short-results-stay-on-one-line
+  (testing "short results are not broken across lines by the pretty printer"
+    (multiple-value-bind (printed value)
+        (repl-eval "(list 1 2 3)")
+      (declare (ignore value))
+      (ok (string= printed "(1 2 3)")))))
 
 (deftest repl-eval-unbalanced-parens-clean-error
   (testing "unbalanced parentheses return a short hint without a backtrace"

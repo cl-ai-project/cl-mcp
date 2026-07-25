@@ -149,6 +149,7 @@ on large outputs)."
 ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
         (error-context nil)
+        (eval-package nil)
         (stdout (make-string-output-stream))
         (stderr (make-string-output-stream)))
     (handler-bind ((warning (lambda (w)
@@ -203,6 +204,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                       (%truncate-output (get-output-stream-string stderr) max-output-length)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
+        (setf eval-package pkg)
         (let ((forms (handler-case
                          (let ((*package* pkg)) (%read-all input (not safe-read)))
                        (end-of-file (e)
@@ -220,9 +222,13 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                            :restarts nil
                                            :frames nil))))))))
           (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
-    (let ((*print-level* print-level)
+    (let ((*package* (or eval-package *package*))
+          (*print-level* print-level)
           (*print-length* print-length)
           (*print-readably* nil)
+          (*print-case* :downcase)
+          (*print-pretty* t)
+          (*print-right-margin* 100)
           (*print-circle* t))
       (values (%truncate-output (prin1-to-string last-value) max-output-length)
               last-value
