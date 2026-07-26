@@ -19,6 +19,7 @@
                 #:allowed-read-path
                 #:ensure-write-path
                 #:resolve-path-in-project
+                #:resolve-readable-path
                 #:broad-root-p))
 
 (in-package #:cl-mcp/tests/utils-paths-test)
@@ -120,6 +121,34 @@
      (declare (ignore root))
      (ok (handler-case
              (progn (resolve-path-in-project "no-such-file" :must-exist t) nil)
+           (error () t)))))))
+
+(deftest resolve-readable-path-follows-the-read-policy
+ (testing "empty or NIL path resolves to the project root itself"
+  (call-with-temp-project-root
+   (lambda (root)
+     (ok (path-inside-p (resolve-readable-path nil) root))
+     (ok (path-inside-p (resolve-readable-path "") root)))))
+ (testing "a registered ASDF system source directory outside the root is allowed"
+  (call-with-temp-project-root
+   (lambda (root)
+     (let ((system-dir (asdf:system-source-directory :alexandria)))
+       (ok (not (path-inside-p system-dir root)))
+       (ok (resolve-readable-path (namestring system-dir) :must-exist t))))))
+ (testing "a path outside both the root and every registered system signals by name"
+  (call-with-temp-project-root
+   (lambda (root)
+     (declare (ignore root))
+     (let ((message (handler-case (progn (resolve-readable-path "/etc/passwd") nil)
+                      (error (e) (princ-to-string e)))))
+       (ok message)
+       (ok (search "/etc/passwd" message))))))
+ (testing "must-exist signals on a missing target"
+  (call-with-temp-project-root
+   (lambda (root)
+     (declare (ignore root))
+     (ok (handler-case
+             (progn (resolve-readable-path "no-such-file" :must-exist t) nil)
            (error () t)))))))
 
 (deftest broad-root-p-blocks-overly-broad-roots

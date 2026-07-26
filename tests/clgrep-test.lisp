@@ -163,3 +163,44 @@
         ;; Single file results should all be from fs.lisp
         (dolist (r single-file-results)
           (ok (search "fs.lisp" (cdr (assoc :file r)))))))))
+
+(deftest clgrep-search-accepts-registered-asdf-system-directory
+  (testing "an absolute path inside a registered ASDF system outside the project root is searched"
+    ;; clgrep-search is read-only, so it uses the same policy as the read tools
+    ;; (lisp-read-file / fs-read-file): project root OR a registered system's
+    ;; source directory. Without this, discovery on a dependency was blocked
+    ;; while reading the very same files was allowed.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (system-dir (asdf:system-source-directory :alexandria)))
+      (ok (not (uiop:subpathp system-dir *project-root*))
+          "alexandria must live outside the project root for this test to mean anything")
+      (let ((results (clgrep-search "defun" :path (namestring system-dir)
+                                    :recursive t :limit 5
+                                    :form-types '("defun"))))
+        (ok (listp results))
+        (ok (> (length results) 0)
+            "should find defun forms in the dependency's sources")
+        (dolist (r results)
+          (ok (string-equal "defun" (cdr (assoc :form-type r)))))))))
+
+(deftest clgrep-search-rejects-path-outside-every-allowed-root
+  (testing "a path in neither the project root nor a registered system still signals"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((message (handler-case (progn (clgrep-search "defun" :path "/etc") nil)
+                       (error (e) (princ-to-string e)))))
+        (ok message "/etc must be rejected")
+        (ok (search "/etc" message)
+            (format nil "the error must name the rejected path, got: ~A" message))))))
+
+(deftest clgrep-search-path-default-and-relative-unchanged
+  (testing "omitting path searches the project root"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "clgrep-search" :recursive t :limit 10)))
+        (ok (listp results))
+        (ok (> (length results) 0)
+            "should find clgrep-search somewhere under the project root"))))
+  (testing "a relative path under the project root still resolves"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "defun" :path "src/" :recursive nil :limit 5)))
+        (ok (listp results))
+        (ok (> (length results) 0) "should find defun under src/")))))
