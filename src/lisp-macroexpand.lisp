@@ -25,6 +25,10 @@
                 #:sanitize-error-message)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:expand-and-build-response)
+  ;; Shared with response-builders, which reads this marker back out of the
+  ;; label.  No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
+  (:import-from #:cl-mcp/src/macroexpand-core
+                #:*backquote-template-marker*)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -150,8 +154,11 @@ read exactly like a real call site."
                                    (if (> total 1)
                                        (format nil " [~D/~D]" index total)
                                        "")
+                                   ;; The marker is a shared parameter, not a
+                                   ;; literal: %FORMAT-MACROEXPAND-TEXT
+                                   ;; searches the label for it.
                                    (if in-template
-                                       " (inside a backquote template)"
+                                       *backquote-template-marker*
                                        ""))
                            (subseq original
                                    (cst-node-start node)
@@ -268,7 +275,8 @@ the two paths cannot drift."
                                :print-level print-level
                                :print-length print-length
                                :max-output-length max-output-length
-                               :note note)))
+                               :note note
+                               :sub-form-p (and sub-form t))))
 
 (define-tool "lisp-macroexpand" :description
  "Expand a macro call and show the resulting source.
@@ -285,7 +293,10 @@ Two ways to name what to expand:
   once (default) — one macroexpand-1 step, best for checking a macro you just wrote
   full           — repeat until the head is no longer a macro, or until 100 steps
   all            — walk the whole form and expand nested macros too. Output can
-                   get very large; loop and defun expand down to special forms.
+                   get very large; nested macro calls in the body are expanded
+                   (loop, for one, expands down to special forms), but defun
+                   itself is left in place, so a whole defun still comes back
+                   headed by defun.
 
 PREREQUISITE: the macro must be DEFINED in the worker image. If the package
 does not exist you get an error telling you to run 'load-system' first; after
@@ -362,6 +373,10 @@ every call, up to ~D" *max-sub-form-matches*))
                                   (make-ht "forms" (%entries->json entries)
                                            "package" package-name
                                            "note" note
+                                           ;; Sent so the worker can tell a
+                                           ;; sub_form match from a whole-form
+                                           ;; one when wording NOT EXPANDED.
+                                           "sub_form" sub_form
                                            "level" (or level "once")
                                            "readtable" readtable
                                            "print_level" print_level

@@ -573,6 +573,41 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (= 1 (gethash "count" payload))
                "the let binding pair still matches")))))))
 
+(deftest lisp-macroexpand-not-expanded-names-positional-blindness
+  (testing "a NOT EXPANDED sub_form match names the likeliest real cause"
+    ;; The stock advice -- load the system -- is misleading when what matched
+    ;; was a LET binding pair, which is what positional-blind matching makes
+    ;; likely.  Only a sub_form request can hit that, so only a sub_form
+    ;; request says it.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-not-expanded.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun binds-a-non-macro-name (n)
+  (let ((not-a-macro-xyzzy n))
+    not-a-macro-xyzzy))
+"
+       (lambda (path)
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defun"
+                                        :form-name "binds-a-non-macro-name"
+                                        :sub-form "not-a-macro-xyzzy"))))
+           (ok (search "NOT EXPANDED" text))
+           (ok (search "positional-blind" text)
+               "the matching rule is named, not just 'load-system'")
+           (ok (search "binding position" text)
+               "and a binding pair is offered as the likely cause")))))
+    ;; The negative case goes through code mode: a whole-form file match cannot
+    ;; easily be NOT EXPANDED, since DEFUN and friends are themselves macros.
+    (let ((text (response-text
+                 (lisp-macroexpand :code "(+ 1 2)" :package *fixture-package*))))
+      (ok (search "NOT EXPANDED" text)
+          "a non-macro head reports the same status outside sub_form")
+      (ok (null (search "positional-blind" text))
+          "but only a sub_form match can have landed on a binding position"))))
+
 (deftest lisp-macroexpand-template-slice-error-does-not-leak-the-stream
   (testing "an unreadable template slice reports the diagnosis, not a stream object"
     ;; Retaining backquote matches makes this path reachable: the slice is
@@ -602,6 +637,46 @@ USE-WORKER-POOL to take the proxy branch instead."
                "the internal stream object does not")
            (ok (null (search "STRING-INPUT-STREAM" text))
                "and does not reach the content text either")))))))
+
+(deftest lisp-macroexpand-template-slice-error-explains-itself
+  (testing "an unreadable template slice says why it cannot be read on its own"
+    ;; The reader reports "Comma not inside a backquote" and the label says the
+    ;; match came out of a template; joining those two facts is the tool's job,
+    ;; not the reader's.  The explanation belongs on the failing path only: a
+    ;; template fragment containing no comma reads and expands perfectly well,
+    ;; so putting it in the label would be wrong for those.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-template-explanation.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defmacro wraps-double-with-comma (x)
+  `(double-it ,x))
+
+(defmacro wraps-double-without-comma ()
+  `(double-it 7))
+"
+       (lambda (path)
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defmacro"
+                                        :form-name "wraps-double-with-comma"
+                                        :sub-form "double-it"))))
+           (ok (search "Comma not inside a backquote" text)
+               "the reader's own diagnosis still reaches the caller")
+           (ok (search "fragment of a backquote template" text)
+               "and the tool spells out what that means here")
+           (ok (search "Expand the enclosing macro instead" text)
+               "together with the action to take"))
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defmacro"
+                                        :form-name "wraps-double-without-comma"
+                                        :sub-form "double-it"))))
+           (ok (search "(* 2 7)" text)
+               "a comma-free template fragment reads and expands")
+           (ok (null (search "fragment of a backquote template" text))
+               "so a successful expansion must not carry the explanation")))))))
 
 (deftest lisp-macroexpand-rejects-sub-form-on-a-file-with-in-readtable
   (testing "the file's own in-readtable is named, instead of a false 'not found'"
@@ -746,7 +821,7 @@ USE-WORKER-POOL to take the proxy branch instead."
       (ok (hash-table-p captured)
           "the stub was reached, so the proxy branch really ran")
       (ok (equal '("forms" "level" "max_output_length" "note" "package"
-                   "print_length" "print_level" "readtable")
+                   "print_length" "print_level" "readtable" "sub_form")
                  (sort (loop for key being the hash-keys of captured
                              collect key)
                        #'string<))

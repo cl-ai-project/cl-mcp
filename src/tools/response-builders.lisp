@@ -18,7 +18,8 @@
   ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-forms
-                #:macroexpand-package-error)
+                #:macroexpand-package-error
+                #:*backquote-template-marker*)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
   (:import-from #:cl-mcp/src/frame-inspector
@@ -399,10 +400,17 @@ STILL A MACRO CALL, not a fully expanded form"
     (t
      (format nil "expanded in ~D step~:P" (getf result :steps)))))
 
-(defun %format-macroexpand-text (results level package note)
+(defun %format-macroexpand-text (results level package note sub-form-p)
   "Render RESULTS as the agent-facing content text.
 Everything a caller needs must appear here: MCP clients display only
-content[].text, so anything left in a sibling JSON field is invisible."
+content[].text, so anything left in a sibling JSON field is invisible.
+
+SUB-FORM-P is true when the request addressed nested calls with sub_form.
+It is threaded in from the caller rather than inferred from the label.
+The two label shapes do differ -- \"name (file line N)\" for a sub-form
+match against \"type name (file line N)\" for a whole form -- but telling
+them apart on that basis would misfire on any form_name containing a
+space, such as \"(setf foo)\" or a defmethod written with specializers."
   (with-output-to-string (stream)
     (format stream "lisp-macroexpand (level: ~A, package: ~A)~%"
             (or level "once")
@@ -411,30 +419,47 @@ content[].text, so anything left in a sibling JSON field is invisible."
       (format stream "~A~%" note))
     (loop for result in results
           for index from 1
-          do (format stream "~%[~D] ~A~%" index (or (getf result :label) "form"))
+          for label = (getf result :label)
+          do (format stream "~%[~D] ~A~%" index (or label "form"))
              (cond
                ((getf result :error)
-                (format stream "ERROR: ~A~%" (getf result :error)))
+                (format stream "ERROR: ~A~%" (getf result :error))
+                ;; Said only on the failing path.  A template fragment with no
+                ;; commas in it reads and expands perfectly well, so attaching
+                ;; this to the label instead would be wrong for those.
+                (when (and label (search *backquote-template-marker* label))
+                  (format stream
+                          "This match is a fragment of a backquote template: ~
+its commas have no enclosing backquote, so the fragment cannot be read on ~
+its own. Expand the enclosing macro instead.~%")))
                ((not (getf result :expanded-p))
                 (format stream
                         "NOT EXPANDED: the head of this form has no macro ~
 definition in this image. If you expected a macro, load its system with ~
-'load-system' first.~%~A~%"
-                        (getf result :printed)))
+'load-system' first.~%")
+                (when sub-form-p
+                  (format stream
+                          "sub_form matching is also positional-blind: this ~
+may be a binding position -- the variable of a let binding pair, or an ~
+flet/labels name -- rather than a call.~%"))
+                (format stream "~A~%" (getf result :printed)))
                (t
                 (format stream "~A~A~%~A~%"
                         (%expansion-summary result level)
                         (if (getf result :truncated-p) " (truncated)" "")
                         (getf result :printed)))))))
 
-(defun build-macroexpand-response (results &key level package note)
+(defun build-macroexpand-response (results &key level package note sub-form-p)
   "Build the standard lisp-macroexpand response hash-table.
 RESULTS is the list of plists returned by MACROEXPAND-FORMS.  NOTE is an
 optional advisory line (for example, that the sub-form match list was
-capped) that must be visible to the caller."
+capped) that must be visible to the caller.  SUB-FORM-P says whether the
+request came in through sub_form, which changes how a NOT EXPANDED result
+is explained."
   (let ((payload (make-ht "content" (text-content
                                      (%format-macroexpand-text results level
-                                                               package note))
+                                                               package note
+                                                               sub-form-p))
                           "level" (or level "once")
                           "package" package
                           "note" note
@@ -447,13 +472,18 @@ capped) that must be visible to the caller."
 
 (defun expand-and-build-response (entries &key package level readtable
                                                print-level print-length
-                                               max-output-length note)
+                                               max-output-length note
+                                               sub-form-p)
   "Expand ENTRIES and build the lisp-macroexpand response payload.
 
 Shared by the worker handler and the parent's inline fallback so the two
 paths cannot produce different shapes.  An absent package short-circuits
 to the minimal {content, isError} payload rather than a full response,
-because there is nothing to report per entry."
+because there is nothing to report per entry.
+
+SUB-FORM-P is a request-level flag, not a per-entry one: sub_form yields
+only sub-form entries and its absence yields exactly one whole-form or
+code entry, so the two never mix within a single call."
   (handler-case
       (build-macroexpand-response
        (macroexpand-forms entries
@@ -463,7 +493,7 @@ because there is nothing to report per entry."
                           :print-level print-level
                           :print-length print-length
                           :max-output-length max-output-length)
-       :level level :package package :note note)
+       :level level :package package :note note :sub-form-p sub-form-p)
     (macroexpand-package-error (condition)
       (make-ht "content" (text-content (princ-to-string condition))
                "isError" t))))

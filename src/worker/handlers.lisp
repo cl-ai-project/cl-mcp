@@ -238,12 +238,17 @@ define-tool \"inspect-object\"."
 PARAMS carries \"forms\", a JSON array (so: a vector) of objects with
 \"label\" and \"source\" keys.  The parent has already located the forms
 and extracted their source text; this handler only re-reads that text in
-the real, loaded package and expands it."
+the real, loaded package and expands it.
+
+\"sub_form\" carries the parent's sub_form argument, purely so a NOT
+EXPANDED result can mention that sub-form matching is positional-blind.
+Only its presence matters here; the parent already did the matching."
   (let ((forms (gethash "forms" params))
         (package (gethash "package" params))
         (level (or (gethash "level" params) "once"))
         (readtable (gethash "readtable" params))
-        (note (gethash "note" params)))
+        (note (gethash "note" params))
+        (sub-form (gethash "sub_form" params)))
     (unless (and forms (plusp (length forms)))
       (error "forms is required"))
     (let ((entries (map 'list
@@ -258,7 +263,8 @@ the real, loaded package and expands it."
        :print-level (gethash "print_level" params)
        :print-length (gethash "print_length" params)
        :max-output-length (gethash "max_output_length" params)
-       :note note))))
+       :note note
+       :sub-form-p (and sub-form t)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/set-project-root

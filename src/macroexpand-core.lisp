@@ -15,7 +15,8 @@
            #:*expansion-print-level*
            #:*expansion-print-length*
            #:*expansion-max-output-length*
-           #:*max-expansion-steps*))
+           #:*max-expansion-steps*
+           #:*backquote-template-marker*))
 
 (in-package #:cl-mcp/src/macroexpand-core)
 
@@ -38,6 +39,18 @@ printer ignores it for the QUOTE abbreviation.  That case is handled by
 (defparameter *max-expansion-steps* 100
   "Upper bound on repeated MACROEXPAND-1 steps for level \"full\".
 Guards against a macro that expands into itself forever.")
+
+(defparameter *backquote-template-marker* " (inside a backquote template)"
+  "Label suffix marking a sub-form match cut out of a backquote template.
+
+Both a producer and a consumer depend on this exact text, and they cannot
+import it from each other: `%sub-form-entries` in src/lisp-macroexpand.lisp
+appends it when building the label, and `%format-macroexpand-text` in
+src/tools/response-builders.lisp searches the label for it to decide whether
+a read failure should be explained as a template slice.  lisp-macroexpand
+already imports response-builders, so the dependency cannot run the other
+way; this file is the one both of them can import from.  Change the wording
+here, never at either use site.")
 
 (define-condition macroexpand-package-error (error)
   ((name :initarg :name :reader macroexpand-package-error-name))
