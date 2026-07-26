@@ -277,7 +277,7 @@ before TARGET's start position."
 
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
-Returns seven values:
+Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
   ORIGINAL — full file text
