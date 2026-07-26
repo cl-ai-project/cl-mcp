@@ -573,6 +573,36 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (= 1 (gethash "count" payload))
                "the let binding pair still matches")))))))
 
+(deftest lisp-macroexpand-template-slice-error-does-not-leak-the-stream
+  (testing "an unreadable template slice reports the diagnosis, not a stream object"
+    ;; Retaining backquote matches makes this path reachable: the slice is
+    ;; text cut out of a template, so its comma has no enclosing backquote and
+    ;; it cannot be read on its own.  That is worth saying; the internal
+    ;; #<STRING-INPUT-STREAM ...> the default report appends is not.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-template-error.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defmacro wraps-double (x)
+  `(double-it ,x))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defmacro"
+                                           :form-name "wraps-double"
+                                           :sub-form "double-it"))
+                (message (gethash "error" (aref (gethash "expansions" payload) 0)))
+                (text (response-text payload)))
+           (ok (search "(inside a backquote template)" text)
+               "the label still says where the slice came from")
+           (ok (search "Comma not inside a backquote" message)
+               "the diagnosis survives")
+           (ok (null (search "STRING-INPUT-STREAM" message))
+               "the internal stream object does not")
+           (ok (null (search "STRING-INPUT-STREAM" text))
+               "and does not reach the content text either")))))))
+
 (deftest lisp-macroexpand-rejects-sub-form-on-a-file-with-in-readtable
   (testing "the file's own in-readtable is named, instead of a false 'not found'"
     ;; named-readtables must really be loaded: without it %TRY-SWITCH-READTABLE

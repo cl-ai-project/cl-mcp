@@ -111,6 +111,16 @@ loaded in this image."))
                  designator))
         table))))
 
+(defun %condition-first-line (condition)
+  "Return the first line of CONDITION's report.
+SBCL's reader errors append a `Stream: #<...>` line that leaks an internal
+stream object into agent-facing text; the first line carries the actual
+diagnosis and nothing else."
+  (let* ((text (princ-to-string condition))
+         (newline (position #\Newline text)))
+    (string-right-trim '(#\Space #\Tab)
+                       (if newline (subseq text 0 newline) text))))
+
 (defun %read-source (source package readtable)
   "Read the single form in SOURCE with *PACKAGE* bound to PACKAGE.
 
@@ -137,7 +147,17 @@ new class of exposure."
         (end-of-file ()
           ;; The default report prints the stream object, which leaks an
           ;; internal #<STRING-INPUT-STREAM ...> into agent-facing text.
-          (error "SOURCE ended mid-form -- check for unbalanced parentheses."))))))
+          (error "SOURCE ended mid-form -- check for unbalanced parentheses."))
+        (reader-error (condition)
+          ;; Same reason as the END-OF-FILE clause: the default report prints
+          ;; the stream object.  READER-ERROR is a sibling of END-OF-FILE under
+          ;; STREAM-ERROR, not a subtype, so it needs its own clause.  The
+          ;; first line carries the real diagnosis -- for a slice taken out of
+          ;; a backquote template that is "Comma not inside a backquote",
+          ;; which reads correctly next to the entry's own "(inside a
+          ;; backquote template)" label.
+          (error "SOURCE could not be read: ~A"
+                 (%condition-first-line condition)))))))
 
 (defun %expand-once (form)
   "Expand FORM one step.  Returns (values expansion steps)."
