@@ -342,14 +342,36 @@
     "defsystem" "deftest")
   "List of known form type keywords to recognize.")
 
+(defun %definition-prefix-p (form-type)
+  "Return T when FORM-TYPE names a defining macro by prefix.
+
+   FORM-TYPE is the head token extracted from raw text, not a read symbol,
+   so the comparison is done on the string. This mirrors %DEFINITION-NAMES in
+   src/lisp-read-file.lisp exactly: a head whose name starts with DEF (or with
+   DEFINE-, which DEF already subsumes) counts as a definition. Keeping the two
+   rules identical is the point -- it is what lets clgrep classify user-defined
+   defining macros such as DEFINE-RULE or DEFTHING, and stops clgrep-search and
+   lisp-read-file from disagreeing about what a form is.
+
+   This rule has a known false positive: heads like DEFAULT or DEFER also start
+   with DEF and will be reported as definitions. %DEFINITION-NAMES already
+   accepts that risk, so clgrep adopts the same trade-off deliberately rather
+   than diverging."
+  (let ((n (string-upcase form-type)))
+    (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
+        (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
+
 (defun extract-form-type-and-name (form-text)
   "Extract the form type and name from FORM-TEXT.
    Returns an alist with :type and :name, or NIL if not a recognized form.
+   A head is recognized when it is in *KNOWN-FORM-TYPES* or when it satisfies
+   %DEFINITION-PREFIX-P, so user-defined defining macros classify too.
 
    Examples:
      (defun foo ...) => ((:type . \"defun\") (:name . \"foo\"))
      (defmethod bar ...) => ((:type . \"defmethod\") (:name . \"bar\"))
-     (defvar *x* ...) => ((:type . \"defvar\") (:name . \"*x*\"))"
+     (defvar *x* ...) => ((:type . \"defvar\") (:name . \"*x*\"))
+     (define-rule r ...) => ((:type . \"define-rule\") (:name . \"r\"))"
   (let ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text)))
     (when (and (> (length trimmed) 0)
                (char= (char trimmed 0) #\())
@@ -361,7 +383,10 @@
         (when match
           (let ((form-type (string-downcase (aref groups 0)))
                 (form-name (aref groups 1)))
-            (when (member form-type *known-form-types* :test #'string=)
+            ;; *KNOWN-FORM-TYPES* still matters for heads no prefix rule can
+            ;; catch, such as IN-PACKAGE.
+            (when (or (member form-type *known-form-types* :test #'string=)
+                      (%definition-prefix-p form-type))
               (list (cons :type form-type)
                     (cons :name form-name)))))))))
 

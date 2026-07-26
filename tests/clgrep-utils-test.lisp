@@ -271,7 +271,23 @@ Final line
     ;; Non-recognized form
     (ok (null (extract-form-type-and-name "(my-custom-form foo)")))
     ;; Non-form string
-    (ok (null (extract-form-type-and-name "just some text")))))
+    (ok (null (extract-form-type-and-name "just some text"))))
+  (testing "should classify user-defined defining macros by DEF/DEFINE- prefix"
+    ;; A DSL macro that is not, and should not need to be, whitelisted.
+    (let ((result (extract-form-type-and-name
+                   "(define-rule non-empty (s) \"doc\" (plusp (length s)))")))
+      (ok (string= "define-rule" (cdr (assoc :type result))))
+      (ok (string= "non-empty" (cdr (assoc :name result)))))
+    ;; Bare DEF prefix, no hyphen.
+    (let ((result (extract-form-type-and-name "(defthing foo 1)")))
+      (ok (string= "defthing" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result)))))
+    ;; in-package is the whitelist entry no prefix rule would ever catch.
+    (let ((result (extract-form-type-and-name "(in-package #:foo)")))
+      (ok (string= "in-package" (cdr (assoc :type result))))
+      (ok (string= "#:foo" (cdr (assoc :name result)))))
+    ;; Clearly not a definition: the head token parses but is rejected.
+    (ok (null (extract-form-type-and-name "(let ((x 1)) x)")))))
 
 (deftest test-semantic-grep-form-type-filter
   (testing "should filter results by form type"
@@ -290,6 +306,66 @@ Final line
                     "grep-file"
                     :form-types '("defclass"))))
       (ok (= 0 (length results))))))
+
+(defparameter *dsl-file-content*
+  "(in-package #:clgrep-dsl-demo)
+
+(define-rule non-empty (s)
+  \"value must be a non-empty string\"
+  (probe-value s))
+
+(defun probe-value (s)
+  (and (stringp s) (plusp (length s))))
+"
+  "A DSL-style source file whose top-level forms use a user-defined
+   defining macro that is not in *KNOWN-FORM-TYPES*.")
+
+(defmacro with-temp-dsl-project ((var) &body body)
+  "Create a temp directory holding one DSL source file, bind its path to VAR."
+  `(let ((,var (uiop:ensure-directory-pathname
+                (merge-pathnames
+                 (format nil "clgrep-dsl-~A-~A/"
+                         (get-universal-time) (random 1000000))
+                 (uiop:temporary-directory)))))
+     (unwind-protect
+         (progn
+           (ensure-directories-exist ,var)
+           (with-open-file (out (merge-pathnames "rules.lisp" ,var)
+                                :direction :output :if-exists :supersede)
+             (write-string *dsl-file-content* out))
+           ,@body)
+       (when (uiop:directory-exists-p ,var)
+         (uiop:delete-directory-tree ,var :validate t)))))
+
+(deftest test-semantic-grep-user-defined-form-type
+  (with-temp-dsl-project (dir)
+    (testing "user-defined defining macros are classified, not reported as NIL"
+      (let ((results (semantic-grep dir "probe-value" :include-form nil)))
+        (ok (= 2 (length results)))
+        (ok (every (lambda (r) (cdr (assoc :form-type r))) results)
+            "no result has a NIL form-type")
+        (let ((rule (find "define-rule" results
+                          :key (lambda (r) (cdr (assoc :form-type r)))
+                          :test #'equal)))
+          (ok rule "the define-rule form is classified")
+          (ok (string= "non-empty" (cdr (assoc :form-name rule)))))))
+    (testing "form-types filters on a user-defined type"
+      (let ((results (semantic-grep dir "probe-value"
+                                    :form-types '("define-rule")
+                                    :include-form nil)))
+        (ok (= 1 (length results)))
+        (ok (string= "define-rule" (cdr (assoc :form-type (first results)))))
+        (ok (string= "non-empty" (cdr (assoc :form-name (first results)))))))
+    (testing "form-types still excludes the rows of other types"
+      (let ((results (semantic-grep dir "probe-value"
+                                    :form-types '("defun")
+                                    :include-form nil)))
+        (ok (= 1 (length results)))
+        (ok (string= "probe-value" (cdr (assoc :form-name (first results)))))))
+    (testing "form-types with an absent type returns nothing"
+      (ok (null (semantic-grep dir "probe-value"
+                               :form-types '("define-endpoint")
+                               :include-form nil))))))
 
 (deftest test-extract-form-signature
   (testing "should extract signatures from various form types"
