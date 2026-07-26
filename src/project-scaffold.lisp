@@ -198,7 +198,10 @@ cl-mcp's tool surface."
              (next-steps
               (vector
                (format nil
-                       "Auto-registered with ASDF. To re-register: (asdf:load-asd ~S)"
+                       "ASDF registration happened in the cl-mcp parent ~
+                        process only; run load-system to register it in ~
+                        this session's worker (or (asdf:load-asd ~S) via ~
+                        repl-eval)"
                        abs-asd)
                (format nil
                        "To load: run load-system with {\"system\": ~S}"

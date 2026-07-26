@@ -380,7 +380,22 @@ callers do not need to reference it."
           (ok (find-if (lambda (s) (search "run-tests" s))
                        (coerce next-steps 'list)))
           (ok (find-if (lambda (s) (search "lisp-edit-form" s))
-                       (coerce next-steps 'list))))))))
+                       (coerce next-steps 'list))))
+        (testing "next_steps does not claim a bare ASDF registration"
+          ;; project-scaffold runs in the parent process, so the registration
+          ;; it performs is invisible to the session's worker where repl-eval
+          ;; and load-system run. The message must not imply otherwise.
+          (ok (notany (lambda (s) (search "Auto-registered with ASDF" s))
+                      (coerce next-steps 'list)))
+          (ok (find-if (lambda (s) (search "parent process" s))
+                       (coerce next-steps 'list))
+              "registration is scoped to the parent process")
+          (ok (find-if (lambda (s)
+                         (and (search "parent process" s)
+                              (search "load-system" s)
+                              (search "worker" s)))
+                       (coerce next-steps 'list))
+              "load-system is named as the way to register in the worker"))))))
 
 (deftest scaffold-e2e-test-system-runs-smoke-test
   (with-temp-project-root (root)
