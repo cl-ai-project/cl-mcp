@@ -24,7 +24,7 @@
                 #:sanitize-for-json
                 #:sanitize-error-message)
   (:import-from #:cl-mcp/src/tools/response-builders
-                #:build-macroexpand-response)
+                #:expand-and-build-response)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -37,9 +37,6 @@
                 #:cst-node-start
                 #:cst-node-end
                 #:cst-node-start-line)
-  (:import-from #:cl-mcp/src/macroexpand-core
-                #:macroexpand-forms
-                #:macroexpand-package-error)
   (:documentation "Parent-side form addressing and tool definition for
 lisp-macroexpand.")
   (:export #:lisp-macroexpand))
@@ -62,46 +59,76 @@ saying so — a silently truncated list would read as full coverage.")
   "Signal ARG-VALIDATION-ERROR unless LEVEL is a recognized expansion level.
 The :ENUM in the tool's arg spec only decorates the JSON schema; nothing
 validates it at runtime, so an unknown level would otherwise surface as a
-generic internal error."
+generic internal error.  Returns no useful value; call it for effect."
   (when (and level
              (not (member level '("once" "full" "all") :test #'string-equal)))
     (error 'arg-validation-error :arg-name "level"
            :message "level must be one of \"once\", \"full\" or \"all\"."))
-  level)
+  (values))
 
 (defun %find-sub-forms (target sub-form)
-  "Return the CST nodes strictly inside TARGET whose head names SUB-FORM.
+  "Return the matches for SUB-FORM strictly inside TARGET.
+
+Each match is a cons of the CST node and a flag that is true when the
+node sits inside a backquote template.
 
 Comparison is case-insensitive and ignores any package qualifier written
 in SUB-FORM, because symbols recovered from the CST may be homeless after
-package-context teardown and only their SYMBOL-NAME is reliable."
+package-context teardown and only their SYMBOL-NAME is reliable.
+
+QUOTE and FUNCTION subtrees are not searched: nothing inside them is
+evaluated in that position, so a match there would always be fabricated.
+A backquote template IS searched, because an unquoted island inside one --
+`(foo ,(double-it x)) -- is a real call; skipping the template outright
+would turn a false positive into a false negative.  Template matches
+carry the flag instead, so the caller can label them.
+
+Matching is otherwise POSITIONAL-BLIND: any list whose head names
+SUB-FORM matches, so a binding position -- the variable of a LET binding
+pair, or an FLET/LABELS name -- is reported exactly like a call.
+Recognizing those would require a full code walker.
+
+Nested self-similar calls overlap: (double-it (double-it n)) yields two
+matches, the first of which contains the second."
   (let ((wanted (%bare-symbol-name sub-form))
         (found '()))
     (labels ((head-name (node)
-               ;; Skip :SKIPPED children: a comment between the open paren and
-               ;; the operator is legal, and taking it as the head would make
-               ;; the search silently miss the form.
-               (let ((head (find-if (lambda (child)
-                                      (eq (cst-node-kind child) :expr))
-                                    (cst-node-children node))))
-                 (when head
-                   (let ((value (cst-node-value head)))
-                     (and (symbolp value) (symbol-name value))))))
-             (walk (node)
+               ;; The node's own read value, not its first child: eclector
+               ;; synthesizes no child node for a reader-macro operator, so
+               ;; '(f x), #'f and `(f x) each have the inner form as their
+               ;; only child and would otherwise read as calls to whatever
+               ;; they contain.  Reading the value also means comments,
+               ;; which appear as :SKIPPED children, need no special case.
+               (let ((value (cst-node-value node)))
+                 (and (consp value)
+                      (symbolp (car value))
+                      (car value)
+                      (symbol-name (car value)))))
+             (operator-p (name operator)
+               (and name (string-equal name operator)))
+             (walk (node in-template)
                (when (eq (cst-node-kind node) :expr)
                  (let ((name (head-name node)))
                    (when (and name (string-equal name wanted))
-                     (push node found)))
-                 (dolist (child (cst-node-children node))
-                   (walk child)))))
+                     (push (cons node in-template) found))
+                   (unless (or (operator-p name "quote")
+                               (operator-p name "function"))
+                     (let ((nested (or in-template
+                                       (operator-p name "quasiquote"))))
+                       (dolist (child (cst-node-children node))
+                         (walk child nested))))))))
       (dolist (child (cst-node-children target))
-        (walk child)))
+        (walk child nil)))
     (nreverse found)))
 
 (defun %sub-form-entries (original target sub-form file)
-  "Return (values ENTRIES NOTE) for every SUB-FORM call inside TARGET.
+  "Return (values ENTRIES NOTE) for every SUB-FORM match inside TARGET.
 ENTRIES is a list of (LABEL . SOURCE) conses; NOTE is non-NIL when the
-match list was capped at *MAX-SUB-FORM-MATCHES*."
+match list was capped at *MAX-SUB-FORM-MATCHES*.
+
+A match inside a backquote template is labelled as such: at that site it
+is template data, not necessarily a call, and an unlabelled entry would
+read exactly like a real call site."
   (let* ((matches (%find-sub-forms target sub-form))
          (total (length matches)))
     (when (null matches)
@@ -114,14 +141,17 @@ match list was capped at *MAX-SUB-FORM-MATCHES*."
                   (format nil "NOTE: ~D calls to ~A matched; showing the first ~D."
                           total sub-form *max-sub-form-matches*))))
       (values
-       (loop for node in kept
+       (loop for (node . in-template) in kept
              for index from 1
-             collect (cons (format nil "~A (~A line ~D)~A"
+             collect (cons (format nil "~A (~A line ~D)~A~A"
                                    sub-form
                                    (file-namestring file)
                                    (cst-node-start-line node)
                                    (if (> total 1)
                                        (format nil " [~D/~D]" index total)
+                                       "")
+                                   (if in-template
+                                       " (inside a backquote template)"
                                        ""))
                            (subseq original
                                    (cst-node-start node)
@@ -152,10 +182,26 @@ sub-form positions. Drop one of the two arguments.")))
       (declare (ignore relative nodes))
       (let ((package-name (or package file-package-name "COMMON-LISP-USER")))
         (if sub-form
-            (multiple-value-bind (entries note)
-                (%sub-form-entries original target sub-form
-                                   (namestring absolute))
-              (values entries package-name note))
+            (progn
+              ;; The argument guard above covers a readtable the CALLER
+              ;; passed.  A file that declares its own (in-readtable ...)
+              ;; switches cst.lisp to the standard CL reader for everything
+              ;; after it, and that path records no children at all -- so
+              ;; sub_form would report "no call found" for a call plainly
+              ;; present.  Keying on the empty children rather than on the
+              ;; declaration keeps this correct however the switch happened.
+              (when (null (cst-node-children target))
+                (error 'arg-validation-error :arg-name "sub_form"
+                       :message (format nil "sub_form cannot be used with ~A: ~
+the file declares its own readtable with an (in-readtable ...) form, which ~
+forces the standard CL reader, and that reader records no sub-form ~
+positions. Address the whole form without sub_form, or pass the nested ~
+call itself as 'code'."
+                                        (file-namestring absolute))))
+              (multiple-value-bind (entries note)
+                  (%sub-form-entries original target sub-form
+                                     (namestring absolute))
+                (values entries package-name note)))
             (values (list (cons (format nil "~A ~A (~A line ~D)"
                                         form-type-string form-name
                                         (file-namestring absolute)
@@ -206,28 +252,23 @@ Returns the tool response payload hash-table.  This is the inline path
 used when the worker pool is disabled; normally the tool proxies to the
 worker instead, because only the worker has the target system loaded.
 
-An absent package returns the same minimal {content, isError} payload the
-worker handler returns, so the two paths cannot drift."
+Expansion and response building are delegated to
+EXPAND-AND-BUILD-RESPONSE, the same function the worker handler calls, so
+the two paths cannot drift."
   (%validate-level level)
   (multiple-value-bind (entries package-name note)
       (%collect-expansion-sources :path path :form-type form-type
                                   :form-name form-name :sub-form sub-form
                                   :code code :package package
                                   :readtable readtable)
-    (let ((effective-level (or level "once")))
-      (handler-case
-          (build-macroexpand-response
-           (macroexpand-forms entries
-                              :package package-name
-                              :level effective-level
-                              :readtable readtable
-                              :print-level print-level
-                              :print-length print-length
-                              :max-output-length max-output-length)
-           :level effective-level :package package-name :note note)
-        (macroexpand-package-error (condition)
-          (make-ht "content" (text-content (princ-to-string condition))
-                   "isError" t))))))
+    (expand-and-build-response entries
+                               :package package-name
+                               :level (or level "once")
+                               :readtable readtable
+                               :print-level print-level
+                               :print-length print-length
+                               :max-output-length max-output-length
+                               :note note)))
 
 (define-tool "lisp-macroexpand" :description
  "Expand a macro call and show the resulting source.
@@ -242,7 +283,7 @@ Two ways to name what to expand:
 
 'level' controls how far to go:
   once (default) — one macroexpand-1 step, best for checking a macro you just wrote
-  full           — repeat until the head is no longer a macro
+  full           — repeat until the head is no longer a macro, or until 100 steps
   all            — walk the whole form and expand nested macros too. Output can
                    get very large; loop and defun expand down to special forms.
 
@@ -252,12 +293,19 @@ editing a defmacro on disk, reload before expanding.
 
 Output is printed lower-case, pretty-printed, and relative to the target
 package, so it can be read as source. Shared-structure markers (#1=) are
-suppressed; depth and length are bounded instead.
+suppressed unless the expansion is genuinely circular, in which case they are
+switched on so printing terminates; depth and length are bounded regardless.
 
 LIMITATIONS: expansion uses a null lexical environment, so a form enclosed in
 macrolet or symbol-macrolet may expand differently than the compiler sees it.
-'sub_form' cannot be combined with 'readtable'. Expanding runs the macro's
-expander function, i.e. arbitrary code, in the isolated worker process."
+'sub_form' matching is positional-blind: it matches any list whose head is the
+name, so a binding position — the variable of a let binding pair, or an
+flet/labels name — is reported just like a call. Quoted and #' subtrees are
+skipped, and a match inside a backquote template is labelled as such.
+'sub_form' cannot be combined with 'readtable', nor used on a file that
+declares its own (in-readtable ...). Expanding runs the macro's expander
+function, i.e. arbitrary code, in the isolated worker process — or in the
+server process itself when the worker pool is disabled."
  :args
  ((path :type :string :description
    "File containing the form; use with form_type and form_name")
@@ -266,7 +314,9 @@ expander function, i.e. arbitrary code, in the isolated worker process."
   (form_name :type :string :description
    "Name of the form; supports 'name[N]' to pick the Nth match")
   (sub_form :type :string :description
-   "Macro name to expand INSIDE the addressed form; expands every call, up to 10")
+   ;; Built from the variable so the prose and the cap cannot disagree.
+   (format nil "Macro name to expand INSIDE the addressed form; expands ~
+every call, up to ~D" *max-sub-form-matches*))
   (code :type :string :description
    "Source text of a form to expand; alternative to path")
   (package :type :string :description

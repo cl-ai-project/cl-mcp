@@ -15,6 +15,10 @@
                 #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
+  (:import-from #:cl-mcp/src/macroexpand-core
+                #:macroexpand-forms
+                #:macroexpand-package-error)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
   (:import-from #:cl-mcp/src/frame-inspector
@@ -26,7 +30,8 @@
            #:build-code-describe-response
            #:build-code-find-references-response
            #:build-inspect-response
-           #:build-macroexpand-response))
+           #:build-macroexpand-response
+           #:expand-and-build-response))
 
 (in-package #:cl-mcp/src/tools/response-builders)
 
@@ -439,3 +444,26 @@ capped) that must be visible to the caller."
     (when (some (lambda (result) (getf result :error)) results)
       (setf (gethash "isError" payload) t))
     payload))
+
+(defun expand-and-build-response (entries &key package level readtable
+                                               print-level print-length
+                                               max-output-length note)
+  "Expand ENTRIES and build the lisp-macroexpand response payload.
+
+Shared by the worker handler and the parent's inline fallback so the two
+paths cannot produce different shapes.  An absent package short-circuits
+to the minimal {content, isError} payload rather than a full response,
+because there is nothing to report per entry."
+  (handler-case
+      (build-macroexpand-response
+       (macroexpand-forms entries
+                          :package package
+                          :level level
+                          :readtable readtable
+                          :print-level print-level
+                          :print-length print-length
+                          :max-output-length max-output-length)
+       :level level :package package :note note)
+    (macroexpand-package-error (condition)
+      (make-ht "content" (text-content (princ-to-string condition))
+               "isError" t))))

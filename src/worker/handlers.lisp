@@ -38,10 +38,7 @@
                 #:build-code-describe-response
                 #:build-code-find-references-response
                 #:build-inspect-response
-                #:build-macroexpand-response)
-  (:import-from #:cl-mcp/src/macroexpand-core
-                #:macroexpand-forms
-                #:macroexpand-package-error)
+                #:expand-and-build-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
@@ -253,20 +250,15 @@ the real, loaded package and expands it."
                         (lambda (form)
                           (cons (gethash "label" form) (gethash "source" form)))
                         forms)))
-      (handler-case
-          (build-macroexpand-response
-           (macroexpand-forms entries
-                              :package package
-                              :level level
-                              :readtable readtable
-                              :print-level (gethash "print_level" params)
-                              :print-length (gethash "print_length" params)
-                              :max-output-length (gethash "max_output_length"
-                                                          params))
-           :level level :package package :note note)
-        (macroexpand-package-error (condition)
-          (make-ht "content" (text-content (princ-to-string condition))
-                   "isError" t))))))
+      (expand-and-build-response
+       entries
+       :package package
+       :level level
+       :readtable readtable
+       :print-level (gethash "print_level" params)
+       :print-length (gethash "print_length" params)
+       :max-output-length (gethash "max_output_length" params)
+       :note note))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/set-project-root

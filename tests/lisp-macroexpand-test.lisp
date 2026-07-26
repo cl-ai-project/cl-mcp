@@ -9,7 +9,7 @@
 (defpackage #:cl-mcp/tests/lisp-macroexpand-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:skip)
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-source
                 #:macroexpand-forms
@@ -328,22 +328,36 @@ absolute path, then delete the file."
   "Return the content[0].text string of a tool response PAYLOAD."
   (gethash "text" (aref (gethash "content" payload) 0)))
 
-(defun call-macroexpand-tool (args-plist &key protocol-version)
+(defun call-macroexpand-tool (args-plist &key protocol-version use-worker-pool)
   "Invoke the generated lisp-macroexpand tool handler and return its response.
 
 ARGS-PLIST holds the JSON argument names and values.  These tests go
 through the handler rather than through LISP-MACROEXPAND because the
 behaviour under test — which failures are argument validation and which
 are operational — lives in the DEFINE-TOOL body, not in the function.
-The worker pool is disabled so the inline branch runs."
+The worker pool is disabled by default so the inline branch runs; pass
+USE-WORKER-POOL to take the proxy branch instead."
   (let ((state (make-state))
         (args (make-hash-table :test #'equal))
-        (*use-worker-pool* nil))
+        (*use-worker-pool* use-worker-pool))
     (loop for (key value) on args-plist by #'cddr
           do (setf (gethash key args) value))
     (when protocol-version
       (setf (protocol-version state) protocol-version))
     (cl-mcp/src/lisp-macroexpand::lisp-macroexpand-handler state 1 args)))
+
+(defun %try-load (system)
+  "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
+  (handler-case
+      (cond
+        ((find-package :ql)
+         (funcall (find-symbol "QUICKLOAD" :ql) system :silent t)
+         t)
+        ((asdf:find-system system nil)
+         (asdf:load-system system)
+         t)
+        (t nil))
+    (error () nil)))
 
 (deftest lisp-macroexpand-file-mode-top-level
   (testing "the addressed top-level form is expanded when sub_form is omitted"
@@ -425,9 +439,13 @@ The worker pool is disabled so the inline branch runs."
 
 (deftest lisp-macroexpand-requires-exactly-one-mode
   (testing "path and code are mutually exclusive, and one of them is required"
+    ;; Assert the MESSAGE, not merely that something was signalled: with the
+    ;; (and (null path) (null code)) guard deleted this call still errors, but
+    ;; with "form_type is required when 'path' is given" -- telling the caller
+    ;; about a path they never supplied, while a bare (error () t) stays green.
     (ok (handler-case (progn (lisp-macroexpand) nil)
-          (error () t))
-        "neither path nor code is rejected")
+          (error (e) (and (search "or 'code'" (princ-to-string e)) t)))
+        "neither path nor code names both alternatives in the message")
     (ok (handler-case (progn (lisp-macroexpand :path "a.lisp" :code "(f)") nil)
           (error () t))
         "both path and code is rejected")))
@@ -498,6 +516,96 @@ The worker pool is disabled so the inline branch runs."
            (ok (= 1 (gethash "count" payload))
                "the call is found rather than silently missed")
            (ok (search "(* 2 n)" text))))))))
+
+(deftest lisp-macroexpand-sub-form-skips-quoted-and-function-positions
+  (testing "quote and #' subtrees are not searched, and a template match is labelled"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-positions.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun uses-double-in-many-positions (x)
+  (list '(double-it a)
+        (quote (double-it b))
+        #'double-it
+        `(double-it ,x)
+        (double-it 3)))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand
+                          :path path
+                          :form-type "defun"
+                          :form-name "uses-double-in-many-positions"
+                          :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 2 (gethash "count" payload))
+               "only the template match and the real call are reported")
+           (ok (null (search "(* 2 a)" text))
+               "'(double-it a) is data, not a call")
+           (ok (null (search "(* 2 b)" text))
+               "(quote (double-it b)) is data, not a call")
+           (ok (search "(* 2 3)" text)
+               "the real call is still found")
+           (ok (search "(inside a backquote template)" text)
+               "the template match is labelled rather than silently dropped")))))))
+
+(deftest lisp-macroexpand-sub-form-is-positional-blind
+  (testing "a binding position is reported like a call: a documented limitation"
+    ;; Pins the documented behaviour rather than endorsing it.  Telling a
+    ;; binding pair from a call needs a full code walker; until then the
+    ;; docstring and the tool description say so, and this test makes the
+    ;; behaviour deliberate instead of accidental.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-binding-position.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun binds-a-name-like-the-macro (n)
+  (let ((double-it n))
+    double-it))
+"
+       (lambda (path)
+         (let ((payload (lisp-macroexpand
+                         :path path
+                         :form-type "defun"
+                         :form-name "binds-a-name-like-the-macro"
+                         :sub-form "double-it")))
+           (ok (= 1 (gethash "count" payload))
+               "the let binding pair still matches")))))))
+
+(deftest lisp-macroexpand-rejects-sub-form-on-a-file-with-in-readtable
+  (testing "the file's own in-readtable is named, instead of a false 'not found'"
+    ;; named-readtables must really be loaded: without it %TRY-SWITCH-READTABLE
+    ;; finds nothing, no reader switch happens, children survive, and the call
+    ;; IS found -- so the test would pass without exercising the guard at all.
+    (if (not (%try-load :named-readtables))
+        (skip "named-readtables not available")
+        (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+          (call-with-temp-source
+           "tests/tmp/macroexpand-in-readtable.lisp"
+           "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+(named-readtables:in-readtable :standard)
+
+(defun uses-double-under-readtable (n)
+  (double-it n))
+"
+           (lambda (path)
+             (ok (handler-case
+                     (progn (lisp-macroexpand
+                             :path path
+                             :form-type "defun"
+                             :form-name "uses-double-under-readtable"
+                             :sub-form "double-it")
+                            nil)
+                   (cl-mcp/src/tools/helpers:arg-validation-error (e)
+                     (and (search "in-readtable" (princ-to-string e)) t)))
+                 "the message names the in-readtable declaration as the cause")
+             (let ((payload (lisp-macroexpand
+                             :path path
+                             :form-type "defun"
+                             :form-name "uses-double-under-readtable")))
+               (ok (= 1 (gethash "count" payload))
+                   "addressing the whole form is unaffected"))))))))
 
 (deftest lisp-macroexpand-tool-reports-a-missing-form-without-a-wrapper
   (testing "a wrong form_name reads like lisp-edit-form's, not like an internal error"
@@ -579,3 +687,37 @@ The worker pool is disabled so the inline branch runs."
             (format nil "rejected: ~S" arguments))
         (ok (null (find #\~ message))
             (format nil "no literal tilde in: ~A" message))))))
+
+(deftest lisp-macroexpand-proxy-params-match-what-the-worker-reads
+  (testing "the parent sends exactly the keys %handle-macroexpand reads"
+    ;; Nothing else covers this seam: tests/worker-test.lisp builds its params
+    ;; by hand and only ever sends forms/package/level, so a typo in any of the
+    ;; other key names would be caught by no test at all -- the worker would
+    ;; silently fall back to NIL for that argument.
+    (let ((captured nil)
+          (original (fdefinition 'cl-mcp/src/proxy:proxy-to-worker)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'cl-mcp/src/proxy:proxy-to-worker)
+                   (lambda (id method params)
+                     (declare (ignore id method))
+                     (setf captured params)
+                     (make-hash-table :test #'equal)))
+             (call-macroexpand-tool
+              (list "code" "(double-it 1)"
+                    "package" *fixture-package*
+                    "level" "full"
+                    "readtable" "standard"
+                    "print_level" 3
+                    "print_length" 4
+                    "max_output_length" 5)
+              :use-worker-pool t))
+        (setf (fdefinition 'cl-mcp/src/proxy:proxy-to-worker) original))
+      (ok (hash-table-p captured)
+          "the stub was reached, so the proxy branch really ran")
+      (ok (equal '("forms" "level" "max_output_length" "note" "package"
+                   "print_length" "print_level" "readtable")
+                 (sort (loop for key being the hash-keys of captured
+                             collect key)
+                       #'string<))
+          "key set matches the gethash calls in %handle-macroexpand"))))
