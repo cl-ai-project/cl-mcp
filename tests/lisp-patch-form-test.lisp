@@ -40,6 +40,47 @@ then clean up."
          (funcall thunk abs)
       (ignore-errors (delete-file abs)))))
 
+(defun %directory-writable-p (dir)
+  "Return T when a probe file can be created inside DIR.
+Used to detect processes (e.g. root) for which chmod does not deny writes."
+  (let ((probe (merge-pathnames* ".cl-mcp-write-probe"
+                                 (uiop:ensure-directory-pathname dir))))
+    (handler-case
+        (progn
+          (with-open-file (stream probe :direction :output
+                                        :if-exists :supersede
+                                        :if-does-not-exist :create)
+            (write-char #\x stream))
+          (ignore-errors (delete-file probe))
+          t)
+      (error () nil))))
+
+(defun with-readonly-temp-file (relative initial thunk)
+  "Create RELATIVE with INITIAL content, make it and its directory read-only,
+then call THUNK with the absolute path. Permissions are restored and the
+fixture removed even when THUNK signals, so a failing test cannot leave the
+tree unwritable. When permissions are not enforced for this process (e.g.
+running as root), THUNK is skipped instead."
+  (let* ((abs (project-path relative))
+         (dir (native-namestring (uiop:pathname-directory-pathname abs)))
+         (dir-pre-existed (probe-file dir)))
+    (ensure-directories-exist abs)
+    (fs-write-file relative initial)
+    (unwind-protect
+         (progn
+           (uiop:run-program (list "chmod" "444" abs))
+           (uiop:run-program (list "chmod" "555" dir))
+           (if (%directory-writable-p dir)
+               (skip "filesystem permissions are not enforced for this process")
+               (funcall thunk abs)))
+      (ignore-errors (uiop:run-program (list "chmod" "755" dir)))
+      (ignore-errors (uiop:run-program (list "chmod" "644" abs)))
+      (ignore-errors (delete-file abs))
+      ;; Only remove the directory when this call created it, so a caller
+      ;; passing a path directly under tests/tmp cannot rmdir the shared dir.
+      (unless dir-pre-existed
+        (ignore-errors (uiop:delete-empty-directory dir))))))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case
@@ -514,3 +555,114 @@ then clean up."
             (ok err "old protocol should produce rpc error for empty old_text")
             (ok (eql -32602 (gethash "code" err))
                 "error code should be -32602 not -32603")))))))
+
+(deftest lisp-patch-form-handler-form-not-found-tool-error
+  (testing "form not found at 2025-11-25 returns isError, not an internal error"
+    (with-temp-file "tests/tmp/patch-handler-form-not-found.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "no-such-form-xyzzy"
+                     "old_text" "(+ x 1)"
+                     "new_text" "(* x 2)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "test-nf-1" args))
+                 (result-obj (gethash "result" response))
+                 (content (and result-obj (gethash "content" result-obj)))
+                 (text (and content (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            (ng (gethash "error" response)
+                "form-not-found at 2025-11-25 should not produce an rpc error")
+            (ok result-obj "response should have result field")
+            (ok (and result-obj (gethash "isError" result-obj))
+                "result should have isError = true")
+            (ok (and text (search "not found" text))
+                "message should say the form was not found")
+            (ok (and text (null (search "Internal error during" text)))
+                "message must not carry an internal-error prefix")))))))
+
+(deftest lisp-patch-form-handler-form-not-found-legacy-protocol
+  (testing "form not found on a legacy protocol returns -32603, as lisp-edit-form does"
+    (with-temp-file "tests/tmp/patch-handler-form-not-found-legacy.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "no-such-form-xyzzy"
+                     "old_text" "(+ x 1)"
+                     "new_text" "(* x 2)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-06-18")
+          (let* ((response (funcall handler state "test-nf-2" args))
+                 (err (gethash "error" response))
+                 (message (and err (gethash "message" err))))
+            (ok err "legacy protocol should produce an rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "form-not-found is an internal error, not invalid params")
+            (ok (and message (search "not found" message))
+                "message should say the form was not found")
+            (ok (and message (null (search "Internal error during" message)))
+                "message must not carry an internal-error prefix")))))))
+
+(deftest lisp-patch-form-handler-post-prologue-failure-tool-error
+  (testing "unwritable target at 2025-11-25 returns isError without an internal-error prefix"
+    (with-readonly-temp-file "tests/tmp/patch-readonly/target.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "target"
+                     "old_text" "(+ x 1)"
+                     "new_text" "(* x 2)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "test-pp-1" args))
+                 (result-obj (gethash "result" response))
+                 (content (and result-obj (gethash "content" result-obj)))
+                 (text (and content (> (length content) 0)
+                            (gethash "text" (aref content 0)))))
+            (ng (gethash "error" response)
+                "post-prologue failure at 2025-11-25 should not produce an rpc error")
+            (ok result-obj "response should have result field")
+            (ok (and result-obj (gethash "isError" result-obj))
+                "result should have isError = true")
+            (ok (and text (null (search "Internal error during" text)))
+                "message must not carry an internal-error prefix")
+            ;; Deliberately not asserting on the errno text: that comes from
+            ;; glibc strerror and is localized by LC_MESSAGES. Assert on the
+            ;; fixture path instead, which is ours and locale-stable.
+            (ok (and text (search "patch-readonly" text))
+                "message should name the file that could not be written")))))))
+
+(deftest lisp-patch-form-handler-post-prologue-failure-legacy-protocol
+  (testing "unwritable target on a legacy protocol returns a bare -32603"
+    (with-readonly-temp-file "tests/tmp/patch-readonly-legacy/target.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "target"
+                     "old_text" "(+ x 1)"
+                     "new_text" "(* x 2)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-06-18")
+          (let* ((response (funcall handler state "test-pp-2" args))
+                 (err (gethash "error" response))
+                 (message (and err (gethash "message" err))))
+            (ok err "legacy protocol should produce an rpc error")
+            (ok (eql -32603 (gethash "code" err))
+                "post-prologue failure is an internal error")
+            (ok (and message (null (search "Internal error during" message)))
+                "message must not carry an internal-error prefix")
+            (ok (and message (search "patch-readonly-legacy" message))
+                "message should name the file that could not be written")))))))

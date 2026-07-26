@@ -18,7 +18,7 @@
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content
+                #:make-ht #:result #:rpc-error #:text-content
                 #:arg-validation-error #:tool-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
@@ -150,11 +150,8 @@ to use for parsing the file."
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
   (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
-      (handler-case
-          (%locate-target-form file-path form-type form-name readtable)
-        (error (e)
-          (error 'patch-operation-error
-                 :reason (format nil "~A" e))))
+      (%locate-target-form file-path form-type form-name readtable)
+    (declare (ignore _))
     (multiple-value-bind (updated modified-form)
         (%apply-patch-operation original target old-text new-text)
       (let ((would-change (not (string= original updated))))
@@ -266,8 +263,27 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "content" (text-content summary)
                                (when changed-p
                                  (list "delta" (- (length new_text) (length old_text)))))))))
+      ;; CLAUSE ORDER IS LOAD-BEARING. PATCH-OPERATION-ERROR and
+      ;; ARG-VALIDATION-ERROR are both subtypes of ERROR, so both must stay
+      ;; ahead of the generic clause; reordering silently changes the response
+      ;; shape of every expected failure rather than breaking the build.
       (patch-operation-error (e)
         (tool-error id
                     (sanitize-for-json
                      (sanitize-error-message (format nil "~A" e)))
-                    :protocol-version (protocol-version state))))))
+                    :protocol-version (protocol-version state)))
+      ;; Re-signal so DEFINE-TOOL's own ARG-VALIDATION-ERROR clause formats it;
+      ;; otherwise the generic clause below would swallow genuine argument
+      ;; errors and misreport them as internal failures. HANDLER-CASE unwinds
+      ;; before running a handler body, so this re-signal cannot re-enter the
+      ;; clauses above or below it — it necessarily reaches DEFINE-TOOL's
+      ;; generated HANDLER-CASE.
+      (arg-validation-error (e)
+        (error e))
+      (error (e)
+        (let ((msg (sanitize-for-json
+                    (sanitize-error-message (format nil "~A" e)))))
+          (if (and (protocol-version state)
+                   (string>= (protocol-version state) "2025-11-25"))
+              (result id (make-ht "content" (text-content msg) "isError" t))
+              (rpc-error id -32603 msg)))))))
