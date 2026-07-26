@@ -32,11 +32,19 @@
   "Source file extensions scanned for package definitions.")
 
 (defparameter *package-context-skip-directories*
-  '(".git" ".qlot" "qlot" ".cache" ".bundle-libs" "bundle-libs")
+  '(".git" ".qlot" "qlot" ".cache" ".bundle-libs")
   "Directory basenames skipped during package spec discovery.
-Includes vendored/bundled dependency directories (e.g. .bundle-libs) whose
-sources are not authored by the project and may contain implementation-
-specific forms this reader cannot tolerate.")
+Includes qlot's vendored bundle output, whose sources are not authored by
+the project and may contain implementation-specific forms this reader
+cannot tolerate.
+
+Only the dotted `.bundle-libs` is listed. That is where current qlot
+bundles; `bundle-libs` was its pre-1.0 spelling. The undotted name is
+deliberately absent because it also matches a plausibly user-authored
+directory at any depth, and hiding it would silently drop the packages
+defined there -- a wrong answer rather than a slow one. Tolerating a file
+we cannot read is the catch-all clause in %PACKAGE-SPECS-IN-FILE's job,
+not this list's.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."

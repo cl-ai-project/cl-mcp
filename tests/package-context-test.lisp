@@ -137,13 +137,16 @@
  (testing "discovery does not abort when a vendored file signals a plain error on read"
   (call-with-temp-project
    (lambda (root)
-     ;; No matching defpackage exists anywhere in this project, so
+     ;; The poison file must live OUTSIDE *PACKAGE-CONTEXT-SKIP-DIRECTORIES*,
+     ;; or the walk never reads it and this test passes with the catch-all
+     ;; clause deleted. `vendor/` is a real vendoring convention that the
+     ;; skip list deliberately does not enumerate -- the point of the
+     ;; catch-all is that the list cannot enumerate them all.
+     ;;
+     ;; No matching defpackage exists anywhere in this project either, so
      ;; DISCOVER-PACKAGE-SPEC's FIND-IF cannot short-circuit before reaching
-     ;; the poison file -- the full walk (and thus the poison file) is
-     ;; guaranteed to be visited, making this a deterministic reproduction
-     ;; (unlike a fixture where a matching defpackage sits earlier in the
-     ;; scan order and hides the bug via short-circuiting).
-     (write-source root ".bundle-libs/software/fake-lib/impl-allegro.lisp"
+     ;; the poison file.
+     (write-source root "vendor/fake-lib/impl-allegro.lisp"
                    "#+(version>= 9) (defun guarded () nil)")
      (ok (null (discover-package-spec "FD010-NOT-DEFINED-ANYWHERE-PKG"))
       "returns NIL instead of signaling on the poisoned vendored file")))))
