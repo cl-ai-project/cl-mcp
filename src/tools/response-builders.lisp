@@ -19,7 +19,8 @@
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-forms
                 #:macroexpand-package-error
-                #:*backquote-template-marker*)
+                #:*backquote-template-marker*
+                #:*shadowed-binding-marker*)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
   (:import-from #:cl-mcp/src/frame-inspector
@@ -410,7 +411,12 @@ It is threaded in from the caller rather than inferred from the label.
 The two label shapes do differ -- \"name (file line N)\" for a sub-form
 match against \"type name (file line N)\" for a whole form -- but telling
 them apart on that basis would misfire on any form_name containing a
-space, such as \"(setf foo)\" or a defmethod written with specializers."
+space, such as \"(setf foo)\" or a defmethod written with specializers.
+
+*SHADOWED-BINDING-MARKER* is explained on both the expanded and the NOT
+EXPANDED path, with different wording: on the first the expansion shown
+is the global definition and is not what the compiler sees, while on the
+second there is nothing to expand at all."
   (with-output-to-string (stream)
     (format stream "lisp-macroexpand (level: ~A, package: ~A)~%"
             (or level "once")
@@ -420,6 +426,7 @@ space, such as \"(setf foo)\" or a defmethod written with specializers."
     (loop for result in results
           for index from 1
           for label = (getf result :label)
+          for shadowed = (and label (search *shadowed-binding-marker* label))
           do (format stream "~%[~D] ~A~%" index (or label "form"))
              (cond
                ((getf result :error)
@@ -433,21 +440,46 @@ space, such as \"(setf foo)\" or a defmethod written with specializers."
 its commas have no enclosing backquote, so the fragment cannot be read on ~
 its own. Expand the enclosing macro instead.~%")))
                ((not (getf result :expanded-p))
-                (format stream
-                        "NOT EXPANDED: the head of this form has no macro ~
+                ;; A shadowed match gets its own diagnosis, replacing both
+                ;; stock lines rather than joining them.  "Load its system"
+                ;; is wrong -- an FLET/LABELS binding is a function and has
+                ;; no expansion at any load state -- and the positional-blind
+                ;; guess is exactly what the shadow detection already ruled
+                ;; out, so printing them here would contradict this line.
+                (if shadowed
+                    (format stream
+                            "NOT EXPANDED: an enclosing macrolet, ~
+symbol-macrolet, flet or labels binds this name and no macro by that name is ~
+defined in this image, so there is nothing to expand. An flet or labels ~
+binding is a function, not a macro; a macrolet binding is a macro, but it is ~
+not reachable from the null lexical environment expansion runs in.~%")
+                    (progn
+                      (format stream
+                              "NOT EXPANDED: the head of this form has no macro ~
 definition in this image. If you expected a macro, load its system with ~
 'load-system' first.~%")
-                (when sub-form-p
-                  (format stream
-                          "sub_form matching is also positional-blind: this ~
-may be a binding position -- the variable of a let binding pair, or an ~
-flet/labels name -- rather than a call.~%"))
+                      (when sub-form-p
+                        (format stream
+                                "sub_form matching is also positional-blind: this ~
+may be a binding position -- the variable of a let binding pair, say -- rather ~
+than a call. Binding pairs of macrolet, symbol-macrolet, flet and labels are ~
+the detected cases, and are skipped before they get here.~%"))))
                 (format stream "~A~%" (getf result :printed)))
                (t
-                (format stream "~A~A~%~A~%"
+                (format stream "~A~A~%"
                         (%expansion-summary result level)
-                        (if (getf result :truncated-p) " (truncated)" "")
-                        (getf result :printed)))))))
+                        (if (getf result :truncated-p) " (truncated)" ""))
+                ;; Said on the SUCCESSFUL path, before the expansion rather
+                ;; than after it: the expansion below is real output of a real
+                ;; macro, and without this line it reads as the answer.  It is
+                ;; the answer for the global definition only.
+                (when shadowed
+                  (format stream
+                          "WARNING: an enclosing macrolet, symbol-macrolet, ~
+flet or labels binds this name, so the expansion below came from the GLOBAL ~
+definition and is NOT what the compiler sees here. Expansion always uses a ~
+null lexical environment; the local definition cannot be reached.~%"))
+                (format stream "~A~%" (getf result :printed)))))))
 
 (defun build-macroexpand-response (results &key level package note sub-form-p)
   "Build the standard lisp-macroexpand response hash-table.

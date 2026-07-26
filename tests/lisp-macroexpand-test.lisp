@@ -573,6 +573,133 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (= 1 (gethash "count" payload))
                "the let binding pair still matches")))))))
 
+(deftest lisp-macroexpand-sub-form-labels-a-macrolet-shadowed-call
+  (testing "a shadowed call is expanded but never presented as the local one"
+    ;; The expansion runs in a null lexical environment, so what comes back is
+    ;; the GLOBAL macro's expansion while the compiler would use the MACROLET's.
+    ;; The expansion is still worth showing -- it is the only one available --
+    ;; but showing it unlabelled is the confidently-wrong failure mode.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-macrolet-shadow.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun shadowed-by-macrolet (n)
+  (macrolet ((double-it (x) `(list :local ,x)))
+    (double-it n)))
+
+(defun not-shadowed-at-all (n)
+  (double-it n))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "shadowed-by-macrolet"
+                                           :sub-form "double-it"))
+                (text (response-text payload))
+                (note (gethash "note" payload)))
+           (ok (= 1 (gethash "count" payload))
+               "only the call is an entry; the binding pair is not")
+           (ok (search "(* 2 n)" text)
+               "the call is still expanded, with the only definition available")
+           (ok (search "(shadowed by an enclosing binding)" text)
+               "and its label says the result is not the local expansion")
+           (ok (search "GLOBAL" text)
+               "the explanation reaches the expanded path, not just errors")
+           (ok (null (search "list :local" text))
+               "the macrolet's own expansion is not claimed to have been used")
+           ;; Finding 2: the binding pair is not a call.  Expanding it hands
+           ;; the expander the pair as its arguments, and the arity complaint
+           ;; that comes back reads like a defect in the macro under test.
+           (ok (and note (search "skipped" note))
+               "the skipped binding position is reported, not silently dropped")
+           (ok (and note (search "macrolet" note))
+               "and the note names the operator that bound it")
+           (ok (search "skipped" text)
+               "the note reaches content text, the only thing clients render")
+           (ok (null (search "too many elements" text))
+               "no expander arity complaint from expanding a binding pair"))
+         ;; Scoping is per-subtree: a sibling call to the same macro elsewhere
+         ;; in the same file must come back clean.
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defun"
+                                        :form-name "not-shadowed-at-all"
+                                        :sub-form "double-it"))))
+           (ok (search "(* 2 n)" text) "the unshadowed call still expands")
+           (ok (null (search "shadowed by an enclosing binding" text))
+               "the shadow flag does not leak out of the binder's subtree")))))))
+
+(deftest lisp-macroexpand-sub-form-detects-flet-shadowing
+  (testing "an flet binding shadows the name too, even though it is not a macro"
+    ;; FLET binds a FUNCTION, so at that call site nothing expands at all --
+    ;; yet the global macro of the same name expands happily in a null lexical
+    ;; environment.  This is the same trap as MACROLET with a worse disguise,
+    ;; so it gets the same label rather than a clean-looking expansion.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-flet-shadow.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun shadowed-by-flet (n)
+  (flet ((double-it (x) (list :local x)))
+    (double-it n)))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "shadowed-by-flet"
+                                           :sub-form "double-it"))
+                (text (response-text payload))
+                (note (gethash "note" payload)))
+           (ok (= 1 (gethash "count" payload))
+               "the flet binding pair is not an entry")
+           (ok (and note (search "flet" note))
+               "it is reported as an flet binding instead")
+           (ok (search "(shadowed by an enclosing binding)" text)
+               "and the call below it is labelled, not silently expanded")
+           (ok (search "(* 2 n)" text)
+               "the global expansion is still shown, clearly marked")))))))
+
+(deftest lisp-macroexpand-shadowed-and-not-expanded-says-so
+  (testing "a call to a shadowed name with no global macro says why, once"
+    ;; The most misleading corner of the NOT EXPANDED path: an FLET-bound name
+    ;; that no macro anywhere shares.  The stock advice is wrong twice over --
+    ;; there is no system to load, because an FLET binding is a function and
+    ;; has no expansion at any load state, and it is not a binding position,
+    ;; because the shadow detection has already ruled that out and skipped the
+    ;; real one.  Printing both would leave the tool contradicting itself.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-flet-no-global.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun calls-a-local-function (n)
+  (flet ((no-macro-anywhere-xyzzy (x) (list :quiet x)))
+    (no-macro-anywhere-xyzzy n)))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand
+                          :path path
+                          :form-type "defun"
+                          :form-name "calls-a-local-function"
+                          :sub-form "no-macro-anywhere-xyzzy"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload))
+               "the flet binding pair is skipped; the call is the only entry")
+           (ok (search "NOT EXPANDED" text)
+               "nothing expanded, and the status still says so")
+           (ok (search "(shadowed by an enclosing binding)" text)
+               "the label carries the shadow marker on this path too")
+           (ok (search "nothing to expand" text)
+               "and the reason is the enclosing binding, not a missing system")
+           (ok (search "is a function, not a macro" text)
+               "which is what makes an flet/labels binding unexpandable")
+           (ok (null (search "positional-blind" text))
+               "the binding-position guess the detection ruled out is dropped")
+           (ok (null (search "load-system" text))
+               "so is the advice to load a system that would not help")))))))
+
 (deftest lisp-macroexpand-not-expanded-names-positional-blindness
   (testing "a NOT EXPANDED sub_form match names the likeliest real cause"
     ;; The stock advice -- load the system -- is misleading when what matched

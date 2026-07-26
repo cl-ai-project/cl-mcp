@@ -16,7 +16,8 @@
            #:*expansion-print-length*
            #:*expansion-max-output-length*
            #:*max-expansion-steps*
-           #:*backquote-template-marker*))
+           #:*backquote-template-marker*
+           #:*shadowed-binding-marker*))
 
 (in-package #:cl-mcp/src/macroexpand-core)
 
@@ -51,6 +52,20 @@ a read failure should be explained as a template slice.  lisp-macroexpand
 already imports response-builders, so the dependency cannot run the other
 way; this file is the one both of them can import from.  Change the wording
 here, never at either use site.")
+
+(defparameter *shadowed-binding-marker* " (shadowed by an enclosing binding)"
+  "Label suffix marking a sub-form match whose name is lexically bound above it.
+
+Set when the match sits below a MACROLET, SYMBOL-MACROLET, FLET or LABELS
+that binds the same name.  The expansion attached to such a label was
+still produced in a null lexical environment, i.e. from the GLOBAL
+definition, so it is not what the compiler sees at that site.
+
+Shares the arrangement of `*backquote-template-marker*` and for the same
+reason: `%sub-form-entries` in src/lisp-macroexpand.lisp appends it to the
+label and `%format-macroexpand-text` in src/tools/response-builders.lisp
+searches the label for it.  Neither file can import from the other, so both
+import it from here.  Change the wording here, never at either use site.")
 
 (define-condition macroexpand-package-error (error)
   ((name :initarg :name :reader macroexpand-package-error-name))

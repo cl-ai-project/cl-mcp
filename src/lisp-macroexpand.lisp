@@ -25,10 +25,11 @@
                 #:sanitize-error-message)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:expand-and-build-response)
-  ;; Shared with response-builders, which reads this marker back out of the
+  ;; Shared with response-builders, which reads these markers back out of the
   ;; label.  No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
   (:import-from #:cl-mcp/src/macroexpand-core
-                #:*backquote-template-marker*)
+                #:*backquote-template-marker*
+                #:*shadowed-binding-marker*)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -52,6 +53,13 @@ lisp-macroexpand.")
 When more match, the extras are dropped and the response carries a note
 saying so — a silently truncated list would read as full coverage.")
 
+(defparameter *shadowing-operators*
+  '("MACROLET" "SYMBOL-MACROLET" "FLET" "LABELS")
+  "Operator names whose binding list can shadow a SUB_FORM name.
+Compared case-insensitively against SYMBOL-NAME, never against a symbol:
+symbols recovered from the CST can be homeless once package-context
+teardown has run, so only their name is reliable.")
+
 (defun %bare-symbol-name (name)
   "Return NAME without any package qualifier: \"pkg:sym\" becomes \"sym\"."
   (let ((colon (position #\: name :from-end t)))
@@ -73,8 +81,13 @@ generic internal error.  Returns no useful value; call it for effect."
 (defun %find-sub-forms (target sub-form)
   "Return the matches for SUB-FORM strictly inside TARGET.
 
-Each match is a cons of the CST node and a flag that is true when the
-node sits inside a backquote template.
+Each match is a list (NODE IN-TEMPLATE BINDING-OPERATOR SHADOWED-BY):
+
+  IN-TEMPLATE      true when the node sits inside a backquote template.
+  BINDING-OPERATOR the lower-case operator name when this node IS a
+                   binding pair rather than a call, else NIL.
+  SHADOWED-BY      the lower-case operator name of the nearest enclosing
+                   form that binds SUB-FORM, else NIL.
 
 Comparison is case-insensitive and ignores any package qualifier written
 in SUB-FORM, because symbols recovered from the CST may be homeless after
@@ -87,14 +100,26 @@ A backquote template IS searched, because an unquoted island inside one --
 would turn a false positive into a false negative.  Template matches
 carry the flag instead, so the caller can label them.
 
-Matching is otherwise POSITIONAL-BLIND: any list whose head names
-SUB-FORM matches, so a binding position -- the variable of a LET binding
-pair, or an FLET/LABELS name -- is reported exactly like a call.
-Recognizing those would require a full code walker.
+Scope awareness is deliberately NOT an implementation of CL scoping
+rules.  It is exactly this one rule: when a node's head names MACROLET,
+SYMBOL-MACROLET, FLET or LABELS, its second :EXPR child is the binding
+list, and a direct child of that binding list whose own head names
+SUB-FORM is a binding position rather than a call.  When such a binding
+exists, everything below that node is treated as shadowed for that name,
+with no attempt to model which sub-forms the binding actually covers --
+FLET's own binding bodies, for one, are outside it.  Over-reporting a
+shadow is a hint the caller can check; under-reporting one produces a
+confidently wrong expansion.
+
+Matching is otherwise POSITIONAL-BLIND: any other list whose head names
+SUB-FORM matches, so the variable of a LET binding pair is still reported
+exactly like a call.  Recognizing every such position would require a
+full code walker.
 
 Nested self-similar calls overlap: (double-it (double-it n)) yields two
 matches, the first of which contains the second."
   (let ((wanted (%bare-symbol-name sub-form))
+        (binding-positions (make-hash-table :test #'eq))
         (found '()))
     (labels ((head-name (node)
                ;; The node's own read value, not its first child: eclector
@@ -110,60 +135,136 @@ matches, the first of which contains the second."
                       (symbol-name (car value)))))
              (operator-p (name operator)
                (and name (string-equal name operator)))
-             (walk (node in-template)
+             (expr-children (node)
+               ;; :SKIPPED children -- comments -- must not shift the
+               ;; position of the binding list.
+               (remove-if-not (lambda (child)
+                                (eq (cst-node-kind child) :expr))
+                              (cst-node-children node)))
+             (register-bindings (node name)
+               ;; Records every binding pair for WANTED under NODE and
+               ;; returns the operator name when at least one exists, i.e.
+               ;; when NODE shadows WANTED for its whole subtree.  Called
+               ;; before descending, so the walk finds the registration
+               ;; already in place when it reaches the pair itself.
+               (when (and name
+                          (member name *shadowing-operators* :test #'string-equal))
+                 (let ((bindings (second (expr-children node)))
+                       (operator nil))
+                   (when bindings
+                     (dolist (pair (expr-children bindings))
+                       (let ((pair-name (head-name pair)))
+                         (when (and pair-name (string-equal pair-name wanted))
+                           (setf operator (string-downcase name))
+                           (setf (gethash pair binding-positions) operator)))))
+                   operator)))
+             (walk (node in-template shadowed-by)
                (when (eq (cst-node-kind node) :expr)
                  (let ((name (head-name node)))
                    (when (and name (string-equal name wanted))
-                     (push (cons node in-template) found))
+                     (push (list node in-template
+                                 (gethash node binding-positions)
+                                 shadowed-by)
+                           found))
                    (unless (or (operator-p name "quote")
                                (operator-p name "function"))
                      (let ((nested (or in-template
-                                       (operator-p name "quasiquote"))))
+                                       (operator-p name "quasiquote")))
+                           ;; Innermost binder wins: it is the one whose
+                           ;; definition the compiler would use here.
+                           (deeper (or (register-bindings node name)
+                                       shadowed-by)))
                        (dolist (child (cst-node-children node))
-                         (walk child nested))))))))
+                         (walk child nested deeper))))))))
       (dolist (child (cst-node-children target))
-        (walk child nil)))
+        (walk child nil nil)))
     (nreverse found)))
+
+(defun %binding-position-note (skipped sub-form file)
+  "Return the advisory line describing the SKIPPED binding-position matches.
+SKIPPED holds matches from %FIND-SUB-FORMS whose BINDING-OPERATOR is set.
+They are never expanded -- the parent knows they are not calls -- so the
+note is the only place they are reported, and it must say both what they
+were and that nothing was done with them."
+  (let ((count (length skipped))
+        (sites (format nil "~{~A~^, ~}"
+                       (loop for (node nil operator) in skipped
+                             collect (format nil "~A (~A line ~D, ~A binding)"
+                                             sub-form
+                                             (file-namestring file)
+                                             (cst-node-start-line node)
+                                             operator)))))
+    (if (= count 1)
+        (format nil "NOTE: 1 match is a binding position, not a call, and was ~
+skipped: ~A."
+                sites)
+        (format nil "NOTE: ~D matches are binding positions, not calls, and ~
+were skipped: ~A."
+                count sites))))
 
 (defun %sub-form-entries (original target sub-form file)
   "Return (values ENTRIES NOTE) for every SUB-FORM match inside TARGET.
-ENTRIES is a list of (LABEL . SOURCE) conses; NOTE is non-NIL when the
-match list was capped at *MAX-SUB-FORM-MATCHES*.
+ENTRIES is a list of (LABEL . SOURCE) conses; NOTE carries the advisory
+lines -- binding positions skipped, match list capped -- or NIL.
 
 A match inside a backquote template is labelled as such: at that site it
 is template data, not necessarily a call, and an unlabelled entry would
-read exactly like a real call site."
+read exactly like a real call site.
+
+A match in a binding position is not expanded at all.  It is not a call,
+so the expander would be handed the binding pair as its argument list and
+would answer with its own arity complaint, which reads like a defect in
+the macro under inspection.  It is reported through NOTE instead.
+
+A match below a binder for the same name IS expanded -- the null-lexical
+expansion is the only one this tool can produce -- but its label carries
+*SHADOWED-BINDING-MARKER* so the caller is told the result comes from the
+global definition and is not what the compiler sees there."
   (let* ((matches (%find-sub-forms target sub-form))
-         (total (length matches)))
+         (skipped (remove-if-not #'third matches))
+         (callable (remove-if #'third matches))
+         (total (length callable))
+         (skip-note (when skipped
+                      (%binding-position-note skipped sub-form file))))
     (when (null matches)
       (error "No call to ~A found inside the addressed form in ~A."
              sub-form file))
-    (let ((kept (if (> total *max-sub-form-matches*)
-                    (subseq matches 0 *max-sub-form-matches*)
-                    matches))
-          (note (when (> total *max-sub-form-matches*)
-                  (format nil "NOTE: ~D calls to ~A matched; showing the first ~D."
-                          total sub-form *max-sub-form-matches*))))
+    (when (null callable)
+      ;; Every match was a binding position.  Saying only "no call found"
+      ;; would hide the matches that were found and deliberately dropped.
+      (error "No call to ~A found inside the addressed form in ~A. ~A"
+             sub-form file skip-note))
+    (let* ((kept (if (> total *max-sub-form-matches*)
+                     (subseq callable 0 *max-sub-form-matches*)
+                     callable))
+           (cap-note (when (> total *max-sub-form-matches*)
+                       (format nil "NOTE: ~D calls to ~A matched; showing the first ~D."
+                               total sub-form *max-sub-form-matches*)))
+           (notes (remove nil (list skip-note cap-note))))
       (values
-       (loop for (node . in-template) in kept
+       (loop for (node in-template nil shadowed-by) in kept
              for index from 1
-             collect (cons (format nil "~A (~A line ~D)~A~A"
+             collect (cons (format nil "~A (~A line ~D)~A~A~A"
                                    sub-form
                                    (file-namestring file)
                                    (cst-node-start-line node)
                                    (if (> total 1)
                                        (format nil " [~D/~D]" index total)
                                        "")
-                                   ;; The marker is a shared parameter, not a
-                                   ;; literal: %FORMAT-MACROEXPAND-TEXT
-                                   ;; searches the label for it.
+                                   ;; The markers are shared parameters, not
+                                   ;; literals: %FORMAT-MACROEXPAND-TEXT
+                                   ;; searches the label for them.
                                    (if in-template
                                        *backquote-template-marker*
+                                       "")
+                                   (if shadowed-by
+                                       *shadowed-binding-marker*
                                        ""))
                            (subseq original
                                    (cst-node-start node)
                                    (cst-node-end node))))
-       note))))
+       (when notes
+         (format nil "~{~A~^~%~}" notes))))))
 
 (defun %collect-file-sources (path form-type form-name sub-form package readtable)
   "Locate the addressed form in PATH.
@@ -307,12 +408,16 @@ package, so it can be read as source. Shared-structure markers (#1=) are
 suppressed unless the expansion is genuinely circular, in which case they are
 switched on so printing terminates; depth and length are bounded regardless.
 
-LIMITATIONS: expansion uses a null lexical environment, so a form enclosed in
-macrolet or symbol-macrolet may expand differently than the compiler sees it.
-'sub_form' matching is positional-blind: it matches any list whose head is the
-name, so a binding position — the variable of a let binding pair, or an
-flet/labels name — is reported just like a call. Quoted and #' subtrees are
-skipped, and a match inside a backquote template is labelled as such.
+LIMITATIONS: expansion always uses a null lexical environment. 'sub_form'
+detects an enclosing macrolet, symbol-macrolet, flet or labels that binds the
+same name: a match below one is still expanded — the global definition is the
+only one available — but is labelled as shadowed, so a result that differs from
+what the compiler sees is never presented as correct. A binding pair of those
+four operators is recognized as a binding position, skipped instead of expanded,
+and reported in a note. Matching is otherwise positional-blind: it matches any
+list whose head is the name, so the variable of a let binding pair is still
+reported just like a call. Quoted and #' subtrees are skipped, and a match
+inside a backquote template is labelled as such.
 'sub_form' cannot be combined with 'readtable', nor used on a file that
 declares its own (in-readtable ...). Expanding runs the macro's expander
 function, i.e. arbitrary code, in the isolated worker process — or in the
