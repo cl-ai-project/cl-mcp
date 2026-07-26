@@ -32,19 +32,28 @@
   "Source file extensions scanned for package definitions.")
 
 (defparameter *package-context-skip-directories*
-  '(".git" ".qlot" "qlot" ".cache" ".bundle-libs")
+  '(".git" ".qlot" "qlot" ".cache" ".bundle-libs" "bundle-libs")
   "Directory basenames skipped during package spec discovery.
-Includes qlot's vendored bundle output, whose sources are not authored by
-the project and may contain implementation-specific forms this reader
-cannot tolerate.
 
-Only the dotted `.bundle-libs` is listed. That is where current qlot
-bundles; `bundle-libs` was its pre-1.0 spelling. The undotted name is
-deliberately absent because it also matches a plausibly user-authored
-directory at any depth, and hiding it would silently drop the packages
-defined there -- a wrong answer rather than a slow one. Tolerating a file
-we cannot read is the catch-all clause in %PACKAGE-SPECS-IN-FILE's job,
-not this list's.")
+Includes qlot's vendored bundle output under BOTH spellings: current qlot
+bundles to `.bundle-libs`, while `bundle-libs` was its pre-1.0 spelling
+and legacy trees still carry it. Note qlot's own traversal-exclusion list
+names the undotted directory (src/utils/asdf.lisp), so both are real.
+
+Skipping them is a large win, and the cost of not doing so recurs: a cold
+discovery over an 832-file bundled tree measured 620 ms without these two
+entries and 1 ms with them, and that is paid on every discovery for a
+file whose package is not yet loaded in the parent.
+
+The trade-off is that a basename matches at any depth, so a user-authored
+directory with one of these names would have the packages defined in it
+silently hidden. That is accepted here because `bundle-libs` names
+vendored output by strong convention; a more general name such as
+`software` is deliberately NOT listed for the same reason.
+
+This list is an optimization, not the correctness mechanism. Tolerating a
+file we cannot READ is the catch-all clause in %PACKAGE-SPECS-IN-FILE's
+job -- no name list can enumerate every vendoring convention.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
