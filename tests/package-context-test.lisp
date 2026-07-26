@@ -133,6 +133,33 @@
      (ok (null (find-package "CL-MCP-TEST-SYNTH-UNWIND"))
       "package deleted after non-local exit")))))
 
+(deftest discovery-survives-unreadable-vendored-file
+ (testing "discovery does not abort when a vendored file signals a plain error on read"
+  (call-with-temp-project
+   (lambda (root)
+     ;; The poison file must live OUTSIDE *PACKAGE-CONTEXT-SKIP-DIRECTORIES*,
+     ;; or the walk never reads it and this test passes with the catch-all
+     ;; clause deleted. `vendor/` is a real vendoring convention that the
+     ;; skip list deliberately does not enumerate -- the point of the
+     ;; catch-all is that the list cannot enumerate them all.
+     ;;
+     ;; No matching defpackage exists anywhere in this project either, so
+     ;; DISCOVER-PACKAGE-SPEC's FIND-IF cannot short-circuit before reaching
+     ;; the poison file.
+     (write-source root "vendor/fake-lib/impl-allegro.lisp"
+                   "#+(version>= 9) (defun guarded () nil)")
+     (ok (null (discover-package-spec "FD010-NOT-DEFINED-ANYWHERE-PKG"))
+      "returns NIL instead of signaling on the poisoned vendored file")))))
+
+(deftest package-specs-in-file-tolerates-feature-expr-error
+ (testing "%package-specs-in-file returns NIL instead of signaling on a bad feature expr"
+  (call-with-temp-project
+   (lambda (root)
+     (let ((path (write-source root ".bundle-libs/software/fake-lib/impl-allegro.lisp"
+                                "#+(version>= 9) (defun guarded () nil)")))
+       (ok (null (cl-mcp/src/package-context::%package-specs-in-file path))
+        "poison file yields NIL, no signal"))))))
+
 (deftest call-with-file-package-context-uses-text
  (testing "infers package context from inline text without re-reading disk"
   (call-with-temp-project
