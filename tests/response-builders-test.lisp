@@ -79,7 +79,7 @@
       (ok (search "macro" text))))))
 
 (deftest build-code-find-references-response-uses-caller
- (testing "summary text shows caller name when available"
+ (testing "summary text shows path:line and the caller name when available"
   (let* ((ref (make-ht "path" "/p/a.lisp" "line" 10 "type" "call"
                        "caller" "MAIN" "context" "..."))
          (refs (vector ref))
@@ -88,6 +88,11 @@
     (ok (= 1 (gethash "count" r)))
     (ok (eq t (gethash "project_only" r)))
     (ok (search "MAIN" text) "caller appears in summary")
+    ;; The line is not an alternative to the caller name: without it the row
+    ;; is neither clickable nor sortable against the caller-less rows.
+    (ok (search "/p/a.lisp:10" text) "path:line appears alongside the caller")
+    (ok (string= "/p/a.lisp:10 (used in MAIN) [call]"
+                 (string-right-trim '(#\Newline) text)))
     (ok (search "FOO" (or (gethash "symbol" r) ""))))))
 
 (deftest build-code-find-references-response-empty
