@@ -46,6 +46,20 @@
 (defparameter *text-context-lines* 5
   "Number of surrounding lines to include for text filtering with patterns.")
 
+(defvar *quasiquote-depth* 0
+  "Backquote nesting depth in effect while printing a source form.
+
+%QUASIQUOTE-PRINTER binds this to one more than its current value around the
+argument of a quasiquote; %UNQUOTE-PRINTER binds it to one less around the
+argument of an unquote.  That is the same bookkeeping the reader does, and it
+is what makes `,' and `,@' convertible only where the reader would accept
+them: at depth zero a comma is outside every backquote, which CL:READ rejects
+outright, so a cons that merely looks like reader output is printed as an
+ordinary list instead.
+
+Unlike *SOURCE-PPRINT-DISPATCH*, DEFVAR is correct here: the entire value is
+the literal 0, so nothing is lost when a reload skips the initializer.")
+
 (defun %print-homeless-symbol-name (stream name)
   "Write NAME to STREAM with case conversion honoring *PRINT-CASE*."
   (write-string (ecase *print-case*
@@ -81,13 +95,126 @@ self-references when the outer tree is walked under *PRINT-PRETTY*."
            (*print-circle* nil))
        (prin1 sym stream)))))
 
-(defvar *source-pprint-dispatch*
+(defun %print-plain-list (stream form)
+  "Print FORM as an ordinary list, recursing through the current dispatch table.
+Serves as the fallback for %QUASIQUOTE-PRINTER and %UNQUOTE-PRINTER whenever a
+cons headed by one of the Eclector backquote symbols must not be converted to
+reader syntax -- because its shape is not what the reader produces, or because
+a comma would land outside every backquote.
+PPRINT-POP handles dotted tails and honors *PRINT-LEVEL* / *PRINT-LENGTH*."
+  (pprint-logical-block (stream form :prefix "(" :suffix ")")
+    (pprint-exit-if-list-exhausted)
+    (loop (write (pprint-pop) :stream stream)
+          (pprint-exit-if-list-exhausted)
+          (write-char #\Space stream)
+          (pprint-newline :fill stream))))
+
+(defun %reader-macro-cons-p (form)
+  "Return true when FORM has the exact (SYM ARG) shape the Eclector reader builds.
+
+A cons headed by one of the Eclector backquote symbols but shaped differently
+-- no argument, extra arguments, or a dotted tail -- is source data that
+happens to start with that symbol rather than reader output, so it has to be
+printed as an ordinary list."
+  (and (consp (cdr form)) (null (cddr form))))
+
+(defun %quasiquote-printer (stream form)
+  "Pprint-dispatch handler printing (ECLECTOR.READER:QUASIQUOTE ARG) as a backquote.
+
+Eclector reads backquote syntax into plain conses headed by
+ECLECTOR.READER:QUASIQUOTE, ECLECTOR.READER:UNQUOTE and
+ECLECTOR.READER:UNQUOTE-SPLICING.  Without a handler those conses are printed
+literally, so every macro body is displayed in a shape that does not match the
+file and does not read back to the same object.
+
+A backquote is valid in any position, so this conversion is unconditional and
+only the shape is checked.  ARG is emitted with WRITE, which re-enters the
+dispatch table in effect, so nested quasiquotes render at every level.  The
+nesting depth is raised around ARG so that unquotes below it convert; see
+*QUASIQUOTE-DEPTH*.
+
+Known limitation: a list written literally as '(ECLECTOR.READER:QUASIQUOTE X)
+in the source is indistinguishable from reader output here, and is displayed
+as '`X.  That text is readable, but CL:READ turns it into an SB-INT:QUASIQUOTE
+structure rather than the Eclector symbol, so it is not the same object.
+Telling the two apart would need reader-origin information the CST does not
+carry, so it is left alone."
+  (if (%reader-macro-cons-p form)
+      (progn
+        (write-string "`" stream)
+        (let ((*quasiquote-depth* (1+ *quasiquote-depth*)))
+          (write (second form) :stream stream)))
+      (%print-plain-list stream form)))
+
+(defun %unquote-printer (prefix)
+  "Return a handler printing (SYM ARG) as PREFIX followed by ARG.
+
+PREFIX is a comma or a comma-at.  Unlike a backquote, a comma is only valid
+inside one, so the conversion applies only while *QUASIQUOTE-DEPTH* is
+positive.  At depth zero the cons is source data that merely looks like reader
+output -- for example '(ECLECTOR.READER:UNQUOTE VALUE) -- and converting it
+would emit ',VALUE, which is (QUOTE (UNQUOTE VALUE)) and which the reader
+rejects outright.  Such a cons is printed as an ordinary list instead, so the
+tool cannot emit text that fails to read back.
+
+The depth is lowered around ARG, again matching the reader: each comma
+consumes one level of backquote nesting.
+
+At a positive depth a literal '(ECLECTOR.READER:UNQUOTE X) in the source is
+still indistinguishable from reader output and is displayed as ',X.  That is
+the same residual %QUASIQUOTE-PRINTER documents, and it is harmless in the
+same way: because the depth is only positive inside the argument of a
+backquote this printer itself emitted, every comma it writes lands inside
+that backquote, so the text always reads back."
+  (lambda (stream form)
+    (if (and (plusp *quasiquote-depth*) (%reader-macro-cons-p form))
+        (progn
+          (write-string prefix stream)
+          (let ((*quasiquote-depth* (1- *quasiquote-depth*)))
+            (write (second form) :stream stream)))
+        (%print-plain-list stream form))))
+
+;;; MUST NOT become a DEFVAR.  Every dispatch entry is registered by the
+;;; initializer below, and DEFVAR leaves an already-bound variable alone, so a
+;;; DEFVAR here would strand any entry added to this table in every image that
+;;; had already loaded an older version of this file.  LOAD-SYSTEM is this
+;;; project's documented way to pick up source changes, and the test suite
+;;; cannot catch the problem because every run starts from a fresh image, so
+;;; the symptom would only ever be "the fix does nothing until you restart".
+(defparameter *source-pprint-dispatch*
   (let ((table (copy-pprint-dispatch nil)))
     (set-pprint-dispatch 'symbol #'%print-source-symbol 0 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:quasiquote))
+                         #'%quasiquote-printer 0 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:unquote))
+                         (%unquote-printer ",") 0 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:unquote-splicing))
+                         (%unquote-printer ",@") 0 table)
     table)
-  "Pprint dispatch used by %FORM->STRING and %COLLAPSE-DEF-FORM so
-homeless-due-to-teardown symbols render without `#:' while genuine
-uninterned symbols retain their prefix. See %PRINT-SOURCE-SYMBOL.")
+  "Pprint dispatch used by %FORM->STRING and %COLLAPSE-DEF-FORM.
+
+Must stay a DEFPARAMETER; see the comment above the form.
+
+Symbols go through %PRINT-SOURCE-SYMBOL so homeless-due-to-teardown symbols
+render without `#:' while genuine uninterned source symbols keep theirs.
+
+Conses headed by the three Eclector backquote symbols go through
+%QUASIQUOTE-PRINTER and %UNQUOTE-PRINTER so a macro body is displayed with the
+backquote, `,' and `,@' reader syntax that appears in the file instead of the
+expanded cons form Eclector reads it into.
+
+(COPY-PPRINT-DISPATCH NIL) returns a copy of the *initial* value of
+*PRINT-PPRINT-DISPATCH*, not an empty table, and that is deliberate: the
+inherited standard entries are what keep PPRINT-QUOTE abbreviating (QUOTE X)
+to 'X and PPRINT-DEFUN laying out definitions.  The four entries here are
+overrides, not the whole table.  The SYMBOL entry displaces the default
+symbol printer, and each CONS entry names one head symbol, so it displaces
+SB-PRETTY::PPRINT-CALL-FORM for that head alone and leaves every other
+standard entry intact.
+
+Both readers of this variable, %FORM->STRING and %COLLAPSE-DEF-FORM, bind
+*PRINT-PPRINT-DISPATCH* to its value at call time, so a rebuilt table takes
+effect on the next call; nothing captures the table object across a reload.")
 
 (defun lisp-source-path-p (path)
   "Return T when PATH designator refers to a Lisp source file by extension."

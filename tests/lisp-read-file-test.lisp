@@ -578,3 +578,228 @@
           (ok msg "should signal an error on unbalanced parens")
           (ok (search "lisp-check-parens" msg)
               "error message should mention lisp-check-parens"))))))
+
+(defun %strip-line-numbers (content)
+  "Return CONTENT with the \"NNN: \" prefix that expanded forms carry removed."
+  (with-output-to-string (out)
+    (with-input-from-string (in content)
+      (loop for line = (read-line in nil nil)
+            while line
+            do (multiple-value-bind (start end) (scan "^ *\\d+: " line)
+                 (declare (ignore start))
+                 (write-line (if end (subseq line end) line) out))))))
+
+(deftest lisp-read-file-renders-backquote-reader-syntax
+  (testing "macro bodies render with backquote, comma and comma-at"
+    (with-temp-lisp-file
+     "tests/tmp/backquote-render.lisp"
+     (format nil "~A~%~A~%"
+             "(defmacro bq-render-demo (a b &body forms)"
+             "  `(let ((,a ,b)) ,@forms))")
+     (lambda (path)
+       (let ((content (gethash "content"
+                               (lisp-read-file path
+                                               :name-pattern "^bq-render-demo$"))))
+         (ok (search "`(let" content)
+             "quasiquote must render as a backquote")
+         (ok (search "(,a ,b)" content)
+             "unquote must render as a comma")
+         (ok (search ",@forms" content)
+             "unquote-splicing must render as ,@")
+         (ok (not (search "eclector.reader" content))
+             "no eclector.reader symbol may leak into the display"))))))
+
+(deftest lisp-read-file-renders-nested-backquote
+  (testing "a nested quasiquote renders with reader syntax at both levels"
+    (with-temp-lisp-file
+     "tests/tmp/backquote-nested.lisp"
+     (format nil "~A~%~A~%"
+             "(defmacro bq-nested-demo (c)"
+             "  `(a `(b ,c)))")
+     (lambda (path)
+       (let ((content (gethash "content"
+                               (lisp-read-file path
+                                               :name-pattern "^bq-nested-demo$"))))
+         (ok (search "`(a `(b ,c))" content)
+             "the inner quasiquote must also use reader syntax")
+         (ok (not (search "eclector.reader" content))
+             "no eclector.reader symbol may leak into the display"))))))
+
+(deftest lisp-read-file-backquote-round-trips
+  (testing "rendered macro text reads back to the object the source reads to"
+    (let ((source (format nil "~A~%~A~%~A~%"
+                          "(defmacro bq-round-trip-demo (a b &body forms)"
+                          "  `(let ((,a ,b))"
+                          "     ,@forms))")))
+      (with-temp-lisp-file
+       "tests/tmp/backquote-round-trip.lisp" source
+       (lambda (path)
+         (let* ((content (gethash "content"
+                                  (lisp-read-file
+                                   path :name-pattern "^bq-round-trip-demo$")))
+                (rendered (%strip-line-numbers content)))
+           ;; Eclector's reader carries the primary assertion because it
+           ;; yields plain conses that EQUAL can compare. CL:READ builds
+           ;; SB-INT:COMMA structures, which EQUAL compares by identity,
+           ;; so the CL:READ leg uses EQUALP instead.
+           (ok (equal (eclector.reader:read-from-string rendered)
+                      (eclector.reader:read-from-string source))
+               "rendered text must read back to the same form as the source")
+           (ok (equalp (read-from-string rendered)
+                       (read-from-string source))
+               "rendered text must read back identically under CL:READ too")))))))
+
+(deftest lisp-read-file-malformed-backquote-cons-does-not-signal
+  (testing "a literal list headed by a backquote symbol prints as a list"
+    (let ((source (format nil "~A~%~A~%~A~%~A~%~A~%"
+                          "(defparameter *bq-malformed-demo*"
+                          "  '((eclector.reader:quasiquote)"
+                          "    (eclector.reader:quasiquote a b)"
+                          "    (eclector.reader:unquote . tail)"
+                          "    (eclector.reader:unquote-splicing a b)))")))
+      (with-temp-lisp-file
+       "tests/tmp/backquote-malformed.lisp" source
+       (lambda (path)
+         (let ((result (handler-case (lisp-read-file
+                                      path :name-pattern "bq-malformed-demo")
+                         (error (e) e))))
+           (ok (hash-table-p result)
+               "malformed backquote conses must not signal")
+           (when (hash-table-p result)
+             (let ((rendered (%strip-line-numbers (gethash "content" result))))
+               (ok (search "quasiquote" rendered)
+                   "malformed conses fall back to ordinary list printing")
+               (ok (equal (eclector.reader:read-from-string rendered)
+                          (eclector.reader:read-from-string source))
+                   "malformed conses must still round-trip")))))))))
+
+(defun %render-definition (relative source name-pattern)
+  "Write SOURCE to RELATIVE, expand NAME-PATTERN, and return the rendered text.
+Line-number prefixes are stripped so the result can be read back."
+  (with-temp-lisp-file
+   relative source
+   (lambda (path)
+     (%strip-line-numbers
+      (gethash "content" (lisp-read-file path :name-pattern name-pattern))))))
+
+(defparameter *literal-unquote-source*
+  "(defparameter *bq-literal-unquote-demo*
+  '(eclector.reader:unquote value))
+"
+  "A top-level literal whose head is an Eclector reader symbol but which is
+not reader output: no backquote encloses it, so it must print as a list.")
+
+(deftest lisp-read-file-literal-unquote-list-is-not-converted
+  (testing "an unquote list outside any backquote keeps its list form"
+    (let ((rendered (%render-definition "tests/tmp/backquote-literal-unquote.lisp"
+                                        *literal-unquote-source*
+                                        "^\\*bq-literal-unquote-demo\\*$")))
+      (ok (search "eclector.reader:unquote" rendered)
+          "the literal list must still show the Eclector symbol")
+      (ok (not (search "'," rendered))
+          "',VALUE is (QUOTE (UNQUOTE VALUE)) and must never be emitted"))))
+
+(deftest lisp-read-file-literal-unquote-list-reads-back
+  (testing "the rendered literal unquote list is readable"
+    ;; This is the property the bug violated: the tool emitted ',VALUE, which
+    ;; CL:READ rejects with "Comma not inside a backquote". Asserting on the
+    ;; text alone would not have caught a different unreadable spelling, so
+    ;; readability is asserted directly.
+    (let ((rendered (%render-definition "tests/tmp/backquote-literal-readback.lisp"
+                                        *literal-unquote-source*
+                                        "^\\*bq-literal-unquote-demo\\*$")))
+      (ok (handler-case (progn (read-from-string rendered) t)
+            (error () nil))
+          "rendered text must read back without signalling")
+      (ok (equal (eclector.reader:read-from-string rendered)
+                 (eclector.reader:read-from-string *literal-unquote-source*))
+          "and must read back to the object the source reads to"))))
+
+(deftest lisp-read-file-unquote-converts-only-inside-a-backquote
+  (testing "commas convert inside a backquote and not in data below one"
+    ;; The same macro exercises both sides of the rule: `,A', `,B' and
+    ;; `,@FORMS' sit at depth 1 and must convert, while the quoted list under
+    ;; `,(list ...)' sits back at depth 0 -- one comma consumed one level --
+    ;; and must not.
+    (let* ((source "(defmacro bq-scope-demo (a b &body forms)
+  `(let ((,a ,b))
+     ,@forms
+     ,(list '(eclector.reader:unquote raw))))
+")
+           (rendered (%render-definition "tests/tmp/backquote-scope.lisp"
+                                         source "^bq-scope-demo$")))
+      (ok (search "`(let" rendered)
+          "quasiquote must render as a backquote")
+      (ok (search "(,a ,b)" rendered)
+          "unquote inside the backquote must render as a comma")
+      (ok (search ",@forms" rendered)
+          "unquote-splicing inside the backquote must render as ,@")
+      (ok (search "'(eclector.reader:unquote raw)" rendered)
+          "the literal below a comma is back at depth 0 and must not convert")
+      (ok (equal (eclector.reader:read-from-string rendered)
+                 (eclector.reader:read-from-string source))
+          "the whole rendering must read back to the source object"))))
+
+(deftest lisp-read-file-nested-quasiquote-tracks-depth
+  (testing "a doubly nested quasiquote converts at both levels"
+    ;; ``(A ,,C) reaches depth 2, so both commas are inside a backquote and
+    ;; both must convert. A boolean "inside a quasiquote" flag would also pass
+    ;; this; the depth is what also makes the depth-0 case above pass.
+    (let* ((source "(defmacro bq-depth-demo (c)
+  ``(a ,,c))
+")
+           (rendered (%render-definition "tests/tmp/backquote-depth.lisp"
+                                         source "^bq-depth-demo$")))
+      (ok (search "``(a ,,c)" rendered)
+          "both quasiquote levels and both commas must use reader syntax")
+      (ok (not (search "eclector.reader" rendered))
+          "no eclector.reader symbol may leak into the display")
+      (ok (equal (eclector.reader:read-from-string rendered)
+                 (eclector.reader:read-from-string source))
+          "the rendering must read back to the source object"))))
+
+(deftest source-pprint-dispatch-is-rebuilt-on-reload
+  (testing "reloading the source file re-registers the dispatch entries"
+    ;; *SOURCE-PPRINT-DISPATCH* registers every entry in its initializer, so it
+    ;; must not be a DEFVAR: DEFVAR leaves an already-bound variable alone, and
+    ;; an image that had loaded an older version of the file would keep the old
+    ;; table and silently ignore the new entries until a full restart.
+    ;;
+    ;; No other test can see this, because every test run starts from a fresh
+    ;; image where the variable is unbound and DEFVAR and DEFPARAMETER behave
+    ;; identically. So the pre-reload state is set up explicitly: install a
+    ;; table that lacks the backquote entries -- standing in for the older
+    ;; version -- and then reload the source file.
+    ;;
+    ;; The reload is a plain LOAD rather than (ASDF:LOAD-SYSTEM ... :FORCE T).
+    ;; The umbrella suite runs inside ASDF:OPERATE (test-op), and ASDF refuses
+    ;; :FORCE in a nested OPERATE call, so the load-system spelling passes
+    ;; under `rove tests/lisp-read-file-test.lisp' and errors under
+    ;; `rove cl-mcp.asd'.  LOAD re-evaluates every top-level form in the file,
+    ;; which is precisely the DEFPARAMETER-vs-DEFVAR distinction under test.
+    (let ((saved cl-mcp/src/lisp-read-file::*source-pprint-dispatch*)
+          (form (list 'eclector.reader:quasiquote
+                      (list 'a (list 'eclector.reader:unquote 'b)))))
+      (unwind-protect
+           (progn
+             (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch*
+                   (copy-pprint-dispatch nil))
+             (let ((stale (cl-mcp/src/lisp-read-file::%form->string form)))
+               (ok (search "eclector.reader" stale)
+                   "precondition: the stale table renders the raw cons"))
+             (let ((*standard-output* (make-broadcast-stream))
+                   (*error-output* (make-broadcast-stream)))
+               (handler-bind ((warning
+                                (lambda (c)
+                                  (let ((restart (find-restart 'muffle-warning c)))
+                                    (when restart (invoke-restart restart))))))
+                 (load (asdf:system-relative-pathname
+                        "cl-mcp" "src/lisp-read-file.lisp"))))
+             (let ((reloaded (cl-mcp/src/lisp-read-file::%form->string form)))
+               (ok (not (search "eclector.reader" reloaded))
+                   "the reload must re-register the backquote entries")
+               (ok (search "`" reloaded)
+                   "quasiquote must render as a backquote again")
+               (ok (search "," reloaded)
+                   "unquote must render as a comma again")))
+        (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch* saved)))))
