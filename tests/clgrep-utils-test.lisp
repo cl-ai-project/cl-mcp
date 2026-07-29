@@ -287,7 +287,34 @@ Final line
       (ok (string= "in-package" (cdr (assoc :type result))))
       (ok (string= "#:foo" (cdr (assoc :name result)))))
     ;; Clearly not a definition: the head token parses but is rejected.
-    (ok (null (extract-form-type-and-name "(let ((x 1)) x)")))))
+    (ok (null (extract-form-type-and-name "(let ((x 1)) x)"))))
+  (testing "should classify package-qualified defining macro heads"
+    ;; A DSL macro reached through its package. The qualifier is dropped so the
+    ;; type equals what a caller filters on and what %DEFINITION-NAMES reports
+    ;; for the same form -- it reads the head as a symbol, so it only ever sees
+    ;; the SYMBOL-NAME.
+    (let ((result (extract-form-type-and-name
+                   "(routes:define-rule non-empty (s) \"doc\" (plusp (length s)))")))
+      (ok (string= "define-rule" (cdr (assoc :type result))))
+      (ok (string= "non-empty" (cdr (assoc :name result)))))
+    ;; Internal symbol, double colon.
+    (let ((result (extract-form-type-and-name "(routes::defthing foo 1)")))
+      (ok (string= "defthing" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result)))))
+    ;; This repository's own .asd files use a qualified head.
+    (let ((result (extract-form-type-and-name
+                   "(asdf:defsystem \"cl-mcp\" :class :package-inferred-system)")))
+      (ok (string= "defsystem" (cdr (assoc :type result))))
+      (ok (string= "\"cl-mcp\"" (cdr (assoc :name result)))))
+    ;; A whitelist entry reached through its package classifies too.
+    (let ((result (extract-form-type-and-name "(cl:defun foo (x) x)")))
+      (ok (string= "defun" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result)))))
+    ;; A qualified head that is not a definition is still rejected.
+    (ok (null (extract-form-type-and-name "(routes:apply-rules x)")))
+    ;; A keyword head is not a package qualifier: .asd component forms such as
+    ;; (:file \"main\") must keep parsing as non-definitions.
+    (ok (null (extract-form-type-and-name "(:file \"main\")")))))
 
 (deftest test-semantic-grep-form-type-filter
   (testing "should filter results by form type"
@@ -320,8 +347,10 @@ Final line
   "A DSL-style source file whose top-level forms use a user-defined
    defining macro that is not in *KNOWN-FORM-TYPES*.")
 
-(defmacro with-temp-dsl-project ((var) &body body)
-  "Create a temp directory holding one DSL source file, bind its path to VAR."
+(defmacro with-temp-dsl-project ((var &optional (content '*dsl-file-content*))
+                                 &body body)
+  "Create a temp directory holding CONTENT as one DSL source file.
+   Binds the directory pathname to VAR, executes BODY, then cleans up."
   `(let ((,var (uiop:ensure-directory-pathname
                 (merge-pathnames
                  (format nil "clgrep-dsl-~A-~A/"
@@ -332,7 +361,7 @@ Final line
            (ensure-directories-exist ,var)
            (with-open-file (out (merge-pathnames "rules.lisp" ,var)
                                 :direction :output :if-exists :supersede)
-             (write-string *dsl-file-content* out))
+             (write-string ,content out))
            ,@body)
        (when (uiop:directory-exists-p ,var)
          (uiop:delete-directory-tree ,var :validate t)))))
@@ -366,6 +395,51 @@ Final line
       (ok (null (semantic-grep dir "probe-value"
                                :form-types '("define-endpoint")
                                :include-form nil))))))
+
+(defparameter *qualified-dsl-file-content*
+  "(in-package #:clgrep-dsl-demo)
+
+(routes:define-rule non-empty (s)
+  \"value must be a non-empty string\"
+  (probe-value s))
+
+(routes::define-endpoint probe (s)
+  (probe-value s))
+
+(defun probe-value (s)
+  (and (stringp s) (plusp (length s))))
+"
+  "A DSL-style source file whose defining macros are reached through their
+   package, the way a caller outside the DSL's package must write them.")
+
+(deftest test-semantic-grep-package-qualified-form-type
+  (with-temp-dsl-project (dir *qualified-dsl-file-content*)
+    (testing "package-qualified defining macros are classified, not NIL"
+      (let ((results (semantic-grep dir "probe-value" :include-form nil)))
+        (ok (= 3 (length results)))
+        (ok (every (lambda (r) (cdr (assoc :form-type r))) results)
+            "no result has a NIL form-type")))
+    (testing "form-types matches the unqualified type name"
+      ;; The caller filters on DEFINE-RULE, not ROUTES:DEFINE-RULE: the
+      ;; qualifier is a property of the call site, not of the form's type.
+      (let ((results (semantic-grep dir "probe-value"
+                                    :form-types '("define-rule")
+                                    :include-form nil)))
+        (ok (= 1 (length results)))
+        (ok (string= "define-rule" (cdr (assoc :form-type (first results)))))
+        (ok (string= "non-empty" (cdr (assoc :form-name (first results)))))))
+    (testing "a double-colon head classifies the same way"
+      (let ((results (semantic-grep dir "probe-value"
+                                    :form-types '("define-endpoint")
+                                    :include-form nil)))
+        (ok (= 1 (length results)))
+        (ok (string= "probe" (cdr (assoc :form-name (first results)))))))
+    (testing "an unqualified head in the same file is unaffected"
+      (let ((results (semantic-grep dir "probe-value"
+                                    :form-types '("defun")
+                                    :include-form nil)))
+        (ok (= 1 (length results)))
+        (ok (string= "probe-value" (cdr (assoc :form-name (first results)))))))))
 
 (deftest test-extract-form-signature
   (testing "should extract signatures from various form types"
