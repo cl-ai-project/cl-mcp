@@ -769,7 +769,14 @@ not reader output: no backquote encloses it, so it must print as a list.")
     ;; image where the variable is unbound and DEFVAR and DEFPARAMETER behave
     ;; identically. So the pre-reload state is set up explicitly: install a
     ;; table that lacks the backquote entries -- standing in for the older
-    ;; version -- and then reload the file the way the load-system tool does.
+    ;; version -- and then reload the source file.
+    ;;
+    ;; The reload is a plain LOAD rather than (ASDF:LOAD-SYSTEM ... :FORCE T).
+    ;; The umbrella suite runs inside ASDF:OPERATE (test-op), and ASDF refuses
+    ;; :FORCE in a nested OPERATE call, so the load-system spelling passes
+    ;; under `rove tests/lisp-read-file-test.lisp' and errors under
+    ;; `rove cl-mcp.asd'.  LOAD re-evaluates every top-level form in the file,
+    ;; which is precisely the DEFPARAMETER-vs-DEFVAR distinction under test.
     (let ((saved cl-mcp/src/lisp-read-file::*source-pprint-dispatch*)
           (form (list 'eclector.reader:quasiquote
                       (list 'a (list 'eclector.reader:unquote 'b)))))
@@ -786,7 +793,8 @@ not reader output: no backquote encloses it, so it must print as a list.")
                                 (lambda (c)
                                   (let ((restart (find-restart 'muffle-warning c)))
                                     (when restart (invoke-restart restart))))))
-                 (asdf:load-system "cl-mcp/src/lisp-read-file" :force t)))
+                 (load (asdf:system-relative-pathname
+                        "cl-mcp" "src/lisp-read-file.lisp"))))
              (let ((reloaded (cl-mcp/src/lisp-read-file::%form->string form)))
                (ok (not (search "eclector.reader" reloaded))
                    "the reload must re-register the backquote entries")
