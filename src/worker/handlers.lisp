@@ -37,7 +37,8 @@
                 #:build-code-find-response
                 #:build-code-describe-response
                 #:build-code-find-references-response
-                #:build-inspect-response)
+                #:build-inspect-response
+                #:expand-and-build-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
@@ -227,6 +228,45 @@ define-tool \"inspect-object\"."
       (build-inspect-response inspection-result))))
 
 ;;; ---------------------------------------------------------------------------
+;;; worker/macroexpand
+;;; ---------------------------------------------------------------------------
+
+(defun %handle-macroexpand (params)
+  "Expand macro forms.  Returns the same structure as define-tool
+\"lisp-macroexpand\".
+
+PARAMS carries \"forms\", a JSON array (so: a vector) of objects with
+\"label\" and \"source\" keys.  The parent has already located the forms
+and extracted their source text; this handler only re-reads that text in
+the real, loaded package and expands it.
+
+\"sub_form\" carries the parent's sub_form argument, purely so a NOT
+EXPANDED result can mention that sub-form matching is positional-blind.
+Only its presence matters here; the parent already did the matching."
+  (let ((forms (gethash "forms" params))
+        (package (gethash "package" params))
+        (level (or (gethash "level" params) "once"))
+        (readtable (gethash "readtable" params))
+        (note (gethash "note" params))
+        (sub-form (gethash "sub_form" params)))
+    (unless (and forms (plusp (length forms)))
+      (error "forms is required"))
+    (let ((entries (map 'list
+                        (lambda (form)
+                          (cons (gethash "label" form) (gethash "source" form)))
+                        forms)))
+      (expand-and-build-response
+       entries
+       :package package
+       :level level
+       :readtable readtable
+       :print-level (gethash "print_level" params)
+       :print-length (gethash "print_length" params)
+       :max-output-length (gethash "max_output_length" params)
+       :note note
+       :sub-form-p (and sub-form t)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; worker/set-project-root
 ;;; ---------------------------------------------------------------------------
 
@@ -273,8 +313,9 @@ Returns a success payload."
   (register-method server "worker/code-describe" #'%handle-code-describe)
   (register-method server "worker/code-find-references" #'%handle-code-find-references)
   (register-method server "worker/inspect-object" #'%handle-inspect-object)
+  (register-method server "worker/macroexpand" #'%handle-macroexpand)
   (register-method server "worker/set-project-root" #'%handle-set-project-root)
   (register-method server "worker/init-start" #'handle-init-start)
   (register-method server "worker/init-status" #'handle-init-status)
-  (log-event :info "worker.handlers.registered" "count" 10)
+  (log-event :info "worker.handlers.registered" "count" 11)
   server)

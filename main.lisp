@@ -19,6 +19,8 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-patch-form
                 #:lisp-patch-form)
+  (:import-from #:cl-mcp/src/lisp-macroexpand
+                #:lisp-macroexpand)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
   (:import-from #:cl-mcp/src/code
@@ -96,6 +98,7 @@
            #:*project-root*
            #:lisp-edit-form
            #:lisp-patch-form
+           #:lisp-macroexpand
            #:lisp-check-parens
            ;; Code intelligence
            #:code-find-definition

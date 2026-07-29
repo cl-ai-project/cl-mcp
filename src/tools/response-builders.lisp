@@ -7,7 +7,7 @@
 (defpackage #:cl-mcp/src/tools/response-builders
   (:use #:cl)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:text-content)
+                #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/object-registry
                 #:inspectable-p #:register-object)
   (:import-from #:cl-mcp/src/inspect
@@ -15,6 +15,12 @@
                 #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
+  (:import-from #:cl-mcp/src/macroexpand-core
+                #:macroexpand-forms
+                #:macroexpand-package-error
+                #:*backquote-template-marker*
+                #:*shadowed-binding-marker*)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
   (:import-from #:cl-mcp/src/frame-inspector
@@ -25,7 +31,9 @@
            #:build-code-find-response
            #:build-code-describe-response
            #:build-code-find-references-response
-           #:build-inspect-response))
+           #:build-inspect-response
+           #:build-macroexpand-response
+           #:expand-and-build-response))
 
 (in-package #:cl-mcp/src/tools/response-builders)
 
@@ -365,3 +373,159 @@ Returns a response with content added, or an isError payload."
         (setf (gethash "content" inspection-result)
               (text-content (format-inspect-elements inspection-result)))
         inspection-result)))
+
+(defun %macroexpand-result->ht (result)
+  "Convert one MACROEXPAND-FORMS plist into a JSON-ready hash-table."
+  (make-ht "label" (getf result :label)
+           "printed" (getf result :printed)
+           "expanded" (json-bool (getf result :expanded-p))
+           "steps" (getf result :steps)
+           "steps_capped" (json-bool (getf result :steps-capped-p))
+           "truncated" (json-bool (getf result :truncated-p))
+           "error" (getf result :error)))
+
+(defun %expansion-summary (result level)
+  "Return the one-line status shown above an expanded RESULT at LEVEL.
+
+Hitting the step limit must be loud: the form below it is still a macro
+call, and rendering that as a finished expansion would mislead the caller
+into thinking the macro bottomed out.  Level \"all\" reports no step
+count because it walks the whole tree rather than stepping the head."
+  (cond
+    ((getf result :steps-capped-p)
+     (format nil "STOPPED at the ~D-step expansion limit: the result below is ~
+STILL A MACRO CALL, not a fully expanded form"
+             (getf result :steps)))
+    ((string-equal level "all")
+     "expanded (full code walk)")
+    (t
+     (format nil "expanded in ~D step~:P" (getf result :steps)))))
+
+(defun %format-macroexpand-text (results level package note sub-form-p)
+  "Render RESULTS as the agent-facing content text.
+Everything a caller needs must appear here: MCP clients display only
+content[].text, so anything left in a sibling JSON field is invisible.
+
+SUB-FORM-P is true when the request addressed nested calls with sub_form.
+It is threaded in from the caller rather than inferred from the label.
+The two label shapes do differ -- \"name (file line N)\" for a sub-form
+match against \"type name (file line N)\" for a whole form -- but telling
+them apart on that basis would misfire on any form_name containing a
+space, such as \"(setf foo)\" or a defmethod written with specializers.
+
+*SHADOWED-BINDING-MARKER* is explained on both the expanded and the NOT
+EXPANDED path, with different wording: on the first the expansion shown
+is the global definition and is not what the compiler sees, while on the
+second there is nothing to expand at all."
+  (with-output-to-string (stream)
+    (format stream "lisp-macroexpand (level: ~A, package: ~A)~%"
+            (or level "once")
+            (or package "COMMON-LISP-USER"))
+    (when note
+      (format stream "~A~%" note))
+    (loop for result in results
+          for index from 1
+          for label = (getf result :label)
+          for shadowed = (and label (search *shadowed-binding-marker* label))
+          do (format stream "~%[~D] ~A~%" index (or label "form"))
+             (cond
+               ((getf result :error)
+                (format stream "ERROR: ~A~%" (getf result :error))
+                ;; Said only on the failing path.  A template fragment with no
+                ;; commas in it reads and expands perfectly well, so attaching
+                ;; this to the label instead would be wrong for those.
+                (when (and label (search *backquote-template-marker* label))
+                  (format stream
+                          "This match is a fragment of a backquote template: ~
+its commas have no enclosing backquote, so the fragment cannot be read on ~
+its own. Expand the enclosing macro instead.~%")))
+               ((not (getf result :expanded-p))
+                ;; A shadowed match gets its own diagnosis, replacing both
+                ;; stock lines rather than joining them.  "Load its system"
+                ;; is wrong -- an FLET/LABELS binding is a function and has
+                ;; no expansion at any load state -- and the positional-blind
+                ;; guess is exactly what the shadow detection already ruled
+                ;; out, so printing them here would contradict this line.
+                (if shadowed
+                    (format stream
+                            "NOT EXPANDED: an enclosing macrolet, ~
+symbol-macrolet, flet or labels binds this name and no macro by that name is ~
+defined in this image, so there is nothing to expand. An flet or labels ~
+binding is a function, not a macro; a macrolet binding is a macro, but it is ~
+not reachable from the null lexical environment expansion runs in.~%")
+                    (progn
+                      (format stream
+                              "NOT EXPANDED: the head of this form has no macro ~
+definition in this image. If you expected a macro, load its system with ~
+'load-system' first.~%")
+                      (when sub-form-p
+                        (format stream
+                                "sub_form matching is also positional-blind: this ~
+may be a binding position -- the variable of a let binding pair, say -- rather ~
+than a call. Binding pairs of macrolet, symbol-macrolet, flet and labels are ~
+the detected cases, and are skipped before they get here.~%"))))
+                (format stream "~A~%" (getf result :printed)))
+               (t
+                (format stream "~A~A~%"
+                        (%expansion-summary result level)
+                        (if (getf result :truncated-p) " (truncated)" ""))
+                ;; Said on the SUCCESSFUL path, before the expansion rather
+                ;; than after it: the expansion below is real output of a real
+                ;; macro, and without this line it reads as the answer.  It is
+                ;; the answer for the global definition only.
+                (when shadowed
+                  (format stream
+                          "WARNING: an enclosing macrolet, symbol-macrolet, ~
+flet or labels binds this name, so the expansion below came from the GLOBAL ~
+definition and is NOT what the compiler sees here. Expansion always uses a ~
+null lexical environment; the local definition cannot be reached.~%"))
+                (format stream "~A~%" (getf result :printed)))))))
+
+(defun build-macroexpand-response (results &key level package note sub-form-p)
+  "Build the standard lisp-macroexpand response hash-table.
+RESULTS is the list of plists returned by MACROEXPAND-FORMS.  NOTE is an
+optional advisory line (for example, that the sub-form match list was
+capped) that must be visible to the caller.  SUB-FORM-P says whether the
+request came in through sub_form, which changes how a NOT EXPANDED result
+is explained."
+  (let ((payload (make-ht "content" (text-content
+                                     (%format-macroexpand-text results level
+                                                               package note
+                                                               sub-form-p))
+                          "level" (or level "once")
+                          "package" package
+                          "note" note
+                          "count" (length results)
+                          "expansions" (map 'vector #'%macroexpand-result->ht
+                                            results))))
+    (when (some (lambda (result) (getf result :error)) results)
+      (setf (gethash "isError" payload) t))
+    payload))
+
+(defun expand-and-build-response (entries &key package level readtable
+                                               print-level print-length
+                                               max-output-length note
+                                               sub-form-p)
+  "Expand ENTRIES and build the lisp-macroexpand response payload.
+
+Shared by the worker handler and the parent's inline fallback so the two
+paths cannot produce different shapes.  An absent package short-circuits
+to the minimal {content, isError} payload rather than a full response,
+because there is nothing to report per entry.
+
+SUB-FORM-P is a request-level flag, not a per-entry one: sub_form yields
+only sub-form entries and its absence yields exactly one whole-form or
+code entry, so the two never mix within a single call."
+  (handler-case
+      (build-macroexpand-response
+       (macroexpand-forms entries
+                          :package package
+                          :level level
+                          :readtable readtable
+                          :print-level print-level
+                          :print-length print-length
+                          :max-output-length max-output-length)
+       :level level :package package :note note :sub-form-p sub-form-p)
+    (macroexpand-package-error (condition)
+      (make-ht "content" (text-content (princ-to-string condition))
+               "isError" t))))

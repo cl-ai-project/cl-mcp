@@ -129,6 +129,7 @@ on large outputs)."
           (*print-escape* t)
           (*print-gensym* t)
           (*print-array* t)
+          (*print-pretty* t)
           (*read-default-float-format* 'single-float))
       (let ((*standard-output* stdout)
             (*error-output* stderr)
@@ -146,9 +147,12 @@ on large outputs)."
                       &key locals-preview-frames locals-preview-max-depth
                            locals-preview-max-elements locals-preview-skip-internal)
   "Evaluate INPUT and return (values printed raw-value stdout stderr error-context).
+PRINTED is rendered relative to the resolved eval package, in lower case and
+pretty-printed at a 100-column margin, so it reads as source.
 ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
         (error-context nil)
+        (eval-package nil)
         (stdout (make-string-output-stream))
         (stderr (make-string-output-stream)))
     (handler-bind ((warning (lambda (w)
@@ -203,6 +207,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                       (%truncate-output (get-output-stream-string stderr) max-output-length)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
+        (setf eval-package pkg)
         (let ((forms (handler-case
                          (let ((*package* pkg)) (%read-all input (not safe-read)))
                        (end-of-file (e)
@@ -220,9 +225,19 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                            :restarts nil
                                            :frames nil))))))))
           (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
-    (let ((*print-level* print-level)
+    ;; This block is a SIBLING of the HANDLER-BIND above, not nested inside
+    ;; it, so PKG's binding has already unwound by the time we get here and
+    ;; *PACKAGE* is whatever the caller had.  EVAL-PACKAGE carries the
+    ;; resolved package across that boundary; without it every symbol prints
+    ;; fully package-qualified relative to the caller.  Every error path
+    ;; RETURN-FROMs before reaching here, so EVAL-PACKAGE is always set.
+    (let ((*package* eval-package)
+          (*print-level* print-level)
           (*print-length* print-length)
           (*print-readably* nil)
+          (*print-case* :downcase)
+          (*print-pretty* t)
+          (*print-right-margin* 100)
           (*print-circle* t))
       (values (%truncate-output (prin1-to-string last-value) max-output-length)
               last-value
@@ -277,7 +292,8 @@ the result as success -- completed work is never discarded as a timeout."
   "Evaluate INPUT (a string of one or more s-expressions) in PACKAGE.
 
 Forms are read as provided and evaluated sequentially; the last value is
-returned as a printed string per `prin1-to-string`. The second return value is
+returned as a printed string per `prin1-to-string`, rendered relative to
+PACKAGE in lower case and pretty-printed at a 100-column margin. The second return value is
 the raw last value for callers that want it. The third and fourth values capture
 stdout and stderr produced during evaluation. The fifth value is a structured
 error context plist when an error occurred, NIL otherwise.
