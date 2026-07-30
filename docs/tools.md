@@ -228,6 +228,7 @@ Dry-run output (when `dry_run` is true):
 - `would_change` (boolean): whether the operation would modify the file
 - `original` (string): the matched form text before changes
 - `preview` (string): full file preview with changes applied
+- `preview_form` (string): just the edited form after changes, or `"(form removed)"` for `delete`. This is what the human-readable summary shows; `preview` holds the whole file and is not inlined into the summary, so a dry-run against a large file no longer returns the file twice.
 - `parinfer_warning` (string, optional): auto-repair warning when closing delimiters are added
 - `content`: human-readable summary
 
@@ -426,6 +427,9 @@ Input:
 - `author` (string, optional): `.asd` `:author`. No newlines. Defaults to `"Unknown"`.
 - `license` (string, optional): `.asd` `:license`. No newlines. Defaults to `"MIT"`.
 - `destination` (string, optional): parent directory under project root where `<name>/` is created. No absolute paths, no `..` traversal. Defaults to `"scaffolds"`.
+- `overwrite` (boolean, optional): replace an existing scaffold directory. Defaults to `false`. Only directories cl-mcp itself generated may be replaced — see Behavior below.
+
+`description`, `author` and `license` are interpolated into Lisp string literals in the generated `.asd`, so double quotes and backslashes are rejected along with newlines.
 
 Output fields (on success):
 - `created` (boolean): always `true` on success
@@ -433,6 +437,8 @@ Output fields (on success):
 - `absolute_path` (string): fully qualified path
 - `files` (array of strings): relative file paths written, in manifest order
 - `next_steps` (array of strings): human-readable REPL commands to register the system with ASDF, load it, run its tests, and edit it via `lisp-edit-form`
+
+The generated directory also contains a `.cl-mcp-scaffold` marker file recording the generator, the project name and the manifest. It is what `overwrite` checks for.
 
 Output on failure:
 - `created` (boolean): `false`
@@ -442,10 +448,16 @@ Behavior:
 - Runs inline in the parent process alongside other `fs-*` tools.
 - Atomically writes to a `.tmp-project-scaffold-<uuid>/` directory under the
   destination, then renames on success. Failed generations leave no artifact.
-- Fails if the target directory already exists; choose a unique `name` per call
-  rather than relying on overwrite semantics.
-- Does NOT automatically load or switch project root. The caller runs the
-  returned `next_steps` via `repl-eval` / `load-system` / `run-tests`.
+- Fails if the target directory already exists and `overwrite` is false.
+- With `overwrite: true`, replaces the target only if it carries the
+  `.cl-mcp-scaffold` marker; any other directory is refused untouched, so the
+  tool can never delete work it did not generate. The old tree is renamed aside
+  and removed only after the new one is committed. Scaffolds generated before
+  v2.3.0 have no marker and must be deleted manually.
+- Does NOT load or register the generated `.asd`, and does not switch project
+  root. Loading generated code in the parent process would escape worker
+  isolation; `load-system` registers the system in the worker instead. The
+  caller runs the returned `next_steps`.
 - Generated scaffolds live under `<project-root>/scaffolds/<name>/` and are
   accessible to every cl-mcp tool (read, edit, grep, eval) without changing
   `project-root`.

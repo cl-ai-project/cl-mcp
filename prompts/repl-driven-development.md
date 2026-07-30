@@ -115,7 +115,7 @@ the worker image has the macro's definition loaded.
 - `old_text` must be exact (whitespace-sensitive) and match exactly once within the form
 - Fails immediately if patch breaks form structure (no changes written)
 
-**Dry-run**: Both tools support `dry_run: true` to preview without writing. Returns `would_change`, `original`, `preview`, `file_path`, `operation`. Use `dry_run: true` first for complex replacements to verify the match before applying.
+**Dry-run**: Both tools support `dry_run: true` to preview without writing. Returns `would_change`, `original`, `preview`, `file_path`, `operation`; `lisp-edit-form` also returns `preview_form` (the edited form alone), which is what its summary shows so a dry-run on a large file does not echo the whole file. Use `dry_run: true` first for complex replacements to verify the match before applying.
 
 **New Files workflow:**
 1. Create minimal file via `fs-write-file`: `(in-package ...)` + a stub `defun` as anchor

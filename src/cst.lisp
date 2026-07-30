@@ -19,7 +19,11 @@
            #:cst-node-end
            #:cst-node-start-line
            #:cst-node-end-line
-           #:parse-top-level-forms))
+           #:parse-top-level-forms
+           ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
+           ;; the same question this file answers while parsing: which
+           ;; IN-PACKAGE is in effect at a given point in the file.
+           #:%in-package-form-p))
 
 (in-package #:cl-mcp/src/cst)
 

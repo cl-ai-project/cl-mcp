@@ -381,6 +381,48 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (null (search "*thing-a*" text))
                "the first definition was not selected")))))))
 
+(deftest lisp-macroexpand-file-mode-uses-the-in-package-at-the-form
+  (testing "the prologue's (in-package :cl-user) is not taken as the file's package"
+    ;; The classic header is (in-package :cl-user), (defpackage ...),
+    ;; (in-package :real-pkg).  Defaulting to the FIRST in-package reads the
+    ;; target in COMMON-LISP-USER: a whole form comes back NOT EXPANDED, or
+    ;; with an expansion built from CL-USER symbols, and a sub_form match is
+    ;; told to load a system that is already loaded.  Both read as facts about
+    ;; the code rather than as the addressing mistake they are.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-prologue.lisp"
+       "(in-package :cl-user)
+
+(defpackage #:macroexpand-prologue-fixture-xyzzy
+  (:use #:cl))
+
+(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(define-thing *thing-after-prologue* 1)
+
+(defun uses-double-after-prologue (n)
+  (double-it n))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "define-thing"
+                                           :form-name "*thing-after-prologue*"))
+                (text (response-text payload)))
+           (ok (equalp *fixture-package* (gethash "package" payload))
+               "the in-package in effect at the form wins over the file's first")
+           (ok (search "defparameter" text)
+               "so the macro expands instead of reporting NOT EXPANDED"))
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defun"
+                                        :form-name "uses-double-after-prologue"
+                                        :sub-form "double-it"))))
+           (ok (search "(* 2 n)" text)
+               "and a nested call to a loaded macro is expanded too")
+           (ok (null (search "load-system" text))
+               "instead of being blamed on a system that is already loaded")))))))
+
 (deftest lisp-macroexpand-file-mode-sub-form
   (testing "sub_form expands a macro call nested inside the addressed form"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
@@ -548,6 +590,44 @@ USE-WORKER-POOL to take the proxy branch instead."
                "the real call is still found")
            (ok (search "(inside a backquote template)" text)
                "the template match is labelled rather than silently dropped")))))))
+
+(deftest lisp-macroexpand-sub-form-searches-a-function-lambda-body
+  (testing "the body of #'(lambda ...) is searched, while #'name stays skipped"
+    ;; Eclector reads #'(lambda ...) as (FUNCTION (LAMBDA ...)), so skipping
+    ;; every FUNCTION subtree hid the lambda body along with it.  When the
+    ;; only call sat there the tool answered "No call to ... found inside the
+    ;; addressed form" -- a false statement about code plainly present, and
+    ;; the worst shape of failure for a search tool.  The skip is still right
+    ;; for #'name, which references a function instead of calling anything.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-function-lambda.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun maps-a-function-lambda (xs)
+  (mapcar #'(lambda (x) (double-it x)) xs))
+
+(defun maps-a-named-function (xs)
+  (mapcar #'double-it xs))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "maps-a-function-lambda"
+                                           :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload))
+               "the call inside the lambda body is found")
+           (ok (search "(* 2 x)" text)
+               "and expanded, instead of a false 'no call found'"))
+         (ok (handler-case
+                 (progn (lisp-macroexpand :path path
+                                          :form-type "defun"
+                                          :form-name "maps-a-named-function"
+                                          :sub-form "double-it")
+                        nil)
+               (error (e) (and (search "No call to" (princ-to-string e)) t)))
+             "#'name references a function and is still not searched"))))))
 
 (deftest lisp-macroexpand-sub-form-is-positional-blind
   (testing "a binding position is reported like a call: a documented limitation"

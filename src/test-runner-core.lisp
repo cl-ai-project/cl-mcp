@@ -12,6 +12,7 @@
            #:detect-test-framework
            #:make-load-failure-result
            #:*test-debug-output*
+           #:*load-lock-wrapper*
            #:*max-test-output-length*))
 
 (in-package #:cl-mcp/src/test-runner-core)
@@ -25,6 +26,21 @@ Outside of test execution, this is a broadcast-stream (output discarded).")
 (defvar *max-test-output-length* 50000
   "Maximum characters for stdout/stderr captured during test execution.
 Matches *default-max-output-length* from repl-core.")
+
+(defvar *load-lock-wrapper* nil
+  "Optional function of one argument (a thunk) wrapping RUN-TESTS' load phase.
+When non-NIL, RUN-TESTS calls it with a thunk that force-reloads the test
+system, so a caller can serialize ASDF loads without holding its lock for the
+whole test run.  The worker binds this to an *ASDF-LOAD-LOCK* acquisition (see
+cl-mcp/src/worker/handlers); test execution itself deliberately runs outside
+the wrapper, because arbitrary test code may block on that same lock and the
+worker dispatches handlers on the calling thread.")
+
+(defun %call-with-load-lock (thunk)
+  "Call THUNK, routing it through *LOAD-LOCK-WRAPPER* when one is installed."
+  (if *load-lock-wrapper*
+      (funcall *load-lock-wrapper* thunk)
+      (funcall thunk)))
 
 (defun %truncate-test-output (string)
   "Truncate STRING to *max-test-output-length* if it exceeds the limit."
@@ -980,10 +996,55 @@ Uses dynamic type checks so FiveAM is an optional dependency."
           (t (incf passed)))))
     (values passed failed pending (nreverse failure-details))))
 
+(defun %name-matches-candidate-p (name candidate)
+  "Return true when NAME equals CANDIDATE, or starts with CANDIDATE followed
+by a \"/\" or \"-\" separator.  Comparison is case-insensitive.  Requiring the
+separator is what keeps a short candidate such as \"fa\" from swallowing an
+unrelated \"fabric\" name."
+  (let ((candidate-length (length candidate)))
+    (or (string-equal name candidate)
+        (and (> (length name) candidate-length)
+             (string-equal candidate name :end2 candidate-length)
+             (find (char name candidate-length) "/-")))))
+
+(defun %fiveam-name-candidates (system-name)
+  "Return the names a FiveAM suite may be matched against for SYSTEM-NAME.
+The candidates are SYSTEM-NAME itself and, for a slash-qualified system such
+as \"my-project/tests\", its primary system name \"my-project\".  The primary
+name covers the classic layout where the test system is \"my-project/tests\"
+while the suite is named MY-PROJECT-TESTS."
+  ;; STRING, not the raw argument: the Rove path reaches SYSTEM-NAME through
+  ;; STRING-UPCASE and so accepts a symbol, and RUN-TESTS is exported.  Keeping
+  ;; both framework paths on the same string-designator contract avoids a type
+  ;; error that would surface only for FiveAM callers.
+  (let* ((name (string system-name))
+         (slash (position #\/ name)))
+    (if (and slash (plusp slash))
+        (list name (subseq name 0 slash))
+        (list name))))
+
+(defun %fiveam-suite-matches-system-p (suite-sym system-name)
+  "Return true when the FiveAM suite SUITE-SYM belongs to SYSTEM-NAME.
+Both the suite's own name and its package name are tested against every
+candidate from %FIVEAM-NAME-CANDIDATES.  The package clause is what makes the
+conventional package-inferred layout work: the suite is an ordinary symbol
+such as MY-PROJECT-TESTS or ALL-TESTS interned in a package named after the
+test system (MY-PROJECT/TESTS), so its symbol name alone carries no system
+information."
+  (let* ((suite-name (string suite-sym))
+         (suite-package (and (symbolp suite-sym) (symbol-package suite-sym)))
+         (pkg-name (and suite-package (package-name suite-package))))
+    (some (lambda (candidate)
+            (or (%name-matches-candidate-p suite-name candidate)
+                (and pkg-name (%name-matches-candidate-p pkg-name candidate))))
+          (%fiveam-name-candidates system-name))))
+
 (defun %find-fiveam-suites-for-system (system-name)
-  "Find FiveAM test suites whose name matches SYSTEM-NAME.
-Returns suite symbols from *TOPLEVEL-SUITES* whose name equals SYSTEM-NAME
-or starts with a SYSTEM-NAME sub-system prefix (\"name/\" or \"name-\").
+  "Find FiveAM test suites that belong to SYSTEM-NAME.
+Returns the suite symbols from *TOPLEVEL-SUITES* accepted by
+%FIVEAM-SUITE-MATCHES-SYSTEM-P, i.e. those whose suite name *or* package name
+matches SYSTEM-NAME (or its primary system name) exactly or as a \"name/\" /
+\"name-\" sub-name.
 Returns NIL when nothing matches; the caller signals rather than silently
 running every unrelated suite in the image (FiveAM suites are registered
 globally, independent of the ASDF system, so a blanket run would execute
@@ -991,21 +1052,14 @@ other systems' suites too).  Uses dynamic symbol resolution so FiveAM is
 an optional dependency."
   (let* ((fiveam-pkg (find-package :fiveam))
          (toplevel-suites-var (and fiveam-pkg
-                                    (find-symbol "*TOPLEVEL-SUITES*" fiveam-pkg)))
+                                   (find-symbol "*TOPLEVEL-SUITES*" fiveam-pkg)))
          (all-suites
            (if (and toplevel-suites-var (boundp toplevel-suites-var))
                (copy-list (symbol-value toplevel-suites-var))
-               nil))
-         (system-prefix (string-upcase system-name)))
-    (remove-if-not
-     (lambda (suite-sym)
-       (let ((suite-name (symbol-name suite-sym)))
-         (or (string-equal suite-name system-prefix)
-             (uiop:string-prefix-p (concatenate 'string system-prefix "/")
-                                   suite-name)
-             (uiop:string-prefix-p (concatenate 'string system-prefix "-")
-                                   suite-name))))
-     all-suites)))
+               nil)))
+    (remove-if-not (lambda (suite-sym)
+                     (%fiveam-suite-matches-system-p suite-sym system-name))
+                   all-suites)))
 
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
@@ -1091,7 +1145,9 @@ stream-capture, crash-handling, and result-assembly logic lives in one place."
          (stdout) (stderr) (debug-output))))))
 
 (defun run-fiveam-tests (system-name)
-  "Run the FiveAM suites whose name matches SYSTEM-NAME and return results.
+  "Run the FiveAM suites belonging to SYSTEM-NAME and return results.
+A suite belongs to the system when its own name or its package name matches
+SYSTEM-NAME (see %FIND-FIVEAM-SUITES-FOR-SYSTEM).
 Signals an error when no suite name matches SYSTEM-NAME instead of running
 every suite registered in the image, so an explicit system name is never
 silently widened into a full-image run.  When suite names do not follow the
@@ -1105,7 +1161,7 @@ system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
                       suites are registered globally and are not tied to the ~
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
-             :hint "Name a suite that matches the system, or pass TEST/TESTS to run specific tests."))
+             :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
     (%fiveam-run-and-collect suite-symbols (list system-name))))
 
 (defun %resolve-fiveam-test-symbol (test-sym)
@@ -1161,14 +1217,19 @@ receive machine-readable data rather than an opaque RPC error:
     Rove and FiveAM paths (no matching suite, unknown test name, missing test
     package) -> MAKE-RESOLUTION-FAILURE-RESULT (framework :unresolved).
 Other errors (framework-internal bugs) still propagate normally so genuine
-failures remain visible."
+failures remain visible.
+
+Only the load phase runs through *LOAD-LOCK-WRAPPER* (see its docstring).
+The framework run is deliberately left outside it: test code is arbitrary and
+may itself block on the caller's lock."
   (when (and test tests) (error "Specify either TEST or TESTS, not both"))
   ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
   ;; so simple-error is the precise contract.  Catching plain ERROR would
   ;; mask serious-condition subclasses or interactive-interrupt that
   ;; should bubble up as bugs rather than be silently bucketed into a
   ;; load-failure result.
-  (handler-case (%ensure-system-loaded system-name)
+  (handler-case (%call-with-load-lock
+                 (lambda () (%ensure-system-loaded system-name)))
     (simple-error (load-err)
       (return-from run-tests
         (make-load-failure-result system-name load-err))))

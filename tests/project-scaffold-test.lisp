@@ -2,7 +2,9 @@
 
 (defpackage #:cl-mcp/tests/project-scaffold-test
   (:use #:cl #:rove)
-  (:import-from #:cl-mcp/src/project-scaffold-core)
+  (:import-from #:cl-mcp/src/project-scaffold-core
+                #:escape-lisp-string
+                #:*scaffold-marker-file*)
   (:import-from #:cl-mcp/src/project-scaffold)
   (:import-from #:cl-mcp/src/project-root))
 
@@ -79,6 +81,16 @@
   (testing "rejects CR"
     (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field
                   "description" (format nil "foo~Abar" #\Return))
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects double quote"
+    ;; A quote closes the Lisp string literal these fields are pasted into
+    ;; inside the generated .asd, turning the rest of the value into code.
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field
+                  "description" "A \"cool\" parser")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects backslash"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field
+                  "author" "C:\\Ada")
                  'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
   (testing "rejects non-string"
     (ok (signals (cl-mcp/src/project-scaffold-core:validate-text-field "license" 42)
@@ -381,17 +393,17 @@ callers do not need to reference it."
                        (coerce next-steps 'list)))
           (ok (find-if (lambda (s) (search "lisp-edit-form" s))
                        (coerce next-steps 'list))))
-        (testing "next_steps does not claim a bare ASDF registration"
-          ;; project-scaffold runs in the parent process, so the registration
-          ;; it performs is invisible to the session's worker where repl-eval
-          ;; and load-system run. The message must not imply otherwise.
+        (testing "next_steps does not claim any ASDF registration happened"
+          ;; project-scaffold no longer loads the generated .asd: doing so
+          ;; evaluated freshly generated code in the parent process, outside
+          ;; the worker isolation boundary. Nothing is registered anywhere
+          ;; until the agent calls load-system, and the message must say so.
           (ok (notany (lambda (s) (search "Auto-registered with ASDF" s))
                       (coerce next-steps 'list)))
-          (ok (find-if (lambda (s) (search "parent process" s))
-                       (coerce next-steps 'list))
-              "registration is scoped to the parent process")
+          (ok (notany (lambda (s) (search "registration happened" s))
+                      (coerce next-steps 'list)))
           (ok (find-if (lambda (s)
-                         (and (search "parent process" s)
+                         (and (search "not registered with ASDF" s)
                               (search "load-system" s)
                               (search "worker" s)))
                        (coerce next-steps 'list))
@@ -433,3 +445,198 @@ callers do not need to reference it."
         (ignore-errors (asdf:clear-system "test-op-demo/tests/main-test"))
         (ignore-errors (asdf:clear-system "test-op-demo/tests"))
         (ignore-errors (asdf:clear-system "test-op-demo"))))))
+
+(defun read-top-level-forms (text)
+  "Return the list of top-level forms READ from TEXT.
+Lets the .asd tests assert on structure rather than on substrings: a
+quote smuggled into a template value shows up as extra top-level forms,
+which a SEARCH-based check would happily miss."
+  (with-input-from-string (in text)
+    (loop for form = (read in nil :eof)
+          until (eq form :eof)
+          collect form)))
+
+(deftest escape-lisp-string-escapes-quote-and-backslash
+  (testing "leaves ordinary text alone"
+    (ok (equal "Ada Lovelace" (escape-lisp-string "Ada Lovelace"))))
+  (testing "escapes a double quote"
+    (ok (equal "a\\\"b" (escape-lisp-string "a\"b"))))
+  (testing "escapes a backslash"
+    (ok (equal "a\\\\b" (escape-lisp-string "a\\b"))))
+  (testing "escapes a trailing backslash"
+    (ok (equal "MIT\\\\" (escape-lisp-string "MIT\\"))))
+  (testing "escaped output reads back as the original string"
+    (dolist (raw (list "a\"b" "a\\b" "MIT\\" "x\") (defparameter *evil* 1) (\""))
+      (ok (equal raw
+                 (read-from-string
+                  (concatenate 'string "\"" (escape-lisp-string raw) "\"")))))))
+
+(deftest scaffold-asd-neutralizes-quote-injection
+  ;; PLAN-SCAFFOLD is called directly (it performs no validation) so that
+  ;; this exercises the escaping layer on its own, independently of
+  ;; VALIDATE-TEXT-FIELD's up-front rejection of the same characters.
+  (let* ((payload
+          "x\") (defparameter *injected-marker* :executed) (asdf:defsystem \"junk")
+         (plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+                :name "inject-demo"
+                :description payload
+                :author "a"
+                :license "MIT"
+                :destination "scaffolds"))
+         (asd (cdr (assoc "inject-demo.asd" plan :test #'string=)))
+         (forms (read-top-level-forms asd)))
+    (testing "the .asd still reads as exactly two defsystem forms"
+      (ok (= 2 (length forms)))
+      (ok (every (lambda (form)
+                   (and (consp form) (eq (first form) 'asdf:defsystem)))
+                 forms)))
+    (testing "the payload round-trips as the :description string, not as code"
+      (ok (equal payload (getf (cddr (first forms)) :description))))))
+
+(deftest scaffold-asd-neutralizes-backslashes
+  (let* ((description "windows path C:\\temp\\x")
+         (author "Ada\\Lovelace")
+         (license "MIT\\")
+         (plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+                :name "slash-demo"
+                :description description
+                :author author
+                :license license
+                :destination "scaffolds"))
+         (asd (cdr (assoc "slash-demo.asd" plan :test #'string=)))
+         (forms (read-top-level-forms asd))
+         (options (cddr (first forms))))
+    (testing "the .asd still reads as exactly two defsystem forms"
+      (ok (= 2 (length forms))))
+    (testing "backslashes round-trip verbatim through read"
+      ;; A trailing backslash is the nastiest case: unescaped it would eat
+      ;; the closing quote of the literal and swallow the following keys.
+      (ok (equal description (getf options :description)))
+      (ok (equal author (getf options :author)))
+      (ok (equal license (getf options :license))))))
+
+(deftest write-scaffold-rejects-quote-and-backslash-fields
+  (with-temp-project-root (root)
+    (testing "double quote in description errors"
+      (ok (signals
+           (cl-mcp/src/project-scaffold:write-scaffold
+            :name "quoted" :description "A \"cool\" parser" :author "a"
+            :license "MIT" :destination "scaffolds")
+           'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+    (testing "backslash in author errors"
+      (ok (signals
+           (cl-mcp/src/project-scaffold:write-scaffold
+            :name "quoted" :description "d" :author "C:\\Ada"
+            :license "MIT" :destination "scaffolds")
+           'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+    (testing "nothing was created for the rejected calls"
+      (ok (null (uiop:directory-exists-p
+                 (uiop:merge-pathnames* "scaffolds/quoted/" root)))))))
+
+(deftest write-scaffold-writes-ownership-marker
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "marked" :description "d" :author "a" :license "MIT"
+     :destination "scaffolds")
+    (let* ((target (uiop:merge-pathnames* "scaffolds/marked/" root))
+           (marker (uiop:merge-pathnames* *scaffold-marker-file* target)))
+      (testing "the marker file exists in the generated scaffold"
+        (ok (probe-file marker)))
+      (testing "the marker holds a readable manifest plist"
+        (let ((form (first (read-top-level-forms
+                            (alexandria:read-file-into-string marker)))))
+          (ok (equal "marked" (getf form :name)))
+          (ok (member "marked.asd" (getf form :files) :test #'string=))
+          (ok (member "src/main.lisp" (getf form :files) :test #'string=)))))))
+
+(deftest write-scaffold-overwrite-replaces-own-scaffold
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "over-me" :description "first" :author "a" :license "MIT"
+     :destination "scaffolds")
+    (let ((target (uiop:merge-pathnames* "scaffolds/over-me/" root)))
+      ;; A stale file proves the old tree really went away rather than
+      ;; being merged into.
+      (with-open-file (s (uiop:merge-pathnames* "stale.txt" target)
+                         :direction :output :if-exists :supersede)
+        (write-string "stale" s))
+      (testing "overwriting a cl-mcp-generated scaffold succeeds"
+        (ok (cl-mcp/src/project-scaffold:write-scaffold
+             :name "over-me" :description "second" :author "a" :license "MIT"
+             :destination "scaffolds" :overwrite t)))
+      (testing "the tree was replaced, not merged"
+        (ok (null (probe-file (uiop:merge-pathnames* "stale.txt" target))))
+        (ok (search "second"
+                    (alexandria:read-file-into-string
+                     (uiop:merge-pathnames* "over-me.asd" target)))))
+      (testing "no scratch directories are left behind"
+        (ok (null (remove-if-not
+                   (lambda (p)
+                     (let ((last-seg (car (last (pathname-directory p)))))
+                       (and (stringp last-seg)
+                            (or (uiop:string-prefix-p ".tmp-project-scaffold-"
+                                                      last-seg)
+                                (uiop:string-prefix-p ".bak-project-scaffold-"
+                                                      last-seg)))))
+                   (uiop:subdirectories
+                    (uiop:merge-pathnames* "scaffolds/" root)))))))))
+
+(deftest write-scaffold-overwrite-refuses-foreign-directory
+  (with-temp-project-root (root)
+    (let* ((target (uiop:merge-pathnames* "scaffolds/precious/" root))
+           (victim (uiop:merge-pathnames* "keep.txt" target)))
+      (ensure-directories-exist target)
+      (with-open-file (s victim :direction :output :if-exists :supersede)
+        (write-string "do not delete" s))
+      (testing "overwrite is refused for a directory cl-mcp did not generate"
+        (ok (handler-case
+                (progn
+                  (cl-mcp/src/project-scaffold:write-scaffold
+                   :name "precious" :description "d" :author "a" :license "MIT"
+                   :destination "scaffolds" :overwrite t)
+                  nil)
+              (cl-mcp/src/project-scaffold-core:invalid-argument-error () t))))
+      (testing "the original contents survive untouched"
+        (ok (uiop:directory-exists-p target))
+        (ok (probe-file victim))
+        (ok (equal "do not delete" (alexandria:read-file-into-string victim)))))))
+
+(deftest write-scaffold-refuses-existing-source-directory
+  (with-temp-project-root (root)
+    (let* ((src (uiop:merge-pathnames* "src/" root))
+           (victim (uiop:merge-pathnames* "main.lisp" src)))
+      (ensure-directories-exist src)
+      (with-open-file (s victim :direction :output :if-exists :supersede)
+        (write-string ";;;; precious source" s))
+      (testing "name colliding with a real source dir at destination . is refused"
+        (ok (handler-case
+                (progn
+                  (cl-mcp/src/project-scaffold:write-scaffold
+                   :name "src" :description "d" :author "a" :license "MIT"
+                   :destination "." :overwrite t)
+                  nil)
+              (cl-mcp/src/project-scaffold-core:invalid-argument-error () t))))
+      (testing "the source tree survives"
+        (ok (uiop:directory-exists-p src))
+        (ok (probe-file victim))
+        (ok (equal ";;;; precious source"
+                   (alexandria:read-file-into-string victim)))))))
+
+(deftest scaffold-tool-does-not-register-generated-system
+  (with-temp-project-root (root)
+    ;; Loading the generated .asd would evaluate freshly generated code in
+    ;; the cl-mcp parent process, outside the worker isolation boundary.
+    ;; The tool must leave this process's ASDF registry untouched.
+    (let ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
+          (args (make-hash-table :test #'equal))
+          (system-name "no-autoload-demo"))
+      (setf (gethash "name" args) system-name)
+      (setf (gethash "destination" args) "scaffolds")
+      (unwind-protect
+           (let* ((response (funcall handler nil 7 args))
+                  (result (gethash "result" response)))
+             (testing "generation still reports success"
+               (ok (eq t (gethash "created" result))))
+             (testing "the generated system is not registered in this process"
+               (ok (null (asdf:find-system system-name nil)))))
+        (ignore-errors (asdf:clear-system system-name))))))

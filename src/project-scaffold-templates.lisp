@@ -45,7 +45,13 @@
                             (asdf:system-depends-on c))))
                       (uiop:symbol-call :rove :run test-packages))))
 "
-  "Template for the generated project's .asd system definition.")
+  "Template for the generated project's .asd system definition.
+Unlike the Markdown templates, every placeholder here sits inside a Lisp
+string literal, so the values must be escaped with
+CL-MCP/SRC/PROJECT-SCAFFOLD-CORE:ESCAPE-LISP-STRING before substitution:
+an unescaped double quote would close the literal and turn the rest of
+the value into top-level forms. PLAN-SCAFFOLD does that; keep any new
+placeholder added here inside a string literal, or revisit the escaping.")
 
 (defparameter *claude-md-template*
   "# CLAUDE.md

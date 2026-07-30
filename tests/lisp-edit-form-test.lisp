@@ -42,6 +42,15 @@ then clean up."
          (funcall thunk abs)
       (ignore-errors (delete-file abs)))))
 
+(defun large-file-source (form-count)
+  "Return Lisp source with a `target' defun followed by FORM-COUNT filler defuns.
+Used to prove that a dry-run summary does not grow with the size of the file."
+  (with-output-to-string (s)
+    (format s "(defun target () :old)~%~%")
+    (dotimes (i form-count)
+      (format s "(defun filler-~D (x)~%  ;; padding to keep this fixture large~%  (+ x ~D))~%~%"
+              i i))))
+
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
     (with-temp-file "tests/tmp/edit-form-replace.lisp"
@@ -1053,3 +1062,114 @@ then clean up."
             (ok err "old protocol should produce rpc error")
             (ok (eql -32603 (gethash "code" err))
                 "error code should be -32603 for old protocol")))))))
+
+(deftest lisp-edit-form-dry-run-carries-preview-form
+  (testing "dry-run result exposes the edited form separately from the whole file"
+    (with-temp-file "tests/tmp/edit-form-dry-run-preview-form.lisp"
+        "(defun keep () :keep)
+
+(defun target () :old)
+"
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (replaced (lisp-edit-form :file-path path
+                                        :form-type "defun"
+                                        :form-name "target"
+                                        :operation "replace"
+                                        :content "(defun target () :new)"
+                                        :dry-run t))
+              (deleted (lisp-edit-form :file-path path
+                                       :form-type "defun"
+                                       :form-name "target"
+                                       :operation "delete"
+                                       :dry-run t))
+              (inserted (lisp-edit-form :file-path path
+                                        :form-type "defun"
+                                        :form-name "target"
+                                        :operation "insert_after"
+                                        :content "(defun added () :added)"
+                                        :dry-run t)))
+          (ok (string= "(defun target () :new)" (gethash "preview_form" replaced))
+              "replace preview_form is the new form only")
+          (ok (string= "(form removed)" (gethash "preview_form" deleted))
+              "delete preview_form is a marker, not the file")
+          (ok (string= "(defun added () :added)" (gethash "preview_form" inserted))
+              "insert_after preview_form is the inserted form only")
+          (ok (search "(defun keep" (gethash "preview" replaced))
+              "preview still holds the whole updated file (replace)")
+          (ok (search "(defun keep" (gethash "preview" deleted))
+              "preview still holds the whole updated file (delete)")
+          (ok (string= before (fs-read-file path))
+              "dry-run writes nothing to disk"))))))
+
+(deftest lisp-edit-form-dry-run-summary-excludes-whole-file
+  (testing "dry-run replace summary shows the edited form, not the updated file"
+    (with-temp-file "tests/tmp/edit-form-dry-run-large.lisp"
+        (large-file-source 500)
+      (lambda (path)
+        (let* ((before (fs-read-file path))
+               (state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "content" "(defun target () :new)"
+                      "dry_run" t))
+               (response (funcall handler state "dry-run-large" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ok (> (length before) 20000)
+              "fixture file is large enough to make inlining obvious")
+          (ok (search ":new" text)
+              "summary shows the edited form")
+          (ok (search "(defun target () :old)" text)
+              "summary still shows the original form")
+          (ok (null (search "filler-499" text))
+              "summary does not inline the rest of the file")
+          (ok (< (length text) 2000)
+              "summary stays bounded regardless of file size")
+          (ok (search "filler-499" (gethash "preview" result-obj))
+              "sibling preview field still carries the whole updated file")
+          (ok (string= "(defun target () :new)" (gethash "preview_form" result-obj))
+              "sibling preview_form field carries the edited form")
+          (ok (string= before (fs-read-file path))
+              "dry-run writes nothing to disk"))))))
+
+(deftest lisp-edit-form-dry-run-delete-summary-excludes-whole-file
+  (testing "dry-run delete summary reports the removal without inlining the file"
+    (with-temp-file "tests/tmp/edit-form-dry-run-delete-large.lisp"
+        (large-file-source 500)
+      (lambda (path)
+        (let* ((before (fs-read-file path))
+               (state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               ;; No content argument: delete must work without one.
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "delete"
+                      "dry_run" t))
+               (response (funcall handler state "dry-run-delete-large" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ng (gethash "error" response)
+              "delete dry-run without content is not an error")
+          (ok (search "Dry-run delete" text)
+              "summary names the delete operation")
+          (ok (search "(form removed)" text)
+              "summary marks the form as removed")
+          (ok (search "(defun target () :old)" text)
+              "summary still shows the form being deleted")
+          (ok (null (search "filler-499" text))
+              "summary does not inline the rest of the file")
+          (ok (< (length text) 2000)
+              "summary stays bounded regardless of file size")
+          (ok (search "filler-499" (gethash "preview" result-obj))
+              "sibling preview field still carries the whole updated file")
+          (ok (null (search "(defun target" (gethash "preview" result-obj)))
+              "sibling preview field reflects the deletion")
+          (ok (string= before (fs-read-file path))
+              "dry-run writes nothing to disk"))))))

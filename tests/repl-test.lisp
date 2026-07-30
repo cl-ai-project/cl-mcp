@@ -677,3 +677,94 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
     (let ((result (repl-eval "(with-input-from-string (s \"\") (read s))")))
       (ok (not (search "unbalanced parentheses" result))
           "runtime EOF should not claim unbalanced parentheses"))))
+
+(defun %make-scratch-package (name)
+  "Create a scratch package named NAME, replacing any leftover from a prior run."
+  (let ((existing (find-package name)))
+    (when existing
+      (delete-package existing)))
+  (make-package name :use '(:cl)))
+
+(defun %delete-scratch-package (name)
+  "Delete the scratch package named NAME when it still exists."
+  (let ((pkg (find-package name)))
+    (when pkg
+      (delete-package pkg))))
+
+(deftest repl-eval-survives-deleting-its-own-package
+  (testing "code that deletes its own eval package returns normally"
+    ;; The result-printing block binds *PACKAGE* to the resolved eval package
+    ;; but sits OUTSIDE %do-repl-eval's HANDLER-BIND.  Once user code deletes
+    ;; that package, PRIN1-TO-STRING signals "*PACKAGE* can't be a deleted
+    ;; package" with no handler in scope, so the condition escapes repl-eval.
+    (let ((name "CL-MCP-TEST-DELETED-PKG-A"))
+      (%make-scratch-package name)
+      (unwind-protect
+           (multiple-value-bind (printed value stdout stderr error-context)
+               (handler-case
+                   (repl-eval "(delete-package :cl-mcp-test-deleted-pkg-a)"
+                              :package name)
+                 (serious-condition (e)
+                   (values (format nil "PROPAGATED: ~A" e) nil "" "" nil)))
+             (declare (ignore stdout stderr))
+             (ok (not (search "PROPAGATED" printed))
+                 "no condition may escape repl-eval")
+             (ok (string-equal printed "t")
+                 "delete-package returned T and it printed")
+             (ok (eq value t)
+                 "raw value is the T returned by delete-package")
+             (ok (null error-context)
+                 "a successful delete-package is not an error"))
+        (%delete-scratch-package name)))))
+
+(deftest repl-eval-survives-deleting-its-own-package-with-timeout
+  (testing "the same deletion under a timeout does not take the worker down"
+    ;; With TIMEOUT-SECONDS the thunk runs in a bare bordeaux-threads thread.
+    ;; An unhandled condition there reaches the debugger hook, and a worker
+    ;; process runs under SB-EXT:DISABLE-DEBUGGER, where that means
+    ;; (exit :abort t) -- the whole process, and the session state with it.
+    (let ((name "CL-MCP-TEST-DELETED-PKG-B"))
+      (%make-scratch-package name)
+      (unwind-protect
+           (multiple-value-bind (printed value stdout stderr error-context)
+               (handler-case
+                   (repl-eval "(delete-package :cl-mcp-test-deleted-pkg-b)"
+                              :package name
+                              :timeout-seconds 5.0d0)
+                 (serious-condition (e)
+                   (values (format nil "PROPAGATED: ~A" e) nil "" "" nil)))
+             (declare (ignore stdout stderr))
+             (ok (not (search "PROPAGATED" printed))
+                 "no condition may escape repl-eval")
+             (ok (not (search "timed out" printed))
+                 "an instant form must not be reported as a timeout")
+             (ok (string-equal printed "t")
+                 "delete-package returned T and it printed")
+             (ok (eq value t)
+                 "raw value is the T returned by delete-package")
+             (ok (null error-context)
+                 "a successful delete-package is not an error"))
+        (%delete-scratch-package name)))))
+
+(deftest repl-eval-with-timeout-contains-escaping-conditions
+  (testing "a serious-condition escaping the thunk becomes an error result"
+    ;; Defense in depth for the whole family: nothing raised inside the timeout
+    ;; thread -- evaluation or printing -- may reach the debugger hook, so
+    ;; %repl-eval-with-timeout degrades it to a normal five-value result.
+    (let ((result (handler-case
+                      (multiple-value-list
+                       (cl-mcp/src/repl-core::%repl-eval-with-timeout
+                        (lambda () (error "layer-two-probe-boom"))
+                        5.0d0))
+                    (serious-condition (e)
+                      (list (format nil "PROPAGATED: ~A" e))))))
+      (ok (= (length result) 5)
+          "an escaped condition still yields the five-value repl-eval result")
+      (ok (not (search "PROPAGATED" (first result)))
+          "the condition must not reach the caller as a signal")
+      (ok (search "Evaluation error" (first result))
+          "the printed value is labelled as an evaluation error")
+      (ok (search "layer-two-probe-boom" (first result))
+          "the condition report reaches the caller as text")
+      (ok (search "layer-two-probe-boom" (or (getf (fifth result) :message) ""))
+          "error-context carries the same message"))))

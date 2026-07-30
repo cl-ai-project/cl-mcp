@@ -143,6 +143,23 @@ on large outputs)."
              (setf last-value (eval form)))))))
     last-value))
 
+(defun %live-package-p (package)
+  "Return true when PACKAGE is a package object that has not been deleted.
+`delete-package` keeps the object's identity but sets its name to NIL, so a
+NIL `package-name` is the reliable liveness test."
+  (and (packagep package)
+       (package-name package)
+       t))
+
+(defun %safe-prin1-to-string (value)
+  "Print VALUE with `prin1-to-string`, degrading to a placeholder on any error.
+The result-printing block of `%do-repl-eval` sits outside its HANDLER-BIND, so a
+printer error signalled here would otherwise escape `repl-eval` entirely."
+  (handler-case (prin1-to-string value)
+    (serious-condition ()
+      (or (ignore-errors (format nil "#<unprintable ~A>" (type-of value)))
+          "#<unprintable>"))))
+
 (defun %do-repl-eval (input package safe-read print-level print-length max-output-length
                       &key locals-preview-frames locals-preview-max-depth
                            locals-preview-max-elements locals-preview-skip-internal)
@@ -231,7 +248,11 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
     ;; resolved package across that boundary; without it every symbol prints
     ;; fully package-qualified relative to the caller.  Every error path
     ;; RETURN-FROMs before reaching here, so EVAL-PACKAGE is always set.
-    (let ((*package* eval-package)
+    ;; User code may have deleted it, though -- (delete-package :my-app) from
+    ;; inside MY-APP -- and no handler is in scope here, so binding *PACKAGE*
+    ;; to a dead package would let the printer signal straight out of
+    ;; REPL-EVAL.  Fall back to the caller's package in that case.
+    (let ((*package* (if (%live-package-p eval-package) eval-package *package*))
           (*print-level* print-level)
           (*print-length* print-length)
           (*print-readably* nil)
@@ -239,11 +260,25 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
           (*print-pretty* t)
           (*print-right-margin* 100)
           (*print-circle* t))
-      (values (%truncate-output (prin1-to-string last-value) max-output-length)
+      (values (%truncate-output (%safe-prin1-to-string last-value) max-output-length)
               last-value
               (%truncate-output (get-output-stream-string stdout) max-output-length)
               (%truncate-output (get-output-stream-string stderr) max-output-length)
               nil))))
+
+(defun %thunk-error-result (condition)
+  "Build the five-element `repl-eval` result list describing CONDITION.
+Shaped like the error returns of `%do-repl-eval`: printed value, raw value,
+stdout, stderr, error-context."
+  (let ((msg (or (ignore-errors (format nil "Evaluation error: ~A" condition))
+                 "Evaluation error: <unprintable condition>"))
+        (type-name (or (ignore-errors (princ-to-string (type-of condition)))
+                       "SERIOUS-CONDITION")))
+    (list msg msg "" ""
+          (list :condition-type type-name
+                :message msg
+                :restarts nil
+                :frames nil))))
 
 (defun %repl-eval-with-timeout (thunk timeout-seconds)
   "Execute THUNK with a polling-based timeout (50ms granularity).
@@ -253,7 +288,21 @@ the result as success -- completed work is never discarded as a timeout."
       (let* ((result-box nil)
              (worker (bordeaux-threads:make-thread
                       (lambda ()
-                        (setf result-box (multiple-value-list (funcall thunk))))
+                        ;; Nothing raised by THUNK -- evaluation *or* printing --
+                        ;; may reach the debugger hook: a worker process runs
+                        ;; under SB-EXT:DISABLE-DEBUGGER, where an unhandled
+                        ;; condition in this thread aborts the whole process and
+                        ;; destroys the session's state.  Degrade to an error
+                        ;; result instead.  Thread termination on timeout is a
+                        ;; THROW, not a condition, so this does not defeat it.
+                        (setf result-box
+                              (handler-case (multiple-value-list (funcall thunk))
+                                (serious-condition (e)
+                                  (ignore-errors
+                                   (cl-mcp/src/log:log-event
+                                    :warn "repl.eval.condition-escaped"
+                                    "type" (princ-to-string (type-of e))))
+                                  (%thunk-error-result e)))))
                       :name "mcp-repl-eval")))
         (loop repeat (ceiling (/ timeout-seconds 0.05d0))
               when (not (bordeaux-threads:thread-alive-p worker))

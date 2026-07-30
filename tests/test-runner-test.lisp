@@ -481,3 +481,164 @@
             "summary lists the synthetic SYSTEM-LOAD failure")
         (ok (search "pool-kill-worker" text)
             "recovery hint surfaces in the rendered text")))))
+
+;;; ---------------------------------------------------------------------------
+;;; FiveAM Suite Matching
+;;; ---------------------------------------------------------------------------
+
+(defvar *fabricated-suite-packages* nil
+  "Packages created by %FABRICATE-SUITE-SYMBOL, deleted on test cleanup.")
+
+(defun %fabricate-suite-symbol (package-name symbol-name)
+  "Intern SYMBOL-NAME in PACKAGE-NAME, creating that package when necessary.
+A package created here is recorded in *FABRICATED-SUITE-PACKAGES* so
+%DELETE-FABRICATED-PACKAGES can remove it; a package that already existed is
+left alone.  Fabricating suite symbols this way exercises the FiveAM suite
+matcher without requiring FiveAM to be loaded."
+  (let ((package (find-package package-name)))
+    (unless package
+      (setf package (make-package package-name :use nil))
+      (push package *fabricated-suite-packages*))
+    (intern symbol-name package)))
+
+(defun %delete-fabricated-packages ()
+  "Delete and forget every package created by %FABRICATE-SUITE-SYMBOL."
+  (dolist (package *fabricated-suite-packages*)
+    (ignore-errors (delete-package package)))
+  (setf *fabricated-suite-packages* nil))
+
+(defun %suite-matches-system-p (package-name symbol-name system-name)
+  "Return true when a fabricated suite PACKAGE-NAME::SYMBOL-NAME belongs to
+SYSTEM-NAME, according to the internal FiveAM suite matcher."
+  (cl-mcp/src/test-runner-core::%fiveam-suite-matches-system-p
+   (%fabricate-suite-symbol package-name symbol-name)
+   system-name))
+
+(deftest fiveam-suite-matcher-matches-suite-and-package-names
+  (testing "a FiveAM suite is matched by its package name as well as its own name"
+    (unwind-protect
+         (progn
+           ;; The reported regression: run-tests is called with the test system
+           ;; name while the suite is an ordinary symbol interned in the
+           ;; package-inferred test package, so its symbol name alone carries
+           ;; no system information.
+           (ok (%suite-matches-system-p "X/TESTS" "X-TESTS" "x/tests")
+               "X/TESTS::X-TESTS belongs to system x/tests")
+           (ok (%suite-matches-system-p "FA/TESTS" "ALL-TESTS" "fa/tests")
+               "a plainly named suite is matched through its package name")
+           ;; Classic layout: test system my-project/tests, suite named after
+           ;; the primary system.
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "MY-PROJECT-TESTS"
+                                        "my-project/tests")
+               "MY-PROJECT-TESTS belongs to system my-project/tests")
+           ;; Pre-existing behaviour must survive the widening.
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM"
+                                        "plain-system")
+               "an exact suite-name match still works")
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM/UNIT"
+                                        "plain-system")
+               "a sub-system suite name still matches"))
+      (%delete-fabricated-packages))))
+
+(deftest fiveam-suite-matcher-rejects-unrelated-names
+  (testing "suites belonging to unrelated systems are never swallowed"
+    (unwind-protect
+         (progn
+           (ok (not (%suite-matches-system-p "XYLOPHONE/TESTS" "XYLOPHONE-TESTS"
+                                             "x"))
+               "system x must not match the unrelated xylophone/tests package")
+           (ok (not (%suite-matches-system-p "FABRIC/TESTS" "FABRIC-TESTS"
+                                             "fa/tests"))
+               "the primary-name candidate fa must not swallow fabric")
+           (ok (not (%suite-matches-system-p "OTHER/TESTS" "TESTS-SUITE"
+                                             "fa/tests"))
+               "a shared trailing segment (tests) is not a match candidate"))
+      (%delete-fabricated-packages))))
+
+;;; ---------------------------------------------------------------------------
+;;; Load-Lock Scope
+;;; ---------------------------------------------------------------------------
+
+(defparameter *load-lock-active-p* nil
+  "True while the RUN-TESTS load-phase wrapper installed by
+RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
+
+(defparameter *lock-state-at-load* :not-loaded
+  "Value of *LOAD-LOCK-ACTIVE-P* observed while the probe system was loaded.")
+
+(defparameter *lock-state-at-run* :not-run
+  "Value of *LOAD-LOCK-ACTIVE-P* observed while the probe test executed.")
+
+(deftest run-tests-load-lock-wrapper-covers-load-phase-only
+  (testing "*load-lock-wrapper* wraps the force-reload but not the framework run"
+    ;; A throwaway system observes *load-lock-active-p* twice: once from a
+    ;; top-level form (the ASDF load phase) and once from a deftest body (the
+    ;; framework phase).  Holding a worker-global lock across the second one is
+    ;; what deadlocked run-tests on tests/worker-init-hook-test.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-lock-scope-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "lock-scope-probe-sys")
+           (probe-package "LOCK-SCOPE-PROBE-SYS")
+           (self "CL-MCP/TESTS/TEST-RUNNER-TEST")
+           (asd-path (uiop:merge-pathnames* "lock-scope-probe-sys.asd" tmp-dir))
+           (src-path (uiop:merge-pathnames* "lock-scope-probe-body.lisp" tmp-dir))
+           (wrapper-calls 0))
+      (setf *load-lock-active-p* nil
+            *lock-state-at-load* :not-loaded
+            *lock-state-at-run* :not-run)
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :depends-on (:rove)~%"
+                       system-name)
+               (format s "  :components ((:file \"lock-scope-probe-body\")))~%"))
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:~A (:use #:cl #:rove))~%" probe-package)
+               (format s "(in-package #:~A)~%" probe-package)
+               (format s "(setf ~A::*lock-state-at-load* ~A::*load-lock-active-p*)~%"
+                       self self)
+               (format s "(deftest lock-scope-probe-test~%")
+               (format s "  (setf ~A::*lock-state-at-run* ~A::*load-lock-active-p*)~%"
+                       self self)
+               (format s "  (ok t))~%"))
+             (asdf:load-asd asd-path)
+             (let ((result
+                     (let ((cl-mcp/src/test-runner-core::*load-lock-wrapper*
+                             (lambda (thunk)
+                               (incf wrapper-calls)
+                               (setf *load-lock-active-p* t)
+                               (unwind-protect (funcall thunk)
+                                 (setf *load-lock-active-p* nil)))))
+                       ;; Address the probe test by name.  Whole-system Rove
+                       ;; discovery maps a system to its packages through
+                       ;; ASDF metadata that a hand-written temp .asd loaded
+                       ;; with LOAD-ASD does not carry, so it finds no suite
+                       ;; here and the probe body never runs -- which would
+                       ;; make *LOCK-STATE-AT-RUN* vacuously unobserved.  The
+                       ;; selective path takes the symbol directly, and both
+                       ;; paths go through the same load phase, which is what
+                       ;; this test is about.
+                       (run-tests system-name
+                                  :test (format nil "~A::LOCK-SCOPE-PROBE-TEST"
+                                                probe-package)))))
+               (ok (= 1 wrapper-calls)
+                   "the wrapper is applied exactly once, for the load phase")
+               (ok (eq t *lock-state-at-load*)
+                   "the system force-reload runs inside the wrapper")
+               (ok (null *lock-state-at-run*)
+                   "the test run happens after the wrapper has returned")
+               (ok (plusp (gethash "passed" result))
+                   "the probe test really executed")
+               (ok (zerop (gethash "failed" result))
+                   "the probe suite passes")))
+        (setf *load-lock-active-p* nil)
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors
+          (let ((probe (find-package probe-package)))
+            (when probe (delete-package probe))))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
