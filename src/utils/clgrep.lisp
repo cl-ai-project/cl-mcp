@@ -452,8 +452,14 @@
    FORM-TYPE comes from EXTRACT-FORM-TYPE-AND-NAME, which strips any package
    qualifier, so the pattern has to admit the qualifier again -- anchoring on
    the bare type would fail to match the (CL:DEFUN ...) text it was derived
-   from and leave a classified form with no signature."
-  (format nil "^\\(\\s*(?:[^\\s():]+:{1,2})?~A\\s+~A\\s*"
+   from and leave a classified form with no signature.
+
+   That same function also downcases the type, so the scan runs
+   case-insensitively: a source that spells the head (DEFUN ...) is classified
+   as DEFUN either way, and a case-sensitive anchor would find nothing to
+   measure the lambda list from.  Only the head is affected; FORM-NAME is
+   reported with the case the source used."
+  (format nil "(?i)^\\(\\s*(?:[^\\s():]+:{1,2})?~A\\s+~A\\s*"
           (cl-ppcre:quote-meta-chars form-type)
           (cl-ppcre:quote-meta-chars form-name)))
 

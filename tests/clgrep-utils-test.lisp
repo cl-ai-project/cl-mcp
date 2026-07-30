@@ -519,7 +519,23 @@ Final line
                  (extract-form-signature "(my.lib::deftest my-test (ok t))")))
     ;; Types outside those two branches already returned the bare name.
     (ok (string= "foo"
-                 (extract-form-signature "(routes:define-rule foo (x) x)")))))
+                 (extract-form-signature "(routes:define-rule foo (x) x)"))))
+  (testing "should extract signatures whatever the case of the head"
+    ;; EXTRACT-FORM-TYPE-AND-NAME downcases the type it reports, so a scan
+    ;; anchored on that type has to ignore case or it cannot find the head in a
+    ;; source that spells it any other way.
+    (ok (string= "(foo x y)"
+                 (extract-form-signature "(CL:DEFUN foo (x y) x)")))
+    (ok (string= "(foo x y)"
+                 (extract-form-signature "(DEFUN foo (x y) x)")))
+    (ok (string= "(foo x)" (extract-form-signature "(Defun foo (x) x)")))
+    (ok (string= "(k p)" (extract-form-signature "(CL:DEFCLASS k (p) ())")))
+    (ok (string= "(my-test ok t)"
+                 (extract-form-signature "(ROVE:DEFTEST my-test (ok t))")))
+    ;; Only the head is matched case-insensitively: the name is reported with
+    ;; the case the source used.
+    (ok (string= "(FOO X Y)"
+                 (extract-form-signature "(DEFUN FOO (X Y) X)")))))
 
 (deftest test-semantic-grep-signature-field
   (testing "should include signature in results"
