@@ -73,6 +73,9 @@ PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Use package-qualified symbols when possible; set project_only=false to include
 external libs.
 
+Each reported line points at the start of the enclosing function's definition,
+not at the exact call site; the 'caller' field names that function.
+
 For simple text-based usage search WITHOUT loading systems, use 'clgrep-search' instead."
   :args ((symbol :type :string :required t
                  :description "Symbol name like \"cl-mcp:run\" (package-qualified preferred)")

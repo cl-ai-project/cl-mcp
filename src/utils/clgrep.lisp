@@ -342,26 +342,76 @@
     "defsystem" "deftest")
   "List of known form type keywords to recognize.")
 
+(defun %definition-prefix-p (form-type)
+  "Return T when FORM-TYPE names a defining macro by prefix.
+
+   FORM-TYPE is the head token extracted from raw text, not a read symbol,
+   so the comparison is done on the string. This mirrors %DEFINITION-NAMES in
+   src/lisp-read-file.lisp exactly: a head whose name starts with DEF (or with
+   DEFINE-, which DEF already subsumes) counts as a definition. Keeping the two
+   rules identical is the point -- it is what lets clgrep classify user-defined
+   defining macros such as DEFINE-RULE or DEFTHING, and stops clgrep-search and
+   lisp-read-file from disagreeing about what a form is.
+
+   This rule has a known false positive: heads like DEFAULT or DEFER also start
+   with DEF and will be reported as definitions. %DEFINITION-NAMES already
+   accepts that risk, so clgrep adopts the same trade-off deliberately rather
+   than diverging."
+  (let ((n (string-upcase form-type)))
+    (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
+        (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
+
+(defun %strip-package-qualifier (head)
+  "Return HEAD without a leading package qualifier.
+
+   A defining macro is routinely invoked through its package -- (ROUTES:DEFINE-RULE
+   ...) outside the DSL's own package, and (ASDF:DEFSYSTEM ...) in this repository's
+   own .asd files.  The qualifier is a property of the call site, not of the form's
+   type, so it is dropped before the head is classified or reported.
+
+   Dropping it is also what keeps clgrep in step with src/lisp-read-file.lisp's
+   %DEFINITION-NAMES: that one reads the head with Eclector and looks at the
+   resulting symbol, so it only ever sees the SYMBOL-NAME and never the qualifier."
+  (let ((colon (position #\: head :from-end t)))
+    (if colon
+        (subseq head (1+ colon))
+        head)))
+
 (defun extract-form-type-and-name (form-text)
   "Extract the form type and name from FORM-TEXT.
    Returns an alist with :type and :name, or NIL if not a recognized form.
+   A head is recognized when it is in *KNOWN-FORM-TYPES* or when it satisfies
+   %DEFINITION-PREFIX-P, so user-defined defining macros classify too.
+
+   The head may carry a package qualifier; %STRIP-PACKAGE-QUALIFIER removes it
+   before either test runs, so the reported type is the one a caller filters on.
 
    Examples:
      (defun foo ...) => ((:type . \"defun\") (:name . \"foo\"))
      (defmethod bar ...) => ((:type . \"defmethod\") (:name . \"bar\"))
-     (defvar *x* ...) => ((:type . \"defvar\") (:name . \"*x*\"))"
+     (defvar *x* ...) => ((:type . \"defvar\") (:name . \"*x*\"))
+     (define-rule r ...) => ((:type . \"define-rule\") (:name . \"r\"))
+     (routes:define-rule r ...) => ((:type . \"define-rule\") (:name . \"r\"))"
   (let ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text)))
     (when (and (> (length trimmed) 0)
                (char= (char trimmed 0) #\())
-      ;; Extract the first token (form type) and second token (name)
+      ;; Extract the first token (form type) and second token (name).  The head
+      ;; group admits an optional PACKAGE: or PACKAGE:: prefix; without it the
+      ;; colon ends the match and a qualified head parses as no form at all.
+      ;; Dots and slashes are constituent characters, and every package in this
+      ;; repository is slash-delimited, so both sides of the colon accept them.
       (multiple-value-bind (match groups)
           (cl-ppcre:scan-to-strings
-           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+-]*)\\s+([^\\s()]+|\\([^)]+\\))"
+           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+./-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)\\s+([^\\s()]+|\\([^)]+\\))"
            trimmed)
         (when match
-          (let ((form-type (string-downcase (aref groups 0)))
+          (let ((form-type (%strip-package-qualifier
+                            (string-downcase (aref groups 0))))
                 (form-name (aref groups 1)))
-            (when (member form-type *known-form-types* :test #'string=)
+            ;; *KNOWN-FORM-TYPES* still matters for heads no prefix rule can
+            ;; catch, such as IN-PACKAGE.
+            (when (or (member form-type *known-form-types* :test #'string=)
+                      (%definition-prefix-p form-type))
               (list (cons :type form-type)
                     (cons :name form-name)))))))))
 
@@ -395,6 +445,24 @@
       (when (zerop depth)
         (values (subseq text start pos) pos)))))
 
+(defun %head-scan-pattern (form-type form-name)
+  "Return a regex anchoring a scan at the head of a FORM-TYPE definition of
+   FORM-NAME.
+
+   FORM-TYPE comes from EXTRACT-FORM-TYPE-AND-NAME, which strips any package
+   qualifier, so the pattern has to admit the qualifier again -- anchoring on
+   the bare type would fail to match the (CL:DEFUN ...) text it was derived
+   from and leave a classified form with no signature.
+
+   That same function also downcases the type, so the scan runs
+   case-insensitively: a source that spells the head (DEFUN ...) is classified
+   as DEFUN either way, and a case-sensitive anchor would find nothing to
+   measure the lambda list from.  Only the head is affected; FORM-NAME is
+   reported with the case the source used."
+  (format nil "(?i)^\\(\\s*(?:[^\\s():]+:{1,2})?~A\\s+~A\\s*"
+          (cl-ppcre:quote-meta-chars form-type)
+          (cl-ppcre:quote-meta-chars form-name)))
+
 (defun extract-form-signature (form-text)
   "Extract the signature from FORM-TEXT.
    Returns a string representing the signature, or NIL if not a recognized form.
@@ -414,9 +482,7 @@
                              "define-compiler-macro" "deftest")
                  :test #'string=)
          (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*~A\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-type)
-                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-pattern (%head-scan-pattern form-type form-name))
                 (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
            (when name-end
              (multiple-value-bind (lambda-list end-pos)
@@ -435,8 +501,7 @@
         ;; Class definitions: name + superclasses
         ((string= form-type "defclass")
          (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*defclass\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-pattern (%head-scan-pattern form-type form-name))
                 (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
            (when name-end
              (multiple-value-bind (superclasses end-pos)

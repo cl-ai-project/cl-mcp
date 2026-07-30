@@ -334,32 +334,34 @@ NIL the symbol was not found and an isError payload is returned."
 
 (defun build-code-find-references-response (symbol refs count project-only)
   "Build the standard code-find-references response hash-table.
-Summary text shows each reference as \"<path> (used in <caller>) [type]\"
-so users see the enclosing function name instead of a potentially
-misleading line snippet. The raw path, line, type, caller, and context
-fields remain in the structured \"refs\" payload for programmatic use."
+Summary text shows each reference as \"<path>:<line> (used in <caller>) [type]\",
+falling back to \"<path>:<line> [type]\" when the caller is unknown or is an
+anonymous lambda. The line keeps every row clickable and sortable; the caller
+name says which function the reference sits in. As documented on
+CL-MCP/SRC/CODE-CORE:CODE-FIND-REFERENCES, the line points at the start of the
+enclosing function rather than at the exact call site. The raw path, line,
+type, caller, and context fields remain in the structured \"refs\" payload for
+programmatic use."
   (let* ((summary-lines
-           (map 'list
-                (lambda (h)
-                  (let ((path (gethash "path" h))
-                        (caller (gethash "caller" h))
-                        (type (gethash "type" h))
-                        (line (gethash "line" h)))
-                    (cond
-                      ((and caller (plusp (length caller))
-                            (string/= caller "(lambda)"))
-                       (format nil "~A (used in ~A) [~A]" path caller type))
-                      (t
-                       (format nil "~A:~A [~A]" path line type)))))
-                refs))
-         (summary (if summary-lines
-                      (format nil "~{~A~%~}" summary-lines)
-                      "")))
-    (make-ht "refs" refs
-             "count" count
-             "symbol" symbol
-             "project_only" project-only
-             "content" (text-content summary))))
+          (map 'list
+               (lambda (h)
+                 (let ((path (gethash "path" h))
+                       (caller (gethash "caller" h))
+                       (type (gethash "type" h))
+                       (line (gethash "line" h)))
+                   (cond
+                    ((and caller (plusp (length caller))
+                          (string/= caller "(lambda)"))
+                     (format nil "~A:~A (used in ~A) [~A]" path line caller
+                             type))
+                    (t (format nil "~A:~A [~A]" path line type)))))
+               refs))
+         (summary
+          (if summary-lines
+              (format nil "~{~A~%~}" summary-lines)
+              "")))
+    (make-ht "refs" refs "count" count "symbol" symbol "project_only"
+             project-only "content" (text-content summary))))
 
 (defun build-inspect-response (inspection-result)
   "Build the standard inspect-object response hash-table.

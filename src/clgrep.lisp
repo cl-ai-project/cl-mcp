@@ -5,7 +5,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
-                #:resolve-path-in-project)
+                #:resolve-readable-path)
   (:import-from #:cl-mcp/src/utils/hash
                 #:alist-to-hash-table)
   (:import-from #:cl-mcp/src/utils/clgrep
@@ -19,7 +19,9 @@
 
 (in-package #:cl-mcp/src/clgrep)
 
-;; Path resolution is now handled by cl-mcp/src/utils/paths:resolve-path-in-project
+;; Path resolution is handled by cl-mcp/src/utils/paths:resolve-readable-path,
+;; which accepts registered ASDF system source directories as well as the
+;; project root (clgrep-search is read-only, same policy as the read tools).
 
 (defun %normalize-result (result base-path)
   "Normalize a single search result, making file paths relative to BASE-PATH."
@@ -45,7 +47,10 @@ Accepts a list of strings, a vector of strings, a single string, or NIL."
 
 Arguments:
   PATTERN          - cl-ppcre regular expression pattern (required)
-  PATH             - Search root directory, relative to project root (optional)
+  PATH             - Search root directory (optional, defaults to project root).
+                     Relative paths are merged with the project root; absolute
+                     paths are accepted when inside the project root or inside
+                     the source directory of a registered ASDF system
   RECURSIVE        - Search subdirectories recursively (default: T)
   CASE-INSENSITIVE - Case-insensitive matching (default: NIL)
   FORM-TYPES       - Filter by form types, e.g., '(\"defun\" \"defmethod\") (optional)
@@ -53,7 +58,7 @@ Arguments:
   INCLUDE-FORM     - If true, include full form text in results (default: NIL)
 
 Returns a list of alists, each containing:
-  :file            - File path (relative to project root)
+  :file            - File path (relative to the search root PATH)
   :line            - Line number of the match
   :match           - The matching line text
   :package         - Package name active at that line
@@ -67,7 +72,7 @@ Returns a list of alists, each containing:
             (zerop (length (string-trim '(#\Space #\Tab) pattern))))
     (error "Pattern cannot be empty"))
   (let* ((effective-limit (or limit 200))
-         (search-path (resolve-path-in-project path :must-exist t))
+         (search-path (resolve-readable-path path :must-exist t))
          (types (%parse-form-types form-types))
          (results (semantic-grep search-path pattern
                                  :recursive recursive
@@ -132,7 +137,10 @@ Recommended workflow:
   :args ((pattern :type :string :required t
                   :description "cl-ppcre regular expression pattern to search for")
          (path :type :string
-               :description "Search root directory, relative to project root (optional, defaults to project root)")
+               :description "Search root directory (optional, defaults to project root).
+Relative paths resolve against the project root. An absolute path is accepted when it is
+inside the project root or inside the source directory of a registered ASDF system, so a
+dependency's sources can be searched the same way lisp-read-file can read them.")
          (recursive :type :boolean :default t
                     :description "Search subdirectories recursively (default: true)")
          (case-insensitive :type :boolean :json-name "case_insensitive"

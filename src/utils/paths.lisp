@@ -13,6 +13,7 @@
            #:allowed-read-path
            #:ensure-write-path
            #:resolve-path-in-project
+           #:resolve-readable-path
            #:normalize-path-for-display
            #:broad-root-p))
 
@@ -150,6 +151,32 @@ Signals an error if PATH is outside project root."
       (unless (path-inside-p canonical base)
         (error "Path ~A is outside project root ~A" target base))
       canonical)))
+
+(declaim (ftype (function ((or null string pathname) &key (:must-exist boolean))
+                           pathname)
+                resolve-readable-path))
+
+(defun resolve-readable-path (path &key (must-exist nil))
+  "Resolve PATH to an absolute pathname that is readable per the read policy.
+Shares RESOLVE-PATH-IN-PROJECT's calling contract: a NIL or empty PATH resolves
+to *project-root*, a relative PATH is merged against it, MUST-EXIST signals when
+the target does not exist, and a disallowed PATH signals rather than returning
+NIL. The containment rule is ALLOWED-READ-PATH's instead: subpaths of
+*project-root* AND source directories of registered ASDF systems are both
+accepted. Use this for read-only tools, which should reach the dependency
+sources that the read tools already expose."
+  (ensure-project-root)
+  (let* ((base *project-root*)
+         (target (if (or (null path) (and (stringp path) (string= path "")))
+                     (uiop/pathname:ensure-directory-pathname base)
+                     (canonical-path path))))
+    (when (and must-exist
+               (null (handler-case (truename target) (file-error () nil))))
+      (error "Path does not exist: ~A" target))
+    (or (allowed-read-path target)
+        (error "Path ~A is outside project root ~A and outside the source ~
+                directory of every registered ASDF system"
+               target base))))
 
 (declaim (ftype (function ((or null string pathname)) (or null string))
                 normalize-path-for-display))
