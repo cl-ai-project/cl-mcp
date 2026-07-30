@@ -536,6 +536,29 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
            (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM"
                                         "plain-system")
                "an exact suite-name match still works")
+           ;; `(def-suite :my-project)` -- the dominant idiom in the wild.
+           ;; A keyword suite has no package to fall back on, so the primary
+           ;; system name must be an exact candidate.  A survey of 89 FiveAM
+           ;; test systems from Quicklisp selected nothing for 69 of them
+           ;; while it was missing.
+           (ok (%suite-matches-system-p "KEYWORD" "MY-PROJECT"
+                                        "my-project/tests")
+               "a keyword suite named after the primary system is found")
+           (ok (%suite-matches-system-p "KEYWORD" "CHANL" "chanl/tests")
+               "the same for a real project's layout")
+           ;; A dot nests a package just as a slash does.
+           (ok (%suite-matches-system-p "CL-YAML-TEST.PARSER" "PARSER"
+                                        "cl-yaml-test")
+               "a dot-nested sub-package belongs to the system")
+           ;; An unqualified system still finds its conventionally named test
+           ;; package, which is what the dash candidates exist for now that
+           ;; "-" no longer grows a prefix.
+           (ok (%suite-matches-system-p "FOO-TESTS" "ALL-TESTS" "foo")
+               "system foo finds its FOO-TESTS package")
+           (ok (%suite-matches-system-p "FOO/TESTS" "ALL-TESTS" "foo")
+               "system foo finds its FOO/TESTS package")
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "FOO-TEST" "foo")
+               "the singular FOO-TEST spelling is found too")
            (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM/UNIT"
                                         "plain-system")
                "a sub-system suite name still matches"))
@@ -544,14 +567,14 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
 (deftest fiveam-suite-matcher-rejects-unrelated-names
   (testing "suites belonging to unrelated systems are never swallowed"
     ;; FiveAM's suite registry is global: every suite of every system loaded
-    ;; into the image is a selection candidate, so an over-broad match runs
-    ;; another project's tests and fires its fixtures.  The first three cases
-    ;; below all passed against an earlier matcher that derived the bare
-    ;; primary name ("foo" from "foo/tests") as a candidate -- but only by
-    ;; accident of spelling: %NAME-MATCHES-CANDIDATE-P accepts a prefix
-    ;; followed by "-" or "/", and FABRIC fails merely because "fa" is
-    ;; followed by "B".  FOO-UTILS and FOO/OTHER were matched.  Keep names
-    ;; here that differ from the system in the *separator* position.
+    ;; into the worker is a selection candidate, so an over-broad match runs
+    ;; another project's tests and fires its fixtures.  Two earlier spellings
+    ;; of this matcher got that wrong, and the negative tests of the day
+    ;; passed only by accident of naming -- FABRIC fails against "fa" merely
+    ;; because the next character is "B" rather than a separator.  The pairs
+    ;; below are the ones that actually collided, including real upstream
+    ;; project pairs, so keep names here that differ from the system in the
+    ;; *separator* position.
     (unwind-protect
          (progn
            (ok (not (%suite-matches-system-p "XYLOPHONE/TESTS" "XYLOPHONE-TESTS"
@@ -563,7 +586,7 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
            (ok (not (%suite-matches-system-p "OTHER/TESTS" "TESTS-SUITE"
                                              "fa/tests"))
                "a shared trailing segment (tests) is not a match candidate")
-           ;; The three the primary-name candidate got wrong.
+           ;; Wrong while the bare primary name was a candidate.
            (ok (not (%suite-matches-system-p "FOO-UTILS" "ALL-TESTS"
                                              "foo/tests"))
                "a sibling system's package must not match at the hyphen")
@@ -572,7 +595,32 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
                "a sibling sub-system's package must not match at the slash")
            (ok (not (%suite-matches-system-p "SOME-OTHER-PKG" "FOO-UTILS-TESTS"
                                              "foo/tests"))
-               "a sibling system's suite symbol must not match either"))
+               "a sibling system's suite symbol must not match either")
+           ;; Wrong while "-" still grew a prefix, which the slash-only fix
+           ;; above did not reach: a system name carrying no slash was its own
+           ;; sole candidate, so every sibling sharing the prefix matched.
+           ;; These three are real upstream pairs.
+           (ok (not (%suite-matches-system-p "LOCAL-TIME-DURATION" "ALL-TESTS"
+                                             "local-time"))
+               "local-time must not select local-time-duration's suite")
+           (ok (not (%suite-matches-system-p "LOG4CL-EXTRAS/TESTS" "MAIN"
+                                             "log4cl"))
+               "log4cl must not select log4cl-extras's suite")
+           (ok (not (%suite-matches-system-p "MITO-ATTACHMENT/TESTS" "ALL-TESTS"
+                                             "mito"))
+               "mito must not select mito-attachment's suite")
+           (ok (not (%suite-matches-system-p "APP-SERVER" "MAIN" "app"))
+               "an unqualified system must not swallow its prefix siblings")
+           ;; The primary name is an *exact* candidate, never grown into, so
+           ;; restoring it for keyword suites does not reopen any of the above.
+           (ok (not (%suite-matches-system-p "COMPLETELY-UNRELATED" "FOO-BAR"
+                                             "foo"))
+               "an exact primary candidate must not grow across the dash")
+           (ok (not (%suite-matches-system-p "SOME-VENDOR" "APP-SERVER-SUITE"
+                                             "app"))
+               "nor match a plugin that names its suite after the host")
+           (ok (not (%suite-matches-system-p "APPLIANCE/TESTS" "MAIN" "app"))
+               "nor a longer name that merely starts with the system name"))
       (%delete-fabricated-packages))))
 
 ;;; ---------------------------------------------------------------------------

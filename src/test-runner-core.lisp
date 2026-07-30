@@ -997,59 +997,97 @@ Uses dynamic type checks so FiveAM is an optional dependency."
     (values passed failed pending (nreverse failure-details))))
 
 (defun %name-matches-candidate-p (name candidate)
-  "Return true when NAME equals CANDIDATE, or starts with CANDIDATE followed
-by a \"/\" or \"-\" separator.  Comparison is case-insensitive.  Requiring the
-separator is what keeps a short candidate such as \"fa\" from swallowing an
-unrelated \"fabric\" name."
+  "Return true when NAME is CANDIDATE or a namespace *below* it.
+
+Case-insensitive.  A name is below CANDIDATE when it starts with CANDIDATE
+followed by \"/\" or \".\" -- the two characters Lisp projects use to nest a
+package under another (FOO/TESTS/UNIT, CL-YAML-TEST.PARSER).
+
+\"-\" is deliberately not one of them.  It is an ordinary word separator, so
+growing a candidate across it made every sibling sharing a prefix a match:
+\"local-time\" selected LOCAL-TIME-DURATION's suite, \"log4cl\" selected
+LOG4CL-EXTRAS's, \"mito\" selected MITO-ATTACHMENT's -- separate upstream
+projects whose fixtures then fired.  Dash-joined names that really do belong
+to the system are reached by %FIVEAM-EXACT-CANDIDATES instead, which matches
+them whole."
   (let ((candidate-length (length candidate)))
     (or (string-equal name candidate)
         (and (> (length name) candidate-length)
              (string-equal candidate name :end2 candidate-length)
-             (find (char name candidate-length) "/-")))))
+             (find (char name candidate-length) "/.")))))
 
 (defun %fiveam-name-candidates (system-name)
-  "Return the names a FiveAM suite may be matched against for SYSTEM-NAME.
+  "Return the namespace candidate for SYSTEM-NAME: the system's own name.
 
-The candidates are SYSTEM-NAME itself and, for a slash-qualified system, the
-same name with every \"/\" replaced by \"-\".  That second candidate exists for
-the classic layout where the test system is \"my-project/tests\" while the
-suite symbol is MY-PROJECT-TESTS: the suite name is the system name written
-with dashes, so deriving it that way matches exactly the convention and
-nothing else.
+A suite or package matches this one by equality or by nesting below it (see
+%NAME-MATCHES-CANDIDATE-P), which is what finds FA/TESTS::ALL-TESTS and
+FA/TESTS/UNIT::UNIT-SUITE for system \"fa/tests\".
 
-It deliberately is NOT the *primary* system name (\"my-project\").  FiveAM's
-suite registry is global, so every suite of every system loaded into the
-image is a candidate for selection, and a bare primary name matches far too
-much: %NAME-MATCHES-CANDIDATE-P accepts a prefix followed by \"-\" or \"/\",
-so \"foo\" derived from \"foo/tests\" swallows FOO-UTILS::ALL-TESTS and
-FOO/OTHER::ALL-TESTS.  Running one system's tests would then execute an
-unrelated system's suites, contaminating the counts and firing their
-fixtures.  The dashed candidate cannot do that: \"foo-tests\" matches neither.
+STRING, not the raw argument: RUN-TESTS is exported and the Rove path reaches
+SYSTEM-NAME through STRING-UPCASE, so a symbol is a legal designator on that
+path and must not become a type error on this one."
+  (list (string system-name)))
 
-STRING, not the raw argument: the Rove path reaches SYSTEM-NAME through
-STRING-UPCASE and so accepts a symbol, and RUN-TESTS is exported.  Keeping
-both framework paths on the same string-designator contract avoids a type
-error that would surface only for FiveAM callers."
-  (let ((name (string system-name)))
-    (if (find #\/ name)
-        (list name (substitute #\- #\/ name))
-        (list name))))
+(defun %fiveam-exact-candidates (system-name)
+  "Return the names that identify SYSTEM-NAME's own suite, matched WHOLE.
+
+These are never grown into: an exact hit is the whole test.  That distinction
+is what lets the matcher be both complete and narrow, because over-matching
+and under-matching turned out to come from different halves of the old rule.
+
+For \"my-project/tests\" the names are:
+
+  my-project         the primary system.  `(def-suite :my-project)` is the
+                     dominant idiom in the wild, and a keyword suite has no
+                     package to fall back on, so without this candidate a
+                     survey of 89 FiveAM test systems from Quicklisp selected
+                     nothing for 69 of them -- run-tests would report
+                     `unresolved` with zero tests run.
+  my-project-tests   the system name written with dashes, and the singular
+  my-project-test    and slash spellings of the same convention, for projects
+  my-project/test    that keep their suite in MY-PROJECT-TEST or similar.
+  my-project/tests
+
+Growing these by prefix is what previously swallowed sibling projects, so
+they are compared whole and nothing else."
+  (let* ((name (string system-name))
+         (slash (position #\/ name))
+         (primary (if slash (subseq name 0 slash) name))
+         (names (list primary)))
+    (when slash
+      (pushnew (substitute #\- #\/ name) names :test #'string-equal))
+    (dolist (suffix '("-test" "-tests" "/test" "/tests"))
+      (pushnew (concatenate 'string primary suffix) names :test #'string-equal))
+    (nreverse names)))
 
 (defun %fiveam-suite-matches-system-p (suite-sym system-name)
   "Return true when the FiveAM suite SUITE-SYM belongs to SYSTEM-NAME.
-Both the suite's own name and its package name are tested against every
-candidate from %FIVEAM-NAME-CANDIDATES.  The package clause is what makes the
-conventional package-inferred layout work: the suite is an ordinary symbol
-such as MY-PROJECT-TESTS or ALL-TESTS interned in a package named after the
-test system (MY-PROJECT/TESTS), so its symbol name alone carries no system
-information."
+
+Both the suite's own name and its package name are tested, because neither
+alone identifies a suite: the package clause finds the package-inferred layout
+where the suite is an ordinary symbol such as ALL-TESTS interned in
+MY-PROJECT/TESTS, and the symbol clause finds `(def-suite :my-project)`, whose
+keyword has no package of its own.
+
+Two candidate sets, matched differently.  %FIVEAM-NAME-CANDIDATES gives the
+system's namespace, which a name may also nest below; %FIVEAM-EXACT-CANDIDATES
+gives the names of the system's own suite, which must match whole.  Keeping
+those apart is what makes the matcher narrow without making it miss: nesting
+is what finds sub-packages, and it was growing the *dash* spellings that used
+to swallow unrelated sibling projects."
   (let* ((suite-name (string suite-sym))
          (suite-package (and (symbolp suite-sym) (symbol-package suite-sym)))
-         (pkg-name (and suite-package (package-name suite-package))))
-    (some (lambda (candidate)
-            (or (%name-matches-candidate-p suite-name candidate)
-                (and pkg-name (%name-matches-candidate-p pkg-name candidate))))
-          (%fiveam-name-candidates system-name))))
+         (pkg-name (and suite-package (package-name suite-package)))
+         (exact (%fiveam-exact-candidates system-name)))
+    (or (some (lambda (candidate)
+                (or (%name-matches-candidate-p suite-name candidate)
+                    (and pkg-name
+                         (%name-matches-candidate-p pkg-name candidate))))
+              (%fiveam-name-candidates system-name))
+        (some (lambda (candidate)
+                (or (string-equal suite-name candidate)
+                    (and pkg-name (string-equal pkg-name candidate))))
+              exact))))
 
 (defun %find-fiveam-suites-for-system (system-name)
   "Find FiveAM test suites that belong to SYSTEM-NAME.
@@ -1235,6 +1273,13 @@ Only the load phase runs through *LOAD-LOCK-WRAPPER* (see its docstring).
 The framework run is deliberately left outside it: test code is arbitrary and
 may itself block on the caller's lock."
   (when (and test tests) (error "Specify either TEST or TESTS, not both"))
+  ;; Normalize the designator once, at the entry point.  RUN-TESTS is exported
+  ;; and the Rove path accepts a symbol, but LOG-EVENT serializes its values
+  ;; with yason, which cannot encode a symbol: the encoder signals mid-object,
+  ;; IGNORE-ERRORS inside the logger swallows it, and the half-written line
+  ;; then swallows the next one, corrupting the NDJSON stream a client is
+  ;; reading.  Coercing here keeps every downstream consumer on strings.
+  (setf system-name (string system-name))
   ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
   ;; so simple-error is the precise contract.  Catching plain ERROR would
   ;; mask serious-condition subclasses or interactive-interrupt that
