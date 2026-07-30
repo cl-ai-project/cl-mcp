@@ -1009,18 +1009,30 @@ unrelated \"fabric\" name."
 
 (defun %fiveam-name-candidates (system-name)
   "Return the names a FiveAM suite may be matched against for SYSTEM-NAME.
-The candidates are SYSTEM-NAME itself and, for a slash-qualified system such
-as \"my-project/tests\", its primary system name \"my-project\".  The primary
-name covers the classic layout where the test system is \"my-project/tests\"
-while the suite is named MY-PROJECT-TESTS."
-  ;; STRING, not the raw argument: the Rove path reaches SYSTEM-NAME through
-  ;; STRING-UPCASE and so accepts a symbol, and RUN-TESTS is exported.  Keeping
-  ;; both framework paths on the same string-designator contract avoids a type
-  ;; error that would surface only for FiveAM callers.
-  (let* ((name (string system-name))
-         (slash (position #\/ name)))
-    (if (and slash (plusp slash))
-        (list name (subseq name 0 slash))
+
+The candidates are SYSTEM-NAME itself and, for a slash-qualified system, the
+same name with every \"/\" replaced by \"-\".  That second candidate exists for
+the classic layout where the test system is \"my-project/tests\" while the
+suite symbol is MY-PROJECT-TESTS: the suite name is the system name written
+with dashes, so deriving it that way matches exactly the convention and
+nothing else.
+
+It deliberately is NOT the *primary* system name (\"my-project\").  FiveAM's
+suite registry is global, so every suite of every system loaded into the
+image is a candidate for selection, and a bare primary name matches far too
+much: %NAME-MATCHES-CANDIDATE-P accepts a prefix followed by \"-\" or \"/\",
+so \"foo\" derived from \"foo/tests\" swallows FOO-UTILS::ALL-TESTS and
+FOO/OTHER::ALL-TESTS.  Running one system's tests would then execute an
+unrelated system's suites, contaminating the counts and firing their
+fixtures.  The dashed candidate cannot do that: \"foo-tests\" matches neither.
+
+STRING, not the raw argument: the Rove path reaches SYSTEM-NAME through
+STRING-UPCASE and so accepts a symbol, and RUN-TESTS is exported.  Keeping
+both framework paths on the same string-designator contract avoids a type
+error that would surface only for FiveAM callers."
+  (let ((name (string system-name)))
+    (if (find #\/ name)
+        (list name (substitute #\- #\/ name))
         (list name))))
 
 (defun %fiveam-suite-matches-system-p (suite-sym system-name)

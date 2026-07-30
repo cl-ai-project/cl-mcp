@@ -526,8 +526,9 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
                "X/TESTS::X-TESTS belongs to system x/tests")
            (ok (%suite-matches-system-p "FA/TESTS" "ALL-TESTS" "fa/tests")
                "a plainly named suite is matched through its package name")
-           ;; Classic layout: test system my-project/tests, suite named after
-           ;; the primary system.
+           ;; Classic layout: test system my-project/tests, suite symbol
+           ;; MY-PROJECT-TESTS -- the system name written with dashes, which
+           ;; is exactly the derived candidate.
            (ok (%suite-matches-system-p "SOME-OTHER-PKG" "MY-PROJECT-TESTS"
                                         "my-project/tests")
                "MY-PROJECT-TESTS belongs to system my-project/tests")
@@ -542,6 +543,15 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
 
 (deftest fiveam-suite-matcher-rejects-unrelated-names
   (testing "suites belonging to unrelated systems are never swallowed"
+    ;; FiveAM's suite registry is global: every suite of every system loaded
+    ;; into the image is a selection candidate, so an over-broad match runs
+    ;; another project's tests and fires its fixtures.  The first three cases
+    ;; below all passed against an earlier matcher that derived the bare
+    ;; primary name ("foo" from "foo/tests") as a candidate -- but only by
+    ;; accident of spelling: %NAME-MATCHES-CANDIDATE-P accepts a prefix
+    ;; followed by "-" or "/", and FABRIC fails merely because "fa" is
+    ;; followed by "B".  FOO-UTILS and FOO/OTHER were matched.  Keep names
+    ;; here that differ from the system in the *separator* position.
     (unwind-protect
          (progn
            (ok (not (%suite-matches-system-p "XYLOPHONE/TESTS" "XYLOPHONE-TESTS"
@@ -549,10 +559,20 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
                "system x must not match the unrelated xylophone/tests package")
            (ok (not (%suite-matches-system-p "FABRIC/TESTS" "FABRIC-TESTS"
                                              "fa/tests"))
-               "the primary-name candidate fa must not swallow fabric")
+               "a longer unrelated name is not a match")
            (ok (not (%suite-matches-system-p "OTHER/TESTS" "TESTS-SUITE"
                                              "fa/tests"))
-               "a shared trailing segment (tests) is not a match candidate"))
+               "a shared trailing segment (tests) is not a match candidate")
+           ;; The three the primary-name candidate got wrong.
+           (ok (not (%suite-matches-system-p "FOO-UTILS" "ALL-TESTS"
+                                             "foo/tests"))
+               "a sibling system's package must not match at the hyphen")
+           (ok (not (%suite-matches-system-p "FOO/OTHER" "ALL-TESTS"
+                                             "foo/tests"))
+               "a sibling sub-system's package must not match at the slash")
+           (ok (not (%suite-matches-system-p "SOME-OTHER-PKG" "FOO-UTILS-TESTS"
+                                             "foo/tests"))
+               "a sibling system's suite symbol must not match either"))
       (%delete-fabricated-packages))))
 
 ;;; ---------------------------------------------------------------------------
