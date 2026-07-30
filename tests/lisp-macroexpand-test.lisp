@@ -76,8 +76,8 @@ stack on this input and takes the whole process down."
 (defmacro circular-expansion-under-list ()
   "Test macro whose expansion is circular under a LIST head, not a QUOTE.
 MACROEXPAND-ALL refuses to descend into QUOTE, so a cycle hidden there is
-survivable by accident; this one is not, and exercises the
-STORAGE-CONDITION clause rather than the input guard."
+survivable by accident; this one is not, and exercises the per-expansion
+circularity check in %MAKE-WALK-GUARD rather than the input guard."
   (let ((cell (list 'list 1)))
     (setf (cddr cell) cell)
     cell))
@@ -240,23 +240,40 @@ STORAGE-CONDITION clause rather than the input guard."
 
 (deftest macroexpand-all-survives-a-runaway-macro
   (testing "a self-reproducing macro at level all is reported, not fatal"
+    ;; This used to rely on catching the CONTROL-STACK-EXHAUSTED that
+    ;; MACROEXPAND-ALL eventually raises.  That is not survivable: at a 2 MB
+    ;; control stack SBCL dies at roughly 5,800 expansions with a bare
+    ;; `Control stack exhausted', signalling nothing, because the fault lands
+    ;; inside a pseudo-atomic allocation.  The test passed only when the fault
+    ;; happened to land somewhere recoverable -- it took down a CI run once the
+    ;; surrounding code shifted the stack layout.  The expansion budget in
+    ;; %MAKE-WALK-GUARD now stops the walk deterministically instead.
     (let ((results (macroexpand-forms
                     (list (cons "runaway" "(self-reproducing-macro)")
                           (cons "sane" "(double-it 4)"))
                     :package *fixture-package* :level "all")))
       (ok (getf (first results) :error)
-          "stack exhaustion is a STORAGE-CONDITION and must still be caught")
+          "the runaway must be reported as a per-entry failure")
+      (ok (search "does not reach a fixpoint" (getf (first results) :error))
+          "the message must name the real cause, not a storage condition")
       (ok (string= "(* 2 4)" (getf (second results) :printed))
           "the entry after the runaway is still expanded"))))
 
 (deftest macroexpand-all-survives-a-circular-expansion
   (testing "a cycle built by the expander is reported, not fatal"
+    ;; The input guard cannot see this cycle -- it is created by the expander
+    ;; from acyclic input -- and the counter alone would not trip either, since
+    ;; descending a circular cons expands no further macros.  %MAKE-WALK-GUARD
+    ;; checks each expansion for circularity at the moment it is produced,
+    ;; which is the only point where the cycle is still small and reachable.
     (let ((results (macroexpand-forms
                     (list (cons "cyclic" "(circular-expansion-under-list)")
                           (cons "sane" "(double-it 4)"))
                     :package *fixture-package* :level "all")))
       (ok (getf (first results) :error)
-          "the input guard cannot catch this; the storage-condition clause must")
+          "the cycle must be reported as a per-entry failure")
+      (ok (search "circular" (getf (first results) :error))
+          "the message must name the cycle")
       (ok (string= "(* 2 4)" (getf (second results) :printed))
           "the batch continues after it"))))
 
