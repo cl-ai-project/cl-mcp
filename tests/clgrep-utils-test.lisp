@@ -310,8 +310,19 @@ Final line
     (let ((result (extract-form-type-and-name "(cl:defun foo (x) x)")))
       (ok (string= "defun" (cdr (assoc :type result))))
       (ok (string= "foo" (cdr (assoc :name result)))))
+    ;; Package names routinely carry slashes -- this repository is a
+    ;; package-inferred system, so every one of its own packages does -- and
+    ;; dots are just as legal a constituent character.
+    (let ((result (extract-form-type-and-name
+                   "(cl-mcp/src/dsl:define-rule foo (x) x)")))
+      (ok (string= "define-rule" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result)))))
+    (let ((result (extract-form-type-and-name "(my.dsl::defthing foo 1)")))
+      (ok (string= "defthing" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result)))))
     ;; A qualified head that is not a definition is still rejected.
     (ok (null (extract-form-type-and-name "(routes:apply-rules x)")))
+    (ok (null (extract-form-type-and-name "(cl-mcp/src/dsl:apply-rules x)")))
     ;; A keyword head is not a package qualifier: .asd component forms such as
     ;; (:file \"main\") must keep parsing as non-definitions.
     (ok (null (extract-form-type-and-name "(:file \"main\")")))))
@@ -406,19 +417,29 @@ Final line
 (routes::define-endpoint probe (s)
   (probe-value s))
 
+(cl-mcp/src/dsl:define-guard slashy (s)
+  (probe-value s))
+
+(cl:defun helper (s)
+  (probe-value s))
+
 (defun probe-value (s)
   (and (stringp s) (plusp (length s))))
 "
   "A DSL-style source file whose defining macros are reached through their
-   package, the way a caller outside the DSL's package must write them.")
+   package, the way a caller outside the DSL's package must write them.
+   Covers a plain package name, a double-colon head, a slash-delimited
+   package name, and a standard defining macro that is itself qualified.")
 
 (deftest test-semantic-grep-package-qualified-form-type
   (with-temp-dsl-project (dir *qualified-dsl-file-content*)
     (testing "package-qualified defining macros are classified, not NIL"
       (let ((results (semantic-grep dir "probe-value" :include-form nil)))
-        (ok (= 3 (length results)))
+        (ok (= 5 (length results)))
         (ok (every (lambda (r) (cdr (assoc :form-type r))) results)
-            "no result has a NIL form-type")))
+            "no result has a NIL form-type")
+        (ok (every (lambda (r) (cdr (assoc :signature r))) results)
+            "a row a form-types filter admits must carry a signature")))
     (testing "form-types matches the unqualified type name"
       ;; The caller filters on DEFINE-RULE, not ROUTES:DEFINE-RULE: the
       ;; qualifier is a property of the call site, not of the form's type.
@@ -434,12 +455,25 @@ Final line
                                     :include-form nil)))
         (ok (= 1 (length results)))
         (ok (string= "probe" (cdr (assoc :form-name (first results)))))))
-    (testing "an unqualified head in the same file is unaffected"
+    (testing "a slash-delimited package name classifies the same way"
+      ;; Every package in this repository is slash-delimited, so this is the
+      ;; shape a caller here would actually write.
       (let ((results (semantic-grep dir "probe-value"
-                                    :form-types '("defun")
+                                    :form-types '("define-guard")
                                     :include-form nil)))
         (ok (= 1 (length results)))
-        (ok (string= "probe-value" (cdr (assoc :form-name (first results)))))))))
+        (ok (string= "slashy" (cdr (assoc :form-name (first results)))))))
+    (testing "a qualified and a bare head share one type"
+      (let* ((results (semantic-grep dir "probe-value"
+                                     :form-types '("defun")
+                                     :include-form nil))
+             (names (sort (mapcar (lambda (r) (cdr (assoc :form-name r)))
+                                  results)
+                          #'string<)))
+        (ok (= 2 (length results)))
+        (ok (equal '("helper" "probe-value") names))
+        (ok (every (lambda (r) (cdr (assoc :signature r))) results)
+            "the qualified defun keeps its signature")))))
 
 (deftest test-extract-form-signature
   (testing "should extract signatures from various form types"
@@ -465,7 +499,27 @@ Final line
     (ok (string= "my-struct"
                  (extract-form-signature "(defstruct my-struct field1 field2)")))
     ;; Non-recognized form
-    (ok (null (extract-form-signature "(my-custom-form foo)")))))
+    (ok (null (extract-form-signature "(my-custom-form foo)"))))
+  (testing "should extract signatures from package-qualified heads"
+    ;; EXTRACT-FORM-TYPE-AND-NAME reports DEFUN for (CL:DEFUN ...), so the
+    ;; signature scan has to look past the qualifier it dropped. Otherwise a row
+    ;; that a form_types filter admits carries no signature at all.
+    (ok (string= "(foo x y)"
+                 (extract-form-signature "(cl:defun foo (x y) x)")))
+    ;; (ROVE:DEFTEST ...) is the everyday case: rove is commonly qualified
+    ;; rather than :USEd into the test package.
+    (ok (string= "(my-test ok t)"
+                 (extract-form-signature "(rove:deftest my-test (ok t))")))
+    (ok (string= "(emit (l json) e)"
+                 (extract-form-signature "(cl:defmethod emit ((l json) e) e)")))
+    ;; defclass takes a separate branch and needs the same treatment.
+    (ok (string= "(k p)" (extract-form-signature "(cl:defclass k (p) ())")))
+    ;; A package name with a dot or a slash reaches the same path.
+    (ok (string= "(my-test ok t)"
+                 (extract-form-signature "(my.lib::deftest my-test (ok t))")))
+    ;; Types outside those two branches already returned the bare name.
+    (ok (string= "foo"
+                 (extract-form-signature "(routes:define-rule foo (x) x)")))))
 
 (deftest test-semantic-grep-signature-field
   (testing "should include signature in results"

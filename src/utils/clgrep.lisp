@@ -398,9 +398,11 @@
       ;; Extract the first token (form type) and second token (name).  The head
       ;; group admits an optional PACKAGE: or PACKAGE:: prefix; without it the
       ;; colon ends the match and a qualified head parses as no form at all.
+      ;; Dots and slashes are constituent characters, and every package in this
+      ;; repository is slash-delimited, so both sides of the colon accept them.
       (multiple-value-bind (match groups)
           (cl-ppcre:scan-to-strings
-           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+-]*)?)\\s+([^\\s()]+|\\([^)]+\\))"
+           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+./-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)\\s+([^\\s()]+|\\([^)]+\\))"
            trimmed)
         (when match
           (let ((form-type (%strip-package-qualifier
@@ -443,6 +445,18 @@
       (when (zerop depth)
         (values (subseq text start pos) pos)))))
 
+(defun %head-scan-pattern (form-type form-name)
+  "Return a regex anchoring a scan at the head of a FORM-TYPE definition of
+   FORM-NAME.
+
+   FORM-TYPE comes from EXTRACT-FORM-TYPE-AND-NAME, which strips any package
+   qualifier, so the pattern has to admit the qualifier again -- anchoring on
+   the bare type would fail to match the (CL:DEFUN ...) text it was derived
+   from and leave a classified form with no signature."
+  (format nil "^\\(\\s*(?:[^\\s():]+:{1,2})?~A\\s+~A\\s*"
+          (cl-ppcre:quote-meta-chars form-type)
+          (cl-ppcre:quote-meta-chars form-name)))
+
 (defun extract-form-signature (form-text)
   "Extract the signature from FORM-TEXT.
    Returns a string representing the signature, or NIL if not a recognized form.
@@ -462,9 +476,7 @@
                              "define-compiler-macro" "deftest")
                  :test #'string=)
          (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*~A\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-type)
-                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-pattern (%head-scan-pattern form-type form-name))
                 (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
            (when name-end
              (multiple-value-bind (lambda-list end-pos)
@@ -483,8 +495,7 @@
         ;; Class definitions: name + superclasses
         ((string= form-type "defclass")
          (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
-                (name-pattern (format nil "^\\(\\s*defclass\\s+~A\\s*"
-                                      (cl-ppcre:quote-meta-chars form-name)))
+                (name-pattern (%head-scan-pattern form-type form-name))
                 (name-end (nth-value 1 (cl-ppcre:scan name-pattern trimmed))))
            (when name-end
              (multiple-value-bind (superclasses end-pos)
