@@ -16,6 +16,7 @@
            #:*expansion-print-length*
            #:*expansion-max-output-length*
            #:*max-expansion-steps*
+           #:*max-walk-expansions*
            #:*backquote-template-marker*
            #:*shadowed-binding-marker*))
 
@@ -40,6 +41,23 @@ printer ignores it for the QUOTE abbreviation.  That case is handled by
 (defparameter *max-expansion-steps* 100
   "Upper bound on repeated MACROEXPAND-1 steps for level \"full\".
 Guards against a macro that expands into itself forever.")
+
+(defparameter *max-walk-expansions* 1000
+  "Upper bound on macro expansions performed by one level \"all\" walk.
+
+Level \"all\" hands the form to SB-CLTL2:MACROEXPAND-ALL, which recurses
+once per expansion.  A macro that expands into itself therefore drives the
+control stack down until it is exhausted, and measurement shows that
+exhaustion is *fatal*: at a 2 MB control stack SBCL dies at roughly 5,800
+expansions with `Control stack exhausted' and no condition is signalled at
+all, because the fault lands inside a pseudo-atomic allocation.  The
+STORAGE-CONDITION clause in MACROEXPAND-FORMS cannot catch that; only
+never reaching it works.
+
+1000 sits far below the fatal depth and far above real code: a full walk
+of an ordinary DEFUN using LET, DOLIST, WHEN and LOOP costs 14 expansions.
+A form that genuinely needs more gets a clear error naming this limit,
+which is a better outcome than taking the worker process down.")
 
 (defparameter *backquote-template-marker* " (inside a backquote template)"
   "Label suffix marking a sub-form match cut out of a backquote template.
@@ -247,6 +265,46 @@ costs one visit per distinct cons instead of blowing up exponentially."
                  found)))
       (walk form))))
 
+(defun %make-walk-guard (counter outer-hook)
+  "Return a *MACROEXPAND-HOOK* function bounding one level \"all\" walk.
+
+COUNTER is a one-element list used as a mutable box.  The hook stops the
+two ways a walk can run away, both *before* the control stack is in
+danger, because reaching the stack guard is not survivable here: SBCL
+faults inside a pseudo-atomic allocation and dies outright, signalling
+nothing a handler could catch.
+
+  - A macro that expands into itself never terminates.  Bounded by
+    *MAX-WALK-EXPANSIONS*.
+  - An expander that builds a *circular* expansion out of acyclic input
+    makes MACROEXPAND-ALL descend forever through conses without
+    necessarily expanding another macro, so the counter alone would not
+    trip.  Each expansion is therefore checked with %CIRCULAR-P at the
+    moment it is produced, which is the only point where the cycle is
+    still small and reachable.  The cost is proportional to the expansion
+    the walker is about to traverse anyway.
+
+OUTER-HOOK is the *MACROEXPAND-HOOK* that was in effect when the walk
+started, and every expansion is delegated through it rather than to
+EXPANDER directly.  Installing this guard must not remove a hook the image
+already had: levels \"once\" and \"full\" reach the caller's hook through
+MACROEXPAND-1, so calling the raw expander here would make \"all\" the one
+level that silently ignores it -- and a hook that rewrites an expansion
+would then be reported differently depending on the level asked for.
+OUTER-HOOK is a function designator, which FUNCALL accepts, so the default
+'FUNCALL needs no special case."
+  (lambda (expander form env)
+    (when (> (incf (first counter)) *max-walk-expansions*)
+      (error "Level \"all\" exceeded ~D macro expansions on this form; it does ~
+not reach a fixpoint.  Use level \"once\" or \"full\"."
+             *max-walk-expansions*))
+    (let ((expansion (funcall outer-hook expander form env)))
+      (when (and (consp expansion) (%circular-p expansion))
+        (error "Level \"all\" cannot expand ~S: its expansion is circular.  ~
+Use level \"once\" or \"full\"."
+               (if (consp form) (first form) form)))
+      expansion)))
+
 (defun %expand-all (form)
   "Walk FORM with SB-CLTL2:MACROEXPAND-ALL, expanding nested macros.
 Returns (values expansion steps), where STEPS is 1 when the walk changed
@@ -257,19 +315,24 @@ standard reader syntax, so \"#1=(list 1 . #1#)\" reads fine — and
 MACROEXPAND-ALL walks the whole tree, exhausting the control stack on
 such input.
 
-The check is on the INPUT, and it is NOT a complete guarantee.  An
-expander can build a circular expansion out of acyclic input, and
-MACROEXPAND-ALL will descend into it and exhaust the control stack
-mid-walk.  That case is caught by the STORAGE-CONDITION clause in
-MACROEXPAND-FORMS, which is therefore load bearing and must not be
-removed.  Level \"all\" also has no step cap of its own:
-*MAX-EXPANSION-STEPS* applies to \"full\" only.
+That input check cannot see an expander that *builds* a cycle, nor a
+macro that expands into itself; both are bounded instead by the
+*MACROEXPAND-HOOK* installed here.  See %MAKE-WALK-GUARD for why the
+bound has to be reached before the stack runs out rather than after, and
+why the guard delegates to the hook that was already in effect instead of
+replacing it.
 
 Levels \"once\" and \"full\" only look at the head, so they accept
 circular input without this restriction."
   (when (%circular-p form)
     (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
-  (let ((expansion (sb-cltl2:macroexpand-all form)))
+  (let* ((counter (list 0))
+         ;; Read the hook BEFORE rebinding it, so the guard can delegate to
+         ;; whatever the image already had rather than displace it.
+         (outer-hook *macroexpand-hook*)
+         (expansion (let ((*macroexpand-hook*
+                            (%make-walk-guard counter outer-hook)))
+                      (sb-cltl2:macroexpand-all form))))
     (values expansion (if (equal expansion form) 0 1))))
 
 (defun %expand (form level)
@@ -376,9 +439,12 @@ apply to the whole request."
                                                   print-level print-length
                                                   max-output-length)
                              ;; STORAGE-CONDITION is named explicitly rather than
-                             ;; catching all of SERIOUS-CONDITION.  A runaway
-                             ;; expansion raises CONTROL-STACK-EXHAUSTED, which is
-                             ;; not an ERROR and must be caught here.  But
+                             ;; catching all of SERIOUS-CONDITION.  It is a
+                             ;; backstop for a heap exhaustion, NOT for a runaway
+                             ;; level "all" walk: measurement shows control-stack
+                             ;; exhaustion there is fatal and signals nothing at
+                             ;; all, so %MAKE-WALK-GUARD has to stop the walk
+                             ;; before it gets that far.  But
                              ;; SB-EXT:TIMEOUT is a SERIOUS-CONDITION too, and a
                              ;; deadline the caller set must abort the request --
                              ;; turning it into a per-entry note that the loop then

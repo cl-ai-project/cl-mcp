@@ -41,7 +41,8 @@
                 #:cst-node-children
                 #:cst-node-start
                 #:cst-node-end
-                #:cst-node-start-line)
+                #:cst-node-start-line
+                #:%in-package-form-p)
   (:documentation "Parent-side form addressing and tool definition for
 lisp-macroexpand.")
   (:export #:lisp-macroexpand))
@@ -93,8 +94,12 @@ Comparison is case-insensitive and ignores any package qualifier written
 in SUB-FORM, because symbols recovered from the CST may be homeless after
 package-context teardown and only their SYMBOL-NAME is reliable.
 
-QUOTE and FUNCTION subtrees are not searched: nothing inside them is
-evaluated in that position, so a match there would always be fabricated.
+A QUOTE subtree is not searched, and neither is #'name: nothing inside
+them is evaluated in that position, so a match there would always be
+fabricated.  The body of #'(lambda ...) IS searched.  Eclector reads it
+as (FUNCTION (LAMBDA ...)), so skipping every FUNCTION subtree used to
+hide the whole lambda -- yet its body is ordinary evaluated code, and a
+call there is as real as any other.
 A backquote template IS searched, because an unquoted island inside one --
 `(foo ,(double-it x)) -- is a real call; skipping the template outright
 would turn a false positive into a false negative.  Template matches
@@ -135,6 +140,25 @@ matches, the first of which contains the second."
                       (symbol-name (car value)))))
              (operator-p (name operator)
                (and name (string-equal name operator)))
+             (function-lambda-p (node)
+               ;; #'(lambda ...) reads as (FUNCTION (LAMBDA ...)); the
+               ;; lambda body is ordinary evaluated code, unlike #'name
+               ;; which only references a function.  Compared by
+               ;; SYMBOL-NAME because CST symbols can be homeless after
+               ;; package-context teardown.
+               ;; CONSP on the cdr before SECOND: source text really can
+               ;; hold a dotted (function . x), and SECOND would raise a raw
+               ;; TYPE-ERROR on it where the pre-branch walk simply skipped
+               ;; the node.
+               (let ((value (cst-node-value node)))
+                 (and (consp value)
+                      (consp (cdr value))
+                      (consp (second value))
+                      (symbolp (car (second value)))
+                      (car (second value))
+                      (member (symbol-name (car (second value)))
+                              '("LAMBDA" "NAMED-LAMBDA")
+                              :test #'string-equal))))
              (expr-children (node)
                ;; :SKIPPED children -- comments -- must not shift the
                ;; position of the binding list.
@@ -167,7 +191,8 @@ matches, the first of which contains the second."
                                  shadowed-by)
                            found))
                    (unless (or (operator-p name "quote")
-                               (operator-p name "function"))
+                               (and (operator-p name "function")
+                                    (not (function-lambda-p node))))
                      (let ((nested (or in-template
                                        (operator-p name "quasiquote")))
                            ;; Innermost binder wins: it is the one whose
@@ -266,6 +291,29 @@ global definition and is not what the compiler sees there."
        (when notes
          (format nil "~{~A~^~%~}" notes))))))
 
+(defun %package-in-effect-at (nodes offset)
+  "Return the package named by the last IN-PACKAGE form before OFFSET, or NIL.
+
+NODES are the file's top-level CST nodes in source order.  The file's
+FIRST in-package is the wrong answer for the classic prologue --
+(in-package :cl-user), (defpackage ...), (in-package :real-pkg) -- where
+everything after it belongs to :real-pkg.  Reading the target in
+COMMON-LISP-USER instead makes a macro that IS loaded look undefined, and
+builds a whole-form expansion out of CL-USER symbols while presenting it
+as correct.
+
+:SKIPPED nodes -- comments -- are ignored, and an in-package form that
+starts at or after OFFSET has not taken effect yet.  The designator is
+extracted with cl-mcp/src/cst's own %IN-PACKAGE-FORM-P, so this answer
+cannot drift from the one the parser used while reading the file."
+  (let ((designator nil))
+    (dolist (node nodes designator)
+      (when (and (eq (cst-node-kind node) :expr)
+                 (< (cst-node-start node) offset))
+        (let ((name (%in-package-form-p (cst-node-value node))))
+          (when name
+            (setf designator name)))))))
+
 (defun %collect-file-sources (path form-type form-name sub-form package readtable)
   "Locate the addressed form in PATH.
 Returns (values ENTRIES PACKAGE-NAME NOTE)."
@@ -287,8 +335,17 @@ sub-form positions. Drop one of the two arguments.")))
     (multiple-value-bind (absolute relative original nodes target snippet
                           form-type-string file-package-name)
         (%locate-target-form path form-type form-name designator)
-      (declare (ignore relative nodes))
-      (let ((package-name (or package file-package-name "COMMON-LISP-USER")))
+      (declare (ignore relative))
+      ;; FILE-PACKAGE-NAME is the file's FIRST in-package, which is the
+      ;; right package only for a file without a prologue.  It stays as the
+      ;; fallback for a target that precedes every in-package form -- the
+      ;; defpackage itself, say -- where the file's declared package is a
+      ;; better guess than CL-USER.
+      (let ((package-name (or package
+                              (%package-in-effect-at nodes
+                                                     (cst-node-start target))
+                              file-package-name
+                              "COMMON-LISP-USER")))
         (if sub-form
             (progn
               ;; The argument guard above covers a readtable the CALLER
@@ -416,8 +473,9 @@ what the compiler sees is never presented as correct. A binding pair of those
 four operators is recognized as a binding position, skipped instead of expanded,
 and reported in a note. Matching is otherwise positional-blind: it matches any
 list whose head is the name, so the variable of a let binding pair is still
-reported just like a call. Quoted and #' subtrees are skipped, and a match
-inside a backquote template is labelled as such.
+reported just like a call. Quoted subtrees and #'name are skipped, but the body
+of #'(lambda ...) is searched, and a match inside a backquote template is
+labelled as such.
 'sub_form' cannot be combined with 'readtable', nor used on a file that
 declares its own (in-readtable ...). Expanding runs the macro's expander
 function, i.e. arbitrary code, in the isolated worker process — or in the
@@ -436,7 +494,7 @@ every call, up to ~D" *max-sub-form-matches*))
   (code :type :string :description
    "Source text of a form to expand; alternative to path")
   (package :type :string :description
-   "Package to read the form in; defaults to the file's in-package, else CL-USER")
+   "Package to read the form in; defaults to the in-package in effect at the form, else CL-USER")
   (level :type :string :enum ("once" "full" "all") :description
    "Expansion depth: once (default), full, or all")
   (readtable :type :string :description

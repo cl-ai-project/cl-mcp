@@ -301,6 +301,38 @@ comments near a target form."
       (%apply-operation-normalized text node operation content)
       (%apply-operation-preserve-spacing text node operation content)))
 
+(defconstant +dry-run-snippet-limit+ 2048
+  "Maximum characters of one form snippet inlined into a dry-run summary.")
+
+(defun %truncate-snippet (text)
+  "Return TEXT bounded to +DRY-RUN-SNIPPET-LIMIT+ characters for summary text.
+Longer input is cut at the limit and annotated with the number of characters
+dropped, so a dry-run summary never echoes an unbounded amount of source.
+Non-string input (a missing key) is returned unchanged."
+  (if (and (stringp text) (> (length text) +dry-run-snippet-limit+))
+      (concatenate 'string
+                   (subseq text 0 +dry-run-snippet-limit+)
+                   (format nil "~%... [~D more characters truncated]"
+                           (- (length text) +dry-run-snippet-limit+)))
+      text))
+
+(defun %preview-form-text (operation content normalize-blank-lines)
+  "Return the form text OPERATION splices into the file, for dry-run previews.
+CONTENT is the validated (possibly parinfer-repaired) replacement text, so the
+result is exactly what %APPLY-OPERATION writes at the edit site. This lets a
+dry-run summary show the edited form instead of the whole updated file.
+:DELETE writes no form, so a short marker is returned instead."
+  (ecase operation
+    ((:delete) "(form removed)")
+    ((:replace)
+     (if normalize-blank-lines
+         (%trim-outer-whitespace content)
+         content))
+    ((:insert-before :insert-after)
+     (if normalize-blank-lines
+         (%trim-outer-whitespace content)
+         (ensure-trailing-newline content)))))
+
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
         (normalize-blank-lines t) readtable)
@@ -353,6 +385,8 @@ to use for parsing both the file and the new content."
                 (setf (gethash "would_change" result) would-change
                       (gethash "original" result) target-snippet
                       (gethash "preview" result) updated
+                      (gethash "preview_form" result)
+                      (%preview-form-text op-key nil normalize-blank-lines)
                       (gethash "file_path" result) (namestring abs)
                       (gethash "operation" result) op-normalized)
                 result))
@@ -378,6 +412,9 @@ to use for parsing both the file and the new content."
                   (setf (gethash "would_change" result) would-change
                         (gethash "original" result) target-snippet
                         (gethash "preview" result) updated
+                        (gethash "preview_form" result)
+                        (%preview-form-text op-key validated-content
+                                            normalize-blank-lines)
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized)
                   (when parinfer-warning
@@ -439,14 +476,21 @@ is used instead of Eclector, which means comments are NOT preserved."))
                             :normalize-blank-lines normalize_blank_lines
                             :readtable (%parse-readtable-designator readtable))
           (if dry_run
+              ;; The summary inlines only the edited FORM (preview_form), never
+              ;; the whole updated file: "preview" holds the full file and is
+              ;; kept as a sibling JSON field for backward compatibility.
               (let* ((preview (gethash "preview" updated))
+                     (preview-form (gethash "preview_form" updated))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
                      (pw (gethash "parinfer_warning" updated))
-                     (summary (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~@[~%WARNING: ~A~]~
-                                               ~@[~%~%--- original ---~%~A~]~@[~%~%--- preview ---~%~A~]"
-                                      operation form_type form_name file_path would-change pw
-                                      original-form preview)))
+                     (summary
+                      (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~
+                                   ~@[~%WARNING: ~A~]~@[~%~%--- original ---~%~A~]~
+                                   ~@[~%~%--- preview ---~%~A~]"
+                              operation form_type form_name file_path would-change pw
+                              (%truncate-snippet original-form)
+                              (%truncate-snippet preview-form))))
                 (result id
                         (apply #'make-ht
                                "path" file_path
@@ -456,6 +500,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "would_change" (json-bool would-change)
                                "original" original-form
                                "preview" preview
+                               "preview_form" preview-form
                                "content" (text-content summary)
                                (when pw
                                  (list "parinfer_warning" pw)))))

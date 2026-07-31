@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/system-loader-core
                 #:load-system)
   (:import-from #:cl-mcp/src/test-runner-core
-                #:run-tests)
+                #:run-tests
+                #:*load-lock-wrapper*)
   (:import-from #:cl-mcp/src/inspect
                 #:inspect-object-by-id)
   (:import-from #:cl-mcp/src/project-root
@@ -133,8 +134,12 @@ concurrent worker/init load or another load-system."
 (defun %handle-run-tests (params)
   "Run tests for a system.  Returns the same structure as define-tool
 \"run-tests\".  Honors timeout_seconds to limit test execution time.
-Holds *ASDF-LOAD-LOCK* during the test run so it cannot overlap a
-concurrent load."
+Holds *ASDF-LOAD-LOCK* only for RUN-TESTS' force-reload phase, by binding
+*LOAD-LOCK-WRAPPER*, so a load here cannot overlap a concurrent load.  The
+test run itself must NOT hold the lock: the worker dispatches handlers on
+its connection thread and Rove runs deftests on that same thread, so a
+suite whose tests touch *ASDF-LOAD-LOCK* (tests/worker-init-hook-test)
+would deadlock or trip SBCL's recursive-lock check."
   (let ((system (gethash "system" params))
          (framework (gethash "framework" params))
          (test (gethash "test" params))
@@ -144,7 +149,11 @@ concurrent load."
     (unless system
       (error "system is required"))
     (flet ((do-run ()
-             (with-asdf-load-lock
+             ;; The lock covers RUN-TESTS' force-reload only; see the
+             ;; docstring for why the test run itself must stay outside it.
+             (let ((*load-lock-wrapper*
+                     (lambda (thunk)
+                       (with-asdf-load-lock (funcall thunk)))))
                (run-tests system
                           :framework framework
                           :test test

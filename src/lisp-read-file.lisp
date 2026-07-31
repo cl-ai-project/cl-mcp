@@ -191,7 +191,7 @@ that backquote, so the text always reads back."
     (set-pprint-dispatch '(cons (member eclector.reader:unquote-splicing))
                          (%unquote-printer ",@") 0 table)
     table)
-  "Pprint dispatch used by %FORM->STRING and %COLLAPSE-DEF-FORM.
+  "Pprint dispatch used by %FORM->STRING, and the base of *SIGNATURE-PPRINT-DISPATCH*.
 
 Must stay a DEFPARAMETER; see the comment above the form.
 
@@ -212,9 +212,73 @@ symbol printer, and each CONS entry names one head symbol, so it displaces
 SB-PRETTY::PPRINT-CALL-FORM for that head alone and leaves every other
 standard entry intact.
 
-Both readers of this variable, %FORM->STRING and %COLLAPSE-DEF-FORM, bind
-*PRINT-PPRINT-DISPATCH* to its value at call time, so a rebuilt table takes
-effect on the next call; nothing captures the table object across a reload.")
+%FORM->STRING binds *PRINT-PPRINT-DISPATCH* to this value at call time, and
+*SIGNATURE-PPRINT-DISPATCH* is rebuilt from it by the same load that rebuilds
+this one, so a rebuilt table takes effect on the next call; nothing captures
+the table object across a reload.")
+
+(defun %pprint-signature-cons (stream form)
+  "Pprint-dispatch handler laying every cons out with PPRINT-FILL.
+
+PPRINT-FILL emits only fill newlines, which the pretty printer suppresses for
+as long as the text fits inside *PRINT-RIGHT-MARGIN*.  The standard layouts it
+displaces do not behave that way: the entries (COPY-PPRINT-DISPATCH NIL)
+inherits for IF, LET, LET* and LOOP emit *mandatory* newlines, which no margin
+can suppress -- the output is identical at margin 200, at
+MOST-POSITIVE-FIXNUM and at NIL.  A collapsed signature is a single
+line-numbered line, so a lambda list default or an initial value containing one
+of those heads would otherwise spill unnumbered continuation lines into the
+collapsed view."
+  (pprint-fill stream form))
+
+(defun %make-signature-pprint-dispatch (base)
+  "Return a copy of BASE in which every cons is laid out by PPRINT-FILL.
+
+The blanket CONS entry is registered at priority 1 so it displaces the standard
+special-form layouts inherited from (COPY-PPRINT-DISPATCH NIL).  Everything
+that must survive that displacement is re-registered at priority 2, where the
+more specific type specifier also wins:
+
+  - (QUOTE X), (FUNCTION X) and (SB-INT:QUASIQUOTE X).  The blanket entry alone
+    regresses the first two to (quote x) and (function x); for the third it is
+    far worse, because PPRINT-FILL descends into the SB-IMPL::COMMA structures a
+    standard-reader backquote expands into and recurses until the control stack
+    is exhausted -- a fatal SBCL error, not a catchable condition.  SBCL's
+    initial table maps all three heads to one PPRINT-QUOTE entry, so restoring
+    that single handler -- read out of a fresh standard table rather than named
+    as an implementation-internal symbol -- covers them together.  Files read
+    through the READTABLE argument go through CL:READ rather than Eclector, so
+    their backquotes arrive as SB-INT:QUASIQUOTE and take exactly this path.
+  - The three Eclector backquote heads, so a signature keeps the backquote,
+    `,' and `,@' rendering %QUASIQUOTE-PRINTER and %UNQUOTE-PRINTER give a
+    macro body.  Their entries in BASE sit at priority 0 and would lose to the
+    blanket entry; SET-PPRINT-DISPATCH matches type specifiers with EQUAL, so
+    these calls replace those entries rather than adding duplicates."
+  (let ((table (copy-pprint-dispatch base))
+        (quote-printer (pprint-dispatch '(quote x) (copy-pprint-dispatch nil))))
+    (set-pprint-dispatch 'cons #'%pprint-signature-cons 1 table)
+    (set-pprint-dispatch '(cons (member quote function sb-int:quasiquote))
+                         quote-printer 2 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:quasiquote))
+                         #'%quasiquote-printer 2 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:unquote))
+                         (%unquote-printer ",") 2 table)
+    (set-pprint-dispatch '(cons (member eclector.reader:unquote-splicing))
+                         (%unquote-printer ",@") 2 table)
+    table))
+
+(defparameter *signature-pprint-dispatch*
+  (%make-signature-pprint-dispatch *source-pprint-dispatch*)
+  "Pprint dispatch used by %COLLAPSE-DEF-FORM to render a signature on one line.
+
+Derived from *SOURCE-PPRINT-DISPATCH*, so homeless-due-to-teardown symbols and
+the Eclector backquote heads render exactly as they do in an expanded view; the
+only difference is that no cons can force a newline the right margin cannot
+suppress.  See %MAKE-SIGNATURE-PPRINT-DISPATCH.
+
+MUST NOT become a DEFVAR, for the reason spelled out above
+*SOURCE-PPRINT-DISPATCH*, and doubly so here: this table is rebuilt from that
+one, so a DEFVAR would also pin it to a table built from a stale base.")
 
 (defun lisp-source-path-p (path)
   "Return T when PATH designator refers to a Lisp source file by extension."
@@ -283,14 +347,17 @@ shared symbol is the sole argument of a form."
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
 For defmethod, includes qualifiers like :before, :after, :around.
-Uses *SOURCE-PPRINT-DISPATCH* so homeless-due-to-teardown symbols
+Uses *SIGNATURE-PPRINT-DISPATCH* so homeless-due-to-teardown symbols
 print without a spurious `#:' prefix while genuinely uninterned
-source symbols keep theirs. Forces *PRINT-CIRCLE* to NIL to avoid
-spurious `#1=#1#' self-references when the CST reader shares a
-single symbol object across multiple positions in the form tree."
+source symbols keep theirs, and so no cons can emit a mandatory
+newline: the caller prefixes only the first line with a line number,
+so a signature that spilled onto a second line would corrupt the
+collapsed view. Forces *PRINT-CIRCLE* to NIL to avoid spurious
+`#1=#1#' self-references when the CST reader shares a single symbol
+object across multiple positions in the form tree."
   (let* ((*print-case* :downcase)
          (*print-circle* nil)
-         (*print-pprint-dispatch* *source-pprint-dispatch*)
+         (*print-pprint-dispatch* *signature-pprint-dispatch*)
          (head (car form))
          (name (second form))
          (qualifiers

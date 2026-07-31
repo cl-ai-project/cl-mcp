@@ -76,8 +76,8 @@ stack on this input and takes the whole process down."
 (defmacro circular-expansion-under-list ()
   "Test macro whose expansion is circular under a LIST head, not a QUOTE.
 MACROEXPAND-ALL refuses to descend into QUOTE, so a cycle hidden there is
-survivable by accident; this one is not, and exercises the
-STORAGE-CONDITION clause rather than the input guard."
+survivable by accident; this one is not, and exercises the per-expansion
+circularity check in %MAKE-WALK-GUARD rather than the input guard."
   (let ((cell (list 'list 1)))
     (setf (cddr cell) cell)
     cell))
@@ -238,25 +238,69 @@ STORAGE-CONDITION clause rather than the input guard."
       (ok (search "#1=" printed)
           "printed with circle notation; nothing hangs or crashes"))))
 
+(deftest macroexpand-all-delegates-to-an-existing-macroexpand-hook
+  (testing "the level-all guard does not displace a hook the image already had"
+    ;; Levels "once" and "full" reach a caller's *MACROEXPAND-HOOK* through
+    ;; MACROEXPAND-1.  Level "all" installs a guard of its own, and calling
+    ;; the raw expander from it made "all" the one level that ignored the
+    ;; hook -- so a hook that rewrites an expansion produced a different
+    ;; answer depending on which level was asked for.
+    (let ((hits 0))
+      (let ((*macroexpand-hook*
+              (lambda (expander form env)
+                (incf hits)
+                (funcall expander form env))))
+        (macroexpand-source "(double-it-twice 3)"
+                            :package *fixture-package* :level "all"))
+      (ok (plusp hits)
+          "a caller's hook must still be invoked during a level-all walk"))
+    ;; A rewriting hook must actually change the result, not merely be called.
+    (let ((printed
+            (let ((*macroexpand-hook*
+                    (lambda (expander form env)
+                      (declare (ignore expander env))
+                      (list 'quote (list :rewritten (first form))))))
+              (macroexpand-source "(double-it 3)"
+                                  :package *fixture-package* :level "all"))))
+      (ok (search ":rewritten" printed)
+          "the hook's own expansion must reach the output"))))
+
 (deftest macroexpand-all-survives-a-runaway-macro
   (testing "a self-reproducing macro at level all is reported, not fatal"
+    ;; This used to rely on catching the CONTROL-STACK-EXHAUSTED that
+    ;; MACROEXPAND-ALL eventually raises.  That is not survivable: at a 2 MB
+    ;; control stack SBCL dies at roughly 5,800 expansions with a bare
+    ;; `Control stack exhausted', signalling nothing, because the fault lands
+    ;; inside a pseudo-atomic allocation.  The test passed only when the fault
+    ;; happened to land somewhere recoverable -- it took down a CI run once the
+    ;; surrounding code shifted the stack layout.  The expansion budget in
+    ;; %MAKE-WALK-GUARD now stops the walk deterministically instead.
     (let ((results (macroexpand-forms
                     (list (cons "runaway" "(self-reproducing-macro)")
                           (cons "sane" "(double-it 4)"))
                     :package *fixture-package* :level "all")))
       (ok (getf (first results) :error)
-          "stack exhaustion is a STORAGE-CONDITION and must still be caught")
+          "the runaway must be reported as a per-entry failure")
+      (ok (search "does not reach a fixpoint" (getf (first results) :error))
+          "the message must name the real cause, not a storage condition")
       (ok (string= "(* 2 4)" (getf (second results) :printed))
           "the entry after the runaway is still expanded"))))
 
 (deftest macroexpand-all-survives-a-circular-expansion
   (testing "a cycle built by the expander is reported, not fatal"
+    ;; The input guard cannot see this cycle -- it is created by the expander
+    ;; from acyclic input -- and the counter alone would not trip either, since
+    ;; descending a circular cons expands no further macros.  %MAKE-WALK-GUARD
+    ;; checks each expansion for circularity at the moment it is produced,
+    ;; which is the only point where the cycle is still small and reachable.
     (let ((results (macroexpand-forms
                     (list (cons "cyclic" "(circular-expansion-under-list)")
                           (cons "sane" "(double-it 4)"))
                     :package *fixture-package* :level "all")))
       (ok (getf (first results) :error)
-          "the input guard cannot catch this; the storage-condition clause must")
+          "the cycle must be reported as a per-entry failure")
+      (ok (search "circular" (getf (first results) :error))
+          "the message must name the cycle")
       (ok (string= "(* 2 4)" (getf (second results) :printed))
           "the batch continues after it"))))
 
@@ -380,6 +424,48 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (search "*thing-b*" text) "the second definition was selected")
            (ok (null (search "*thing-a*" text))
                "the first definition was not selected")))))))
+
+(deftest lisp-macroexpand-file-mode-uses-the-in-package-at-the-form
+  (testing "the prologue's (in-package :cl-user) is not taken as the file's package"
+    ;; The classic header is (in-package :cl-user), (defpackage ...),
+    ;; (in-package :real-pkg).  Defaulting to the FIRST in-package reads the
+    ;; target in COMMON-LISP-USER: a whole form comes back NOT EXPANDED, or
+    ;; with an expansion built from CL-USER symbols, and a sub_form match is
+    ;; told to load a system that is already loaded.  Both read as facts about
+    ;; the code rather than as the addressing mistake they are.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-prologue.lisp"
+       "(in-package :cl-user)
+
+(defpackage #:macroexpand-prologue-fixture-xyzzy
+  (:use #:cl))
+
+(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(define-thing *thing-after-prologue* 1)
+
+(defun uses-double-after-prologue (n)
+  (double-it n))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "define-thing"
+                                           :form-name "*thing-after-prologue*"))
+                (text (response-text payload)))
+           (ok (equalp *fixture-package* (gethash "package" payload))
+               "the in-package in effect at the form wins over the file's first")
+           (ok (search "defparameter" text)
+               "so the macro expands instead of reporting NOT EXPANDED"))
+         (let ((text (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defun"
+                                        :form-name "uses-double-after-prologue"
+                                        :sub-form "double-it"))))
+           (ok (search "(* 2 n)" text)
+               "and a nested call to a loaded macro is expanded too")
+           (ok (null (search "load-system" text))
+               "instead of being blamed on a system that is already loaded")))))))
 
 (deftest lisp-macroexpand-file-mode-sub-form
   (testing "sub_form expands a macro call nested inside the addressed form"
@@ -548,6 +634,44 @@ USE-WORKER-POOL to take the proxy branch instead."
                "the real call is still found")
            (ok (search "(inside a backquote template)" text)
                "the template match is labelled rather than silently dropped")))))))
+
+(deftest lisp-macroexpand-sub-form-searches-a-function-lambda-body
+  (testing "the body of #'(lambda ...) is searched, while #'name stays skipped"
+    ;; Eclector reads #'(lambda ...) as (FUNCTION (LAMBDA ...)), so skipping
+    ;; every FUNCTION subtree hid the lambda body along with it.  When the
+    ;; only call sat there the tool answered "No call to ... found inside the
+    ;; addressed form" -- a false statement about code plainly present, and
+    ;; the worst shape of failure for a search tool.  The skip is still right
+    ;; for #'name, which references a function instead of calling anything.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (call-with-temp-source
+       "tests/tmp/macroexpand-function-lambda.lisp"
+       "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun maps-a-function-lambda (xs)
+  (mapcar #'(lambda (x) (double-it x)) xs))
+
+(defun maps-a-named-function (xs)
+  (mapcar #'double-it xs))
+"
+       (lambda (path)
+         (let* ((payload (lisp-macroexpand :path path
+                                           :form-type "defun"
+                                           :form-name "maps-a-function-lambda"
+                                           :sub-form "double-it"))
+                (text (response-text payload)))
+           (ok (= 1 (gethash "count" payload))
+               "the call inside the lambda body is found")
+           (ok (search "(* 2 x)" text)
+               "and expanded, instead of a false 'no call found'"))
+         (ok (handler-case
+                 (progn (lisp-macroexpand :path path
+                                          :form-type "defun"
+                                          :form-name "maps-a-named-function"
+                                          :sub-form "double-it")
+                        nil)
+               (error (e) (and (search "No call to" (princ-to-string e)) t)))
+             "#'name references a function and is still not searched"))))))
 
 (deftest lisp-macroexpand-sub-form-is-positional-blind
   (testing "a binding position is reported like a call: a documented limitation"

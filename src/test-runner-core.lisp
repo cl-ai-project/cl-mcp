@@ -12,6 +12,7 @@
            #:detect-test-framework
            #:make-load-failure-result
            #:*test-debug-output*
+           #:*load-lock-wrapper*
            #:*max-test-output-length*))
 
 (in-package #:cl-mcp/src/test-runner-core)
@@ -26,6 +27,21 @@ Outside of test execution, this is a broadcast-stream (output discarded).")
   "Maximum characters for stdout/stderr captured during test execution.
 Matches *default-max-output-length* from repl-core.")
 
+(defvar *load-lock-wrapper* nil
+  "Optional function of one argument (a thunk) wrapping RUN-TESTS' load phase.
+When non-NIL, RUN-TESTS calls it with a thunk that force-reloads the test
+system, so a caller can serialize ASDF loads without holding its lock for the
+whole test run.  The worker binds this to an *ASDF-LOAD-LOCK* acquisition (see
+cl-mcp/src/worker/handlers); test execution itself deliberately runs outside
+the wrapper, because arbitrary test code may block on that same lock and the
+worker dispatches handlers on the calling thread.")
+
+(defun %call-with-load-lock (thunk)
+  "Call THUNK, routing it through *LOAD-LOCK-WRAPPER* when one is installed."
+  (if *load-lock-wrapper*
+      (funcall *load-lock-wrapper* thunk)
+      (funcall thunk)))
+
 (defun %truncate-test-output (string)
   "Truncate STRING to *max-test-output-length* if it exceeds the limit."
   (if (> (length string) *max-test-output-length*)
@@ -38,17 +54,144 @@ Matches *default-max-output-length* from repl-core.")
 ;;; Framework Detection
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *test-framework-systems*
+  '((:rove . ("rove"))
+    (:fiveam . ("fiveam" "it.bese.fiveam"))
+    (:prove . ("prove")))
+  "Framework keyword -> the ASDF system names that indicate it.
+A test system names its framework in :depends-on, which is the only
+system-specific evidence available before anything has run.")
+
+(defun %dependency-entry-name (entry)
+  "Return the ASDF system name ENTRY denotes, or NIL when it denotes none.
+
+:DEPENDS-ON entries are not all plain names.  ASDF admits (:VERSION name v),
+(:FEATURE feature dep) and (:REQUIRE module); the last names an
+implementation module rather than a system and has nothing to resolve.
+
+A (:FEATURE f dep) whose feature is absent is skipped, because ASDF skips it
+too -- following it would attribute to the system a dependency it does not
+have on this implementation."
+  (typecase entry
+    (string (asdf:coerce-name entry))
+    (symbol (asdf:coerce-name entry))
+    (cons (let ((head (first entry)))
+            (cond ((and (keywordp head) (string-equal head "version"))
+                   (%dependency-entry-name (second entry)))
+                  ((and (keywordp head) (string-equal head "feature"))
+                   (when (uiop:featurep (second entry))
+                     (%dependency-entry-name (third entry))))
+                  (t nil))))
+    (t nil)))
+
+(defun %transitive-dependency-names (system-name &key (max-systems 500))
+  "Return the ASDF system names SYSTEM-NAME depends on, transitively.
+
+Returns NIL when SYSTEM-NAME is not registered, which is the caller's cue
+that there is no system-specific evidence to go on.
+
+Only ASDF:REGISTERED-SYSTEM is used -- never FIND-SYSTEM.  FIND-SYSTEM
+resolves a name by *loading the .asd*, and a .asd may carry
+:DEFSYSTEM-DEPENDS-ON, which compiles and loads whole systems as a side
+effect.  Measured on this repo: one detection call for \"cl-mcp/tests\"
+reached usocket's (:feature :usocket-iolib :iolib) branch and pulled in
+cffi-grovel, cffi-toolchain and four iolib systems -- 13 MB of fasls and
+32k characters of compiler output, on the run-tests path, after the load
+lock had been released.  Detection must observe, not build.
+
+RUN-TESTS has already loaded the system under test by the time this runs,
+so its real graph is registered and the registry lookup sees all of it.
+Traversal is breadth first and capped at MAX-SYSTEMS: a package-inferred
+project contributes one system per file (cl-mcp/tests reaches 170), and
+detection is not worth an unbounded walk."
+  (let ((root (ignore-errors (asdf:registered-system system-name))))
+    (when root
+      (let ((seen (make-hash-table :test #'equal))
+            (queue (list root))
+            (names '())
+            (visited 0))
+        (loop while (and queue (< visited max-systems))
+              for system = (pop queue)
+              do (incf visited)
+                 (let ((entries (ignore-errors
+                                 (asdf:system-depends-on system))))
+                   (ignore-errors
+                    (dolist (entry entries)
+                      (let ((name (%dependency-entry-name entry)))
+                        (when (and name (not (gethash name seen)))
+                          (setf (gethash name seen) t)
+                          (push name names)
+                          (let ((dep (ignore-errors
+                                      (asdf:registered-system name))))
+                            (when dep
+                              (setf queue (append queue (list dep)))))))))))
+        names))))
+
+(defun %frameworks-among (names)
+  "Return the framework keywords NAMES contains, in *TEST-FRAMEWORK-SYSTEMS* order."
+  (loop for (framework . systems) in *test-framework-systems*
+        when (some (lambda (s) (member s names :test #'string-equal)) systems)
+          collect framework))
+
+(defun %direct-dependency-names (system-name)
+  "Return the names SYSTEM-NAME itself declares in :depends-on.
+Registry lookup only; see %TRANSITIVE-DEPENDENCY-NAMES for why."
+  (let ((system (ignore-errors (asdf:registered-system system-name))))
+    (when system
+      (remove nil
+              (mapcar #'%dependency-entry-name
+                      (or (ignore-errors (asdf:system-depends-on system))
+                          '()))))))
+
+(defun %declared-test-frameworks (system-name)
+  "Return the framework keywords SYSTEM-NAME declares.
+NIL when the system is not registered or names no known framework.
+
+A system's OWN :depends-on wins outright.  A test system names the framework
+it is written against, while the transitive set also carries whatever its
+library dependencies happen to test with -- a FiveAM project that uses a
+library tested with Rove inherits :ROVE, and would otherwise be handed to
+the wrong backend on a tie.  The transitive walk is the fallback for a test
+system that declares no framework directly, such as an umbrella that only
+depends on its sub-systems."
+  (or (%frameworks-among (%direct-dependency-names system-name))
+      (%frameworks-among (%transitive-dependency-names system-name))))
+
+(defun %framework-from-image ()
+  "Return the framework keyword implied by whatever is loaded in this image.
+The last resort: it carries no information about the system being tested, so
+it is only ever a guess, and in a long-lived worker it is a stale one."
+  (cond ((find-package :rove) :rove)
+        ((find-package :fiveam) :fiveam)
+        ((find-package :prove) :prove)
+        (t :asdf)))
+
 (defun detect-test-framework (system-name)
   "Detect which test framework SYSTEM-NAME uses.
-Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
-  (declare (ignore system-name))
-  ;; For now, detect by loaded packages
-  ;; Future: inspect system dependencies
-  (cond
-    ((find-package :rove) :rove)
-    ((find-package :fiveam) :fiveam)
-    ((find-package :prove) :prove)
-    (t :asdf)))
+Returns :ROVE, :FIVEAM, :PROVE, or :ASDF (fallback).
+
+The system's own :depends-on decides, because the image cannot: cl-mcp's
+worker is long lived and shared, so the moment any session loads a Rove
+project, Rove is in the image forever.  Detecting from loaded packages
+therefore reported :ROVE for every system thereafter -- a FiveAM system was
+handed to the Rove backend, which found none of its suites, ran nothing, and
+returned passed=0 failed=0.  That renders as a pass, so the agent was told
+its tests were green when none had run.
+
+Order of evidence:
+  1. exactly one framework among the transitive dependencies -> that one;
+  2. several -- a project may depend on both, or inherit one through a
+     library -- broken by whether the system actually has FiveAM suites
+     registered, since that is direct evidence rather than a declaration;
+  3. none, or an unresolvable system -> the loaded-package guess, which is
+     all the information there is."
+  (let ((declared (%declared-test-frameworks system-name)))
+    (cond ((null declared) (%framework-from-image))
+          ((null (rest declared)) (first declared))
+          ((and (member :fiveam declared)
+                (%find-fiveam-suites-for-system system-name))
+           :fiveam)
+          (t (first declared)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Unified Result Format
@@ -980,10 +1123,117 @@ Uses dynamic type checks so FiveAM is an optional dependency."
           (t (incf passed)))))
     (values passed failed pending (nreverse failure-details))))
 
+(defun %name-matches-candidate-p (name candidate)
+  "Return true when NAME is CANDIDATE or a namespace *below* it.
+
+Case-insensitive.  A name is below CANDIDATE when it starts with CANDIDATE
+followed by \"/\" or \".\" -- the two characters Lisp projects use to nest a
+package under another (FOO/TESTS/UNIT, CL-YAML-TEST.PARSER).
+
+\"-\" is deliberately not one of them.  It is an ordinary word separator, so
+growing a candidate across it made every sibling sharing a prefix a match:
+\"local-time\" selected LOCAL-TIME-DURATION's suite, \"log4cl\" selected
+LOG4CL-EXTRAS's, \"mito\" selected MITO-ATTACHMENT's -- separate upstream
+projects whose fixtures then fired.  Dash-joined names that really do belong
+to the system are reached by %FIVEAM-EXACT-CANDIDATES instead, which matches
+them whole."
+  (let ((candidate-length (length candidate)))
+    (or (string-equal name candidate)
+        (and (> (length name) candidate-length)
+             (string-equal candidate name :end2 candidate-length)
+             (find (char name candidate-length) "/.")))))
+
+(defun %fiveam-name-candidates (system-name)
+  "Return the namespace candidate for SYSTEM-NAME: the system's own name.
+
+A suite or package matches this one by equality or by nesting below it (see
+%NAME-MATCHES-CANDIDATE-P), which is what finds FA/TESTS::ALL-TESTS and
+FA/TESTS/UNIT::UNIT-SUITE for system \"fa/tests\".
+
+STRING, not the raw argument: RUN-TESTS is exported and the Rove path reaches
+SYSTEM-NAME through STRING-UPCASE, so a symbol is a legal designator on that
+path and must not become a type error on this one."
+  (list (string system-name)))
+
+(defun %fiveam-exact-candidates (system-name)
+  "Return the names that identify SYSTEM-NAME's own suite, matched WHOLE.
+
+These are never grown into: an exact hit is the whole test.  That distinction
+is what lets the matcher be both complete and narrow, because over-matching
+and under-matching turned out to come from different halves of the old rule.
+
+For \"my-project/tests\" the names are:
+
+  my-project         the primary system.  `(def-suite :my-project)` is the
+                     dominant idiom in the wild, and a keyword suite has no
+                     package to fall back on, so without this candidate a
+                     survey of 89 FiveAM test systems from Quicklisp selected
+                     nothing for 69 of them -- run-tests would report
+                     `unresolved` with zero tests run.
+  my-project-tests   the system name written with dashes, and the singular
+  my-project-test    and slash spellings of the same convention, for projects
+  my-project/test    that keep their suite in MY-PROJECT-TEST or similar.
+  my-project/tests
+
+Growing these by prefix is what previously swallowed sibling projects, so
+they are compared whole and nothing else."
+  (let* ((name (string system-name))
+         (slash (position #\/ name))
+         ;; The primary-derived names describe the "<primary>/<tests>" shape
+         ;; only.  A deeper system such as "foo/tests/unit" is a component of
+         ;; the test system, not another spelling of it, so deriving from
+         ;; "foo" there would select the PARENT's suite -- asking for one
+         ;; sub-system would run the whole test system.  Deeper names get the
+         ;; full name and its dashed form, and reach their own sub-packages
+         ;; through the namespace candidate.
+         (primary (cond ((null slash) name)
+                        ((find #\/ name :start (1+ slash)) nil)
+                        (t (subseq name 0 slash))))
+         (names '()))
+    (when primary
+      (push primary names)
+      (dolist (suffix '("-test" "-tests" "/test" "/tests"))
+        (pushnew (concatenate 'string primary suffix) names
+                 :test #'string-equal)))
+    (when slash
+      (pushnew (substitute #\- #\/ name) names :test #'string-equal))
+    (nreverse names)))
+
+(defun %fiveam-suite-matches-system-p (suite-sym system-name)
+  "Return true when the FiveAM suite SUITE-SYM belongs to SYSTEM-NAME.
+
+Both the suite's own name and its package name are tested, because neither
+alone identifies a suite: the package clause finds the package-inferred layout
+where the suite is an ordinary symbol such as ALL-TESTS interned in
+MY-PROJECT/TESTS, and the symbol clause finds `(def-suite :my-project)`, whose
+keyword has no package of its own.
+
+Two candidate sets, matched differently.  %FIVEAM-NAME-CANDIDATES gives the
+system's namespace, which a name may also nest below; %FIVEAM-EXACT-CANDIDATES
+gives the names of the system's own suite, which must match whole.  Keeping
+those apart is what makes the matcher narrow without making it miss: nesting
+is what finds sub-packages, and it was growing the *dash* spellings that used
+to swallow unrelated sibling projects."
+  (let* ((suite-name (string suite-sym))
+         (suite-package (and (symbolp suite-sym) (symbol-package suite-sym)))
+         (pkg-name (and suite-package (package-name suite-package)))
+         (exact (%fiveam-exact-candidates system-name)))
+    (or (some (lambda (candidate)
+                (or (%name-matches-candidate-p suite-name candidate)
+                    (and pkg-name
+                         (%name-matches-candidate-p pkg-name candidate))))
+              (%fiveam-name-candidates system-name))
+        (some (lambda (candidate)
+                (or (string-equal suite-name candidate)
+                    (and pkg-name (string-equal pkg-name candidate))))
+              exact))))
+
 (defun %find-fiveam-suites-for-system (system-name)
-  "Find FiveAM test suites whose name matches SYSTEM-NAME.
-Returns suite symbols from *TOPLEVEL-SUITES* whose name equals SYSTEM-NAME
-or starts with a SYSTEM-NAME sub-system prefix (\"name/\" or \"name-\").
+  "Find FiveAM test suites that belong to SYSTEM-NAME.
+Returns the suite symbols from *TOPLEVEL-SUITES* accepted by
+%FIVEAM-SUITE-MATCHES-SYSTEM-P, i.e. those whose suite name *or* package name
+matches SYSTEM-NAME (or its primary system name) exactly or as a \"name/\" /
+\"name-\" sub-name.
 Returns NIL when nothing matches; the caller signals rather than silently
 running every unrelated suite in the image (FiveAM suites are registered
 globally, independent of the ASDF system, so a blanket run would execute
@@ -991,21 +1241,14 @@ other systems' suites too).  Uses dynamic symbol resolution so FiveAM is
 an optional dependency."
   (let* ((fiveam-pkg (find-package :fiveam))
          (toplevel-suites-var (and fiveam-pkg
-                                    (find-symbol "*TOPLEVEL-SUITES*" fiveam-pkg)))
+                                   (find-symbol "*TOPLEVEL-SUITES*" fiveam-pkg)))
          (all-suites
            (if (and toplevel-suites-var (boundp toplevel-suites-var))
                (copy-list (symbol-value toplevel-suites-var))
-               nil))
-         (system-prefix (string-upcase system-name)))
-    (remove-if-not
-     (lambda (suite-sym)
-       (let ((suite-name (symbol-name suite-sym)))
-         (or (string-equal suite-name system-prefix)
-             (uiop:string-prefix-p (concatenate 'string system-prefix "/")
-                                   suite-name)
-             (uiop:string-prefix-p (concatenate 'string system-prefix "-")
-                                   suite-name))))
-     all-suites)))
+               nil)))
+    (remove-if-not (lambda (suite-sym)
+                     (%fiveam-suite-matches-system-p suite-sym system-name))
+                   all-suites)))
 
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
@@ -1091,7 +1334,9 @@ stream-capture, crash-handling, and result-assembly logic lives in one place."
          (stdout) (stderr) (debug-output))))))
 
 (defun run-fiveam-tests (system-name)
-  "Run the FiveAM suites whose name matches SYSTEM-NAME and return results.
+  "Run the FiveAM suites belonging to SYSTEM-NAME and return results.
+A suite belongs to the system when its own name or its package name matches
+SYSTEM-NAME (see %FIND-FIVEAM-SUITES-FOR-SYSTEM).
 Signals an error when no suite name matches SYSTEM-NAME instead of running
 every suite registered in the image, so an explicit system name is never
 silently widened into a full-image run.  When suite names do not follow the
@@ -1105,7 +1350,7 @@ system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
                       suites are registered globally and are not tied to the ~
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
-             :hint "Name a suite that matches the system, or pass TEST/TESTS to run specific tests."))
+             :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
     (%fiveam-run-and-collect suite-symbols (list system-name))))
 
 (defun %resolve-fiveam-test-symbol (test-sym)
@@ -1161,14 +1406,31 @@ receive machine-readable data rather than an opaque RPC error:
     Rove and FiveAM paths (no matching suite, unknown test name, missing test
     package) -> MAKE-RESOLUTION-FAILURE-RESULT (framework :unresolved).
 Other errors (framework-internal bugs) still propagate normally so genuine
-failures remain visible."
+failures remain visible.
+
+Only the load phase runs through *LOAD-LOCK-WRAPPER* (see its docstring).
+The framework run is deliberately left outside it: test code is arbitrary and
+may itself block on the caller's lock."
   (when (and test tests) (error "Specify either TEST or TESTS, not both"))
+  ;; Normalize the designator once, at the entry point.  RUN-TESTS is exported
+  ;; and the Rove path accepts a symbol, but LOG-EVENT serializes its values
+  ;; with yason, which cannot encode a symbol: the encoder signals mid-object,
+  ;; IGNORE-ERRORS inside the logger swallows it, and the half-written line
+  ;; then swallows the next one, corrupting the NDJSON stream a client is
+  ;; reading.  Coercing here keeps every downstream consumer on strings.
+  ;;
+  ;; ASDF:COERCE-NAME, not CL:STRING.  ASDF downcases a symbol designator and
+  ;; takes a string verbatim, so (STRING :MY-SYSTEM) yields "MY-SYSTEM", which
+  ;; FIND-SYSTEM then fails to resolve -- the coercion added to protect the
+  ;; symbol path would have been the thing that broke it.
+  (setf system-name (asdf:coerce-name system-name))
   ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
   ;; so simple-error is the precise contract.  Catching plain ERROR would
   ;; mask serious-condition subclasses or interactive-interrupt that
   ;; should bubble up as bugs rather than be silently bucketed into a
   ;; load-failure result.
-  (handler-case (%ensure-system-loaded system-name)
+  (handler-case (%call-with-load-lock
+                 (lambda () (%ensure-system-loaded system-name)))
     (simple-error (load-err)
       (return-from run-tests
         (make-load-failure-result system-name load-err))))

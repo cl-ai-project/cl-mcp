@@ -62,9 +62,11 @@ the **stale** `.asd` — your brand-new tests will be invisible and the test
 runner will report counts from ghost tests. The symptom is baffling; avoid it
 by asking ASDF up front.
 
-`project-scaffold` now **auto-registers** the `.asd` with ASDF, so
-`load-system` works immediately after scaffolding. Sanity-check the
-resolution after scaffolding:
+`project-scaffold` does **not** register the generated `.asd` with ASDF — it
+only writes files. Registering would mean loading generated code in the cl-mcp
+parent process, outside worker isolation, so `load-system` is what registers
+the system, in the worker. Sanity-check the resolution after your first
+`load-system`:
 
 ```
 repl-eval code='(asdf:system-source-file (asdf:find-system "<name>"))'
@@ -74,9 +76,13 @@ The returned path MUST match the `absolute_path` from the scaffold response.
 If it does not, you hit a collision despite the check above — rename and
 re-scaffold.
 
-### 3. First load (no manual ASDF registration needed)
+### 3. First load (this is what registers the system)
 
-After scaffolding, `load-system system=<name>` should work directly thanks to auto-registration. If it fails with `Component "<name>" not found` (e.g., after a worker restart), re-register:
+After scaffolding, run `load-system system=<name>`; that call is what registers
+the system with ASDF, in the worker. If it fails with `Component "<name>" not
+found` — for instance because the scaffold landed outside a directory ASDF
+scans, or after a worker restart discarded the registration — register it
+explicitly:
 
 ```
 repl-eval code='(asdf:load-asd "<absolute-path-from-step-2>/<name>.asd")'

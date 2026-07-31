@@ -204,6 +204,158 @@
                        lines)
               "defclass should have line number"))))))
 
+(defun %collapsed-lines (relative source)
+  "Write SOURCE to RELATIVE, read it back collapsed, and return the display lines.
+A collapsed definition is meant to be exactly one line, so the length of the
+returned list is the assertion the signature-layout tests below are built on."
+  (with-temp-lisp-file
+   relative source
+   (lambda (path)
+     (with-input-from-string (in (gethash "content" (lisp-read-file path :collapsed t)))
+       (loop for line = (read-line in nil nil)
+             while line collect line)))))
+
+(deftest lisp-read-file-collapsed-let-initializer-stays-on-one-line
+  (testing "a LET initial value does not break the collapsed signature"
+    ;; The dispatch table %COLLAPSE-DEF-FORM prints under is derived from
+    ;; (COPY-PPRINT-DISPATCH NIL), which retains SBCL's standard layouts for
+    ;; IF, LET, LET* and LOOP.  Those emit *mandatory* newlines that no
+    ;; *PRINT-RIGHT-MARGIN* can suppress, and %FORMAT-LISP-FORM numbers only
+    ;; the first line, so a spill leaves unnumbered continuation lines behind.
+    (let* ((lines (%collapsed-lines
+                   "tests/tmp/sig-let-initializer.lisp"
+                   (format nil "~A~%~A~%"
+                           "(defparameter *sig-let-demo*"
+                           "  (let ((env \"root\")) (if env env \"fallback\")))")))
+           (line (or (first lines) "")))
+      (ok (= 1 (length lines))
+          "the collapsed signature must occupy exactly one line")
+      (ok (search "(defparameter *sig-let-demo*" line)
+          "the signature names the variable")
+      (ok (search "(if env" line)
+          "the whole initial value stays on that line"))))
+
+(deftest lisp-read-file-collapsed-if-default-stays-on-one-line
+  (testing "an IF default in a lambda list does not break the collapsed signature"
+    (let* ((lines (%collapsed-lines
+                   "tests/tmp/sig-if-default.lisp"
+                   (format nil "~A~%~A~%"
+                           "(defun sig-if-demo (&optional (x (if alpha beta gamma)))"
+                           "  x)")))
+           (line (or (first lines) "")))
+      (ok (= 1 (length lines))
+          "the collapsed signature must occupy exactly one line")
+      (ok (search "(if alpha beta gamma)" line)
+          "the default form stays on that line"))))
+
+(deftest lisp-read-file-collapsed-loop-default-stays-on-one-line
+  (testing "a LOOP default in a lambda list does not break the collapsed signature"
+    (let* ((lines (%collapsed-lines
+                   "tests/tmp/sig-loop-default.lisp"
+                   (format nil "~A~%~A~%"
+                           "(defun sig-loop-demo (&key (x (loop for i below 3 collect i)))"
+                           "  x)")))
+           (line (or (first lines) "")))
+      (ok (= 1 (length lines))
+          "the collapsed signature must occupy exactly one line")
+      (ok (search "(loop for i below 3 collect i)" line)
+          "the loop stays on that line"))))
+
+(deftest lisp-read-file-collapsed-keeps-quote-abbreviations
+  (testing "a collapsed signature still abbreviates QUOTE and FUNCTION"
+    ;; The one-line layout is obtained by routing every cons through
+    ;; PPRINT-FILL.  On its own that entry also swallows the standard QUOTE
+    ;; printer, regressing 'X to (quote x) and #'F to (function f), so the
+    ;; standard handler is re-registered at a higher priority.  This is the
+    ;; test that fails if that re-registration is ever dropped.
+    (let* ((lines (%collapsed-lines
+                   "tests/tmp/sig-quote-abbrev.lisp"
+                   (format nil "~A~%~A~%"
+                           "(defun sig-quote-demo (&optional (x '(1 2)) (y #'sig-quote-helper))"
+                           "  (list x y))")))
+           (line (or (first lines) "")))
+      (ok (= 1 (length lines))
+          "the collapsed signature must occupy exactly one line")
+      (ok (search "'(1 2)" line)
+          "QUOTE must still print as an apostrophe")
+      (ok (not (search "(quote " line))
+          "QUOTE must not fall back to its list form")
+      (ok (search "#'sig-quote-helper" line)
+          "FUNCTION must still print as #'")
+      (ok (not (search "(function " line))
+          "FUNCTION must not fall back to its list form"))))
+
+(deftest lisp-read-file-collapsed-survives-standard-reader-backquote
+  (testing "a CL:READ backquote does not exhaust the control stack"
+    ;; Files read through the READTABLE argument go through CL:READ rather than
+    ;; Eclector, so their backquotes arrive as SB-INT:QUASIQUOTE conses wrapping
+    ;; SB-IMPL::COMMA structures -- not the ECLECTOR.READER:QUASIQUOTE heads the
+    ;; table overrides by name.  The blanket PPRINT-FILL cons entry that gives a
+    ;; signature its single line then descends into those structures and recurses
+    ;; until the control stack is exhausted, which SBCL reports as a fatal error
+    ;; rather than a catchable condition -- it takes the process down, so no
+    ;; HANDLER-CASE here could soften it.  SBCL's initial table maps QUOTE,
+    ;; FUNCTION and SB-INT:QUASIQUOTE to one PPRINT-QUOTE entry, so the priority-2
+    ;; re-registration must name all three.  This test dies with the process if
+    ;; SB-INT:QUASIQUOTE is ever dropped from that list.
+    (let ((rendered
+           (let ((*print-pprint-dispatch*
+                  cl-mcp/src/lisp-read-file::*signature-pprint-dispatch*)
+                 (*print-right-margin* 200)
+                 (*print-case* :downcase))
+             (write-to-string (read-from-string "`(a ,b ,@c)") :pretty t))))
+      (ok (search "`(a" rendered)
+          "a standard-reader backquote must still render as a backquote")
+      (ok (search ",b" rendered)
+          "an unquote must still render as a comma")
+      (ok (not (search "quasiquote" rendered))
+          "the SB-INT:QUASIQUOTE head must not leak into the signature"))))
+
+(deftest lisp-read-file-collapsed-keeps-backquote-rendering
+  (testing "a collapsed signature still renders Eclector backquote conses"
+    ;; The backquote rendering lives in *SOURCE-PPRINT-DISPATCH* at priority 0,
+    ;; where a blanket CONS entry would outrank it.  The signature table has to
+    ;; re-register those three heads above the blanket entry, or an initial
+    ;; value written with a backquote would show the raw Eclector symbols.
+    (let* ((lines (%collapsed-lines
+                   "tests/tmp/sig-backquote.lisp"
+                   (format nil "~A~%~A~%"
+                           "(defparameter *sig-bq-demo*"
+                           "  `(let ((,a ,b)) ,@forms))")))
+           (line (or (first lines) "")))
+      (ok (= 1 (length lines))
+          "the collapsed signature must occupy exactly one line")
+      (ok (search "`(let ((,a ,b)) ,@forms)" line)
+          "backquote, comma and comma-at must all survive")
+      (ok (not (search "eclector.reader" line))
+          "no eclector.reader symbol may leak into the signature"))))
+
+(deftest lisp-read-file-collapsed-view-numbers-every-line
+  (testing "no line of a collapsed view is left without a line number"
+    ;; The property the per-form tests above imply, asserted once directly:
+    ;; %FORMAT-LISP-FORM prefixes only the first line of a collapsed signature,
+    ;; so an unnumbered line in the output means some signature spilled.
+    ;;
+    ;; The fixture deliberately holds no multi-line string literal.  A newline
+    ;; inside a literal is content, not layout: no pretty-printer setting can
+    ;; remove it and stripping it would corrupt the source, so a def form whose
+    ;; third subform is such a string still spans several lines by design.
+    (let ((lines (%collapsed-lines
+                  "tests/tmp/sig-every-line-numbered.lisp"
+                  (format nil "~{~A~%~}"
+                          '("(in-package :cl-user)"
+                            ""
+                            "(defparameter *sig-numbered-a* (let ((q 1)) q))"
+                            ""
+                            "(defun sig-numbered-b (&optional (x (if alpha beta gamma)))"
+                            "  x)"
+                            ""
+                            "(defvar *sig-numbered-c* (loop for i below 3 collect i))")))))
+      (ok (>= (length lines) 4)
+          "every top-level form contributes a line")
+      (ok (every (lambda (line) (scan "^ *\\d+: " line)) lines)
+          "an unnumbered line means a signature spilled onto a continuation line"))))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case
@@ -769,7 +921,9 @@ not reader output: no backquote encloses it, so it must print as a list.")
     ;; image where the variable is unbound and DEFVAR and DEFPARAMETER behave
     ;; identically. So the pre-reload state is set up explicitly: install a
     ;; table that lacks the backquote entries -- standing in for the older
-    ;; version -- and then reload the source file.
+    ;; version -- and then reload the source file.  *SIGNATURE-PPRINT-DISPATCH*
+    ;; is checked alongside it because it is built from the same entries and
+    ;; carries exactly the same hazard.
     ;;
     ;; The reload is a plain LOAD rather than (ASDF:LOAD-SYSTEM ... :FORCE T).
     ;; The umbrella suite runs inside ASDF:OPERATE (test-op), and ASDF refuses
@@ -778,15 +932,23 @@ not reader output: no backquote encloses it, so it must print as a list.")
     ;; `rove cl-mcp.asd'.  LOAD re-evaluates every top-level form in the file,
     ;; which is precisely the DEFPARAMETER-vs-DEFVAR distinction under test.
     (let ((saved cl-mcp/src/lisp-read-file::*source-pprint-dispatch*)
+          (saved-signature cl-mcp/src/lisp-read-file::*signature-pprint-dispatch*)
           (form (list 'eclector.reader:quasiquote
                       (list 'a (list 'eclector.reader:unquote 'b)))))
       (unwind-protect
            (progn
              (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch*
+                   (copy-pprint-dispatch nil)
+                   cl-mcp/src/lisp-read-file::*signature-pprint-dispatch*
                    (copy-pprint-dispatch nil))
-             (let ((stale (cl-mcp/src/lisp-read-file::%form->string form)))
+             (let ((stale (cl-mcp/src/lisp-read-file::%form->string form))
+                   (stale-signature
+                    (cl-mcp/src/lisp-read-file::%collapse-def-form
+                     (list 'defparameter '*stale-demo* form))))
                (ok (search "eclector.reader" stale)
-                   "precondition: the stale table renders the raw cons"))
+                   "precondition: the stale table renders the raw cons")
+               (ok (search "eclector.reader" stale-signature)
+                   "precondition: the stale signature table renders it too"))
              (let ((*standard-output* (make-broadcast-stream))
                    (*error-output* (make-broadcast-stream)))
                (handler-bind ((warning
@@ -795,11 +957,20 @@ not reader output: no backquote encloses it, so it must print as a list.")
                                     (when restart (invoke-restart restart))))))
                  (load (asdf:system-relative-pathname
                         "cl-mcp" "src/lisp-read-file.lisp"))))
-             (let ((reloaded (cl-mcp/src/lisp-read-file::%form->string form)))
+             (let ((reloaded (cl-mcp/src/lisp-read-file::%form->string form))
+                   (reloaded-signature
+                    (cl-mcp/src/lisp-read-file::%collapse-def-form
+                     (list 'defparameter '*stale-demo* form))))
                (ok (not (search "eclector.reader" reloaded))
                    "the reload must re-register the backquote entries")
                (ok (search "`" reloaded)
                    "quasiquote must render as a backquote again")
                (ok (search "," reloaded)
-                   "unquote must render as a comma again")))
-        (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch* saved)))))
+                   "unquote must render as a comma again")
+               (ok (not (search "eclector.reader" reloaded-signature))
+                   "the same reload must rebuild the signature table")
+               (ok (search "`" reloaded-signature)
+                   "and a signature must render the backquote again too")))
+        (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch* saved
+              cl-mcp/src/lisp-read-file::*signature-pprint-dispatch*
+              saved-signature)))))

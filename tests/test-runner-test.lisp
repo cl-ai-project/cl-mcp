@@ -25,6 +25,97 @@
     ;; Rove is loaded since we're using it for tests
     (ok (eq :rove (detect-test-framework "any-system")))))
 
+(deftest detect-test-framework-prefers-the-systems-own-dependency
+  (testing "a FiveAM system is detected as FiveAM even with Rove in the image"
+    ;; This suite runs under Rove, so the image always has Rove loaded --
+    ;; exactly the state a long-lived cl-mcp worker reaches the moment any
+    ;; session touches a Rove project.  Detection used to read the image and
+    ;; hand every system to the Rove backend, which found no FiveAM suite,
+    ;; ran nothing, and returned passed=0 failed=0 -- rendered as a pass.
+    ;; The system's own :depends-on is the only system-specific evidence.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-detect-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "detect-probe-fiveam")
+           (test-system (format nil "~A/tests" system-name))
+           (asd-path (uiop:merge-pathnames*
+                      (format nil "~A.asd" system-name) tmp-dir)))
+      (ok (find-package :rove) "precondition: Rove is loaded in this image")
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output
+                                         :if-exists :supersede)
+               (format s "(asdf:defsystem ~S)~%" system-name)
+               (format s "(asdf:defsystem ~S :depends-on (\"fiveam\"))~%"
+                       test-system))
+             (asdf:load-asd asd-path)
+             (ok (eq :fiveam (detect-test-framework test-system))
+                 "the declared dependency decides, not the loaded packages")
+             (ok (eq :rove (detect-test-framework "no-such-system-xyzzy"))
+                 "an unresolvable system still falls back to the image"))
+        (ignore-errors (asdf:clear-system test-system))
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest detect-test-framework-observes-without-building
+  (testing "detection loads nothing and prints nothing"
+    ;; Detection walks the dependency graph.  Resolving a name with
+    ;; ASDF:FIND-SYSTEM would load the .asd, and a .asd may carry
+    ;; :DEFSYSTEM-DEPENDS-ON, which compiles and loads whole systems.
+    ;; Measured before the registry-only rewrite: one call for "cl-mcp/tests"
+    ;; reached usocket's (:feature :usocket-iolib :iolib) branch and pulled in
+    ;; six systems, 13 MB of fasls and 32k characters of compiler output --
+    ;; on the run-tests path, after the ASDF load lock had been released.
+    (let ((before (length (asdf:already-loaded-systems)))
+          (out (make-string-output-stream))
+          (err (make-string-output-stream)))
+      (let ((*standard-output* out) (*error-output* err))
+        (detect-test-framework "cl-mcp/tests"))
+      (ok (= before (length (asdf:already-loaded-systems)))
+          "detection must not load a system")
+      (ok (zerop (length (get-output-stream-string out)))
+          "nor write to stdout")
+      (ok (zerop (length (get-output-stream-string err)))
+          "nor to stderr"))))
+
+(deftest detect-test-framework-prefers-a-direct-declaration
+  (testing "a framework inherited through a library does not win"
+    ;; A test system names the framework it is written against.  The
+    ;; transitive set also carries whatever its libraries test with, so a
+    ;; FiveAM project depending on a Rove-tested library used to tie, and the
+    ;; tie went to Rove -- the wrong backend, which then ran nothing.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-inherit-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (asd-path (uiop:merge-pathnames* "twi.asd" tmp-dir)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output
+                                         :if-exists :supersede)
+               (format s "(asdf:defsystem \"twi-lib\" :depends-on (\"rove\"))~%")
+               (format s "(asdf:defsystem \"twi\" :depends-on (\"twi-lib\"))~%")
+               (format s "(asdf:defsystem \"twi/tests\"~%")
+               (format s "  :depends-on (\"twi\" \"fiveam\"))~%")
+               (format s "(asdf:defsystem \"twi-umbrella/tests\"~%")
+               (format s "  :depends-on (\"twi/tests\"))~%"))
+             (handler-bind ((warning #'muffle-warning))
+               (asdf:load-asd asd-path))
+             (ok (eq :fiveam (detect-test-framework "twi/tests"))
+                 "the direct fiveam declaration beats the inherited rove")
+             (ok (eq :rove (detect-test-framework "twi-umbrella/tests"))
+                 "a system declaring none falls back to the transitive set"))
+        (dolist (s '("twi-umbrella/tests" "twi/tests" "twi" "twi-lib"))
+          (ignore-errors (asdf:clear-system s)))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Result Structure Tests
 ;;; ---------------------------------------------------------------------------
@@ -481,3 +572,326 @@
             "summary lists the synthetic SYSTEM-LOAD failure")
         (ok (search "pool-kill-worker" text)
             "recovery hint surfaces in the rendered text")))))
+
+(deftest build-run-tests-response-does-not-call-zero-tests-a-pass
+  (testing "a run that executed nothing is not reported as green"
+    ;; Zero failures out of zero tests is what let a mis-detected framework
+    ;; report success while running nothing: the agent reads content[].text,
+    ;; sees the banner, and believes its suite is green.  It is not a failure
+    ;; either -- a system may genuinely have no tests -- so the banner says so.
+    (flet ((banner (passed failed pending &key (framework :rove) failed-tests)
+             (gethash "text"
+                      (aref (gethash
+                             "content"
+                             (build-run-tests-response
+                              (cl-mcp/src/test-runner-core::make-test-result
+                               :passed passed :failed failed :pending pending
+                               :failed-tests failed-tests
+                               :framework framework :duration 1)))
+                            0))))
+      (let ((text (banner 0 0 0)))
+        (ok (search "NO TESTS RAN" text) "the banner must say nothing ran")
+        (ok (not (search "✓ PASS" text)) "and must not claim a pass"))
+      (ok (search "✓ PASS" (banner 3 0 0))
+          "a run that did execute tests still passes")
+      (ok (search "✗ FAIL" (banner 0 1 0))
+          "and a failing run still fails")
+      ;; The ASDF fallback reports no counts at all, so its SUCCESS is also
+      ;; zero/zero.  Calling that "no tests ran" would be false.
+      (ok (search "✓ PASS" (banner 0 0 0 :framework :asdf))
+          "a successful asdf:test-system run is a pass, not an empty run")
+      ;; Likewise, entries in failed_tests prove something ran.
+      (ok (not (search "NO TESTS RAN"
+                       (banner 0 0 0 :failed-tests
+                               (list (cl-mcp/src/test-runner-core::make-failure-detail
+                                      :test-name "x" :reason "y")))))
+          "a non-empty failure list contradicts an empty run"))))
+
+;;; ---------------------------------------------------------------------------
+;;; FiveAM Suite Matching
+;;; ---------------------------------------------------------------------------
+
+(defvar *fabricated-suite-packages* nil
+  "Packages created by %FABRICATE-SUITE-SYMBOL, deleted on test cleanup.")
+
+(defun %fabricate-suite-symbol (package-name symbol-name)
+  "Intern SYMBOL-NAME in PACKAGE-NAME, creating that package when necessary.
+A package created here is recorded in *FABRICATED-SUITE-PACKAGES* so
+%DELETE-FABRICATED-PACKAGES can remove it; a package that already existed is
+left alone.  Fabricating suite symbols this way exercises the FiveAM suite
+matcher without requiring FiveAM to be loaded."
+  (let ((package (find-package package-name)))
+    (unless package
+      (setf package (make-package package-name :use nil))
+      (push package *fabricated-suite-packages*))
+    (intern symbol-name package)))
+
+(defun %delete-fabricated-packages ()
+  "Delete and forget every package created by %FABRICATE-SUITE-SYMBOL."
+  (dolist (package *fabricated-suite-packages*)
+    (ignore-errors (delete-package package)))
+  (setf *fabricated-suite-packages* nil))
+
+(defun %suite-matches-system-p (package-name symbol-name system-name)
+  "Return true when a fabricated suite PACKAGE-NAME::SYMBOL-NAME belongs to
+SYSTEM-NAME, according to the internal FiveAM suite matcher."
+  (cl-mcp/src/test-runner-core::%fiveam-suite-matches-system-p
+   (%fabricate-suite-symbol package-name symbol-name)
+   system-name))
+
+(deftest fiveam-suite-matcher-matches-suite-and-package-names
+  (testing "a FiveAM suite is matched by its package name as well as its own name"
+    (unwind-protect
+         (progn
+           ;; The reported regression: run-tests is called with the test system
+           ;; name while the suite is an ordinary symbol interned in the
+           ;; package-inferred test package, so its symbol name alone carries
+           ;; no system information.
+           (ok (%suite-matches-system-p "X/TESTS" "X-TESTS" "x/tests")
+               "X/TESTS::X-TESTS belongs to system x/tests")
+           (ok (%suite-matches-system-p "FA/TESTS" "ALL-TESTS" "fa/tests")
+               "a plainly named suite is matched through its package name")
+           ;; Classic layout: test system my-project/tests, suite symbol
+           ;; MY-PROJECT-TESTS -- the system name written with dashes, which
+           ;; is exactly the derived candidate.
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "MY-PROJECT-TESTS"
+                                        "my-project/tests")
+               "MY-PROJECT-TESTS belongs to system my-project/tests")
+           ;; Pre-existing behaviour must survive the widening.
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM"
+                                        "plain-system")
+               "an exact suite-name match still works")
+           ;; `(def-suite :my-project)` -- the dominant idiom in the wild.
+           ;; A keyword suite has no package to fall back on, so the primary
+           ;; system name must be an exact candidate.  A survey of 89 FiveAM
+           ;; test systems from Quicklisp selected nothing for 69 of them
+           ;; while it was missing.
+           (ok (%suite-matches-system-p "KEYWORD" "MY-PROJECT"
+                                        "my-project/tests")
+               "a keyword suite named after the primary system is found")
+           (ok (%suite-matches-system-p "KEYWORD" "CHANL" "chanl/tests")
+               "the same for a real project's layout")
+           ;; A deeper system still finds its own package and its own
+           ;; dashed spelling; only the parent-derived names are dropped.
+           (ok (%suite-matches-system-p "FOO/TESTS/UNIT" "ALL-TESTS"
+                                        "foo/tests/unit")
+               "a sub-system finds its own package")
+           (ok (%suite-matches-system-p "SOMEWHERE" "FOO-TESTS-UNIT"
+                                        "foo/tests/unit")
+               "and its own dashed spelling")
+           ;; A dot nests a package just as a slash does.
+           (ok (%suite-matches-system-p "CL-YAML-TEST.PARSER" "PARSER"
+                                        "cl-yaml-test")
+               "a dot-nested sub-package belongs to the system")
+           ;; An unqualified system still finds its conventionally named test
+           ;; package, which is what the dash candidates exist for now that
+           ;; "-" no longer grows a prefix.
+           (ok (%suite-matches-system-p "FOO-TESTS" "ALL-TESTS" "foo")
+               "system foo finds its FOO-TESTS package")
+           (ok (%suite-matches-system-p "FOO/TESTS" "ALL-TESTS" "foo")
+               "system foo finds its FOO/TESTS package")
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "FOO-TEST" "foo")
+               "the singular FOO-TEST spelling is found too")
+           (ok (%suite-matches-system-p "SOME-OTHER-PKG" "PLAIN-SYSTEM/UNIT"
+                                        "plain-system")
+               "a sub-system suite name still matches"))
+      (%delete-fabricated-packages))))
+
+(deftest fiveam-suite-matcher-rejects-unrelated-names
+  (testing "suites belonging to unrelated systems are never swallowed"
+    ;; FiveAM's suite registry is global: every suite of every system loaded
+    ;; into the worker is a selection candidate, so an over-broad match runs
+    ;; another project's tests and fires its fixtures.  Two earlier spellings
+    ;; of this matcher got that wrong, and the negative tests of the day
+    ;; passed only by accident of naming -- FABRIC fails against "fa" merely
+    ;; because the next character is "B" rather than a separator.  The pairs
+    ;; below are the ones that actually collided, including real upstream
+    ;; project pairs, so keep names here that differ from the system in the
+    ;; *separator* position.
+    (unwind-protect
+         (progn
+           (ok (not (%suite-matches-system-p "XYLOPHONE/TESTS" "XYLOPHONE-TESTS"
+                                             "x"))
+               "system x must not match the unrelated xylophone/tests package")
+           (ok (not (%suite-matches-system-p "FABRIC/TESTS" "FABRIC-TESTS"
+                                             "fa/tests"))
+               "a longer unrelated name is not a match")
+           (ok (not (%suite-matches-system-p "OTHER/TESTS" "TESTS-SUITE"
+                                             "fa/tests"))
+               "a shared trailing segment (tests) is not a match candidate")
+           ;; Wrong while the bare primary name was a candidate.
+           (ok (not (%suite-matches-system-p "FOO-UTILS" "ALL-TESTS"
+                                             "foo/tests"))
+               "a sibling system's package must not match at the hyphen")
+           (ok (not (%suite-matches-system-p "FOO/OTHER" "ALL-TESTS"
+                                             "foo/tests"))
+               "a sibling sub-system's package must not match at the slash")
+           (ok (not (%suite-matches-system-p "SOME-OTHER-PKG" "FOO-UTILS-TESTS"
+                                             "foo/tests"))
+               "a sibling system's suite symbol must not match either")
+           ;; Wrong while "-" still grew a prefix, which the slash-only fix
+           ;; above did not reach: a system name carrying no slash was its own
+           ;; sole candidate, so every sibling sharing the prefix matched.
+           ;; These three are real upstream pairs.
+           (ok (not (%suite-matches-system-p "LOCAL-TIME-DURATION" "ALL-TESTS"
+                                             "local-time"))
+               "local-time must not select local-time-duration's suite")
+           (ok (not (%suite-matches-system-p "LOG4CL-EXTRAS/TESTS" "MAIN"
+                                             "log4cl"))
+               "log4cl must not select log4cl-extras's suite")
+           (ok (not (%suite-matches-system-p "MITO-ATTACHMENT/TESTS" "ALL-TESTS"
+                                             "mito"))
+               "mito must not select mito-attachment's suite")
+           (ok (not (%suite-matches-system-p "APP-SERVER" "MAIN" "app"))
+               "an unqualified system must not swallow its prefix siblings")
+           ;; The primary name is an *exact* candidate, never grown into, so
+           ;; restoring it for keyword suites does not reopen any of the above.
+           (ok (not (%suite-matches-system-p "COMPLETELY-UNRELATED" "FOO-BAR"
+                                             "foo"))
+               "an exact primary candidate must not grow across the dash")
+           (ok (not (%suite-matches-system-p "SOME-VENDOR" "APP-SERVER-SUITE"
+                                             "app"))
+               "nor match a plugin that names its suite after the host")
+           (ok (not (%suite-matches-system-p "APPLIANCE/TESTS" "MAIN" "app"))
+               "nor a longer name that merely starts with the system name")
+           ;; A deeper system is a component of the test system, not another
+           ;; spelling of it.  Deriving primary-name candidates for it made
+           ;; a request for one sub-system run the whole parent suite.
+           (ok (not (%suite-matches-system-p "FOO/TESTS" "ALL-TESTS"
+                                             "foo/tests/unit"))
+               "a sub-system must not select its parent test system's suite")
+           (ok (not (%suite-matches-system-p "KEYWORD" "FOO" "foo/tests/unit"))
+               "nor the primary system's keyword suite"))
+      (%delete-fabricated-packages))))
+
+;;; ---------------------------------------------------------------------------
+;;; Load-Lock Scope
+;;; ---------------------------------------------------------------------------
+
+(defparameter *load-lock-active-p* nil
+  "True while the RUN-TESTS load-phase wrapper installed by
+RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
+
+(defparameter *lock-state-at-load* :not-loaded
+  "Value of *LOAD-LOCK-ACTIVE-P* observed while the probe system was loaded.")
+
+(defparameter *lock-state-at-run* :not-run
+  "Value of *LOAD-LOCK-ACTIVE-P* observed while the probe test executed.")
+
+(deftest run-tests-accepts-a-symbol-system-designator
+  (testing "a symbol names a system the same way it does for ASDF"
+    ;; RUN-TESTS is exported and its own docstrings promise symbol support.
+    ;; The entry point normalizes the designator so LOG-EVENT never sees a
+    ;; symbol (yason cannot encode one), and normalizing with CL:STRING
+    ;; instead of ASDF:COERCE-NAME upcased it -- ASDF downcases a symbol but
+    ;; takes a string verbatim, so every symbol designator became
+    ;; "Component ... not found".  Nothing covered this path, which is how it
+    ;; shipped past a green suite.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-symdesig-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "symdesig-probe-sys")
+           (probe-package "SYMDESIG-PROBE-SYS")
+           (asd-path (uiop:merge-pathnames* "symdesig-probe-sys.asd" tmp-dir))
+           (src-path (uiop:merge-pathnames* "symdesig-body.lisp" tmp-dir)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :depends-on (:rove)~%" system-name)
+               (format s "  :components ((:file \"symdesig-body\")))~%"))
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:~A (:use #:cl #:rove))~%" probe-package)
+               (format s "(in-package #:~A)~%" probe-package)
+               (format s "(deftest symdesig-probe-test (ok t))~%"))
+             (asdf:load-asd asd-path)
+             (let ((result (run-tests (intern (string-upcase system-name)
+                                              :keyword)
+                                      :test (format nil "~A::SYMDESIG-PROBE-TEST"
+                                                    probe-package))))
+               (ok (not (string= "load-error" (gethash "framework" result)))
+                   "a keyword designator must resolve, not fail to load")
+               (ok (plusp (gethash "passed" result))
+                   "and the addressed test must actually run")))
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors
+          (let ((probe (find-package probe-package)))
+            (when probe (delete-package probe))))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest run-tests-load-lock-wrapper-covers-load-phase-only
+  (testing "*load-lock-wrapper* wraps the force-reload but not the framework run"
+    ;; A throwaway system observes *load-lock-active-p* twice: once from a
+    ;; top-level form (the ASDF load phase) and once from a deftest body (the
+    ;; framework phase).  Holding a worker-global lock across the second one is
+    ;; what deadlocked run-tests on tests/worker-init-hook-test.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-lock-scope-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "lock-scope-probe-sys")
+           (probe-package "LOCK-SCOPE-PROBE-SYS")
+           (self "CL-MCP/TESTS/TEST-RUNNER-TEST")
+           (asd-path (uiop:merge-pathnames* "lock-scope-probe-sys.asd" tmp-dir))
+           (src-path (uiop:merge-pathnames* "lock-scope-probe-body.lisp" tmp-dir))
+           (wrapper-calls 0))
+      (setf *load-lock-active-p* nil
+            *lock-state-at-load* :not-loaded
+            *lock-state-at-run* :not-run)
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :depends-on (:rove)~%"
+                       system-name)
+               (format s "  :components ((:file \"lock-scope-probe-body\")))~%"))
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:~A (:use #:cl #:rove))~%" probe-package)
+               (format s "(in-package #:~A)~%" probe-package)
+               (format s "(setf ~A::*lock-state-at-load* ~A::*load-lock-active-p*)~%"
+                       self self)
+               (format s "(deftest lock-scope-probe-test~%")
+               (format s "  (setf ~A::*lock-state-at-run* ~A::*load-lock-active-p*)~%"
+                       self self)
+               (format s "  (ok t))~%"))
+             (asdf:load-asd asd-path)
+             (let ((result
+                     (let ((cl-mcp/src/test-runner-core::*load-lock-wrapper*
+                             (lambda (thunk)
+                               (incf wrapper-calls)
+                               (setf *load-lock-active-p* t)
+                               (unwind-protect (funcall thunk)
+                                 (setf *load-lock-active-p* nil)))))
+                       ;; Address the probe test by name.  Whole-system Rove
+                       ;; discovery maps a system to its packages through
+                       ;; ASDF metadata that a hand-written temp .asd loaded
+                       ;; with LOAD-ASD does not carry, so it finds no suite
+                       ;; here and the probe body never runs -- which would
+                       ;; make *LOCK-STATE-AT-RUN* vacuously unobserved.  The
+                       ;; selective path takes the symbol directly, and both
+                       ;; paths go through the same load phase, which is what
+                       ;; this test is about.
+                       (run-tests system-name
+                                  :test (format nil "~A::LOCK-SCOPE-PROBE-TEST"
+                                                probe-package)))))
+               (ok (= 1 wrapper-calls)
+                   "the wrapper is applied exactly once, for the load phase")
+               (ok (eq t *lock-state-at-load*)
+                   "the system force-reload runs inside the wrapper")
+               (ok (null *lock-state-at-run*)
+                   "the test run happens after the wrapper has returned")
+               (ok (plusp (gethash "passed" result))
+                   "the probe test really executed")
+               (ok (zerop (gethash "failed" result))
+                   "the probe suite passes")))
+        (setf *load-lock-active-p* nil)
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors
+          (let ((probe (find-package probe-package)))
+            (when probe (delete-package probe))))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))

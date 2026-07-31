@@ -22,5 +22,11 @@ tests/tmp/*
 experiments/
 claudedocs/
 
+# project-scaffold's default output directory.  Ignored in this repo only:
+# scaffolds generated here are throwaway probes for exercising the tool, not
+# deliverables.  Downstream projects should NOT copy this entry — there the
+# generated skeleton is the artifact the user asked for.
+scaffolds/
+
 # AI agent working documents (designs, plans, reports)
 docs/plans/
