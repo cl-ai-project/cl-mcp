@@ -187,6 +187,12 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
   :target-dir (absolute pathname)
   :relative-path (namestring relative to *project-root*)
   :files (list of relative path strings, in manifest order)
+  :leftover-backup (pathname, or NIL) -- set when the replaced tree could
+    not be removed after the commit.  The caller must surface it: the
+    leftover carries the same .asd, and ASDF's tree scan reaches
+    dot-directories, so FIND-SYSTEM can resolve the system to the stale
+    copy.  The generation itself succeeded, so this is a warning rather
+    than an error.
 
 OVERWRITE only ever replaces a directory this tool generated, proven by
 the ownership marker; anything else is refused so that a name colliding
@@ -225,7 +231,8 @@ underlying error after cleaning up the temp directory."
                                  :license (or license "")
                                  :destination destination))
             (moved-aside nil)
-            (committed nil))
+            (committed nil)
+            (leftover-backup nil))
         (unwind-protect
              (progn
                (%write-files-to-temp temp-dir name plan)
@@ -240,14 +247,18 @@ underlying error after cleaning up the temp directory."
                ;; The scaffold is already in place, so a failure to remove the
                ;; backup must not turn a successful generation into a reported
                ;; error -- the unwind cleanup below cannot undo the commit
-               ;; either.  Leaving a stale .bak-project-scaffold-<uuid> sibling
-               ;; behind is the strictly better outcome; it is inert, and a
-               ;; later overwrite recognizes it by prefix.
+               ;; either.  But the leftover is NOT inert: it is a complete
+               ;; copy carrying the same .asd, and ASDF's tree scan walks
+               ;; dot-directories, so FIND-SYSTEM can resolve the system to the
+               ;; stale copy instead of the new one.  Report it rather than
+               ;; returning a bare success the caller cannot act on.
                (when moved-aside
-                 (ignore-errors (%delete-scaffold-tree backup-dir)))
+                 (unless (ignore-errors (%delete-scaffold-tree backup-dir) t)
+                   (setf leftover-backup backup-dir)))
                (list :target-dir target-dir
                      :relative-path (enough-namestring target-dir *project-root*)
-                     :files (mapcar #'car plan)))
+                     :files (mapcar #'car plan)
+                     :leftover-backup leftover-backup))
           (unless committed
             (when (uiop:directory-exists-p temp-dir)
               (ignore-errors (%delete-scaffold-tree temp-dir)))
@@ -307,6 +318,7 @@ file). Any other existing directory is refused, never deleted."))
              (target-dir (getf result-plist :target-dir))
              (relative (getf result-plist :relative-path))
              (files (getf result-plist :files))
+             (leftover (getf result-plist :leftover-backup))
              (abs-asd (namestring
                        (merge-pathnames (format nil "~A.asd" name) target-dir)))
              (next-steps
@@ -331,19 +343,31 @@ file). Any other existing directory is refused, never deleted."))
         ;; loading it would execute freshly generated code outside the worker
         ;; isolation boundary. Registration happens in the worker instead,
         ;; when the agent follows next_steps and calls load-system.
-        (result id
-                (make-ht
-                 "created" t
-                 "path" relative
-                 "absolute_path" (namestring target-dir)
-                 "files" (coerce files 'vector)
-                 "next_steps" next-steps
-                 "content"
-                 (text-content
-                  (format nil "Scaffolded ~A at ~A (~D files)~%Path: ~A~%~{~A~%~}"
-                          name relative (length files)
-                          (namestring target-dir)
-                          (coerce next-steps 'list))))))
+        (let* ((warning
+                (when leftover
+                  (format nil
+                          "The replaced scaffold could not be removed and ~
+                           remains at ~A.  It carries the same .asd, and ~
+                           ASDF's tree scan reaches it, so FIND-SYSTEM may ~
+                           resolve ~A to that stale copy -- delete it before ~
+                           loading."
+                          (namestring leftover) name)))
+               (ht (make-ht
+                    "created" t
+                    "path" relative
+                    "absolute_path" (namestring target-dir)
+                    "files" (coerce files 'vector)
+                    "next_steps" next-steps
+                    "content"
+                    (text-content
+                     (format nil
+                             "Scaffolded ~A at ~A (~D files)~%Path: ~A~%~{~A~%~}~@[~%⚠ ~A~%~]"
+                             name relative (length files)
+                             (namestring target-dir)
+                             (coerce next-steps 'list)
+                             warning)))))
+          (when warning (setf (gethash "warning" ht) warning))
+          (result id ht)))
     (invalid-argument-error (e)
       (result id
               (make-ht

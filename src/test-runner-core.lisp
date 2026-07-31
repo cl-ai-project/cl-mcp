@@ -1279,7 +1279,12 @@ may itself block on the caller's lock."
   ;; IGNORE-ERRORS inside the logger swallows it, and the half-written line
   ;; then swallows the next one, corrupting the NDJSON stream a client is
   ;; reading.  Coercing here keeps every downstream consumer on strings.
-  (setf system-name (string system-name))
+  ;;
+  ;; ASDF:COERCE-NAME, not CL:STRING.  ASDF downcases a symbol designator and
+  ;; takes a string verbatim, so (STRING :MY-SYSTEM) yields "MY-SYSTEM", which
+  ;; FIND-SYSTEM then fails to resolve -- the coercion added to protect the
+  ;; symbol path would have been the thing that broke it.
+  (setf system-name (asdf:coerce-name system-name))
   ;; %ensure-system-loaded re-raises load failures via (error "~A" ...),
   ;; so simple-error is the precise contract.  Catching plain ERROR would
   ;; mask serious-condition subclasses or interactive-interrupt that

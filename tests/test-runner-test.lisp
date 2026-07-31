@@ -637,6 +637,50 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
 (defparameter *lock-state-at-run* :not-run
   "Value of *LOAD-LOCK-ACTIVE-P* observed while the probe test executed.")
 
+(deftest run-tests-accepts-a-symbol-system-designator
+  (testing "a symbol names a system the same way it does for ASDF"
+    ;; RUN-TESTS is exported and its own docstrings promise symbol support.
+    ;; The entry point normalizes the designator so LOG-EVENT never sees a
+    ;; symbol (yason cannot encode one), and normalizing with CL:STRING
+    ;; instead of ASDF:COERCE-NAME upcased it -- ASDF downcases a symbol but
+    ;; takes a string verbatim, so every symbol designator became
+    ;; "Component ... not found".  Nothing covered this path, which is how it
+    ;; shipped past a green suite.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-symdesig-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "symdesig-probe-sys")
+           (probe-package "SYMDESIG-PROBE-SYS")
+           (asd-path (uiop:merge-pathnames* "symdesig-probe-sys.asd" tmp-dir))
+           (src-path (uiop:merge-pathnames* "symdesig-body.lisp" tmp-dir)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :depends-on (:rove)~%" system-name)
+               (format s "  :components ((:file \"symdesig-body\")))~%"))
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:~A (:use #:cl #:rove))~%" probe-package)
+               (format s "(in-package #:~A)~%" probe-package)
+               (format s "(deftest symdesig-probe-test (ok t))~%"))
+             (asdf:load-asd asd-path)
+             (let ((result (run-tests (intern (string-upcase system-name)
+                                              :keyword)
+                                      :test (format nil "~A::SYMDESIG-PROBE-TEST"
+                                                    probe-package))))
+               (ok (not (string= "load-error" (gethash "framework" result)))
+                   "a keyword designator must resolve, not fail to load")
+               (ok (plusp (gethash "passed" result))
+                   "and the addressed test must actually run")))
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors
+          (let ((probe (find-package probe-package)))
+            (when probe (delete-package probe))))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
 (deftest run-tests-load-lock-wrapper-covers-load-phase-only
   (testing "*load-lock-wrapper* wraps the force-reload but not the framework run"
     ;; A throwaway system observes *load-lock-active-p* twice: once from a
