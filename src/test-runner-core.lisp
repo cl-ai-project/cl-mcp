@@ -54,17 +54,144 @@ worker dispatches handlers on the calling thread.")
 ;;; Framework Detection
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *test-framework-systems*
+  '((:rove . ("rove"))
+    (:fiveam . ("fiveam" "it.bese.fiveam"))
+    (:prove . ("prove")))
+  "Framework keyword -> the ASDF system names that indicate it.
+A test system names its framework in :depends-on, which is the only
+system-specific evidence available before anything has run.")
+
+(defun %dependency-entry-name (entry)
+  "Return the ASDF system name ENTRY denotes, or NIL when it denotes none.
+
+:DEPENDS-ON entries are not all plain names.  ASDF admits (:VERSION name v),
+(:FEATURE feature dep) and (:REQUIRE module); the last names an
+implementation module rather than a system and has nothing to resolve.
+
+A (:FEATURE f dep) whose feature is absent is skipped, because ASDF skips it
+too -- following it would attribute to the system a dependency it does not
+have on this implementation."
+  (typecase entry
+    (string (asdf:coerce-name entry))
+    (symbol (asdf:coerce-name entry))
+    (cons (let ((head (first entry)))
+            (cond ((and (keywordp head) (string-equal head "version"))
+                   (%dependency-entry-name (second entry)))
+                  ((and (keywordp head) (string-equal head "feature"))
+                   (when (uiop:featurep (second entry))
+                     (%dependency-entry-name (third entry))))
+                  (t nil))))
+    (t nil)))
+
+(defun %transitive-dependency-names (system-name &key (max-systems 500))
+  "Return the ASDF system names SYSTEM-NAME depends on, transitively.
+
+Returns NIL when SYSTEM-NAME is not registered, which is the caller's cue
+that there is no system-specific evidence to go on.
+
+Only ASDF:REGISTERED-SYSTEM is used -- never FIND-SYSTEM.  FIND-SYSTEM
+resolves a name by *loading the .asd*, and a .asd may carry
+:DEFSYSTEM-DEPENDS-ON, which compiles and loads whole systems as a side
+effect.  Measured on this repo: one detection call for \"cl-mcp/tests\"
+reached usocket's (:feature :usocket-iolib :iolib) branch and pulled in
+cffi-grovel, cffi-toolchain and four iolib systems -- 13 MB of fasls and
+32k characters of compiler output, on the run-tests path, after the load
+lock had been released.  Detection must observe, not build.
+
+RUN-TESTS has already loaded the system under test by the time this runs,
+so its real graph is registered and the registry lookup sees all of it.
+Traversal is breadth first and capped at MAX-SYSTEMS: a package-inferred
+project contributes one system per file (cl-mcp/tests reaches 170), and
+detection is not worth an unbounded walk."
+  (let ((root (ignore-errors (asdf:registered-system system-name))))
+    (when root
+      (let ((seen (make-hash-table :test #'equal))
+            (queue (list root))
+            (names '())
+            (visited 0))
+        (loop while (and queue (< visited max-systems))
+              for system = (pop queue)
+              do (incf visited)
+                 (let ((entries (ignore-errors
+                                 (asdf:system-depends-on system))))
+                   (ignore-errors
+                    (dolist (entry entries)
+                      (let ((name (%dependency-entry-name entry)))
+                        (when (and name (not (gethash name seen)))
+                          (setf (gethash name seen) t)
+                          (push name names)
+                          (let ((dep (ignore-errors
+                                      (asdf:registered-system name))))
+                            (when dep
+                              (setf queue (append queue (list dep)))))))))))
+        names))))
+
+(defun %frameworks-among (names)
+  "Return the framework keywords NAMES contains, in *TEST-FRAMEWORK-SYSTEMS* order."
+  (loop for (framework . systems) in *test-framework-systems*
+        when (some (lambda (s) (member s names :test #'string-equal)) systems)
+          collect framework))
+
+(defun %direct-dependency-names (system-name)
+  "Return the names SYSTEM-NAME itself declares in :depends-on.
+Registry lookup only; see %TRANSITIVE-DEPENDENCY-NAMES for why."
+  (let ((system (ignore-errors (asdf:registered-system system-name))))
+    (when system
+      (remove nil
+              (mapcar #'%dependency-entry-name
+                      (or (ignore-errors (asdf:system-depends-on system))
+                          '()))))))
+
+(defun %declared-test-frameworks (system-name)
+  "Return the framework keywords SYSTEM-NAME declares.
+NIL when the system is not registered or names no known framework.
+
+A system's OWN :depends-on wins outright.  A test system names the framework
+it is written against, while the transitive set also carries whatever its
+library dependencies happen to test with -- a FiveAM project that uses a
+library tested with Rove inherits :ROVE, and would otherwise be handed to
+the wrong backend on a tie.  The transitive walk is the fallback for a test
+system that declares no framework directly, such as an umbrella that only
+depends on its sub-systems."
+  (or (%frameworks-among (%direct-dependency-names system-name))
+      (%frameworks-among (%transitive-dependency-names system-name))))
+
+(defun %framework-from-image ()
+  "Return the framework keyword implied by whatever is loaded in this image.
+The last resort: it carries no information about the system being tested, so
+it is only ever a guess, and in a long-lived worker it is a stale one."
+  (cond ((find-package :rove) :rove)
+        ((find-package :fiveam) :fiveam)
+        ((find-package :prove) :prove)
+        (t :asdf)))
+
 (defun detect-test-framework (system-name)
   "Detect which test framework SYSTEM-NAME uses.
-Returns :ROVE, :FIVEAM, or :ASDF (fallback)."
-  (declare (ignore system-name))
-  ;; For now, detect by loaded packages
-  ;; Future: inspect system dependencies
-  (cond
-    ((find-package :rove) :rove)
-    ((find-package :fiveam) :fiveam)
-    ((find-package :prove) :prove)
-    (t :asdf)))
+Returns :ROVE, :FIVEAM, :PROVE, or :ASDF (fallback).
+
+The system's own :depends-on decides, because the image cannot: cl-mcp's
+worker is long lived and shared, so the moment any session loads a Rove
+project, Rove is in the image forever.  Detecting from loaded packages
+therefore reported :ROVE for every system thereafter -- a FiveAM system was
+handed to the Rove backend, which found none of its suites, ran nothing, and
+returned passed=0 failed=0.  That renders as a pass, so the agent was told
+its tests were green when none had run.
+
+Order of evidence:
+  1. exactly one framework among the transitive dependencies -> that one;
+  2. several -- a project may depend on both, or inherit one through a
+     library -- broken by whether the system actually has FiveAM suites
+     registered, since that is direct evidence rather than a declaration;
+  3. none, or an unresolvable system -> the loaded-package guess, which is
+     all the information there is."
+  (let ((declared (%declared-test-frameworks system-name)))
+    (cond ((null declared) (%framework-from-image))
+          ((null (rest declared)) (first declared))
+          ((and (member :fiveam declared)
+                (%find-fiveam-suites-for-system system-name))
+           :fiveam)
+          (t (first declared)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Unified Result Format

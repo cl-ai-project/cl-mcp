@@ -260,6 +260,21 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                     (cond ((string= framework-name "load-error") "✗ LOAD FAILED")
                           ((string= framework-name "unresolved") "✗ UNRESOLVED")
                           ((string= framework-name "timeout") "✗ TIMEOUT")
+                          ;; Nothing ran.  Zero failures is not a pass here --
+                          ;; that is what let a mis-detected framework report
+                          ;; green while executing no test at all.  Not an
+                          ;; error either: a system may genuinely have none.
+                          ;;
+                          ;; The ASDF fallback is excluded: it shells out to
+                          ;; ASDF:TEST-SYSTEM, which reports no counts at all,
+                          ;; so its successful run is zero/zero too and saying
+                          ;; nothing ran would be false.  A non-empty
+                          ;; failed_tests is excluded for the same reason --
+                          ;; whatever produced those entries did run.
+                          ((and (zerop failed) (zerop passed) (zerop pending)
+                                (not (string= framework-name "asdf"))
+                                (zerop (length failed-tests-vector)))
+                           "⚠ NO TESTS RAN")
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed

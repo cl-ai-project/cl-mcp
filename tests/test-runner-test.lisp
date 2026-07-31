@@ -25,6 +25,97 @@
     ;; Rove is loaded since we're using it for tests
     (ok (eq :rove (detect-test-framework "any-system")))))
 
+(deftest detect-test-framework-prefers-the-systems-own-dependency
+  (testing "a FiveAM system is detected as FiveAM even with Rove in the image"
+    ;; This suite runs under Rove, so the image always has Rove loaded --
+    ;; exactly the state a long-lived cl-mcp worker reaches the moment any
+    ;; session touches a Rove project.  Detection used to read the image and
+    ;; hand every system to the Rove backend, which found no FiveAM suite,
+    ;; ran nothing, and returned passed=0 failed=0 -- rendered as a pass.
+    ;; The system's own :depends-on is the only system-specific evidence.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-detect-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (system-name "detect-probe-fiveam")
+           (test-system (format nil "~A/tests" system-name))
+           (asd-path (uiop:merge-pathnames*
+                      (format nil "~A.asd" system-name) tmp-dir)))
+      (ok (find-package :rove) "precondition: Rove is loaded in this image")
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output
+                                         :if-exists :supersede)
+               (format s "(asdf:defsystem ~S)~%" system-name)
+               (format s "(asdf:defsystem ~S :depends-on (\"fiveam\"))~%"
+                       test-system))
+             (asdf:load-asd asd-path)
+             (ok (eq :fiveam (detect-test-framework test-system))
+                 "the declared dependency decides, not the loaded packages")
+             (ok (eq :rove (detect-test-framework "no-such-system-xyzzy"))
+                 "an unresolvable system still falls back to the image"))
+        (ignore-errors (asdf:clear-system test-system))
+        (ignore-errors (asdf:clear-system system-name))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest detect-test-framework-observes-without-building
+  (testing "detection loads nothing and prints nothing"
+    ;; Detection walks the dependency graph.  Resolving a name with
+    ;; ASDF:FIND-SYSTEM would load the .asd, and a .asd may carry
+    ;; :DEFSYSTEM-DEPENDS-ON, which compiles and loads whole systems.
+    ;; Measured before the registry-only rewrite: one call for "cl-mcp/tests"
+    ;; reached usocket's (:feature :usocket-iolib :iolib) branch and pulled in
+    ;; six systems, 13 MB of fasls and 32k characters of compiler output --
+    ;; on the run-tests path, after the ASDF load lock had been released.
+    (let ((before (length (asdf:already-loaded-systems)))
+          (out (make-string-output-stream))
+          (err (make-string-output-stream)))
+      (let ((*standard-output* out) (*error-output* err))
+        (detect-test-framework "cl-mcp/tests"))
+      (ok (= before (length (asdf:already-loaded-systems)))
+          "detection must not load a system")
+      (ok (zerop (length (get-output-stream-string out)))
+          "nor write to stdout")
+      (ok (zerop (length (get-output-stream-string err)))
+          "nor to stderr"))))
+
+(deftest detect-test-framework-prefers-a-direct-declaration
+  (testing "a framework inherited through a library does not win"
+    ;; A test system names the framework it is written against.  The
+    ;; transitive set also carries whatever its libraries test with, so a
+    ;; FiveAM project depending on a Rove-tested library used to tie, and the
+    ;; tie went to Rove -- the wrong backend, which then ran nothing.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-inherit-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (asd-path (uiop:merge-pathnames* "twi.asd" tmp-dir)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output
+                                         :if-exists :supersede)
+               (format s "(asdf:defsystem \"twi-lib\" :depends-on (\"rove\"))~%")
+               (format s "(asdf:defsystem \"twi\" :depends-on (\"twi-lib\"))~%")
+               (format s "(asdf:defsystem \"twi/tests\"~%")
+               (format s "  :depends-on (\"twi\" \"fiveam\"))~%")
+               (format s "(asdf:defsystem \"twi-umbrella/tests\"~%")
+               (format s "  :depends-on (\"twi/tests\"))~%"))
+             (handler-bind ((warning #'muffle-warning))
+               (asdf:load-asd asd-path))
+             (ok (eq :fiveam (detect-test-framework "twi/tests"))
+                 "the direct fiveam declaration beats the inherited rove")
+             (ok (eq :rove (detect-test-framework "twi-umbrella/tests"))
+                 "a system declaring none falls back to the transitive set"))
+        (dolist (s '("twi-umbrella/tests" "twi/tests" "twi" "twi-lib"))
+          (ignore-errors (asdf:clear-system s)))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Result Structure Tests
 ;;; ---------------------------------------------------------------------------
@@ -481,6 +572,40 @@
             "summary lists the synthetic SYSTEM-LOAD failure")
         (ok (search "pool-kill-worker" text)
             "recovery hint surfaces in the rendered text")))))
+
+(deftest build-run-tests-response-does-not-call-zero-tests-a-pass
+  (testing "a run that executed nothing is not reported as green"
+    ;; Zero failures out of zero tests is what let a mis-detected framework
+    ;; report success while running nothing: the agent reads content[].text,
+    ;; sees the banner, and believes its suite is green.  It is not a failure
+    ;; either -- a system may genuinely have no tests -- so the banner says so.
+    (flet ((banner (passed failed pending &key (framework :rove) failed-tests)
+             (gethash "text"
+                      (aref (gethash
+                             "content"
+                             (build-run-tests-response
+                              (cl-mcp/src/test-runner-core::make-test-result
+                               :passed passed :failed failed :pending pending
+                               :failed-tests failed-tests
+                               :framework framework :duration 1)))
+                            0))))
+      (let ((text (banner 0 0 0)))
+        (ok (search "NO TESTS RAN" text) "the banner must say nothing ran")
+        (ok (not (search "✓ PASS" text)) "and must not claim a pass"))
+      (ok (search "✓ PASS" (banner 3 0 0))
+          "a run that did execute tests still passes")
+      (ok (search "✗ FAIL" (banner 0 1 0))
+          "and a failing run still fails")
+      ;; The ASDF fallback reports no counts at all, so its SUCCESS is also
+      ;; zero/zero.  Calling that "no tests ran" would be false.
+      (ok (search "✓ PASS" (banner 0 0 0 :framework :asdf))
+          "a successful asdf:test-system run is a pass, not an empty run")
+      ;; Likewise, entries in failed_tests prove something ran.
+      (ok (not (search "NO TESTS RAN"
+                       (banner 0 0 0 :failed-tests
+                               (list (cl-mcp/src/test-runner-core::make-failure-detail
+                                      :test-name "x" :reason "y")))))
+          "a non-empty failure list contradicts an empty run"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching
