@@ -265,7 +265,7 @@ costs one visit per distinct cons instead of blowing up exponentially."
                  found)))
       (walk form))))
 
-(defun %make-walk-guard (counter)
+(defun %make-walk-guard (counter outer-hook)
   "Return a *MACROEXPAND-HOOK* function bounding one level \"all\" walk.
 
 COUNTER is a one-element list used as a mutable box.  The hook stops the
@@ -282,13 +282,23 @@ nothing a handler could catch.
     trip.  Each expansion is therefore checked with %CIRCULAR-P at the
     moment it is produced, which is the only point where the cycle is
     still small and reachable.  The cost is proportional to the expansion
-    the walker is about to traverse anyway."
+    the walker is about to traverse anyway.
+
+OUTER-HOOK is the *MACROEXPAND-HOOK* that was in effect when the walk
+started, and every expansion is delegated through it rather than to
+EXPANDER directly.  Installing this guard must not remove a hook the image
+already had: levels \"once\" and \"full\" reach the caller's hook through
+MACROEXPAND-1, so calling the raw expander here would make \"all\" the one
+level that silently ignores it -- and a hook that rewrites an expansion
+would then be reported differently depending on the level asked for.
+OUTER-HOOK is a function designator, which FUNCALL accepts, so the default
+'FUNCALL needs no special case."
   (lambda (expander form env)
     (when (> (incf (first counter)) *max-walk-expansions*)
       (error "Level \"all\" exceeded ~D macro expansions on this form; it does ~
 not reach a fixpoint.  Use level \"once\" or \"full\"."
              *max-walk-expansions*))
-    (let ((expansion (funcall expander form env)))
+    (let ((expansion (funcall outer-hook expander form env)))
       (when (and (consp expansion) (%circular-p expansion))
         (error "Level \"all\" cannot expand ~S: its expansion is circular.  ~
 Use level \"once\" or \"full\"."
@@ -308,14 +318,20 @@ such input.
 That input check cannot see an expander that *builds* a cycle, nor a
 macro that expands into itself; both are bounded instead by the
 *MACROEXPAND-HOOK* installed here.  See %MAKE-WALK-GUARD for why the
-bound has to be reached before the stack runs out rather than after.
+bound has to be reached before the stack runs out rather than after, and
+why the guard delegates to the hook that was already in effect instead of
+replacing it.
 
 Levels \"once\" and \"full\" only look at the head, so they accept
 circular input without this restriction."
   (when (%circular-p form)
     (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
   (let* ((counter (list 0))
-         (expansion (let ((*macroexpand-hook* (%make-walk-guard counter)))
+         ;; Read the hook BEFORE rebinding it, so the guard can delegate to
+         ;; whatever the image already had rather than displace it.
+         (outer-hook *macroexpand-hook*)
+         (expansion (let ((*macroexpand-hook*
+                            (%make-walk-guard counter outer-hook)))
                       (sb-cltl2:macroexpand-all form))))
     (values expansion (if (equal expansion form) 0 1))))
 

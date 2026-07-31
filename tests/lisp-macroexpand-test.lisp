@@ -238,6 +238,33 @@ circularity check in %MAKE-WALK-GUARD rather than the input guard."
       (ok (search "#1=" printed)
           "printed with circle notation; nothing hangs or crashes"))))
 
+(deftest macroexpand-all-delegates-to-an-existing-macroexpand-hook
+  (testing "the level-all guard does not displace a hook the image already had"
+    ;; Levels "once" and "full" reach a caller's *MACROEXPAND-HOOK* through
+    ;; MACROEXPAND-1.  Level "all" installs a guard of its own, and calling
+    ;; the raw expander from it made "all" the one level that ignored the
+    ;; hook -- so a hook that rewrites an expansion produced a different
+    ;; answer depending on which level was asked for.
+    (let ((hits 0))
+      (let ((*macroexpand-hook*
+              (lambda (expander form env)
+                (incf hits)
+                (funcall expander form env))))
+        (macroexpand-source "(double-it-twice 3)"
+                            :package *fixture-package* :level "all"))
+      (ok (plusp hits)
+          "a caller's hook must still be invoked during a level-all walk"))
+    ;; A rewriting hook must actually change the result, not merely be called.
+    (let ((printed
+            (let ((*macroexpand-hook*
+                    (lambda (expander form env)
+                      (declare (ignore expander env))
+                      (list 'quote (list :rewritten (first form))))))
+              (macroexpand-source "(double-it 3)"
+                                  :package *fixture-package* :level "all"))))
+      (ok (search ":rewritten" printed)
+          "the hook's own expansion must reach the output"))))
+
 (deftest macroexpand-all-survives-a-runaway-macro
   (testing "a self-reproducing macro at level all is reported, not fatal"
     ;; This used to rely on catching the CONTROL-STACK-EXHAUSTED that
