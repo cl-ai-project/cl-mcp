@@ -46,6 +46,37 @@
       (ok (search "BAR" text))
       (ok (not (search " line " text)) "no line phrase when line is NIL")))))
 
+(deftest build-code-find-response-does-not-misreport-an-existing-file
+  (testing "a file that exists is not annotated 'source not on disk'"
+    ;; The annotation used to fire on every hit.  BUILD-CODE-FIND-RESPONSE
+    ;; probed the path it was given, but by then CODE-FIND-DEFINITION had
+    ;; already made it relative for display -- relative to *PROJECT-ROOT*,
+    ;; which is not the process's working directory in a worker.  Every
+    ;; existing file therefore probed as missing.  The caller now decides,
+    ;; from the absolute pathname, and passes the answer in.
+    ;;
+    ;; The two cases above both use /no/such/path.lisp and assert the
+    ;; annotation IS present, so neither could ever have caught this.
+    (let* ((r (build-code-find-response "FOO" "src/core.lisp" 10 t))
+           (text (gethash "text" (aref (gethash "content" r) 0))))
+      (ok (search "src/core.lisp" text) "the path is still reported")
+      (ok (search "line 10" text) "and the line")
+      (ok (not (search "not on disk" text))
+          "an on-disk file must not be annotated as missing"))
+    (let* ((r (build-code-find-response "FOO" "src/core.lisp" 10 nil))
+           (text (gethash "text" (aref (gethash "content" r) 0))))
+      (ok (search "not on disk" text)
+          "and a genuinely missing file still is"))))
+
+(deftest build-code-find-response-keeps-the-two-value-contract
+  (testing "a caller passing no on-disk flag still probes for itself"
+    ;; The argument is optional so a caller that has not been updated keeps
+    ;; the old behaviour rather than silently claiming every file is present.
+    (let* ((r (build-code-find-response "BAZ" "/no/such/path.lisp" 7))
+           (text (gethash "text" (aref (gethash "content" r) 0))))
+      (ok (search "not on disk" text)
+          "a missing file is still reported as missing without the flag"))))
+
 (deftest build-code-find-response-not-found
  (testing "NIL path produces an isError payload"
   (let ((r (build-code-find-response "BAZ" nil nil)))

@@ -184,9 +184,9 @@ would deadlock or trip SBCL's recursive-lock check."
         (package (gethash "package" params)))
     (unless symbol
       (error "symbol is required"))
-    (multiple-value-bind (path line)
+    (multiple-value-bind (path line on-disk)
         (code-find-definition symbol :package package)
-      (build-code-find-response symbol path line))))
+      (build-code-find-response symbol path line on-disk))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-describe

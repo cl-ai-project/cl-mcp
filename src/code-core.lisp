@@ -155,15 +155,21 @@ the offset is spurious. Returns NIL when the file cannot be read."
         nil))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
-                          (values (or null string) (or null integer) &optional))
+                          (values (or null string) (or null integer) t &optional))
                 code-find-definition))
 
 (defun code-find-definition (symbol-name &key package)
   "Return the definition location for SYMBOL-NAME.
-Values are PATH (string) and LINE (integer), or NILs when not found.
-Searches multiple SB-INTROSPECT definition kinds so that classes,
+Values are PATH (string), LINE (integer) and ON-DISK (boolean), or NILs when
+not found.  Searches multiple SB-INTROSPECT definition kinds so that classes,
 structures, conditions, generic functions, macros, and variables are
-all locatable, not only ordinary functions."
+all locatable, not only ordinary functions.
+
+ON-DISK is decided here, on the absolute pathname SB-INTROSPECT returned,
+because PATH has already been made relative for display and the relativization
+is not always against the process's working directory: a worker's CWD is
+whatever it inherited, not *PROJECT-ROOT*.  Probing the relative string
+downstream therefore failed for every file that does exist."
   (let* ((qualified (position #\: symbol-name))
          (pkg (if qualified nil package))
          (sym (%parse-symbol symbol-name :package pkg)))
@@ -197,10 +203,13 @@ all locatable, not only ordinary functions."
         (let* ((pathname (funcall path-fn source))
                (char-offset (and offset (funcall offset source)))
                (line (%offset->line pathname char-offset))
+               (on-disk (and pathname
+                             (ignore-errors (probe-file pathname))
+                             t))
                (path (normalize-path-for-display pathname)))
-          (return-from code-find-definition (values path line))))
+          (return-from code-find-definition (values path line on-disk))))
       (log-event :warn "code.find.not-found" "symbol" symbol-name)
-      (values nil nil))
+      (values nil nil nil))
     #-sbcl
     (error "code-find-definition requires SBCL")))
 
