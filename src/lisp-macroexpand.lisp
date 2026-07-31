@@ -146,8 +146,13 @@ matches, the first of which contains the second."
                ;; which only references a function.  Compared by
                ;; SYMBOL-NAME because CST symbols can be homeless after
                ;; package-context teardown.
+               ;; CONSP on the cdr before SECOND: source text really can
+               ;; hold a dotted (function . x), and SECOND would raise a raw
+               ;; TYPE-ERROR on it where the pre-branch walk simply skipped
+               ;; the node.
                (let ((value (cst-node-value node)))
                  (and (consp value)
+                      (consp (cdr value))
                       (consp (second value))
                       (symbolp (car (second value)))
                       (car (second value))

@@ -546,6 +546,14 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
                "a keyword suite named after the primary system is found")
            (ok (%suite-matches-system-p "KEYWORD" "CHANL" "chanl/tests")
                "the same for a real project's layout")
+           ;; A deeper system still finds its own package and its own
+           ;; dashed spelling; only the parent-derived names are dropped.
+           (ok (%suite-matches-system-p "FOO/TESTS/UNIT" "ALL-TESTS"
+                                        "foo/tests/unit")
+               "a sub-system finds its own package")
+           (ok (%suite-matches-system-p "SOMEWHERE" "FOO-TESTS-UNIT"
+                                        "foo/tests/unit")
+               "and its own dashed spelling")
            ;; A dot nests a package just as a slash does.
            (ok (%suite-matches-system-p "CL-YAML-TEST.PARSER" "PARSER"
                                         "cl-yaml-test")
@@ -620,7 +628,15 @@ SYSTEM-NAME, according to the internal FiveAM suite matcher."
                                              "app"))
                "nor match a plugin that names its suite after the host")
            (ok (not (%suite-matches-system-p "APPLIANCE/TESTS" "MAIN" "app"))
-               "nor a longer name that merely starts with the system name"))
+               "nor a longer name that merely starts with the system name")
+           ;; A deeper system is a component of the test system, not another
+           ;; spelling of it.  Deriving primary-name candidates for it made
+           ;; a request for one sub-system run the whole parent suite.
+           (ok (not (%suite-matches-system-p "FOO/TESTS" "ALL-TESTS"
+                                             "foo/tests/unit"))
+               "a sub-system must not select its parent test system's suite")
+           (ok (not (%suite-matches-system-p "KEYWORD" "FOO" "foo/tests/unit"))
+               "nor the primary system's keyword suite"))
       (%delete-fabricated-packages))))
 
 ;;; ---------------------------------------------------------------------------

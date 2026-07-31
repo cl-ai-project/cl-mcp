@@ -1052,12 +1052,24 @@ Growing these by prefix is what previously swallowed sibling projects, so
 they are compared whole and nothing else."
   (let* ((name (string system-name))
          (slash (position #\/ name))
-         (primary (if slash (subseq name 0 slash) name))
-         (names (list primary)))
+         ;; The primary-derived names describe the "<primary>/<tests>" shape
+         ;; only.  A deeper system such as "foo/tests/unit" is a component of
+         ;; the test system, not another spelling of it, so deriving from
+         ;; "foo" there would select the PARENT's suite -- asking for one
+         ;; sub-system would run the whole test system.  Deeper names get the
+         ;; full name and its dashed form, and reach their own sub-packages
+         ;; through the namespace candidate.
+         (primary (cond ((null slash) name)
+                        ((find #\/ name :start (1+ slash)) nil)
+                        (t (subseq name 0 slash))))
+         (names '()))
+    (when primary
+      (push primary names)
+      (dolist (suffix '("-test" "-tests" "/test" "/tests"))
+        (pushnew (concatenate 'string primary suffix) names
+                 :test #'string-equal)))
     (when slash
       (pushnew (substitute #\- #\/ name) names :test #'string-equal))
-    (dolist (suffix '("-test" "-tests" "/test" "/tests"))
-      (pushnew (concatenate 'string primary suffix) names :test #'string-equal))
     (nreverse names)))
 
 (defun %fiveam-suite-matches-system-p (suite-sym system-name)
