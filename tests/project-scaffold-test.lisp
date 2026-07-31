@@ -450,11 +450,17 @@ callers do not need to reference it."
   "Return the list of top-level forms READ from TEXT.
 Lets the .asd tests assert on structure rather than on substrings: a
 quote smuggled into a template value shows up as extra top-level forms,
-which a SEARCH-based check would happily miss."
-  (with-input-from-string (in text)
-    (loop for form = (read in nil :eof)
-          until (eq form :eof)
-          collect form)))
+which a SEARCH-based check would happily miss.
+
+*READ-EVAL* is bound to NIL because TEXT is generated from the very
+injection payloads these tests feed in.  Reading it with read-time eval
+enabled would let a `#.' in a payload execute here, inside the test that
+exists to prove such a payload cannot execute."
+  (let ((*read-eval* nil))
+    (with-input-from-string (in text)
+      (loop for form = (read in nil :eof)
+            until (eq form :eof)
+            collect form))))
 
 (deftest escape-lisp-string-escapes-quote-and-backslash
   (testing "leaves ordinary text alone"
@@ -466,10 +472,15 @@ which a SEARCH-based check would happily miss."
   (testing "escapes a trailing backslash"
     (ok (equal "MIT\\\\" (escape-lisp-string "MIT\\"))))
   (testing "escaped output reads back as the original string"
-    (dolist (raw (list "a\"b" "a\\b" "MIT\\" "x\") (defparameter *evil* 1) (\""))
-      (ok (equal raw
-                 (read-from-string
-                  (concatenate 'string "\"" (escape-lisp-string raw) "\"")))))))
+    ;; *READ-EVAL* NIL: these inputs are injection payloads, and reading them
+    ;; with read-time eval enabled would let a `#.' among them execute inside
+    ;; the test that exists to prove it cannot.
+    (let ((*read-eval* nil))
+      (dolist (raw (list "a\"b" "a\\b" "MIT\\" "x\") (defparameter *evil* 1) (\""
+                         "#.(error \"read-time eval must not fire\")"))
+        (ok (equal raw
+                   (read-from-string
+                    (concatenate 'string "\"" (escape-lisp-string raw) "\""))))))))
 
 (deftest scaffold-asd-neutralizes-quote-injection
   ;; PLAN-SCAFFOLD is called directly (it performs no validation) so that
