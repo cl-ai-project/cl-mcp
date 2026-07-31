@@ -332,7 +332,7 @@ Run tests for a system and return structured results with pass/fail counts and f
 
 Input:
 - `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`)
-- `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, or `"auto"` for auto-detect)
+- `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
 
@@ -342,6 +342,9 @@ Output:
 - `pending` (integer): Number of pending/skipped tests (when reported by the framework)
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `duration_ms` (integer): Execution time in milliseconds
+
+The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, or `⚠ NO TESTS RAN`. The last means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either.
+
 - `failed_tests` (array, when failures exist): Detailed failure information including:
   - `test_name`: Name of the failing test
   - `description`: Test description

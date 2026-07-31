@@ -168,7 +168,8 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 - Run system: `{"system": "my-system/tests"}`
 - Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (package must be loaded first)
 - Run selected tests: `{"system": "my-system/tests", "tests": ["my-system/tests::first-test", "my-system/tests::second-test"]}`
-- Force framework when auto-detection is ambiguous: `{"system": "my-system/tests", "framework": "fiveam"}`
+- Framework is detected from the test system's own `:depends-on`; override with `{"system": "my-system/tests", "framework": "fiveam"}`
+- A `⚠ NO TESTS RAN` summary means the run completed but executed nothing — check the system name and any `tests` selection before reading it as success
 - Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
 - Response includes `stdout`/`stderr` fields (structured data only, NOT shown in summary text)
 - **Print debugging**: `format t` output goes to `stdout` (not visible in summary). To see debug prints in the summary, write to `*test-debug-output*`:
