@@ -40,9 +40,9 @@ and is loaded"))
   :body
   (with-proxy-dispatch (id "worker/code-find"
                           (make-ht "symbol" symbol "package" package))
-    (multiple-value-bind (path line)
+    (multiple-value-bind (path line on-disk)
         (code-find-definition symbol :package package)
-      (result id (build-code-find-response symbol path line)))))
+      (result id (build-code-find-response symbol path line on-disk)))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.

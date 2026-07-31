@@ -76,7 +76,13 @@ When CIRCULAR-P is true, returns a circular reference marker."
 
 (defun %value-repr (object seen-table active-table depth max-depth max-elements)
   "Return representation of OBJECT, registering if inspectable.
-Returns either a primitive value representation, an object-ref, or a circular-ref."
+Returns either a primitive value representation, an object-ref, or a circular-ref.
+
+An expanded result carries its \"id\" just as an object-ref does.  Without it,
+raising MAX-DEPTH removed the very handles it was raised to reach: at depth 1 a
+slot came back as an object-ref and showed [object-id: N], while at depth 2 the
+same slot was expanded in place and showed none, so the deeper view was the one
+you could not drill into."
   (if (inspectable-p object)
       (let ((child-depth (1+ depth)))
         (cond
@@ -91,9 +97,13 @@ Returns either a primitive value representation, an object-ref, or a circular-re
            (%make-object-ref object seen-table))
           ;; First time and depth allows expansion.
           (t
-           (%ensure-object-id object seen-table)
-           (%inspect-object-impl object seen-table active-table child-depth
-                                 max-depth max-elements))))
+           (let ((id (%ensure-object-id object seen-table))
+                 (expanded (%inspect-object-impl object seen-table active-table
+                                                 child-depth max-depth
+                                                 max-elements)))
+             (when (hash-table-p expanded)
+               (setf (gethash "id" expanded) id))
+             expanded))))
       (%primitive-value-repr object)))
 
 ;;; Type-specific inspection functions
@@ -451,8 +461,13 @@ If REPR is not a hash-table, return its princ-to-string."
           (loop for el in (coerce elements 'list)
                 for i from 0
                 do (if (hash-table-p el)
+                       ;; REF_ID as well as ID: a circular-ref carries its
+                       ;; handle under "ref_id", and it is the one nested kind
+                       ;; that would otherwise render with no marker at all --
+                       ;; conspicuous now that its siblings have one.
                        (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
-                               i (%repr-text el) (gethash "id" el))
+                               i (%repr-text el)
+                               (or (gethash "id" el) (gethash "ref_id" el)))
                        (format s "~&  [~D] ~A" i el)))))
       ;; Hash-table entries
       (let ((entries (gethash "entries" inspection-result)))
@@ -463,9 +478,15 @@ If REPR is not a hash-table, return its princ-to-string."
                 do (when (hash-table-p entry)
                      (let ((k (gethash "key" entry))
                            (v (gethash "value" entry)))
-                       (format s "~&  ~A => ~A~@[ [object-id: ~A]~]"
-                               (%repr-text k) (%repr-text v)
-                               (when (hash-table-p v) (gethash "id" v))))))))
+                       ;; A composite KEY is drillable too, and its handle was
+                       ;; reachable only from the JSON before.
+                       (format s "~&  ~A~@[ [key-object-id: ~A]~] => ~A~@[ [object-id: ~A]~]"
+                               (%repr-text k)
+                               (when (hash-table-p k)
+                                 (or (gethash "id" k) (gethash "ref_id" k)))
+                               (%repr-text v)
+                               (when (hash-table-p v)
+                                 (or (gethash "id" v) (gethash "ref_id" v)))))))))
       ;; CLOS slots
       (let ((slots (gethash "slots" inspection-result)))
         (when (and slots (plusp (length slots)))
@@ -476,7 +497,9 @@ If REPR is not a hash-table, return its princ-to-string."
                        (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
                                (gethash "name" slot "?")
                                (%repr-text v)
-                               (when (hash-table-p v) (gethash "id" v))))))))
+                               (when (hash-table-p v)
+                                 (or (gethash "id" v)
+                                     (gethash "ref_id" v)))))))))
       ;; Meta info (truncation)
       (let ((meta (gethash "meta" inspection-result)))
         (when (and meta (hash-table-p meta) (gethash "truncated" meta))

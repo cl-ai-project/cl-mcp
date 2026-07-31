@@ -309,31 +309,45 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
           (when presentp (setf (gethash field response) value))))
       response)))
 
-(defun build-code-find-response (symbol path line)
+(defun build-code-find-response (symbol path line &optional (on-disk t on-disk-supplied-p))
   "Build the standard code-find response hash-table.
 PATH is the source file path, LINE the line number.  When PATH is
-NIL the symbol was not found and an isError payload is returned."
+NIL the symbol was not found and an isError payload is returned.
+
+ON-DISK says whether the source file exists.  The caller decides it, because
+by the time PATH reaches here it has been made relative for display, and
+relative to what is not knowable from this side: NORMALIZE-PATH-FOR-DISPLAY
+tries *PROJECT-ROOT*, then the working directory, then cl-mcp's own source
+directory.  Probing the relative string here resolved it against the process's
+CWD -- which in a worker is whatever it inherited -- so every existing file was
+annotated \"source not on disk\".
+
+The argument is optional; when it is omitted the builder falls back to probing
+PATH itself, so a caller that has not been updated keeps exactly its old
+behaviour rather than silently claiming every file is present.  Do not
+\"simplify\" this into a plain default of T: that is the direction that turns a
+missing file into a reported one."
   (if path
-      (make-ht "path" path
-               "line" line
-               "content" (text-content
-                          (let ((on-disk (ignore-errors (probe-file path))))
-                            (cond
-                              ((and line on-disk)
-                               (format nil "~A defined in ~A at line ~D"
-                                       symbol path line))
-                              (line
-                               (format nil "~A defined in ~A at line ~D (source not on disk)"
-                                       symbol path line))
-                              (on-disk
-                               (format nil "~A defined in ~A" symbol path))
-                              (t
-                               (format nil "~A defined in ~A (source not on disk)"
-                                       symbol path))))))
-      (make-ht "isError" t
-               "content" (text-content
-                          (format nil "Definition not found for ~A"
-                                  symbol)))))
+      (make-ht "path" path "line" line "content"
+               (text-content
+                (let ((on-disk (if on-disk-supplied-p
+                                   on-disk
+                                   (ignore-errors (probe-file path)))))
+                  (cond
+                   ((and line on-disk)
+                    (format nil "~A defined in ~A at line ~D" symbol path
+                            line))
+                   (line
+                    (format nil
+                            "~A defined in ~A at line ~D (source not on disk)"
+                            symbol path line))
+                   (on-disk (format nil "~A defined in ~A" symbol path))
+                   (t
+                    (format nil "~A defined in ~A (source not on disk)" symbol
+                            path))))))
+      (make-ht "isError" t "content"
+               (text-content
+                (format nil "Definition not found for ~A" symbol)))))
 
 (defun build-code-describe-response (name type arglist doc path line)
   "Build the standard code-describe response hash-table."

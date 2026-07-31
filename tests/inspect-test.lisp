@@ -98,6 +98,48 @@
            ;; Second element should be an object-ref
            (ok (string= "object-ref" (ht-get (second elems) "kind")))))))))
 
+(deftest inspect-keeps-object-ids-when-max-depth-expands
+  (testing "raising max-depth does not cost you the ids you drill with"
+    ;; At depth 1 a nested value came back as an object-ref, which carries
+    ;; "id".  At depth 2 the same value was expanded in place, and the
+    ;; expanded hash-table had no "id" at all -- so asking for the deeper
+    ;; view removed the very handles it was asked for, and the rendered text
+    ;; lost its [object-id: N] markers.  Every inspectable value carries its
+    ;; id now, expanded or not.
+    (with-fresh-registry
+     (lambda ()
+       (let* ((inner (list :inner 1 2))
+              (obj (list inner))
+              (id (register-object obj)))
+         (dolist (depth '(1 2 3))
+           (let* ((result (inspect-object-by-id id :max-depth depth))
+                  (first-element (first (ht-get result "elements"))))
+             (ok (ht-get first-element "id")
+                 (format nil "the nested value carries an id at max-depth ~D"
+                         depth))
+             (ok (integerp (ht-get first-element "id"))
+                 "and it is an integer usable as an inspect-object argument"))))))))
+
+(deftest inspect-renders-a-handle-for-a-circular-reference
+  (testing "a circular element still shows an id in the rendered text"
+    ;; A circular-ref carries its handle under "ref_id", not "id", so the text
+    ;; renderer printed nothing for it.  That was invisible while no sibling
+    ;; had a marker either; once every other nested value gained one, the
+    ;; cycle became the single element an agent could not drill into.
+    (with-fresh-registry
+     (lambda ()
+       (let* ((root (list :a nil (list :c 1)))
+              (id (register-object root)))
+         (setf (second root) root)
+         (dolist (depth '(1 2 3))
+           (let ((text (cl-mcp/src/inspect:format-inspect-elements
+                        (inspect-object-by-id id :max-depth depth))))
+             (ok (search "<circular to" text)
+                 (format nil "the cycle is still reported at max-depth ~D"
+                         depth))
+             (ok (search (format nil "[object-id: ~D]" id) text)
+                 "and carries a handle pointing back at the root"))))))))
+
 (deftest inspect-list-truncation
   (testing "inspect list respects max_elements"
     (with-fresh-registry
