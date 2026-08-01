@@ -31,7 +31,7 @@
 | 所要時間 | 353.25 秒 / 最大 RSS 593,148 kB |
 | src | 59 ファイル / 18,225 行 |
 | SBCL | 2.5.8.roswell |
-| `src/utils/strings.lisp` のカバレッジ | 式 21/21、分岐 4/4（`cl-mcp/tests/utils-strings-test` のみ実行時） |
+| `src/utils/strings.lisp` のカバレッジ | 式 18/21、分岐 4/4（空のキャッシュから計測。未カバーの 3 式は `defpackage` / `in-package` / `declaim`） |
 | `sb-cover::report-file` の戻り値 | `(式 sample-count 分岐 sample-count)` の 2 要素リスト |
 | `ASDF_OUTPUT_TRANSLATIONS="/:<dir>/"` | `<dir>/<元の絶対パス>` に振り替わることを確認済み |
 
@@ -48,7 +48,7 @@
 | `coverage/` (生成物) | HTML レポートと隔離 fasl キャッシュ | 追跡しない |
 | `docs/plans/2026-08-01-robustness-and-coverage-audit.md` (新規) | 統合監査レポート | 追跡しない（`docs/plans/` は `.gitignore` 済み） |
 
-`scripts/coverage.ros` は ASDF システムの外にある単独スクリプトなので、rove のユニットテストを掛ける先がない。代わりに**スクリプト自身が `--smoke` モードを持ち、既知の答え（21/21, 4/4）と突き合わせて自己検証する**。これが Task 2 の赤→緑サイクルであり、同時に SBCL 内部 API 依存が壊れたことを検知する恒久的なガードにもなる。
+`scripts/coverage.ros` は ASDF システムの外にある単独スクリプトなので、rove のユニットテストを掛ける先がない。代わりに**スクリプト自身が `--smoke` モードを持ち、既知の答え（18/21, 4/4）と突き合わせて自己検証する**。これが Task 2 の赤→緑サイクルであり、同時に SBCL 内部 API 依存が壊れたことを検知する恒久的なガードにもなる。
 
 ---
 
@@ -209,11 +209,22 @@ EOF
   (declare (ignore file))
   nil)
 
-(defun run-smoke (root)
+(defun run-smoke (root cache)
   "src/utils/strings.lisp だけを計装し、既知の答えと突き合わせる。
 
-期待値 (21 21 4 4) は 2026-08-01 に SBCL 2.5.8 で実測した値であり、
-sb-cover の HTML レポートが出す数字と一致することを確認済みである。"
+期待値 (18 21 4 4) は 2026-08-01 に SBCL 2.5.8 で、**空のキャッシュから**実測した値である。
+
+21 式のうち 3 式（defpackage, in-package, declaim）は決してカバー済みにならない。
+定義系トップレベルフォームは、そのファイルが計測プロセス内でコンパイルされる限り
+実行済みとして計上されないためである。関数本体は分岐まで完全にカバーされる。
+この差は src 全体で約 323 フォーム、全式の 1.35% にあたり、ファイル先頭に集中する。
+詳細は scripts/coverage-scope.md を見ること。
+
+**キャッシュを空にしてから計測する。** これを怠ると、前回の実行が残した fasl を
+ロードするだけになり、コンパイル経路を通らないぶん定義系フォームが実行済みとして
+計上されて (21 21 4 4) が出る。実際にそれで 3 セッションにわたり SMOKE OK が
+返り続け、検算が何も検算していなかった。"
+  (clear-coverage-cache cache)
   (proclaim '(optimize sb-cover:store-coverage-data))
   (asdf:load-system :cl-mcp/src/utils/strings :force t)
   (proclaim '(optimize (sb-cover:store-coverage-data 0)))
@@ -222,7 +233,7 @@ sb-cover の HTML レポートが出す数字と一致することを確認済�
   ;; report がカバレッジ記録を最新化するので、集計より先に呼ぶ必要がある。
   (sb-cover:report (merge-pathnames "coverage/smoke/" root))
   (let* ((file (namestring (truename (merge-pathnames "src/utils/strings.lisp" root))))
-         (expected '(21 21 4 4))
+         (expected '(18 21 4 4))
          (actual (collect-file-coverage file)))
     (format t "~&~%smoke: ~A~%  expected ~S~%  actual   ~S~%" file expected actual)
     (cond ((equal actual expected)
@@ -241,7 +252,7 @@ sb-cover の HTML レポートが出す数字と一致することを確認済�
          (cache (setup-isolated-cache root)))
     (format t "~&repo-root: ~A~%cache:     ~A~%" root cache)
     (uiop:quit
-     (cond ((member "--smoke" argv :test #'string=) (run-smoke root))
+     (cond ((member "--smoke" argv :test #'string=) (run-smoke root cache))
            (t (format t "~&full モードは未実装~%") 1)))))
 ```
 
@@ -251,7 +262,8 @@ sb-cover の HTML レポートが出す数字と一致することを確認済�
 ./scripts/coverage.ros --smoke; echo "EXIT=$?"
 ```
 
-期待: `expected (21 21 4 4)` / `actual NIL` と表示され、`SMOKE FAILED`、`EXIT=1`。所要 2 分程度。
+期待: `expected (18 21 4 4)` / `actual NIL` と表示され、`SMOKE FAILED`、`EXIT=1`。
+キャッシュを空から始めるので所要 4〜6 分。
 
 - [ ] **Step 3: アダプタを実装する**
 
@@ -279,7 +291,7 @@ HTML レポートの数字と必ず一致する。"
 ./scripts/coverage.ros --smoke; echo "EXIT=$?"
 ```
 
-期待: `expected (21 21 4 4)` / `actual (21 21 4 4)`、`SMOKE OK`、`EXIT=0`。
+期待: `expected (18 21 4 4)` / `actual (18 21 4 4)`、`SMOKE OK`、`EXIT=0`。
 
 - [ ] **Step 5: コミット**
 
@@ -294,7 +306,7 @@ reuses sb-cover's own tallying, which is why these figures match the HTML
 exactly rather than approximating it.
 
 The path runs through SBCL internals, so --smoke pins it to a measured
-answer (21/21 expressions, 4/4 branches for src/utils/strings.lisp) and
+answer (18/21 expressions, 4/4 branches for src/utils/strings.lisp) and
 raises instead of quietly reporting 0% when the shape changes.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
@@ -559,7 +571,7 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
 `main` の full 分岐を差し替える。`run-full` はキャッシュを空にするので `cache` を受け取る:
 
 ```lisp
-     (cond ((member "--smoke" argv :test #'string=) (run-smoke root))
+     (cond ((member "--smoke" argv :test #'string=) (run-smoke root cache))
            (t (run-full root cache)))
 ```
 
@@ -583,9 +595,10 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
 grep "utils/strings.lisp" docs/coverage-summary.md
 ```
 
-期待: `| src/utils/strings.lisp | 21/21 | 100.0 | 4/4 | 100.0 |`。
+期待: `| src/utils/strings.lisp | 18/21 | 85.7 | 4/4 | 100.0 |`。
 
 `all`（21 と 4）はコードの形だけで決まるので、どのテストを回しても変わらない。
+未カバーの 3 式は `defpackage` / `in-package` / `declaim` で、関数本体は完全にカバーされる。
 数値が食い違ったら、全スイート実行の経路で計測が壊れている。**先に進んではならない。**
 
 - [ ] **Step 4: サマリの中身を目視確認する**
