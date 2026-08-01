@@ -40,12 +40,66 @@ exec ros -Q -- $0 "$@"
     (asdf:initialize-output-translations)
     cache))
 
+(define-condition coverage-adapter-error (error)
+  ((detail :initarg :detail :reader coverage-adapter-error-detail))
+  (:report
+   (lambda (condition stream)
+     (format stream
+             "sb-cover の内部 API が期待と違う形をしている: ~A~@
+              SBCL ~A。scripts/coverage.ros のアダプタを見直すこと。~@
+              カバレッジ 0% を黙って返すより、ここで止まる方がよい。"
+             (coverage-adapter-error-detail condition)
+             (lisp-implementation-version)))))
+
+(defun coverage-table ()
+  "計装済みファイルのカバレッジ記録を持つハッシュ表を返す。"
+  (let ((table (car sb-int:*code-coverage-info*)))
+    (unless (hash-table-p table)
+      (error 'coverage-adapter-error
+             :detail "(car sb-int:*code-coverage-info*) がハッシュ表ではない"))
+    table))
+
+(defun collect-file-coverage (file)
+  "FILE の (式ok 式all 分岐ok 分岐all) を返す。
+
+sb-cover は HTML しか出さないので、HTML を書き出す関数に空ストリームを渡して
+数値だけを取り出す。sb-cover 自身の集計ロジックを再利用するため、ここで得た数値は
+HTML レポートの数字と必ず一致する。"
+  (let ((counts (sb-cover::report-file file (make-broadcast-stream) :default)))
+    (unless (and (listp counts) (= 2 (length counts)))
+      (error 'coverage-adapter-error
+             :detail (format nil "report-file が 2 要素のリストを返さなかった: ~S" counts)))
+    (destructuring-bind (expression branch) counts
+      (list (sb-cover::ok-of expression) (sb-cover::all-of expression)
+            (sb-cover::ok-of branch) (sb-cover::all-of branch)))))
+
+(defun run-smoke (root)
+  "src/utils/strings.lisp だけを計装し、既知の答えと突き合わせる。
+
+期待値 (21 21 4 4) は 2026-08-01 に SBCL 2.5.8 で実測した値であり、
+sb-cover の HTML レポートが出す数字と一致することを確認済みである。"
+  (proclaim '(optimize sb-cover:store-coverage-data))
+  (asdf:load-system :cl-mcp/src/utils/strings :force t)
+  (proclaim '(optimize (sb-cover:store-coverage-data 0)))
+  (asdf:load-system :cl-mcp/tests/utils-strings-test)
+  (rove:run :cl-mcp/tests/utils-strings-test)
+  ;; report がカバレッジ記録を最新化するので、集計より先に呼ぶ必要がある。
+  (sb-cover:report (merge-pathnames "coverage/smoke/" root))
+  (let* ((file (namestring (truename (merge-pathnames "src/utils/strings.lisp" root))))
+         (expected '(21 21 4 4))
+         (actual (collect-file-coverage file)))
+    (format t "~&~%smoke: ~A~%  expected ~S~%  actual   ~S~%" file expected actual)
+    (cond ((equal actual expected)
+           (format t "~&SMOKE OK~%")
+           0)
+          (t
+           (format t "~&SMOKE FAILED~%")
+           1))))
+
 (defun main (&rest argv)
-  (declare (ignorable argv))
   (let* ((root (repo-root))
          (cache (setup-isolated-cache root)))
     (format t "~&repo-root: ~A~%cache:     ~A~%" root cache)
-    (format t "~&translated: ~A~%"
-            (asdf:apply-output-translations
-             (merge-pathnames "src/utils/strings.lisp" root)))
-    (uiop:quit 0)))
+    (uiop:quit
+     (cond ((member "--smoke" argv :test #'string=) (run-smoke root))
+           (t (format t "~&full モードは未実装~%") 1)))))
