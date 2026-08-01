@@ -65,13 +65,22 @@ exec ros -Q -- $0 "$@"
 sb-cover は HTML しか出さないので、HTML を書き出す関数に空ストリームを渡して
 数値だけを取り出す。sb-cover 自身の集計ロジックを再利用するため、ここで得た数値は
 HTML レポートの数字と必ず一致する。"
-  (let ((counts (sb-cover::report-file file (make-broadcast-stream) :default)))
-    (unless (and (listp counts) (= 2 (length counts)))
+  (handler-case
+      (let ((counts (sb-cover::report-file file (make-broadcast-stream) :default)))
+        (unless (and (listp counts) (= 2 (length counts)))
+          (error 'coverage-adapter-error
+                 :detail (format nil "report-file が 2 要素のリストを返さなかった: ~S" counts)))
+        (destructuring-bind (expression branch) counts
+          (unless (and (typep expression 'sb-cover::sample-count)
+                       (typep branch 'sb-cover::sample-count))
+            (error 'coverage-adapter-error
+                   :detail (format nil "report-file の要素が sample-count 型でない（式/分岐の並び順が変わった可能性）: ~S" counts)))
+          (list (sb-cover::ok-of expression) (sb-cover::all-of expression)
+                (sb-cover::ok-of branch) (sb-cover::all-of branch))))
+    (coverage-adapter-error (e) (error e))
+    (error (e)
       (error 'coverage-adapter-error
-             :detail (format nil "report-file が 2 要素のリストを返さなかった: ~S" counts)))
-    (destructuring-bind (expression branch) counts
-      (list (sb-cover::ok-of expression) (sb-cover::all-of expression)
-            (sb-cover::ok-of branch) (sb-cover::all-of branch)))))
+             :detail (format nil "sb-cover 内部 API 呼び出しで予期しないエラー: ~A" e)))))
 
 (defun run-smoke (root)
   "src/utils/strings.lisp だけを計装し、既知の答えと突き合わせる。
