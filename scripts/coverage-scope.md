@@ -82,7 +82,7 @@ JSON-RPC をやり取りする。`sb-ext:run-program` によるプロセス起�
 | `src/repl-core.lisp` | 410/478 (85.8%) | `repl-test.lisp` が `cl-mcp/src/repl-core::%repl-eval-with-timeout` を直接呼ぶ |
 | `src/code-core.lisp` | 657/803 (81.8%) | `code-test.lisp` が `cl-mcp/src/code-core::%offset->line`・`%format-xref-caller` を直接呼ぶ |
 | `src/system-loader-core.lisp` | 382/464 (82.3%) | `system-loader-test.lisp` が `%redefinition-warning-p`・`%decide-suppress-redefinition` 等を直接呼ぶ |
-| `src/test-runner-core.lisp` | 1587/2258 (70.3%) | `test-runner-test.lisp` が `%ensure-system-loaded`・`%rows-purge-ghost-suites` 等を直接呼ぶ |
+| `src/test-runner-core.lisp` | 1587/2258 (70.3%) | `test-runner-test.lisp` が `%ensure-system-loaded`・`%rove-purge-ghost-suites` 等を直接呼ぶ |
 | `src/macroexpand-core.lisp` | 439/469 (93.6%) | `lisp-macroexpand-test.lisp` が `%parse-readtable-name` 等を直接呼ぶ |
 
 いずれも「本番の呼び出し元はワーカー」だが「テストは `*-core` の関数をパッケージ修飾
@@ -138,10 +138,19 @@ code」と明記する通りロード専用モジュールであり、0/2 は定
 `define-tool` マクロが展開する `load-system` ツール本体（引数検証、
 `with-proxy-dispatch` によるワーカーへのRPC呼び出し）である。定義系フォームの影響を
 すべて差し引いても 1/36 しか実行されておらず、これは定義系フォームの効果ではなく、
-このツールのラッパー本体を実プロセス経由のワーカーに接続した状態で通す統合テストが
-薄いことによる**正味のテスト不足**である。Task 3 の 0% 検算の結論（下記）とも整合する:
-sb-cover は「フォームが存在するだけ」では ok にせず「実行されたか」を見ているので、
-定義系でない36式のうち35式が未実行なら、それはそのまま実行されていないということ。
+統合テストが薄いことによる**正味のテスト不足**である。Task 3 の 0% 検算の結論（下記）
+とも整合する: sb-cover は「フォームが存在するだけ」では ok にせず「実行されたか」を
+見ているので、定義系でない36式のうち35式が未実行なら、それはそのまま実行されて
+いないということ。
+
+**remedy に関する注意**: この不足を埋める手段は「実プロセス経由のワーカーに接続した
+状態で通す統合テスト」では**ない**。`with-proxy-dispatch`（`src/proxy.lisp:66-68`）は
+`` `(if *use-worker-pool* (result ,id (proxy-to-worker ,id ,method ,params-form)) (progn ,@inline-body)) ``
+に展開される。ワーカーに実際に接続したテストは `*use-worker-pool*` が非NILの分岐、
+すなわち `proxy-to-worker` を通るので、計測されていない35式（ツール本体そのものの
+ロジック）はワーカー側プロセスで実行され、計測プロセスからは見えないままである。
+数字を動かすのは、`*use-worker-pool*` を NIL に束縛した状態で計測プロセス内から
+`load-system` ツールを呼ぶ、**プロセス内呼び出し**である。
 
 ## `src/lisp-read-file.lisp` の計測アーティファクト（自己再ロードによる計装解除）
 
@@ -149,7 +158,8 @@ sb-cover は「フォームが存在するだけ」では ok にせず「実行�
 （ロード専用モジュール）や `src/project-scaffold-templates.lisp`（静的データファイル）を
 除けば表全体で最も低い部類に入る。**この数字はテストが薄いことを意味しない。**
 `tests/lisp-read-file-test.lisp` はこのファイルに対して最も手厚いテストの一つ
-（`deftest` 約60個）であり、collapsed/rawモード、name_pattern/content_pattern の
+（`deftest` 49個。`grep -c '^(deftest' tests/lisp-read-file-test.lisp` で実測）であり、
+collapsed/rawモード、name_pattern/content_pattern の
 組み合わせ、offset/limitの境界値とページネーション、コメントコンテキスト、メソッド
 修飾子、パッケージローカルニックネーム、カスタムreadtable（自動検出含む）、`#.`
 read-eval無効化のセキュリティテスト、不正な正規表現の検証、空パスの検証、括弧
@@ -157,7 +167,7 @@ read-eval無効化のセキュリティテスト、不正な正規表現の検�
 ほぼ全機能を網羅している。
 
 **原因**: `tests/lisp-read-file-test.lisp` の `source-pprint-dispatch-is-rebuilt-on-reload`
-（958行目付近）が、テストスイート実行の**途中**で
+（`deftest` 自体は913行目）が、テストスイート実行の**途中**で、958行目にある
 
 ```lisp
 (load (asdf:system-relative-pathname "cl-mcp" "src/lisp-read-file.lisp"))
@@ -183,7 +193,7 @@ read-eval無効化のセキュリティテスト、不正な正規表現の検�
 残った結果である。
 
 **結論**: `docs/coverage-summary.md` の 5.1% を根拠に「`lisp-read-file` がほとんど
-テストされていない」と読んではならない。実態は約60個の `deftest` が機能のほぼ全体を
+テストされていない」と読んではならない。実態は49個の `deftest` が機能のほぼ全体を
 網羅している。低い数字は計測パイプライン側の見落とし（アーティファクト）であり、
 正味のテスト不足を示す `src/system-loader.lisp`（1/38, 2.6%。上記「定義系トップレベル
 フォームの影響」参照）とは性質が異なるので混同しないこと。
@@ -226,7 +236,7 @@ read-eval無効化のセキュリティテスト、不正な正規表現の検�
 | src/lisp-edit-form.lisp | 親で実行 | 親プロセス内で動く |
 | src/lisp-macroexpand.lisp | 親で実行 | 親プロセス内で動く |
 | src/lisp-patch-form.lisp | 親で実行 | 親プロセス内で動く |
-| src/lisp-read-file.lisp | 親で実行 | 親プロセス内で動くが、55/1078 (5.1%) という数字は計測アーティファクト。`tests/lisp-read-file-test.lisp` の `source-pprint-dispatch-is-rebuilt-on-reload` が計装OFF区間で自身をLOADし直すため、以後の実行が記録されない。実際のテストは約60 deftestと厚い。詳細は「`src/lisp-read-file.lisp` の計測アーティファクト」参照 |
+| src/lisp-read-file.lisp | 親で実行 | 親プロセス内で動くが、55/1078 (5.1%) という数字は計測アーティファクト。`tests/lisp-read-file-test.lisp` の `source-pprint-dispatch-is-rebuilt-on-reload` が計装OFF区間で自身をLOADし直すため、以後の実行が記録されない。実際のテストは49 deftestと厚い。詳細は「`src/lisp-read-file.lisp` の計測アーティファクト」参照 |
 | src/log.lisp | 親で実行 | 親プロセス内で動く |
 | src/macroexpand-core.lisp | 親で実行 | 本番はワーカー内の lisp-macroexpand 実処理だが、lisp-macroexpand-test.lisp が %parse-readtable-name 等を計測プロセス内から直接呼び出しており、数値(439/469, 93.6%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
 | src/object-registry.lisp | 親で実行 | 親プロセス内で動く |
@@ -283,6 +293,11 @@ Task 4 のフル実行では計測プロセス内で `cl-mcp/tests` 全体（355
 warmup=0/2 でそれぞれ 1.0秒/2.0秒以内に返ることを確認するテスト）もいずれも成功し
 （実測 0.000秒）、しきい値を緩める変更は一切行っていない。計測を通すために除外・
 無効化したテストは無い。
+
+**未解明の差異**: 設計仕様のベースラインは 3,548 アサーションと記録している一方、
+ここでの実測は 3,552 件の `✓` である。4件の差が同一コミット上の実測ドリフトなのか、
+それとも「rove の `✓` 表示件数」と「アサーション数」という数え方の違いによるものなのか、
+現時点では判別できていない。裏付けの再調査はせず、未解明のまま記録する。
 
 ## 0% 検出の検算記録
 
