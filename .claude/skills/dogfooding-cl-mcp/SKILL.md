@@ -114,11 +114,17 @@ Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for 
 - `lisp-edit-form` / `lisp-patch-form` accept `form_type: "defsystem"` for `.asd` files, NOT `"asdf:defsystem"`.
 
 **Working in a FiveAM project** (skip if you scaffolded with Rove):
-- Each new test file declares its own suite nested under the root one:
-  `(def-suite <file>-suite :in :<name>)` then `(in-suite <file>-suite)`. The
-  nesting is what keeps one `run-tests` call covering the whole project — a
-  suite declared without `:in` becomes a second toplevel suite, and `run-tests`
-  only reaches it if its name or package happens to match the system name.
+- Each new test file needs **two** things, and skipping either fails quietly:
+  1. `(def-suite <file>-suite :in :<name>)` then `(in-suite <file>-suite)`.
+     Without `:in`, the generated `test-op` never reaches the suite even though
+     `run-tests` still does — see the pitfalls table.
+  2. `(:import-from #:<name>/tests/main-test)` in the `defpackage`. `:in`
+     resolves its parent at load time, so the root-suite file has to load
+     first; this clause is what makes ASDF guarantee it. Relying on the `.asd`
+     `:depends-on` order instead is what produces the vanishing-test-count row
+     in the pitfalls table.
+- After adding suites, cross-check the two runners once:
+  `(length (fiveam:run :<name>))` must equal what `run-tests` reports.
 - `lisp-edit-form` addresses a FiveAM test with `form_type: "test"` and the
   test's name; a suite with `form_type: "def-suite"` and the suite name minus
   its `:` (`form_name: "my-project"` matches `(def-suite :my-project ...)`).
@@ -173,14 +179,14 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |
 | `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed: `load-system` now auto-discovers `.asd` files under the project root on MISSING-COMPONENT | Resolved. Verified in cycle 10 (2026-04-13). Manual `asdf:load-asd` only needed if `.asd` is outside the project root |
 | `run-tests` single-test mode reports `Test runner crashed` with `no applicable method for TEST-NAME` on `FAILED-ASSERTION` | Rove internal bug: `rove:run-tests` calls `TEST-NAME` on `FAILED-ASSERTION` objects. Caught by handler-case in `run-rove-selected-tests`; `%safe-test-name` guards `run-rove-tests` path | Failure is reported gracefully (not a hard crash). The "Test runner crashed" reason text reflects Rove's internal error |
-| `project-scaffold` text response does not contain the `next_steps` array | Response builder does not render `next_steps` in `content[].text` | Use the `absolute_path` from the structured response and prime ASDF manually per step 3 |
 | `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
 | `lisp-edit-form content=<multi-form>` rejects with `content must contain exactly one top-level form` | Tool only accepts one form per call | Chain multiple `insert_after` calls, one form each |
 | `clgrep-search form_types=[...]` filter returns fewer results than expected | Filter works for most cases but may miss forms with non-standard structure | Omit `form_types` and post-filter client-side if results seem incomplete, OR prefer `code-find` / `code-describe` for exact lookups |
 | `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
 | `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
 | `load-system` after changing package exports shows noisy "also exports" warnings | SBCL package-variance; stale worker image | `pool-kill-worker` then `load-system` for a clean image. `load-system` now shows a hint when this happens |
-| FiveAM project: `run-tests` reports fewer tests than you wrote, or `unresolved` with zero tests | A suite was declared without `:in :<name>`, so it is a second toplevel suite that the suite matcher only reaches if its own name or package name matches the system name | Nest every suite under the scaffold's root suite: `(def-suite <file>-suite :in :<name>)`. Confirm with `repl-eval` on `fiveam::*toplevel-suites*` — only the root suite should appear there for your project |
+| FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. **`run-tests` cannot detect this defect**, so a green run is not evidence | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with `repl-eval` on `(length (fiveam:run :<name>))` — that is the number `test-op` will run, and it must match what `run-tests` reports |
+| FiveAM project: the test count silently drops (e.g. 6 → 1) between two `run-tests` calls, still reporting `✓ PASS` | A sub-test file does not depend on the root-suite file, so its load order comes from the `.asd` `:depends-on` list. Wrong order on a *cold* worker is a loud `Unknown suite <NAME>`; on a *warm* one the sub-suite attaches to the previous run's root-suite object, is orphaned when the new root replaces it, and its tests just disappear | Give every sub-test `defpackage` an `(:import-from #:<name>/tests/main-test)` clause. That makes ASDF order the files regardless of the `:depends-on` order — verified by leaving the list deliberately reversed |
 | `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
 
 ## Success criteria
