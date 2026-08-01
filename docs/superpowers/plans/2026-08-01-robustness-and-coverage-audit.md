@@ -793,11 +793,16 @@ nickname として export している）。**`:accept-once nil` を必ず付け
 **計装済み fasl を読ませないため、`ASDF_OUTPUT_TRANSLATIONS` を明示的に空にして起動する。**
 Task 1 でシェルに設定が残っていると、遅いワーカーを掴んで測定と無関係な症状を拾う。
 
+**ロードと起動は別々の `-e` に分ける。** 1 つの `(progn ...)` にまとめると、`cl-mcp` パッケージが
+まだ存在しない時点でフォーム全体が読まれるため、リーダーエラーで起動に失敗する。
+`-e` を分ければ各フォームが順に読まれ、`cl-mcp:run` を読む時点ではロードが済んでいる。
+
 ```bash
-env -u ASDF_OUTPUT_TRANSLATIONS ros -Q -e '(progn
-  (asdf:load-system :cl-mcp)
-  (cl-mcp:run :transport :tcp :port 18000 :accept-once nil))' \
+env -u ASDF_OUTPUT_TRANSLATIONS ros -Q \
+  -e '(asdf:load-system :cl-mcp)' \
+  -e '(cl-mcp:run :transport :tcp :port 18000 :accept-once nil)' \
   > /tmp/cl-mcp-probe-target.log 2>&1 &
+disown
 echo "PID=$!"
 ```
 
