@@ -143,6 +143,55 @@ code」と明記する通りロード専用モジュールであり、0/2 は定
 sb-cover は「フォームが存在するだけ」では ok にせず「実行されたか」を見ているので、
 定義系でない36式のうち35式が未実行なら、それはそのまま実行されていないということ。
 
+## `src/lisp-read-file.lisp` の計測アーティファクト（自己再ロードによる計装解除）
+
+`src/lisp-read-file.lisp` は 55/1078 (5.1%)、分岐 10/148 (6.8%) と、`src/tools/all.lisp`
+（ロード専用モジュール）や `src/project-scaffold-templates.lisp`（静的データファイル）を
+除けば表全体で最も低い部類に入る。**この数字はテストが薄いことを意味しない。**
+`tests/lisp-read-file-test.lisp` はこのファイルに対して最も手厚いテストの一つ
+（`deftest` 約60個）であり、collapsed/rawモード、name_pattern/content_pattern の
+組み合わせ、offset/limitの境界値とページネーション、コメントコンテキスト、メソッド
+修飾子、パッケージローカルニックネーム、カスタムreadtable（自動検出含む）、`#.`
+read-eval無効化のセキュリティテスト、不正な正規表現の検証、空パスの検証、括弧
+不整合時の親切なエラー、バッククォート/カンマのレンダリングとラウンドトリップまで、
+ほぼ全機能を網羅している。
+
+**原因**: `tests/lisp-read-file-test.lisp` の `source-pprint-dispatch-is-rebuilt-on-reload`
+（958行目付近）が、テストスイート実行の**途中**で
+
+```lisp
+(load (asdf:system-relative-pathname "cl-mcp" "src/lisp-read-file.lisp"))
+```
+
+を実行している。`*SOURCE-PPRINT-DISPATCH*` が `DEFVAR` ではなく `DEFPARAMETER` で
+あることを検証するには実際のファイル再ロードが要る、というのがテスト自身のコメントが
+説明する理由である（`rove cl-mcp.asd` は `ASDF:OPERATE` のネスト内で `:force t` を
+許さないため、`(asdf:load-system ... :force t)` ではなく生の `LOAD` を使わざるを得ない、
+という制約も明記されている）。`tests/` 全体を `\(load\s+\(asdf:system-relative-pathname`
+で検索した結果、測定対象の `src/*.lisp` を実行中に生 `LOAD` で再ロードしているのはこの
+1箇所のみ（他に `\(load\s` でヒットする2件は `/tmp` の一時ファイルや合成faslのロードで、
+測定対象外）。
+
+`scripts/coverage.ros` の `run-full` はテスト実行**前**に計装を明示的にOFFへ戻す
+（`cl-mcp` を計装ありでコンパイルした後、`(proclaim '(optimize (sb-cover:store-coverage-data 0)))`
+を実行してから `cl-mcp/tests` をロードし `rove:run` する）。したがって上記の `LOAD` は
+テスト実行フェーズ、すなわち計装が既にOFFの区間で走る。この再ロードにより
+`src/lisp-read-file.lisp` の全関数（`lisp-read-file` 本体、`%format-lisp-form`、
+`%collapse-def-form`、`%form->string`、両方のpprintディスパッチテーブル構築など）が
+非計装のコードに置き換わり、**それ以降どのテストが何回それらを呼んでも sb-cover には
+一切記録されなくなる**。55/1078 という数字は、この `LOAD` が走るまでに実行された分だけが
+残った結果である。
+
+**結論**: `docs/coverage-summary.md` の 5.1% を根拠に「`lisp-read-file` がほとんど
+テストされていない」と読んではならない。実態は約60個の `deftest` が機能のほぼ全体を
+網羅している。低い数字は計測パイプライン側の見落とし（アーティファクト）であり、
+正味のテスト不足を示す `src/system-loader.lisp`（1/38, 2.6%。上記「定義系トップレベル
+フォームの影響」参照）とは性質が異なるので混同しないこと。
+
+対策候補（本タスクの範囲外、記録のみ）: `source-pprint-dispatch-is-rebuilt-on-reload`
+の `LOAD` 呼び出しの前後で `(proclaim '(optimize sb-cover:store-coverage-data))` を
+保存・復元する、あるいは `scripts/coverage.ros` 側でこのテストだけ別プロセスに切り出す。
+
 ## `sb-cover` のソース位置警告があるファイル
 
 以下の6ファイルはレポート生成時に `Error finding source location for source path ...`
@@ -177,7 +226,7 @@ sb-cover は「フォームが存在するだけ」では ok にせず「実行�
 | src/lisp-edit-form.lisp | 親で実行 | 親プロセス内で動く |
 | src/lisp-macroexpand.lisp | 親で実行 | 親プロセス内で動く |
 | src/lisp-patch-form.lisp | 親で実行 | 親プロセス内で動く |
-| src/lisp-read-file.lisp | 親で実行 | 親プロセス内で動く |
+| src/lisp-read-file.lisp | 親で実行 | 親プロセス内で動くが、55/1078 (5.1%) という数字は計測アーティファクト。`tests/lisp-read-file-test.lisp` の `source-pprint-dispatch-is-rebuilt-on-reload` が計装OFF区間で自身をLOADし直すため、以後の実行が記録されない。実際のテストは約60 deftestと厚い。詳細は「`src/lisp-read-file.lisp` の計測アーティファクト」参照 |
 | src/log.lisp | 親で実行 | 親プロセス内で動く |
 | src/macroexpand-core.lisp | 親で実行 | 本番はワーカー内の lisp-macroexpand 実処理だが、lisp-macroexpand-test.lisp が %parse-readtable-name 等を計測プロセス内から直接呼び出しており、数値(439/469, 93.6%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
 | src/object-registry.lisp | 親で実行 | 親プロセス内で動く |
