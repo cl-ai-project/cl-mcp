@@ -418,9 +418,10 @@ Example requests:
 
 ## `project-scaffold`
 Generate a minimal Common Lisp project skeleton under the project root. The
-generated project uses `package-inferred-system` + Rove and ships with
+generated project uses `package-inferred-system` and ships with
 `CLAUDE.md` / `AGENTS.md` templates referencing cl-mcp's existing prompts via
-relative `@`-include paths. On success, returns the list of created files and
+relative `@`-include paths. Its tests are written with Rove by default, or with
+FiveAM when `framework` says so. On success, returns the list of created files and
 a `next_steps` array with concrete REPL commands the agent can invoke to
 register the project with ASDF and run its tests.
 
@@ -430,6 +431,7 @@ Input:
 - `author` (string, optional): `.asd` `:author`. No newlines. Defaults to `"Unknown"`.
 - `license` (string, optional): `.asd` `:license`. No newlines. Defaults to `"MIT"`.
 - `destination` (string, optional): parent directory under project root where `<name>/` is created. No absolute paths, no `..` traversal. Defaults to `"scaffolds"`.
+- `framework` (string, optional): test framework the generated tests are written with — `"rove"` (default) or `"fiveam"`, matched case-insensitively. Any other name is rejected rather than silently falling back, so a typo cannot produce a Rove project labelled as something else.
 - `overwrite` (boolean, optional): replace an existing scaffold directory. Defaults to `false`. Only directories cl-mcp itself generated may be replaced — see Behavior below.
 
 `description`, `author` and `license` are interpolated into Lisp string literals in the generated `.asd`, so double quotes and backslashes are rejected along with newlines.
@@ -439,6 +441,7 @@ Output fields (on success):
 - `path` (string): directory path relative to project root (e.g. `"scaffolds/foo-lib/"`)
 - `absolute_path` (string): fully qualified path
 - `files` (array of strings): relative file paths written, in manifest order
+- `framework` (string): the resolved test framework, `"rove"` or `"fiveam"`
 - `next_steps` (array of strings): human-readable REPL commands to register the system with ASDF, load it, run its tests, and edit it via `lisp-edit-form`
 
 The generated directory also contains a `.cl-mcp-scaffold` marker file recording the generator, the project name and the manifest. It is what `overwrite` checks for.
@@ -451,6 +454,13 @@ Behavior:
 - Runs inline in the parent process alongside other `fs-*` tools.
 - Atomically writes to a `.tmp-project-scaffold-<uuid>/` directory under the
   destination, then renames on success. Failed generations leave no artifact.
+- `framework` drives the generated `.asd` `:depends-on` entry, its `test-op`
+  hook and `tests/main-test.lisp`. A FiveAM project gets a root suite named
+  after the primary system — `(def-suite :<name>)` — which is exactly the
+  spelling `run-tests`' FiveAM suite matcher looks for, so `run-tests` finds
+  and runs it with no further configuration; nest further suites under it with
+  `:in :<name>`. `run-tests` detects the framework from the generated
+  `:depends-on`, so no `framework` argument is needed there either.
 - Fails if the target directory already exists and `overwrite` is false.
 - With `overwrite: true`, replaces the target only if it carries the
   `.cl-mcp-scaffold` marker; any other directory is refused untouched, so the
@@ -481,6 +491,7 @@ Response (excerpt):
            "path":"scaffolds/demo-lib/",
            "files":["demo-lib.asd","CLAUDE.md","AGENTS.md","README.md",
                     ".gitignore","src/main.lisp","tests/main-test.lisp"],
+           "framework":"rove",
            "next_steps":["To register with ASDF: run repl-eval with (asdf:load-asd \"...\")",
                          "To load: run load-system with {\"system\": \"demo-lib\"}",
                          "To test: run run-tests with {\"system\": \"demo-lib/tests\"}",

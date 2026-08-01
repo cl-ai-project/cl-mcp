@@ -6,7 +6,13 @@
                 #:escape-lisp-string
                 #:*scaffold-marker-file*)
   (:import-from #:cl-mcp/src/project-scaffold)
-  (:import-from #:cl-mcp/src/project-root))
+  (:import-from #:cl-mcp/src/project-root)
+  (:import-from #:cl-mcp/src/test-runner
+                #:detect-test-framework)
+  ;; FiveAM is pulled in so the generated FiveAM scaffold can actually be
+  ;; loaded and run here; without it the e2e test would only prove that the
+  ;; template renders, not that run-tests can find and run its suite.
+  (:import-from #:fiveam))
 
 (in-package #:cl-mcp/tests/project-scaffold-test)
 
@@ -200,6 +206,95 @@
     (testing "parent-prompts resolves with extra ../"
       (let ((md (cdr (assoc "CLAUDE.md" plan :test #'string=))))
         (ok (search "../../../prompts/repl-driven-development.md" md))))))
+
+(deftest validate-framework
+  (testing "NIL selects the default framework"
+    (ok (eq :rove (cl-mcp/src/project-scaffold-core:validate-framework nil))))
+  (testing "accepts the supported framework names"
+    (ok (eq :rove (cl-mcp/src/project-scaffold-core:validate-framework "rove")))
+    (ok (eq :fiveam (cl-mcp/src/project-scaffold-core:validate-framework "fiveam"))))
+  (testing "accepts a keyword designator"
+    (ok (eq :fiveam (cl-mcp/src/project-scaffold-core:validate-framework :fiveam))))
+  (testing "is case-insensitive, so FiveAM's own spelling works"
+    (ok (eq :fiveam (cl-mcp/src/project-scaffold-core:validate-framework "FiveAM"))))
+  (testing "rejects a framework with no template"
+    ;; run-tests can execute Prove suites, but project-scaffold has no Prove
+    ;; template, so accepting the name would generate a Rove project under a
+    ;; Prove label.
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-framework "prove")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects an empty string"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-framework "")
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error)))
+  (testing "rejects a non-string, non-symbol"
+    (ok (signals (cl-mcp/src/project-scaffold-core:validate-framework 42)
+                 'cl-mcp/src/project-scaffold-core:invalid-argument-error))))
+
+(deftest plan-scaffold-defaults-to-rove
+  ;; The framework argument is optional, and every caller that predates it
+  ;; must keep getting the Rove project it used to get.
+  (let* ((plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+                :name "rove-default"
+                :description "d" :author "a" :license "MIT"
+                :destination "scaffolds"))
+         (asd (cdr (assoc "rove-default.asd" plan :test #'string=)))
+         (test (cdr (assoc "tests/main-test.lisp" plan :test #'string=))))
+    (testing "the test system depends on rove, not fiveam"
+      (ok (search "\"rove\"" asd))
+      (ok (null (search "fiveam" asd))))
+    (testing "the smoke test is written against Rove"
+      (ok (search "#:rove" test))
+      (ok (search "(deftest scaffold-smoke" test)))))
+
+(deftest plan-scaffold-fiveam
+  (let* ((plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+                :name "fa-demo"
+                :description "A FiveAM demo"
+                :author "Ada Lovelace"
+                :license "MIT"
+                :destination "scaffolds"
+                :framework :fiveam))
+         (asd (cdr (assoc "fa-demo.asd" plan :test #'string=)))
+         (test (cdr (assoc "tests/main-test.lisp" plan :test #'string=)))
+         (claude (cdr (assoc "CLAUDE.md" plan :test #'string=)))
+         (readme (cdr (assoc "README.md" plan :test #'string=)))
+         (agents (cdr (assoc "AGENTS.md" plan :test #'string=))))
+    (testing "the manifest still holds the same seven files"
+      (ok (= 7 (length plan)))
+      (ok (assoc "src/main.lisp" plan :test #'string=)))
+    (testing "the test system depends on fiveam and never on rove"
+      (ok (search "\"fiveam\"" asd))
+      (ok (null (search "rove" asd))))
+    (testing "test-op runs the project's own suite rather than every suite"
+      ;; FiveAM's suite registry is global, so a blanket run would execute
+      ;; other systems' suites too.
+      (ok (search ":fiveam :run!" asd))
+      (ok (search ":fa-demo" asd)))
+    (testing "the smoke test is written against FiveAM"
+      (ok (search "#:fiveam" test))
+      (ok (search "(def-suite :fa-demo" test))
+      (ok (search "(in-suite :fa-demo)" test))
+      (ok (search "scaffold-smoke" test))
+      (ok (search ":fa-demo/src/main" test))
+      (ok (null (search "deftest" test)))
+      (ok (null (search "rove" test))))
+    (testing "the generated docs name FiveAM, not Rove"
+      (ok (search "FiveAM" claude))
+      (ok (null (search "Rove" claude)))
+      (ok (search "FiveAM" readme))
+      (ok (null (search "Rove" readme)))
+      (ok (null (search "Rove" agents))))
+    (testing "src/main.lisp is framework-independent and unchanged"
+      (ok (equal (cdr (assoc "src/main.lisp" plan :test #'string=))
+                 (cdr (assoc "src/main.lisp"
+                             (cl-mcp/src/project-scaffold-core:plan-scaffold
+                              :name "fa-demo" :description "A FiveAM demo"
+                              :author "Ada Lovelace" :license "MIT"
+                              :destination "scaffolds")
+                             :test #'string=)))))
+    (testing "no unresolved placeholders remain"
+      (dolist (entry plan)
+        (ok (null (search "{{" (cdr entry))))))))
 
 (defmacro with-temp-project-root ((root-var) &body body)
   "Bind cl-mcp/src/project-root:*project-root* to a fresh temp directory.
@@ -526,6 +621,22 @@ exists to prove such a payload cannot execute."
       (ok (equal author (getf options :author)))
       (ok (equal license (getf options :license))))))
 
+(deftest scaffold-fiveam-asd-is-readable
+  (let* ((plan (cl-mcp/src/project-scaffold-core:plan-scaffold
+                :name "fa-readable" :description "d" :author "a" :license "MIT"
+                :destination "scaffolds" :framework :fiveam))
+         (asd (cdr (assoc "fa-readable.asd" plan :test #'string=)))
+         (forms (read-top-level-forms asd)))
+    (testing "the .asd reads as exactly two defsystem forms"
+      (ok (= 2 (length forms)))
+      (ok (every (lambda (form)
+                   (and (consp form) (eq (first form) 'asdf:defsystem)))
+                 forms)))
+    (testing "the test system declares fiveam in :depends-on"
+      (let ((deps (getf (cddr (second forms)) :depends-on)))
+        (ok (member "fiveam" deps :test #'equal))
+        (ok (member "fa-readable/tests/main-test" deps :test #'equal))))))
+
 (deftest write-scaffold-rejects-quote-and-backslash-fields
   (with-temp-project-root (root)
     (testing "double quote in description errors"
@@ -651,3 +762,84 @@ exists to prove such a payload cannot execute."
              (testing "the generated system is not registered in this process"
                (ok (null (asdf:find-system system-name nil)))))
         (ignore-errors (asdf:clear-system system-name))))))
+
+(deftest scaffold-fiveam-e2e-suite-is-discoverable-and-green
+  (with-temp-project-root (root)
+    (let ((prompts (uiop:ensure-directory-pathname
+                    (merge-pathnames "prompts/" root))))
+      (ensure-directories-exist prompts)
+      (dolist (stub '("repl-driven-development.md" "common-lisp-expert.md"))
+        (with-open-file (s (merge-pathnames stub prompts)
+                           :direction :output :if-exists :supersede)
+          (write-string "stub" s))))
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "fiveam-e2e-demo" :description "d" :author "a" :license "MIT"
+     :destination "scaffolds" :framework "fiveam")
+    (let ((asd-path (merge-pathnames
+                     "scaffolds/fiveam-e2e-demo/fiveam-e2e-demo.asd" root)))
+      (unwind-protect
+           (progn
+             (asdf:load-asd asd-path)
+             (asdf:load-system "fiveam-e2e-demo/tests")
+             (testing "run-tests detects FiveAM from the generated :depends-on"
+               (ok (eq :fiveam (detect-test-framework "fiveam-e2e-demo/tests"))))
+             (testing "run-tests' suite matcher finds the generated suite"
+               ;; The matcher is what decides which suites run-tests executes.
+               ;; A suite it cannot see means a run of zero tests, and zero
+               ;; tests render as a pass -- the failure mode a scaffold must
+               ;; never ship with.
+               (ok (cl-mcp/src/test-runner-core::%find-fiveam-suites-for-system
+                    "fiveam-e2e-demo/tests")))
+             (testing "the generated smoke test runs and passes"
+               ;; The dribble is rebound around the run itself so FiveAM's
+               ;; progress output does not interleave with Rove's report.
+               (let ((results (let ((fiveam:*test-dribble*
+                                      (make-broadcast-stream)))
+                                (fiveam:run :fiveam-e2e-demo))))
+                 (ok (plusp (length results))
+                     "the suite ran at least one check")
+                 (ok (fiveam:results-status results)
+                     "and every check passed"))))
+        ;; FiveAM's suite registry is global and outlives the temp project,
+        ;; so the generated suite is unregistered here rather than left to
+        ;; be matched by some later system whose name happens to nest below.
+        (setf fiveam::*toplevel-suites*
+              (remove :fiveam-e2e-demo fiveam::*toplevel-suites*))
+        (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests/main-test"))
+        (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests"))
+        (ignore-errors (asdf:clear-system "fiveam-e2e-demo"))))))
+
+(deftest scaffold-tool-accepts-framework-argument
+  (with-temp-project-root (root)
+    (let ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
+          (args (make-hash-table :test #'equal)))
+      (setf (gethash "name" args) "fa-tool-demo")
+      (setf (gethash "destination" args) "scaffolds")
+      (setf (gethash "framework" args) "fiveam")
+      (let* ((response (funcall handler nil 11 args))
+             (result (gethash "result" response)))
+        (testing "generation succeeds and echoes the resolved framework"
+          (ok (eq t (gethash "created" result)))
+          (ok (equal "fiveam" (gethash "framework" result))))
+        (testing "the generated .asd is a FiveAM one"
+          (let ((asd (alexandria:read-file-into-string
+                      (uiop:merge-pathnames*
+                       "scaffolds/fa-tool-demo/fa-tool-demo.asd" root))))
+            (ok (search "\"fiveam\"" asd))
+            (ok (null (search "\"rove\"" asd)))))))))
+
+(deftest scaffold-tool-rejects-unknown-framework
+  (with-temp-project-root (root)
+    (let ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
+          (args (make-hash-table :test #'equal)))
+      (setf (gethash "name" args) "bad-fw")
+      (setf (gethash "destination" args) "scaffolds")
+      (setf (gethash "framework" args) "prove")
+      (let* ((response (funcall handler nil 12 args))
+             (result (gethash "result" response)))
+        (testing "the call is rejected with a diagnostic naming the field"
+          (ok (null (gethash "created" result)))
+          (ok (search "framework" (gethash "error" result))))
+        (testing "and nothing is written for the rejected call"
+          (ok (null (uiop:directory-exists-p
+                     (uiop:merge-pathnames* "scaffolds/bad-fw/" root)))))))))
