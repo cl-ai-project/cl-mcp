@@ -37,6 +37,51 @@
         (ok (stringp (getf first-restart :name)))
         (ok (stringp (getf first-restart :description)))))))
 
+(defun %probe-restart-names (package)
+  "Return the captured restart names for a probe signalled with *PACKAGE* bound.
+HANDLER-BIND rather than HANDLER-CASE: the restarts have to still be
+established when the context is captured, and HANDLER-CASE unwinds first."
+  (let (context)
+    (ignore-errors
+     (let ((*package* package))
+       (handler-bind ((error (lambda (condition)
+                               (setf context (capture-error-context condition)))))
+         (restart-case (error "restart naming probe")
+           (:keyword-named () :report "keyword" nil)
+           (symbol-named () :report "symbol" nil)))))
+    (mapcar (lambda (restart) (getf restart :name))
+            (getf context :restarts))))
+
+(deftest capture-error-context-restart-names-are-readable
+  ;; INVOKE-RESTART compares restart names with EQ, and cl-mcp's own prompts
+  ;; tell library authors to name restarts with keywords for exactly that
+  ;; reason.  Printing the name with ~A rendered :KEYWORD-NAMED and
+  ;; KEYWORD-NAMED as the same text, so the field an agent reads to decide
+  ;; which spelling to type could not tell them apart.
+  (let ((names (%probe-restart-names
+                (find-package '#:cl-mcp/tests/frame-inspector-test))))
+    (testing "a keyword-named restart keeps its colon"
+      (ok (member ":KEYWORD-NAMED" names :test #'string=)))
+    (testing "a symbol named in the current package carries no qualifier"
+      (ok (member "SYMBOL-NAMED" names :test #'string=)))
+    (testing "the two spellings are no longer the same string"
+      (ok (not (member ":SYMBOL-NAMED" names :test #'string=)))
+      (ok (not (member "KEYWORD-NAMED" names :test #'string=))))))
+
+(deftest capture-error-context-restart-names-qualify-foreign-symbols
+  ;; The names are printed relative to *PACKAGE*, which during repl-eval is the
+  ;; package the caller asked for -- so what comes back is what they would have
+  ;; to type there. From a package that does not home the symbol, that means a
+  ;; qualifier.
+  (let ((names (%probe-restart-names (find-package '#:cl-user))))
+    (testing "a symbol from another package comes back qualified"
+      (ok (find-if (lambda (name)
+                     (and (search "SYMBOL-NAMED" name)
+                          (search "::" name)))
+                   names)))
+    (testing "a keyword needs no qualifier and gets none"
+      (ok (member ":KEYWORD-NAMED" names :test #'string=)))))
+
 (deftest capture-error-context-frames
   (testing "captures stack frames (SBCL specific)"
     (let ((ctx (handler-case
