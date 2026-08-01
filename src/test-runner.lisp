@@ -45,11 +45,12 @@ To include debug prints in the visible summary, write to *test-debug-output*:
   (format cl-mcp/src/test-runner-core:*test-debug-output* \"debug: ~A~%\" value)
 - failed_tests (array of objects with fields:)
   - test_name (string) — name of the failing test
-  - description (string) — assertion description message
+  - description (string) — assertion description (Rove) or the test's docstring (FiveAM)
   - form (string) — the assertion form expression
-  - values (array of strings) — evaluated argument values
+  - values (array of strings) — evaluated argument values (Rove only)
   - reason (string) — error reason or condition message
-  - source (object) — source location with file and line
+  - source (object) — source location with file and line (Rove only; FiveAM
+    records no source location for a test, so use test_name and description)
 
 Examples:
   Run all tests: system='cl-mcp/tests/clhs-test'

@@ -347,11 +347,14 @@ The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED
 
 - `failed_tests` (array, when failures exist): Detailed failure information including:
   - `test_name`: Name of the failing test
-  - `description`: Test description
+  - `description`: Rove — the assertion's description; FiveAM — the test's docstring
   - `form`: The failing assertion form
-  - `values`: Evaluated values
-  - `reason`: Error message (string)
-  - `source`: Source location (file and line)
+  - `values`: Evaluated values (Rove only)
+  - `reason`: Error message (string). For FiveAM this is the framework's own
+    message with its blank lines removed, so one mismatch stays one short block
+  - `source`: Source location, file and line (**Rove only** — FiveAM records no
+    source location for a test, so locate a FiveAM failure by `test_name` and
+    `description`)
 
 Example requests:
 ```json

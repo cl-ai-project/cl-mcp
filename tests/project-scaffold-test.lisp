@@ -8,11 +8,7 @@
   (:import-from #:cl-mcp/src/project-scaffold)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/test-runner
-                #:detect-test-framework)
-  ;; FiveAM is pulled in so the generated FiveAM scaffold can actually be
-  ;; loaded and run here; without it the e2e test would only prove that the
-  ;; template renders, not that run-tests can find and run its suite.
-  (:import-from #:fiveam))
+                #:detect-test-framework))
 
 (in-package #:cl-mcp/tests/project-scaffold-test)
 
@@ -763,51 +759,150 @@ exists to prove such a payload cannot execute."
                (ok (null (asdf:find-system system-name nil)))))
         (ignore-errors (asdf:clear-system system-name))))))
 
+(defmacro when-fiveam-available (&body body)
+  "Evaluate BODY only when the FiveAM system can be found, else report a skip.
+FiveAM is deliberately not a declared dependency of this test system: cl-mcp's
+own tests are Rove tests, and the production FiveAM backend resolves its
+symbols at run time for the same reason.  A generated FiveAM project cannot be
+*run* without it though, so the tests that do so are skipped rather than failed
+when it is absent."
+  `(if (null (asdf:find-system "fiveam" nil))
+       (skip "FiveAM is not installed; a generated FiveAM project cannot run here")
+       (progn
+         (asdf:load-system "fiveam")
+         ,@body)))
+
+(defun fiveam-run-suite (suite-name)
+  "Run SUITE-NAME through FiveAM with its progress output muted.
+Every FiveAM symbol is resolved at run time so that this file compiles in an
+image where FiveAM was never loaded. Only call inside WHEN-FIVEAM-AVAILABLE."
+  (let ((run (uiop:find-symbol* '#:run :fiveam))
+        (dribble (uiop:find-symbol* '#:*test-dribble* :fiveam)))
+    (progv (list dribble) (list (make-broadcast-stream))
+      (funcall run suite-name))))
+
+(defun forget-fiveam-toplevel-suite (suite-name)
+  "Drop SUITE-NAME from FiveAM's global toplevel-suite registry.
+That registry outlives the temporary project a test generated, so a suite left
+in it would stay a selection candidate for every later system whose name
+happens to nest below it."
+  (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+    (setf (symbol-value var) (remove suite-name (symbol-value var)))))
+
+(defun break-the-generated-smoke-test (root name)
+  "Rewrite NAME's generated smoke assertion in ROOT so that it fails.
+Replaces the (find-package ...) call the scaffold asserts on with a false
+comparison. One replacement covers both framework templates, because only the
+assertion macro wrapped around that call differs between them. Returns the
+path, and signals rather than silently doing nothing when the call is absent."
+  (let* ((path (merge-pathnames
+                (format nil "scaffolds/~A/tests/main-test.lisp" name) root))
+         (text (alexandria:read-file-into-string path))
+         (broken (cl-ppcre:regex-replace "\\(find-package [^)]*\\)" text "(= 1 2)")))
+    (assert (string/= text broken) ()
+            "no (find-package ...) assertion to break in ~A" path)
+    (alexandria:write-string-into-file broken path :if-exists :supersede)
+    path))
+
 (deftest scaffold-fiveam-e2e-suite-is-discoverable-and-green
+  (when-fiveam-available
+    (with-temp-project-root (root)
+      (let ((prompts (uiop:ensure-directory-pathname
+                      (merge-pathnames "prompts/" root))))
+        (ensure-directories-exist prompts)
+        (dolist (stub '("repl-driven-development.md" "common-lisp-expert.md"))
+          (with-open-file (s (merge-pathnames stub prompts)
+                             :direction :output :if-exists :supersede)
+            (write-string "stub" s))))
+      (cl-mcp/src/project-scaffold:write-scaffold
+       :name "fiveam-e2e-demo" :description "d" :author "a" :license "MIT"
+       :destination "scaffolds" :framework "fiveam")
+      (let ((asd-path (merge-pathnames
+                       "scaffolds/fiveam-e2e-demo/fiveam-e2e-demo.asd" root)))
+        (unwind-protect
+             (progn
+               (asdf:load-asd asd-path)
+               (asdf:load-system "fiveam-e2e-demo/tests")
+               (testing "run-tests detects FiveAM from the generated :depends-on"
+                 (ok (eq :fiveam (detect-test-framework "fiveam-e2e-demo/tests"))))
+               (testing "run-tests' suite matcher finds the generated suite"
+                 ;; The matcher is what decides which suites run-tests executes.
+                 ;; A suite it cannot see means a run of zero tests, and zero
+                 ;; tests render as a pass -- the failure mode a scaffold must
+                 ;; never ship with.
+                 (ok (cl-mcp/src/test-runner-core::%find-fiveam-suites-for-system
+                      "fiveam-e2e-demo/tests")))
+               (testing "the generated smoke test runs and passes"
+                 (let ((results (fiveam-run-suite :fiveam-e2e-demo)))
+                   (ok (plusp (length results))
+                       "the suite ran at least one check")
+                   (ok (funcall (uiop:find-symbol* '#:results-status :fiveam)
+                                results)
+                       "and every check passed"))))
+          (forget-fiveam-toplevel-suite :fiveam-e2e-demo)
+          (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests/main-test"))
+          (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests"))
+          (ignore-errors (asdf:clear-system "fiveam-e2e-demo")))))))
+
+(deftest scaffold-rove-test-op-signals-when-the-suite-fails
+  ;; The runner's return value is the only evidence ASDF gets that a suite
+  ;; went red. Discard it and test-op completes normally, so `asdf:test-system`
+  ;; -- the command the generated README tells the user to run -- reports
+  ;; success over a failing suite, and so does any CI built on it.
   (with-temp-project-root (root)
-    (let ((prompts (uiop:ensure-directory-pathname
-                    (merge-pathnames "prompts/" root))))
-      (ensure-directories-exist prompts)
-      (dolist (stub '("repl-driven-development.md" "common-lisp-expert.md"))
-        (with-open-file (s (merge-pathnames stub prompts)
-                           :direction :output :if-exists :supersede)
-          (write-string "stub" s))))
     (cl-mcp/src/project-scaffold:write-scaffold
-     :name "fiveam-e2e-demo" :description "d" :author "a" :license "MIT"
-     :destination "scaffolds" :framework "fiveam")
-    (let ((asd-path (merge-pathnames
-                     "scaffolds/fiveam-e2e-demo/fiveam-e2e-demo.asd" root)))
+     :name "rove-red" :description "d" :author "a" :license "MIT"
+     :destination "scaffolds")
+    (break-the-generated-smoke-test root "rove-red")
+    (let ((asd-path (merge-pathnames "scaffolds/rove-red/rove-red.asd" root)))
       (unwind-protect
            (progn
              (asdf:load-asd asd-path)
-             (asdf:load-system "fiveam-e2e-demo/tests")
-             (testing "run-tests detects FiveAM from the generated :depends-on"
-               (ok (eq :fiveam (detect-test-framework "fiveam-e2e-demo/tests"))))
-             (testing "run-tests' suite matcher finds the generated suite"
-               ;; The matcher is what decides which suites run-tests executes.
-               ;; A suite it cannot see means a run of zero tests, and zero
-               ;; tests render as a pass -- the failure mode a scaffold must
-               ;; never ship with.
-               (ok (cl-mcp/src/test-runner-core::%find-fiveam-suites-for-system
-                    "fiveam-e2e-demo/tests")))
-             (testing "the generated smoke test runs and passes"
-               ;; The dribble is rebound around the run itself so FiveAM's
-               ;; progress output does not interleave with Rove's report.
-               (let ((results (let ((fiveam:*test-dribble*
-                                      (make-broadcast-stream)))
-                                (fiveam:run :fiveam-e2e-demo))))
-                 (ok (plusp (length results))
-                     "the suite ran at least one check")
-                 (ok (fiveam:results-status results)
-                     "and every check passed"))))
-        ;; FiveAM's suite registry is global and outlives the temp project,
-        ;; so the generated suite is unregistered here rather than left to
-        ;; be matched by some later system whose name happens to nest below.
-        (setf fiveam::*toplevel-suites*
-              (remove :fiveam-e2e-demo fiveam::*toplevel-suites*))
-        (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests/main-test"))
-        (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests"))
-        (ignore-errors (asdf:clear-system "fiveam-e2e-demo"))))))
+             (testing "test-op signals rather than reporting success"
+               (ok (handler-case
+                       (let ((*standard-output* (make-broadcast-stream))
+                             (*error-output* (make-broadcast-stream)))
+                         ;; Own compilation unit: ASDF signals from inside one,
+                         ;; and a deliberate failure here would otherwise be
+                         ;; tallied into the whole suite's closing summary as
+                         ;; "caught N fatal ERROR conditions".
+                         (with-compilation-unit (:override t)
+                           (asdf:test-system "rove-red"))
+                         nil)
+                     (error () t)))))
+        (ignore-errors (asdf:clear-system "rove-red/tests/main-test"))
+        (ignore-errors (asdf:clear-system "rove-red/tests"))
+        (ignore-errors (asdf:clear-system "rove-red"))))))
+
+(deftest scaffold-fiveam-test-op-signals-when-the-suite-fails
+  ;; Same contract as the Rove case: fiveam:run! reports the failure to the
+  ;; console and returns false, and a test-op that drops that value turns a red
+  ;; suite into a green build.
+  (when-fiveam-available
+    (with-temp-project-root (root)
+      (cl-mcp/src/project-scaffold:write-scaffold
+       :name "fiveam-red" :description "d" :author "a" :license "MIT"
+       :destination "scaffolds" :framework "fiveam")
+      (break-the-generated-smoke-test root "fiveam-red")
+      (let ((asd-path (merge-pathnames "scaffolds/fiveam-red/fiveam-red.asd"
+                                       root)))
+        (unwind-protect
+             (progn
+               (asdf:load-asd asd-path)
+               (testing "test-op signals rather than reporting success"
+                 (ok (handler-case
+                         (let ((*standard-output* (make-broadcast-stream))
+                               (*error-output* (make-broadcast-stream)))
+                           ;; See the Rove twin for why this gets its own
+                           ;; compilation unit.
+                           (with-compilation-unit (:override t)
+                             (asdf:test-system "fiveam-red"))
+                           nil)
+                       (error () t)))))
+          (forget-fiveam-toplevel-suite :fiveam-red)
+          (ignore-errors (asdf:clear-system "fiveam-red/tests/main-test"))
+          (ignore-errors (asdf:clear-system "fiveam-red/tests"))
+          (ignore-errors (asdf:clear-system "fiveam-red")))))))
 
 (deftest scaffold-tool-accepts-framework-argument
   (with-temp-project-root (root)

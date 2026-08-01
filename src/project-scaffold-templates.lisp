@@ -49,7 +49,11 @@
                               (and (stringp dep)
                                    (uiop:string-prefix-p \"{{name}}/tests/\" dep)))
                             (asdf:system-depends-on c))))
-                      (uiop:symbol-call :rove :run test-packages))))
+                      ;; The runner's return value is the only evidence ASDF
+                      ;; gets that the suite went red.  Drop it and test-op
+                      ;; completes normally, so CI passes over failing tests.
+                      (unless (uiop:symbol-call :rove :run test-packages)
+                        (error \"{{name}}: test suite reported failures\")))))
 "
   "Template for the generated project's .asd when the framework is Rove.
 Unlike the Markdown templates, every placeholder here sits inside a Lisp
@@ -77,9 +81,16 @@ The same applies to *ASD-TEMPLATE-FIVEAM*.")
   :depends-on (\"fiveam\"
                \"{{name}}\"
                \"{{name}}/tests/main-test\")
+  ;; Runs the root suite, which covers every suite nested under it with
+  ;; :in :{{name}} -- and only those.  A suite declared without :in is NOT
+  ;; reached from here, so nest yours; see tests/main-test.lisp.
   :perform (test-op (o c)
                     (declare (ignore o c))
-                    (uiop:symbol-call :fiveam :run! :{{name}})))
+                    ;; run! prints the failures and returns false.  Dropping
+                    ;; that value would let test-op complete normally, so CI
+                    ;; would pass over a red suite.
+                    (unless (uiop:symbol-call :fiveam :run! :{{name}})
+                      (error \"{{name}}: test suite reported failures\"))))
 "
   "Template for the generated project's .asd when the framework is FiveAM.
 Runs the project's own root suite rather than every registered one:

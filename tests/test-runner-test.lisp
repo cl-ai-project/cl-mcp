@@ -895,3 +895,95 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
           (let ((probe (find-package probe-package)))
             (when probe (delete-package probe))))
         (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest fiveam-reason-text-collapses-blank-line-runs
+  ;; FiveAM builds its failure message by printing each fragment on its own
+  ;; line with a blank line between, so "1200 /= 1201" arrives as ten lines.
+  ;; The summary text is the only part of the response most clients render,
+  ;; and every failure in a run pays that cost.
+  (let ((collapse #'cl-mcp/src/test-runner-core::%collapse-blank-lines))
+    (testing "a run of blank lines becomes a single line break"
+      (ok (equal (format nil "a~%b") (funcall collapse (format nil "a~%~%~%b")))))
+    (testing "an ordinary line break is left alone"
+      (ok (equal (format nil "a~%b") (funcall collapse (format nil "a~%b")))))
+    (testing "leading and trailing blank lines are trimmed"
+      (ok (equal "a" (funcall collapse (format nil "~%~%a~%~%")))))
+    (testing "text without blank lines is returned unchanged"
+      (ok (equal "plain" (funcall collapse "plain"))))
+    (testing "a non-string passes through, so callers need no type check"
+      (ok (null (funcall collapse nil))))))
+
+(deftest fiveam-failure-detail-carries-the-tests-docstring
+  ;; run-tests documents failed_tests[].description and the Rove backend fills
+  ;; it in. The FiveAM backend left it empty even though FiveAM keeps the
+  ;; test's docstring on the test-case object, so a FiveAM failure arrived
+  ;; with no statement of what was being asserted -- and, having no source
+  ;; location either, nothing to locate it by but the bare test name.
+  ;;
+  ;; FiveAM is resolved at run time rather than declared: cl-mcp's own suite
+  ;; is a Rove suite, and its FiveAM backend is written for an image where
+  ;; FiveAM may be absent.
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed; the FiveAM backend cannot run here")
+      (let* ((tmp-dir (uiop:ensure-directory-pathname
+                       (uiop:merge-pathnames*
+                        (format nil "cl-mcp-fiveam-detail-~A-~A/"
+                                (get-universal-time) (random 100000))
+                        (uiop:temporary-directory))))
+             (system "fiveam-detail-probe")
+             (asd-path (uiop:merge-pathnames*
+                        (format nil "~A.asd" system) tmp-dir)))
+        (asdf:load-system "fiveam")
+        (unwind-protect
+             (progn
+               (ensure-directories-exist tmp-dir)
+               (with-open-file (s asd-path :direction :output
+                                           :if-exists :supersede)
+                 (format s "(asdf:defsystem ~S~%  :depends-on (\"fiveam\")~%~
+                            ~2@T:components ((:file \"suite\")))~%"
+                         system))
+               (with-open-file (s (uiop:merge-pathnames* "suite.lisp" tmp-dir)
+                                  :direction :output :if-exists :supersede)
+                 (format s "(defpackage #:fiveam-detail-probe-suite~%~
+                            ~2@T(:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-detail-probe-suite)~%~
+                            (def-suite :fiveam-detail-probe)~%~
+                            (in-suite :fiveam-detail-probe)~%~
+                            (test deliberate-failure~%~
+                            ~2@T\"documented on purpose\"~%~
+                            ~2@T(is (= 1 2)))~%"))
+               ;; On the central registry rather than only ASDF:LOAD-ASD'd:
+               ;; RUN-TESTS force-reloads, and the CLEAR-SYSTEM that precedes
+               ;; the reload drops a system ASDF cannot re-find from any
+               ;; search path, which surfaces as MISSING-COMPONENT instead of
+               ;; the failure this test is about.
+               (let ((asdf:*central-registry*
+                       (cons tmp-dir asdf:*central-registry*)))
+                 (asdf:load-asd asd-path)
+                 (let* ((result (run-tests system))
+                        (failures (gethash "failed_tests" result))
+                        (failure (and (plusp (length failures))
+                                      (aref failures 0))))
+                   (testing "the run is reported as a FiveAM failure"
+                     ;; Quote the reason: when the probe system fails to load,
+                     ;; every later assertion fails for that reason rather than
+                     ;; for the one under test, and a bare framework mismatch
+                     ;; says nothing about why.
+                     (ok (equal "fiveam" (gethash "framework" result))
+                         (format nil "framework=~A reason=~A"
+                                 (gethash "framework" result)
+                                 (and failure (gethash "reason" failure))))
+                     (ok (= 1 (gethash "failed" result))))
+                   (testing "the failure quotes the test's docstring"
+                     (ok failure)
+                     (ok (equal "documented on purpose"
+                                (and failure (gethash "description" failure)))))
+                   (testing "the reason carries no blank-line runs"
+                     (let ((reason (and failure (gethash "reason" failure))))
+                       (ok (stringp reason))
+                       (ok (null (search (format nil "~%~%") reason))))))))
+          (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+            (setf (symbol-value var)
+                  (remove :fiveam-detail-probe (symbol-value var))))
+          (ignore-errors (asdf:clear-system system))
+          (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
