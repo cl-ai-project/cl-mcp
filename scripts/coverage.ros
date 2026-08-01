@@ -7,6 +7,11 @@ exec ros -Q -- $0 "$@"
   (ros:ensure-asdf)
   (require :sb-posix)
   (require :sb-cover)
+  ;; ここでの quickload は計装済みキャッシュ隔離(setup-isolated-cache)より前に走るので
+  ;; 通常のキャッシュに fasl を残すが、instrumentation はまだ宣言されていない
+  ;; (store-coverage-data は run-smoke/run-full 内で initialize される)。
+  ;; つまりこの rove fasl は非計装であり、どのみち置かれる場所に置かれるだけで
+  ;; 計測結果に影響しない。先に計装を宣言してからここを動かすよう「修正」しないこと。
   #+quicklisp (ql:quickload '(:rove) :silent t))
 
 (defpackage :ros.script.coverage
@@ -16,8 +21,9 @@ exec ros -Q -- $0 "$@"
 ;;; cl-mcp のテストカバレッジを sb-cover で実測するドライバ。
 ;;;
 ;;; 使い方（リポジトリのルートから実行する）:
-;;;   ./scripts/coverage.ros --smoke   既知の答えで計測パイプラインを検算する（約2分）
-;;;   ./scripts/coverage.ros           全スイートを計装実行する（12〜18分）
+;;;   ./scripts/coverage.ros --smoke   既知の答えで計測パイプラインを検算する（約4〜6分。
+;;;                                    毎回キャッシュを空にしてから計測するため）
+;;;   ./scripts/coverage.ros           全スイートを計装実行する（約20〜30分）
 ;;;
 ;;; ワーカー子プロセス内の実行は計測できない。盲点は scripts/coverage-scope.md を見ること。
 
@@ -107,6 +113,7 @@ HTML レポートの数字と必ず一致する。"
 ロードするだけになり、コンパイル経路を通らないぶん定義系フォームが実行済みとして
 計上されて (21 21 4 4) が出る。実際にそれで 3 セッションにわたり SMOKE OK が
 返り続け、検算が何も検算していなかった。"
+  (format t "~&SBCL: ~A~%" (lisp-implementation-version))
   (clear-coverage-cache cache)
   (proclaim '(optimize sb-cover:store-coverage-data))
   (asdf:load-system :cl-mcp/src/utils/strings :force t)
@@ -137,7 +144,13 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
                  (asdf:system-depends-on (asdf:find-system :cl-mcp/tests))))
 
 (defun percentage (ok all)
-  (if (zerop all) 0.0 (* 100.0 (/ ok all))))
+  "OK/ALL をパーセントで返す。ALL が 0 のときは sb-cover の percent と同じく NIL。"
+  (unless (zerop all) (* 100.0 (/ ok all))))
+
+(defun format-percentage (ok all)
+  "PERCENTAGE の表示用文字列。分母が 0 のときは \"N/A\"。"
+  (let ((value (percentage ok all)))
+    (if value (format nil "~,1F" value) "N/A")))
 
 (defun source-relative-name (file root)
   "FILE がリポジトリ配下なら相対パス、そうでなければ絶対パスの文字列を返す。"
@@ -159,6 +172,15 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
              (coverage-table))
     (sort rows #'< :key (lambda (row) (percentage (second row) (third row))))))
 
+(defun git-commit-hash (root)
+  "ROOT の git HEAD を短縮ハッシュの文字列で返す。取得できなければ NIL。"
+  (handler-case
+      (string-trim '(#\Newline #\Return #\Space)
+                   (uiop:run-program (list "git" "-C" (namestring root)
+                                            "rev-parse" "--short" "HEAD")
+                                     :output :string))
+    (error () nil)))
+
 (defun write-summary (root rows)
   "ROWS を docs/coverage-summary.md に書き出す。"
   (let ((path (merge-pathnames "docs/coverage-summary.md" root))
@@ -177,26 +199,36 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
       (format stream "# カバレッジサマリ~%~%")
       (format stream "`scripts/coverage.ros` が生成する。手で編集しないこと。~%~%")
       (format stream "- SBCL: ~A~%" (lisp-implementation-version))
+      (format stream "- 計測コミット: ~A~%"
+              (or (git-commit-hash root)
+                  "取得できなかった（git rev-parse --short HEAD が失敗した）"))
       (format stream "- 計測ファイル数: ~D~%" (length rows))
-      (format stream "- 式カバレッジ合計: ~D/~D (~,1F%)~%"
+      (format stream "- 式カバレッジ合計: ~D/~D (~A%)~%"
               total-expression-ok total-expression-all
-              (percentage total-expression-ok total-expression-all))
-      (format stream "- 分岐カバレッジ合計: ~D/~D (~,1F%)~%~%"
+              (format-percentage total-expression-ok total-expression-all))
+      (format stream "- 分岐カバレッジ合計: ~D/~D (~A%)~%~%"
               total-branch-ok total-branch-all
-              (percentage total-branch-ok total-branch-all))
+              (format-percentage total-branch-ok total-branch-all))
       (format stream "ワーカー子プロセス内の実行は計測できない。~
-                      この表に出ない、あるいは 0% のファイルが未テストとは限らない。~
-                      判断の前に `scripts/coverage-scope.md` を読むこと。~%~%")
+                      この表に出ない、0% の、あるいは低い数値のファイルが未テストとは~
+                      限らない。特に `src/lisp-read-file.lisp` はテスト中盤の生 LOAD~
+                      再ロードで計装が外れる既知の計測アーティファクトがあり、実際の~
+                      テストは厚い。判断の前に `scripts/coverage-scope.md` を読むこと。~%~%")
       (format stream "| ファイル | 式 | 式% | 分岐 | 分岐% |~%")
       (format stream "|---|---|---|---|---|~%")
       (dolist (row rows)
         (destructuring-bind (name expression-ok expression-all branch-ok branch-all) row
-          (format stream "| ~A | ~D/~D | ~,1F | ~D/~D | ~,1F |~%"
+          (format stream "| ~A | ~D/~D | ~A | ~D/~D | ~A |~%"
                   name expression-ok expression-all
-                  (percentage expression-ok expression-all)
+                  (format-percentage expression-ok expression-all)
                   branch-ok branch-all
-                  (percentage branch-ok branch-all))))
-      (format stream "~%## 一度も実行されていないファイル~%~%")
+                  (format-percentage branch-ok branch-all))))
+      (format stream "~%## 実行済み式カウントが 0 のファイル~%~%")
+      (format stream "式ok が 0 は「一度も実行されなかった」ことを意味しない。~
+                      defpackage・in-package 等の定義系トップレベルフォームは、~
+                      そのファイルが計測プロセス内でコンパイルされる限り実行済みとして~
+                      計上されない仕様であり、以下のファイルはロード時に実際には~
+                      実行されている（詳細は `scripts/coverage-scope.md`）。~%~%")
       (let ((dead (remove-if-not (lambda (row) (zerop (second row))) rows)))
         (if dead
             (dolist (row dead)
@@ -214,19 +246,29 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
   (let ((src (truename (merge-pathnames "src/" root))))
     (cons "cl-mcp/main"
           (sort (loop for path in (directory (merge-pathnames "**/*.lisp" src))
+                      for name = (file-namestring path)
                       for relative = (enough-namestring path src)
+                      ;; Emacs のロックシンボリックリンク(.#foo.lisp)やバックアップ
+                      ;; ファイル(foo.lisp~)を拾うと不正なシステム名になり全体が
+                      ;; 落ちる。実害は「即座に失敗する」だけだが、除外できるものは
+                      ;; 除外する。
+                      unless (or (uiop:string-prefix-p ".#" name)
+                                 (uiop:string-suffix-p name "~"))
                       collect (format nil "cl-mcp/src/~A"
                                       (subseq relative 0 (- (length relative)
                                                             (length ".lisp")))))
                 #'string<))))
 
-(defparameter *third-party-dependencies*
-  '("alexandria" "cl-ppcre" "yason" "usocket" "bordeaux-threads"
-    "eclector" "hunchentoot")
-  "cl-mcp.asd の :depends-on から cl-mcp/main を除いたもの。
+(defun third-party-dependencies ()
+  "cl-mcp.asd の :depends-on から cl-mcp 自身のサブシステムを除いたものを返す。
+
+test-package-names と同じ理由でハードコードしない。手でコピーすると
+cl-mcp.asd が :depends-on に新しい依存を追加したときに黙って drift する。
 
 これらは計装しない。third-party を計装しても数値には出ない
-（summary-rows が src/ で絞る）一方、実行時間とメモリだけが膨らむ。")
+（summary-rows が src/ で絞る）一方、実行時間とメモリだけが膨らむ。"
+  (remove-if (lambda (dependency) (uiop:string-prefix-p "cl-mcp" dependency))
+             (asdf:system-depends-on (asdf:find-system "cl-mcp"))))
 
 (defun run-full (root cache)
   "src 全体を計装し、全テストスイートを回してサマリを書き出す。"
@@ -241,7 +283,7 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
   ;;    その結果それらが一律に未カバーとして数えられる。実測では約 323 フォーム、
   ;;    全体の 1.35% にあたるが、小さいファイルでは支配的になり、
   ;;    ロジックが 100% テストされている core.lisp が 33.3% と表示されていた。
-  (dolist (system *third-party-dependencies*)
+  (dolist (system (third-party-dependencies))
     (asdf:load-system system))
   ;; 2. 計装 ON にして cl-mcp 自身のシステムだけを強制再コンパイルする。
   (let ((systems (cl-mcp-source-systems root)))
@@ -255,16 +297,43 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
   ;; ここで :force を付けてはならない。src が計装なしで再コンパイルされ、
   ;; 直前の計装が丸ごと無駄になる。
   (asdf:load-system :cl-mcp/tests)
-  ;; テストが赤でも計測は続ける。赤いテストは監査の所見であって計測の失敗ではない。
-  ;; 一方、計測そのものが例外で落ちたらサマリを書かずに終える。
-  (handler-case (rove:run (test-package-names))
-    (error (condition)
-      (format *error-output* "~&テスト実行中に例外: ~A~%" condition)))
+  ;; テストが赤でも計測は続ける。赤いテストは Rove 自身が捕捉して nil を返すので、
+  ;; ここまで error が届くことはない。ここに届く error が意味するのは「テストが
+  ;; 落ちた」ではなく「~56 個のテストパッケージを回る rove:run そのものが測定経路の
+  ;; 異常で中断した」ことである。その場合は残りのパッケージが一つも走っていないので、
+  ;; 部分データで docs/coverage-summary.md を上書きしてはならない。書かずに
+  ;; 非ゼロで終了する。
+  (let ((test-run-error
+          (handler-case (progn (rove:run (test-package-names)) nil)
+            (error (condition) condition))))
+    (when test-run-error
+      (format *error-output*
+              "~&テスト実行が中断された: ~A~@
+               計測が全パッケージを終えていないため docs/coverage-summary.md は~
+               書き換えない。~%"
+              test-run-error)
+      (return-from run-full 1)))
   (sb-cover:report (merge-pathnames "coverage/html/" root))
   (let ((rows (summary-rows root)))
     (when (null rows)
       (error 'coverage-adapter-error
              :detail "src 配下のファイルが 1 つも計測されていない"))
+    ;; --smoke と同じ既知の答えで検算してから書き出す。--smoke は third-party の
+    ;; 事前ロードをスキップし、システムを1つだけ force し、別ディレクトリに書き出す
+    ;; ので run-full 固有の計装経路(third-party-dependencies の分離ロード、
+    ;; cl-mcp-source-systems の一括 force)そのものは検算していない。過去2回の
+    ;; 数値ドリフトはまさにここで起きた。
+    (let* ((expected '(18 21 4 4))
+           (known-row (find "src/utils/strings.lisp" rows :key #'first :test #'string=))
+           (actual (and known-row (rest known-row))))
+      (unless (equal actual expected)
+        (format *error-output*
+                "~&既知の答えによる検算に失敗した: src/utils/strings.lisp~@
+                 expected ~S~@
+                 actual   ~S~@
+                 docs/coverage-summary.md は書き換えない。~%"
+                expected actual)
+        (return-from run-full 1)))
     (let ((path (write-summary root rows)))
       (format t "~&~%サマリ: ~A~%HTML:   ~A~%計測ファイル数: ~D~%"
               path (merge-pathnames "coverage/html/cover-index.html" root)
@@ -272,6 +341,8 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
   0)
 
 (defun main (&rest argv)
+  "スクリプトのエントリポイント。ARGV に \"--smoke\" があれば run-smoke、
+なければ run-full を実行し、その終了コードでプロセスを終了する。"
   (let* ((root (repo-root))
          (cache (setup-isolated-cache root)))
     (format t "~&repo-root: ~A~%cache:     ~A~%" root cache)

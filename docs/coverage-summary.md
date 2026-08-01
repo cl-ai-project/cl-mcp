@@ -3,31 +3,32 @@
 `scripts/coverage.ros` が生成する。手で編集しないこと。
 
 - SBCL: 2.5.8.roswell
+- 計測コミット: 24f0b61
 - 計測ファイル数: 59
 - 式カバレッジ合計: 18370/23915 (76.8%)
 - 分岐カバレッジ合計: 1764/2592 (68.1%)
 
-ワーカー子プロセス内の実行は計測できない。この表に出ない、あるいは 0% のファイルが未テストとは限らない。判断の前に `scripts/coverage-scope.md` を読むこと。
+ワーカー子プロセス内の実行は計測できない。この表に出ない、0% の、あるいは低い数値のファイルが未テストとは限らない。特に `src/lisp-read-file.lisp` はテスト中盤の生 LOAD再ロードで計装が外れる既知の計測アーティファクトがあり、実際のテストは厚い。判断の前に `scripts/coverage-scope.md` を読むこと。
 
 | ファイル | 式 | 式% | 分岐 | 分岐% |
 |---|---|---|---|---|
-| src/tools/all.lisp | 0/2 | 0.0 | 0/0 | 0.0 |
-| src/project-scaffold-templates.lisp | 0/11 | 0.0 | 0/0 | 0.0 |
+| src/tools/all.lisp | 0/2 | 0.0 | 0/0 | N/A |
+| src/project-scaffold-templates.lisp | 0/11 | 0.0 | 0/0 | N/A |
 | src/system-loader.lisp | 1/38 | 2.6 | 0/4 | 0.0 |
 | src/lisp-read-file.lisp | 55/1078 | 5.1 | 10/148 | 6.8 |
 | src/worker/main.lisp | 46/264 | 17.4 | 2/16 | 12.5 |
-| src/state.lisp | 2/6 | 33.3 | 0/0 | 0.0 |
-| src/core.lisp | 2/6 | 33.3 | 0/0 | 0.0 |
-| src/test-runner.lisp | 19/55 | 34.5 | 0/0 | 0.0 |
+| src/state.lisp | 2/6 | 33.3 | 0/0 | N/A |
+| src/core.lisp | 2/6 | 33.3 | 0/0 | N/A |
+| src/test-runner.lisp | 19/55 | 34.5 | 0/0 | N/A |
 | src/run.lisp | 47/114 | 41.2 | 3/8 | 37.5 |
-| src/utils/printing.lisp | 9/20 | 45.0 | 0/0 | 0.0 |
-| src/repl.lisp | 41/72 | 56.9 | 0/0 | 0.0 |
+| src/utils/printing.lisp | 9/20 | 45.0 | 0/0 | N/A |
+| src/repl.lisp | 41/72 | 56.9 | 0/0 | N/A |
 | src/http.lisp | 411/664 | 61.9 | 35/62 | 56.5 |
-| src/utils/system.lisp | 5/8 | 62.5 | 0/0 | 0.0 |
+| src/utils/system.lisp | 5/8 | 62.5 | 0/0 | N/A |
 | src/tcp.lisp | 302/453 | 66.7 | 16/32 | 50.0 |
 | src/proxy.lisp | 326/484 | 67.4 | 38/54 | 70.4 |
 | src/test-runner-core.lisp | 1587/2258 | 70.3 | 130/218 | 59.6 |
-| src/code.lisp | 46/65 | 70.8 | 0/0 | 0.0 |
+| src/code.lisp | 46/65 | 70.8 | 0/0 | N/A |
 | src/utils/lenient-read.lisp | 226/308 | 73.4 | 24/46 | 52.2 |
 | src/tools/registry.lisp | 28/38 | 73.7 | 0/2 | 0.0 |
 | src/project-root.lisp | 47/63 | 74.6 | 4/6 | 66.7 |
@@ -57,7 +58,7 @@
 | src/inspect.lisp | 881/1016 | 86.7 | 86/116 | 74.1 |
 | src/tools/response-builders.lisp | 784/894 | 87.7 | 69/96 | 71.9 |
 | src/tools/pool-kill-worker.lisp | 90/102 | 88.2 | 8/8 | 100.0 |
-| src/utils/random.lisp | 18/20 | 90.0 | 0/0 | 0.0 |
+| src/utils/random.lisp | 18/20 | 90.0 | 0/0 | N/A |
 | src/object-registry.lisp | 100/111 | 90.1 | 7/8 | 87.5 |
 | src/fs.lisp | 560/621 | 90.2 | 40/52 | 76.9 |
 | src/worker/init-hook.lisp | 202/223 | 90.6 | 8/14 | 57.1 |
@@ -71,7 +72,9 @@
 | src/clgrep.lisp | 189/196 | 96.4 | 9/12 | 75.0 |
 | src/tools/define-tool.lisp | 155/157 | 98.7 | 6/6 | 100.0 |
 
-## 一度も実行されていないファイル
+## 実行済み式カウントが 0 のファイル
+
+式ok が 0 は「一度も実行されなかった」ことを意味しない。defpackage・in-package 等の定義系トップレベルフォームは、そのファイルが計測プロセス内でコンパイルされる限り実行済みとして計上されない仕様であり、以下のファイルはロード時に実際には実行されている（詳細は `scripts/coverage-scope.md`）。
 
 - `src/tools/all.lisp` (式 0/2)
 - `src/project-scaffold-templates.lisp` (式 0/11)
