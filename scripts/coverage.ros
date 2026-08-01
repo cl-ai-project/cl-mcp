@@ -71,10 +71,11 @@ HTML レポートの数字と必ず一致する。"
           (error 'coverage-adapter-error
                  :detail (format nil "report-file が 2 要素のリストを返さなかった: ~S" counts)))
         (destructuring-bind (expression branch) counts
-          (unless (and (typep expression 'sb-cover::sample-count)
-                       (typep branch 'sb-cover::sample-count))
+          (unless (and (eq (sb-cover::mode-of expression) :expression)
+                       (eq (sb-cover::mode-of branch) :branch))
             (error 'coverage-adapter-error
-                   :detail (format nil "report-file の要素が sample-count 型でない（式/分岐の並び順が変わった可能性）: ~S" counts)))
+                   :detail (format nil "report-file の要素が式/分岐の順で並んでいない（mode: ~S ~S）"
+                                   (sb-cover::mode-of expression) (sb-cover::mode-of branch))))
           (list (sb-cover::ok-of expression) (sb-cover::all-of expression)
                 (sb-cover::ok-of branch) (sb-cover::all-of branch))))
     (coverage-adapter-error (e) (error e))
