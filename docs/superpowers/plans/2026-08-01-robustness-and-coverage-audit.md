@@ -333,17 +333,40 @@ EOF
 ./scripts/coverage.ros --smoke; echo "EXIT=$?"
 ```
 
-期待: `SMOKE FAILED` かつ `actual` の**式 all が 21 より大きく、式 ok は 21 のまま**、分岐 all は 4 より大きい。例: `actual (21 27 4 6)`。
+期待: `SMOKE FAILED` かつ `actual (22 32 4 6)`。
 
-これは「実行されない式が確かに未カバーとして数えられている」ことを意味する。もし `ok` と `all` が同じだけ増えたなら、計測が実行の有無を見ていないので**先に進んではならない**。
+読み方に注意する。**式 ok は 21 のままではなく 22 に増える。** sb-cover はトップレベルフォーム
+そのものも計装対象にし、`(defun ...)` フォーム自体はファイルのロード時に必ず実行されるためである
+（SBCL の `ir1tran.lisp` の `ir1-convert` がマクロ展開前の生フォームに対して
+`instrument-coverage` を無条件に呼ぶ）。増えた 11 式のうち実行されたのはこの 1 つだけで、
+関数の本体（`if`、`evenp`、2 つの `format`）はすべて未実行のままである。
+
+分岐は予想どおり `ok` が 4 で据え置き、`all` だけが 6 に増える。
+
+**判定基準**: 追加した関数の**本体**が未カバーとして数えられていること。式の増分 11 に対して
+実行済みの増分が 1（トップレベルフォーム分）であること、そして分岐 ok が動かないことの 2 点で確認する。
+もし `ok` と `all` が同じだけ増えたなら、計測が実行の有無を見ていないので**先に進んではならない**。
 
 - [ ] **Step 3: HTML で該当関数が赤く塗られていることを目視確認する**
 
+**sb-cover は HTML 出力で英数字以外の文字を実体参照に変換する**（`cover.lisp` の
+`print-report`）。関数名をそのまま grep しても 0 件になるので、ハイフンを `&#45;` にした形で探す。
+
 ```bash
-ls coverage/smoke/ && grep -c "coverage-probe-never-called" coverage/smoke/*.html
+ls coverage/smoke/ && grep -c 'coverage&#45;probe&#45;never&#45;called' coverage/smoke/*.html
 ```
 
-期待: `cover-index.html` 以外の HTML ファイルに関数名が 1 回以上現れる。
+期待: `cover-index.html` 以外の HTML ファイルに 1 件以上。
+
+さらに、その関数の本体が未実行として着色されていることを確認する。sb-cover は
+未実行を `state-2`、分岐が両方とも通っていない箇所を `state-10` として出力する。
+
+```bash
+grep -o 'state-1[05]\?"[^<]*' coverage/smoke/*.html | grep -iE 'evenp|format' | head -5
+```
+
+期待: `evenp` や `format` を含む行が未実行の state で現れる。**関数名が HTML に現れるだけでは
+「赤く塗られている」ことの証明にならない**ので、この 2 つ目の確認まで行うこと。
 
 - [ ] **Step 4: 一時的な関数を取り除く**
 
