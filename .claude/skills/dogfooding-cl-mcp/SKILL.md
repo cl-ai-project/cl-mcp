@@ -43,7 +43,15 @@ ToolSearch select:mcp__cl-mcp__lisp-read-file,mcp__cl-mcp__load-system,mcp__cl-m
 
 ### 2. Scaffold with `project-scaffold`
 
-Call `project-scaffold` once with `destination: "experiments"`. Save the response — note the `absolute_path` and `files` list.
+Call `project-scaffold` once with `destination: "experiments"`. Save the response — note the `absolute_path`, the `files` list, and the `framework` it echoes back.
+
+**Pick a test framework.** The default is Rove; pass `framework: "fiveam"` for a
+FiveAM project instead. Same layout either way — only the `.asd` `:depends-on`
+entry, its `test-op` hook and `tests/main-test.lisp` differ. Alternate between
+cycles: a FiveAM cycle drives `run-tests` code paths a Rove cycle never reaches
+(suite discovery, FiveAM failure-detail extraction), and framework-specific
+rough edges only surface there. See "Working in a FiveAM project" below for the
+handful of things that differ once you start adding tests.
 
 **Pick a name ASDF does not already know.** Before calling `project-scaffold`,
 verify with ASDF itself, not with a directory listing:
@@ -94,7 +102,7 @@ Target shape (medium = 15-30 minutes of work):
 
 - 3-5 source files under `src/`
 - 2-4 test files under `tests/`
-- ~10 Rove tests across all test files
+- ~10 tests across all test files (Rove `deftest`, or FiveAM `test` forms)
 - At least one of: `defclass` + `defmethod`, `defstruct`, `define-condition`, a small `defmacro`, multi-file inter-package `:import-from`
 
 Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for **existing** files (parinfer-safe). Register extra test packages in the scaffold's `.asd` `:depends-on` list and re-`load-system` after each new file.
@@ -104,6 +112,37 @@ Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for 
 - `lisp-edit-form content` must contain **exactly one top-level form**. To insert multiple forms, chain `insert_after` calls.
 - `code-find` requires `symbol`, NOT `name`. When the symbol is not in `CL-USER`, also pass `package`.
 - `lisp-edit-form` / `lisp-patch-form` accept `form_type: "defsystem"` for `.asd` files, NOT `"asdf:defsystem"`.
+
+**Working in a FiveAM project** (skip if you scaffolded with Rove):
+- Each new test file needs **two** things, and skipping either fails quietly:
+  1. `(def-suite <file>-suite :in :<name>)` then `(in-suite <file>-suite)`.
+     Without `:in`, the generated `test-op` never reaches the suite even though
+     `run-tests` still does — see the pitfalls table.
+  2. `(:import-from #:<name>/tests/main-test)` in the `defpackage`. `:in`
+     resolves its parent at load time, so the root-suite file has to load
+     first; this clause is what makes ASDF guarantee it. Relying on the `.asd`
+     `:depends-on` order instead is what produces the vanishing-test-count row
+     in the pitfalls table.
+- After adding suites, cross-check the two runners once. Count *tests*, not
+  checks — `(length (fiveam:run ...))` returns one entry per `is`, so it is
+  larger than `run-tests`' number and comparing them directly is misleading:
+
+  ```lisp
+  (length (remove-duplicates
+           (mapcar (lambda (r) (fiveam::test-case r))
+                   (let ((fiveam:*test-dribble* (make-broadcast-stream)))
+                     (fiveam:run :<name>)))))
+  ```
+
+  That is what `test-op` covers, and it must equal `run-tests`'
+  `passed + failed + pending`.
+- `lisp-edit-form` addresses a FiveAM test with `form_type: "test"` and the
+  test's name; a suite with `form_type: "def-suite"` and the suite name minus
+  its `:` (`form_name: "my-project"` matches `(def-suite :my-project ...)`).
+- `run-tests` needs no `framework` argument — it reads the generated
+  `:depends-on`. Selecting one test still works: `tests: ["<pkg>::<test-name>"]`.
+- FiveAM's `is` wraps a whole form and takes the message afterwards:
+  `(is (= 3 (add 1 2)) "adds")`, not Rove's `(ok ... "adds")` shape.
 
 ### 5. Exercise the full tool surface
 
@@ -151,20 +190,21 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |
 | `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed: `load-system` now auto-discovers `.asd` files under the project root on MISSING-COMPONENT | Resolved. Verified in cycle 10 (2026-04-13). Manual `asdf:load-asd` only needed if `.asd` is outside the project root |
 | `run-tests` single-test mode reports `Test runner crashed` with `no applicable method for TEST-NAME` on `FAILED-ASSERTION` | Rove internal bug: `rove:run-tests` calls `TEST-NAME` on `FAILED-ASSERTION` objects. Caught by handler-case in `run-rove-selected-tests`; `%safe-test-name` guards `run-rove-tests` path | Failure is reported gracefully (not a hard crash). The "Test runner crashed" reason text reflects Rove's internal error |
-| `project-scaffold` text response does not contain the `next_steps` array | Response builder does not render `next_steps` in `content[].text` | Use the `absolute_path` from the structured response and prime ASDF manually per step 3 |
 | `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
 | `lisp-edit-form content=<multi-form>` rejects with `content must contain exactly one top-level form` | Tool only accepts one form per call | Chain multiple `insert_after` calls, one form each |
 | `clgrep-search form_types=[...]` filter returns fewer results than expected | Filter works for most cases but may miss forms with non-standard structure | Omit `form_types` and post-filter client-side if results seem incomplete, OR prefer `code-find` / `code-describe` for exact lookups |
 | `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
 | `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
 | `load-system` after changing package exports shows noisy "also exports" warnings | SBCL package-variance; stale worker image | `pool-kill-worker` then `load-system` for a clean image. `load-system` now shows a hint when this happens |
+| FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. **`run-tests` cannot detect this defect**, so a green run is not evidence | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with the tests-not-checks count under "Working in a FiveAM project" — it must match `run-tests`' `passed + failed + pending` |
+| FiveAM project: the test count silently drops (e.g. 6 → 1) between two `run-tests` calls, still reporting `✓ PASS` | A sub-test file does not depend on the root-suite file, so its load order comes from the `.asd` `:depends-on` list. Wrong order on a *cold* worker is a loud `Unknown suite <NAME>`; on a *warm* one the sub-suite attaches to the previous run's root-suite object, is orphaned when the new root replaces it, and its tests just disappear | Give every sub-test `defpackage` an `(:import-from #:<name>/tests/main-test)` clause. That makes ASDF order the files regardless of the `:depends-on` order — verified by leaving the list deliberately reversed |
 | `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
 
 ## Success criteria
 
 You are done with one cycle when:
 
-- [ ] The throwaway project has all its generated Rove tests green (verified per-package OR via aggregate `run-tests`; the aggregate undercount bug is now fixed)
+- [ ] The throwaway project has all its tests green (Rove: verified per-package OR via aggregate `run-tests`, the aggregate undercount bug is now fixed. FiveAM: one aggregate run covers everything nested under the root suite)
 - [ ] At least one edited Lisp file was sanity-checked with `lisp-check-parens` (cheap and catches `lisp-patch-form` drift early)
 - [ ] At least **5 feedback items** were **actually appended** to the chosen feedback file (verify with a `fs-read-file` or shell `tail` — the "I'll record it later" trap is real)
 - [ ] Feedback is categorized P1/P2/P3 under a dated section heading
@@ -183,8 +223,8 @@ You are done with one cycle when:
 When a cycle completes, summarize:
 
 1. **Project:** name + absolute path
-2. **Size:** N src files, N test files, N Rove tests, what CL features exercised (defclass, defmethod, etc.)
-3. **Test status:** per-package counts (avoid the aggregate trap)
+2. **Size:** N src files, N test files, N tests and which framework, what CL features exercised (defclass, defmethod, etc.)
+3. **Test status:** Rove — per-package counts (avoid the aggregate trap). FiveAM — the root-suite run, plus a note on any suite that turned out not to be nested under it
 4. **Feedback recorded:** total count, P1/P2/P3 breakdown
 5. **Procedural pitfalls:** anything that took more than one try (these are usually the best P1/P2 candidates)
 6. **Cleanup:** project root restored ✓, cl-mcp `git status` clean ✓

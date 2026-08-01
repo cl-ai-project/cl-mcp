@@ -1044,9 +1044,31 @@ the surrounding passed/failed/pending/failure-details bindings."
 ;;; Main Entry Point
 ;;; ---------------------------------------------------------------------------
 
+(defun %collapse-blank-lines (text)
+  "Return TEXT with its blank lines dropped, so runs of them become one break.
+Anything that is not a string passes through untouched, so callers need no
+type check of their own.
+
+FiveAM composes a failure message one fragment per paragraph, which renders
+`1200 /= 1201' as ten lines: the assertion form, a blank line, `evaluated
+to', a blank line, and so on.  The summary text is the part of the response
+most clients show, and every failure in a run pays that cost."
+  (if (stringp text)
+      (format nil "~{~A~^~%~}"
+              (remove-if (lambda (line)
+                           (string= ""
+                                    (string-trim '(#\Space #\Tab #\Return) line)))
+                         (uiop:split-string text :separator '(#\Newline))))
+      text))
+
 (defun %fiveam-extract-failure-detail (result)
   "Extract a failure detail hash-table from a FiveAM TEST-FAILURE result object.
-Uses dynamic symbol resolution so FiveAM is an optional dependency."
+Uses dynamic symbol resolution so FiveAM is an optional dependency.
+
+The test's docstring is carried through as the detail's description.  FiveAM
+records no source location for a test, so a FiveAM failure arrives without the
+file and line a Rove one has; the docstring is then the only statement of what
+was being asserted, and leaving it out reduced the report to a bare test name."
   (flet ((fiveam-slot (obj slot-name)
            (let* ((pkg (find-package :fiveam))
                   (slot-sym (and pkg (find-symbol slot-name pkg))))
@@ -1055,18 +1077,23 @@ Uses dynamic symbol resolution so FiveAM is an optional dependency."
          (fiveam-class (class-name)
            (and (find-package :fiveam)
                 (find-class (find-symbol class-name :fiveam) nil))))
-    (declare (ignorable #'fiveam-class))
+    (declare (ignorable (function fiveam-class)))
     (let* ((test-case (fiveam-slot result "TEST-CASE"))
-           (test-name (and test-case
-                           (princ-to-string
-                            (fiveam-slot test-case "NAME"))))
+           (test-name
+            (and test-case (princ-to-string (fiveam-slot test-case "NAME"))))
+           (description (fiveam-slot test-case "DESCRIPTION"))
            (reason (fiveam-slot result "REASON"))
            (test-expr (fiveam-slot result "TEST-EXPR")))
-      (make-failure-detail
-       :test-name (or test-name "<unknown>")
-       :form (and test-expr (princ-to-string test-expr))
-       :reason (or (and (stringp reason) reason)
-                   (princ-to-string (or reason "no reason given")))))))
+      (make-failure-detail :test-name (or test-name "<unknown>")
+                           :description (and (stringp description)
+                                             (plusp (length description))
+                                             description)
+                           :form (and test-expr (princ-to-string test-expr))
+                           :reason
+                           (%collapse-blank-lines
+                            (or (and (stringp reason) reason)
+                                (princ-to-string
+                                 (or reason "no reason given"))))))))
 
 (defun %fiveam-result-test-case (result)
   "Return the FiveAM TEST-CASE object that RESULT belongs to, or NIL.

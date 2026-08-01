@@ -11,16 +11,21 @@
                 #:scan
                 #:regex-replace-all)
   (:import-from #:cl-mcp/src/project-scaffold-templates
-                #:*asd-template*
+                #:*asd-template-rove*
+                #:*asd-template-fiveam*
                 #:*claude-md-template*
                 #:*agents-md-template*
                 #:*readme-template*
                 #:*gitignore-template*
                 #:*main-lisp-template*
-                #:*main-test-template*)
+                #:*main-test-template-rove*
+                #:*main-test-template-fiveam*)
   (:export #:validate-project-name
            #:validate-destination
            #:validate-text-field
+           #:validate-framework
+           #:*supported-frameworks*
+           #:*default-framework*
            #:escape-lisp-string
            #:render-template
            #:compute-parent-prompts-path
@@ -127,6 +132,43 @@ allowed."
            :reason "must not contain double quote or backslash characters"))
   value)
 
+(defparameter *supported-frameworks* '(:rove :fiveam)
+  "Test frameworks PROJECT-SCAFFOLD can generate a project for.
+Deliberately narrower than what run-tests can execute: run-tests also
+drives Prove and an ASDF fallback, but only frameworks with a complete
+.asd plus test-file template pair belong here.  Accepting a name without
+templates would generate a Rove project and label it as something else,
+which is worse than refusing the name.")
+
+(defparameter *default-framework* :rove
+  "Framework used when the caller names none.
+Rove, because that is what every scaffold generated before the framework
+argument existed shipped with, and what the prompts @-included by the
+generated CLAUDE.md describe.")
+
+(defun validate-framework (framework)
+  "Return FRAMEWORK as one of *SUPPORTED-FRAMEWORKS*, else signal.
+FRAMEWORK is a string or symbol designator compared case-insensitively,
+so both \"fiveam\" and FiveAM's own \"FiveAM\" spelling resolve to
+:FIVEAM. NIL selects *DEFAULT-FRAMEWORK*, which is what keeps the
+argument optional for callers written before it existed. Any other value
+signals INVALID-ARGUMENT-ERROR."
+  (cond
+    ((null framework) *default-framework*)
+    ((or (stringp framework) (symbolp framework))
+     (let ((name (string framework)))
+       (or (find-if (lambda (supported)
+                      (string-equal name (symbol-name supported)))
+                    *supported-frameworks*)
+           (error 'invalid-argument-error
+                  :field "framework" :value framework
+                  :reason (format nil "must be one of ~{~(~A~)~^, ~}"
+                                  *supported-frameworks*)))))
+    (t
+     (error 'invalid-argument-error
+            :field "framework" :value framework
+            :reason "must be a string or symbol"))))
+
 (defun escape-lisp-string (value)
   "Return VALUE escaped for embedding inside a Lisp string literal.
 Every backslash and every double quote in VALUE is prefixed with a
@@ -206,31 +248,53 @@ so neither can smuggle extra forms into the marker."
       (format out "(:generator \"cl-mcp/project-scaffold\" :version 1~% :name ~S~% :files ~S)~%"
               name files))))
 
-(defun plan-scaffold (&key name description author license destination)
+(defun %framework-templates (framework)
+  "Return (values ASD-TEMPLATE MAIN-TEST-TEMPLATE LABEL) for FRAMEWORK.
+FRAMEWORK is a keyword already normalized by VALIDATE-FRAMEWORK, so the
+ECASE can only be reached with a supported one. LABEL is the framework's
+own spelling of its name, substituted into the generated Markdown as
+{{test-framework}}."
+  (ecase framework
+    (:rove (values *asd-template-rove* *main-test-template-rove* "Rove"))
+    (:fiveam (values *asd-template-fiveam* *main-test-template-fiveam*
+                     "FiveAM"))))
+
+(defun plan-scaffold (&key name description author license destination framework)
   "Return an alist of (RELATIVE-PATH . CONTENT) for the scaffold manifest.
 Applies all template substitutions but performs no I/O. Two binding sets
 are used: the .asd template drops its values inside Lisp string literals,
 so those are escaped with ESCAPE-LISP-STRING, while the Markdown and
-source templates receive the raw values. Callers are responsible for
-input validation before calling this function; plan-scaffold assumes its
-arguments are already normalized strings."
-  (let* ((parent-prompts (compute-parent-prompts-path destination))
-         (raw-bindings `(("name" . ,name)
-                         ("description" . ,description)
-                         ("author" . ,author)
-                         ("license" . ,license)
-                         ("parent-prompts" . ,parent-prompts)))
-         (asd-bindings `(("name" . ,name)
-                         ("description" . ,(escape-lisp-string description))
-                         ("author" . ,(escape-lisp-string author))
-                         ("license" . ,(escape-lisp-string license))
-                         ("parent-prompts" . ,parent-prompts)))
-         (render (lambda (tpl) (render-template tpl raw-bindings))))
-    (list
-     (cons (format nil "~A.asd" name)  (render-template *asd-template* asd-bindings))
-     (cons "CLAUDE.md"                 (funcall render *claude-md-template*))
-     (cons "AGENTS.md"                 (funcall render *agents-md-template*))
-     (cons "README.md"                 (funcall render *readme-template*))
-     (cons ".gitignore"                (funcall render *gitignore-template*))
-     (cons "src/main.lisp"             (funcall render *main-lisp-template*))
-     (cons "tests/main-test.lisp"      (funcall render *main-test-template*)))))
+source templates receive the raw values.
+
+FRAMEWORK selects which .asd and tests/main-test.lisp templates are used
+and which name the generated Markdown gives the test framework; it is
+normalized through VALIDATE-FRAMEWORK, so NIL means *DEFAULT-FRAMEWORK*
+and an unsupported name signals rather than silently generating the
+default. The other arguments are assumed to be already validated,
+normalized strings."
+  (let ((framework (validate-framework framework))
+        (parent-prompts (compute-parent-prompts-path destination)))
+    (multiple-value-bind (asd-template main-test-template framework-label)
+        (%framework-templates framework)
+      (let* ((raw-bindings `(("name" . ,name)
+                             ("description" . ,description)
+                             ("author" . ,author)
+                             ("license" . ,license)
+                             ("parent-prompts" . ,parent-prompts)
+                             ("test-framework" . ,framework-label)))
+             (asd-bindings `(("name" . ,name)
+                             ("description" . ,(escape-lisp-string description))
+                             ("author" . ,(escape-lisp-string author))
+                             ("license" . ,(escape-lisp-string license))
+                             ("parent-prompts" . ,parent-prompts)
+                             ("test-framework" . ,framework-label)))
+             (render (lambda (tpl) (render-template tpl raw-bindings))))
+        (list
+         (cons (format nil "~A.asd" name) (render-template asd-template
+                                                           asd-bindings))
+         (cons "CLAUDE.md"            (funcall render *claude-md-template*))
+         (cons "AGENTS.md"            (funcall render *agents-md-template*))
+         (cons "README.md"            (funcall render *readme-template*))
+         (cons ".gitignore"           (funcall render *gitignore-template*))
+         (cons "src/main.lisp"        (funcall render *main-lisp-template*))
+         (cons "tests/main-test.lisp" (funcall render main-test-template)))))))

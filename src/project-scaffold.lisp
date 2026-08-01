@@ -17,6 +17,7 @@
                 #:validate-project-name
                 #:validate-destination
                 #:validate-text-field
+                #:validate-framework
                 #:plan-scaffold
                 #:invalid-argument-error
                 #:*scaffold-marker-file*
@@ -182,11 +183,14 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
                                (namestring directory))))
       (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
 
-(defun write-scaffold (&key name description author license destination overwrite)
+(defun write-scaffold (&key name description author license destination overwrite
+                            framework)
   "Generate the scaffold project atomically. Returns a plist with:
   :target-dir (absolute pathname)
   :relative-path (namestring relative to *project-root*)
   :files (list of relative path strings, in manifest order)
+  :framework (keyword) -- the test framework the project was generated
+    for, resolved from the FRAMEWORK designator
   :leftover-backup (pathname, or NIL) -- set when the replaced tree could
     not be removed after the commit.  The caller must surface it: the
     leftover carries the same .asd, and ASDF's tree scan reaches
@@ -208,6 +212,10 @@ underlying error after cleaning up the temp directory."
   (validate-text-field "description" (or description ""))
   (validate-text-field "author" (or author ""))
   (validate-text-field "license" (or license ""))
+  ;; Normalizes as well as validates: everything downstream -- the template
+  ;; selection and the tool's response field -- wants the resolved keyword
+  ;; rather than the designator the caller passed.
+  (setf framework (validate-framework framework))
   (multiple-value-bind (target-dir temp-dir backup-dir)
       (%absolute-scaffold-paths *project-root* destination name)
     (%assert-within-project-root target-dir)
@@ -229,7 +237,8 @@ underlying error after cleaning up the temp directory."
                                  :description (or description "")
                                  :author (or author "")
                                  :license (or license "")
-                                 :destination destination))
+                                 :destination destination
+                                 :framework framework))
             (moved-aside nil)
             (committed nil)
             (leftover-backup nil))
@@ -258,6 +267,7 @@ underlying error after cleaning up the temp directory."
                (list :target-dir target-dir
                      :relative-path (enough-namestring target-dir *project-root*)
                      :files (mapcar #'car plan)
+                     :framework framework
                      :leftover-backup leftover-backup))
           (unless committed
             (when (uiop:directory-exists-p temp-dir)
@@ -271,9 +281,13 @@ underlying error after cleaning up the temp directory."
   :description
   "Generate a minimal Common Lisp project skeleton under the project root.
 
-The generated project uses package-inferred-system + Rove and ships with
+The generated project uses package-inferred-system and ships with
 CLAUDE.md/AGENTS.md templates referencing cl-mcp's existing prompts via
-relative @-include paths. On success, returns the list of created files and
+relative @-include paths. Its test suite is written with Rove by default;
+pass 'framework' to get a FiveAM project instead. Either way run-tests
+detects the framework from the generated .asd, so no extra wiring is needed.
+
+On success, returns the list of created files, the resolved framework, and
 a 'next_steps' array with concrete REPL commands the agent can invoke to
 register the project with ASDF and run its tests.
 
@@ -301,6 +315,11 @@ surface."
             "License string for .asd :license. No newlines.")
    (destination :type :string :description
                 "Relative parent directory under project root where <name>/ is created. Default: scaffolds.")
+   (framework :type :string :description
+              "Test framework the generated tests are written with: 'rove' (default) or
+'fiveam'. Selects the .asd :depends-on entry, the test-op hook and the
+tests/main-test.lisp template, so run-tests picks the framework up from the
+generated project without further configuration.")
    (overwrite :type :boolean :description
               "When true, replace an existing directory instead of failing -- but only
 if cl-mcp itself generated that directory (it must contain a .cl-mcp-scaffold marker
@@ -314,10 +333,13 @@ file). Any other existing directory is refused, never deleted."))
                :author (or author "Unknown")
                :license (or license "MIT")
                :destination (or destination "scaffolds")
+               :framework framework
                :overwrite overwrite))
              (target-dir (getf result-plist :target-dir))
              (relative (getf result-plist :relative-path))
              (files (getf result-plist :files))
+             (framework-name (string-downcase
+                              (symbol-name (getf result-plist :framework))))
              (leftover (getf result-plist :leftover-backup))
              (abs-asd (namestring
                        (merge-pathnames (format nil "~A.asd" name) target-dir)))
@@ -357,12 +379,14 @@ file). Any other existing directory is refused, never deleted."))
                     "path" relative
                     "absolute_path" (namestring target-dir)
                     "files" (coerce files 'vector)
+                    "framework" framework-name
                     "next_steps" next-steps
                     "content"
                     (text-content
                      (format nil
-                             "Scaffolded ~A at ~A (~D files)~%Path: ~A~%~{~A~%~}~@[~%⚠ ~A~%~]"
-                             name relative (length files)
+                             "Scaffolded ~A at ~A (~D files, ~A tests)~%~
+                              Path: ~A~%~{~A~%~}~@[~%⚠ ~A~%~]"
+                             name relative (length files) framework-name
                              (namestring target-dir)
                              (coerce next-steps 'list)
                              warning)))))
