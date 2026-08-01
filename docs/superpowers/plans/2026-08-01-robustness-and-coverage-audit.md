@@ -479,11 +479,47 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
             (format stream "なし。~%"))))
     path))
 
-(defun run-full (root)
+(defun cl-mcp-source-systems (root)
+  "src/ 配下の .lisp ファイルに対応する ASDF システム名の一覧を返す。
+
+package-inferred-system ではファイル 1 つがシステム 1 つに対応する。
+`(asdf:load-system :cl-mcp :force t)` は **対象システムしか force せず、依存システムは
+force しない** ので、src のほとんどはキャッシュ済み fasl が黙って再利用されてしまう。
+計装したいシステムを名前で列挙して :force に渡す必要がある。"
+  (let ((src (truename (merge-pathnames "src/" root))))
+    (cons "cl-mcp/main"
+          (sort (loop for path in (directory (merge-pathnames "**/*.lisp" src))
+                      for relative = (enough-namestring path src)
+                      collect (format nil "cl-mcp/src/~A"
+                                      (subseq relative 0 (- (length relative)
+                                                            (length ".lisp")))))
+                #'string<))))
+
+(defun clear-coverage-cache (cache)
+  "計装キャッシュを空にする。
+
+前回の実行が残した fasl を再利用すると、計装されているかどうかが実行ごとに変わり、
+数値が再現しなくなる。計測は毎回まっさらから始める。"
+  (when (probe-file cache)
+    (uiop:delete-directory-tree cache :validate (constantly t)))
+  (ensure-directories-exist cache))
+
+(defun run-full (root cache)
   "src 全体を計装し、全テストスイートを回してサマリを書き出す。"
-  (proclaim '(optimize sb-cover:store-coverage-data))
-  (asdf:load-system :cl-mcp :force t)
-  (proclaim '(optimize (sb-cover:store-coverage-data 0)))
+  (clear-coverage-cache cache)
+  ;; 1. 依存ライブラリを計装なしでロードしてキャッシュに置く。
+  ;;    third-party を計装しても数値には出ない（summary-rows が src/ で絞る）一方、
+  ;;    実行時間とメモリだけが膨らむ。
+  (asdf:load-system :cl-mcp)
+  ;; 2. 計装 ON にして cl-mcp 自身のシステムだけを強制再コンパイルする。
+  (let ((systems (cl-mcp-source-systems root)))
+    (proclaim '(optimize sb-cover:store-coverage-data))
+    (asdf:load-system "cl-mcp" :force systems)
+    ;; :cl-mcp の依存グラフから到達しないファイルを拾う。キャッシュは空なので
+    ;; ここで初めてコンパイルされ、計装が乗る。
+    (dolist (system systems)
+      (asdf:load-system system))
+    (proclaim '(optimize (sb-cover:store-coverage-data 0))))
   ;; ここで :force を付けてはならない。src が計装なしで再コンパイルされ、
   ;; 直前の計装が丸ごと無駄になる。
   (asdf:load-system :cl-mcp/tests)
@@ -504,11 +540,11 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
   0)
 ```
 
-`main` の full 分岐を差し替える:
+`main` の full 分岐を差し替える。`run-full` はキャッシュを空にするので `cache` を受け取る:
 
 ```lisp
      (cond ((member "--smoke" argv :test #'string=) (run-smoke root))
-           (t (run-full root)))
+           (t (run-full root cache)))
 ```
 
 - [ ] **Step 2: フル実行する（12〜18 分）**
@@ -519,7 +555,9 @@ tests.lisp の test-op フックと同じ選び方をしている。テストを
 ./scripts/coverage.ros > /tmp/coverage-full.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/coverage-full.log
 ```
 
-期待: `EXIT=0`、`計測ファイル数:` が 40 以上、`docs/coverage-summary.md` が生成されている。
+期待: `EXIT=0`、`計測ファイル数:` が 55 以上（src は 59 ファイル）、`docs/coverage-summary.md` が生成されている。
+
+キャッシュを空から始めるので依存ライブラリのコンパイルからやり直しになる。**20〜30 分**を見込む。
 
 `pool-startup-latency-test` のような時間依存テストが落ちる可能性がある。**閾値は絶対に緩めない。** 落ちたテスト名をログから拾って控え、Task 6 の分類テーブルに「計測実行時の既知の除外」として記録する。
 
@@ -598,7 +636,12 @@ grep -oE '^\| src/[^ |]+' docs/coverage-summary.md | sed 's/^| //' | sort > /tmp
 comm -23 /tmp/src-files.txt /tmp/covered-files.txt
 ```
 
-出力された各ファイルが「計測対象外」である。`:cl-mcp` から ASDF 依存で到達しないファイル、またはワーカー専用のファイルが候補になる。
+出力された各ファイルが「計測対象外」である。
+
+**差分が 0 件になるのは正常な結果である。** Task 4 は `src/**/*.lisp` から導いたシステム名を
+明示的に列挙して計装するので、到達性による取りこぼしは原則起きない。差分が出た場合は
+「システムとしてロードできなかった」「sb-cover がソース位置を復元できなかった」のどちらかであり、
+どちらなのかを Step 4 で切り分ける。
 
 - [ ] **Step 4: 各差分ファイルの到達性を確認する**
 
