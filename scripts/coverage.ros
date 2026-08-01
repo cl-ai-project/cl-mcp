@@ -1,0 +1,51 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn ;;init forms
+  (ros:ensure-asdf)
+  (require :sb-posix)
+  (require :sb-cover)
+  #+quicklisp (ql:quickload '(:rove) :silent t))
+
+(defpackage :ros.script.coverage
+  (:use :cl))
+(in-package :ros.script.coverage)
+
+;;; cl-mcp のテストカバレッジを sb-cover で実測するドライバ。
+;;;
+;;; 使い方（リポジトリのルートから実行する）:
+;;;   ./scripts/coverage.ros --smoke   既知の答えで計測パイプラインを検算する（約2分）
+;;;   ./scripts/coverage.ros           全スイートを計装実行する（12〜18分）
+;;;
+;;; ワーカー子プロセス内の実行は計測できない。盲点は scripts/coverage-scope.md を見ること。
+
+(defun repo-root ()
+  "カレントディレクトリをリポジトリのルートとして返す。ルートでなければエラーにする。"
+  (let ((cwd (uiop:getcwd)))
+    (unless (probe-file (merge-pathnames "cl-mcp.asd" cwd))
+      (error "cl-mcp.asd が見つからない。リポジトリのルートから実行すること（現在: ~A）" cwd))
+    cwd))
+
+(defun setup-isolated-cache (root)
+  "計装済み fasl を専用ディレクトリに隔離し、そのディレクトリを返す。
+
+環境変数も設定するのは、ワーカー子プロセスが親の環境を引き継いで同じキャッシュを
+読むようにするためである。ワーカー側のカバレッジは捨てるので数値には影響しないが、
+通常のキャッシュを計装済み fasl で汚さないことが目的である。"
+  (let ((cache (merge-pathnames "coverage/cache/" root)))
+    (ensure-directories-exist cache)
+    (sb-posix:putenv (format nil "ASDF_OUTPUT_TRANSLATIONS=/:~A" (namestring cache)))
+    (asdf:initialize-output-translations)
+    cache))
+
+(defun main (&rest argv)
+  (declare (ignorable argv))
+  (let* ((root (repo-root))
+         (cache (setup-isolated-cache root)))
+    (format t "~&repo-root: ~A~%cache:     ~A~%" root cache)
+    (format t "~&translated: ~A~%"
+            (asdf:apply-output-translations
+             (merge-pathnames "src/utils/strings.lisp" root)))
+    (uiop:quit 0)))
