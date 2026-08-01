@@ -123,8 +123,19 @@ Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for 
      first; this clause is what makes ASDF guarantee it. Relying on the `.asd`
      `:depends-on` order instead is what produces the vanishing-test-count row
      in the pitfalls table.
-- After adding suites, cross-check the two runners once:
-  `(length (fiveam:run :<name>))` must equal what `run-tests` reports.
+- After adding suites, cross-check the two runners once. Count *tests*, not
+  checks — `(length (fiveam:run ...))` returns one entry per `is`, so it is
+  larger than `run-tests`' number and comparing them directly is misleading:
+
+  ```lisp
+  (length (remove-duplicates
+           (mapcar (lambda (r) (fiveam::test-case r))
+                   (let ((fiveam:*test-dribble* (make-broadcast-stream)))
+                     (fiveam:run :<name>)))))
+  ```
+
+  That is what `test-op` covers, and it must equal `run-tests`'
+  `passed + failed + pending`.
 - `lisp-edit-form` addresses a FiveAM test with `form_type: "test"` and the
   test's name; a suite with `form_type: "def-suite"` and the suite name minus
   its `:` (`form_name: "my-project"` matches `(def-suite :my-project ...)`).
@@ -185,7 +196,7 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
 | `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
 | `load-system` after changing package exports shows noisy "also exports" warnings | SBCL package-variance; stale worker image | `pool-kill-worker` then `load-system` for a clean image. `load-system` now shows a hint when this happens |
-| FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. **`run-tests` cannot detect this defect**, so a green run is not evidence | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with `repl-eval` on `(length (fiveam:run :<name>))` — that is the number `test-op` will run, and it must match what `run-tests` reports |
+| FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. **`run-tests` cannot detect this defect**, so a green run is not evidence | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with the tests-not-checks count under "Working in a FiveAM project" — it must match `run-tests`' `passed + failed + pending` |
 | FiveAM project: the test count silently drops (e.g. 6 → 1) between two `run-tests` calls, still reporting `✓ PASS` | A sub-test file does not depend on the root-suite file, so its load order comes from the `.asd` `:depends-on` list. Wrong order on a *cold* worker is a loud `Unknown suite <NAME>`; on a *warm* one the sub-suite attaches to the previous run's root-suite object, is orphaned when the new root replaces it, and its tests just disappear | Give every sub-test `defpackage` an `(:import-from #:<name>/tests/main-test)` clause. That makes ASDF order the files regardless of the `:depends-on` order — verified by leaving the list deliberately reversed |
 | `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
 
