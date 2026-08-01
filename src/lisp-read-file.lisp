@@ -401,8 +401,13 @@ object across multiple positions in the form tree."
              (eq reason :s-expression-comment)
              (and (consp reason) (eq (car reason) :line-comment))))))
 
-(defun %comment-text (node text)
+(defun %node-source-text (node text)
+  "Return NODE's own span of TEXT, exactly as it appears in the file."
   (subseq text (cst-node-start node) (cst-node-end node)))
+
+(defun %comment-text (node text)
+  "Return the text of comment NODE as it appears in TEXT."
+  (%node-source-text node text))
 
 (defun %line-number-width (line-count)
   (max 1 (length (write-to-string line-count))))
@@ -415,8 +420,25 @@ object across multiple positions in the form tree."
             for idx from start-line do
               (format out "~VD: ~A~%" width idx line)))))
 
-(defun %format-lisp-form (node name-scanner content-scanner line-width)
-  "Return two values: display string and whether NODE was expanded."
+(defun %format-lisp-form (node source-text name-scanner content-scanner
+                          line-width)
+  "Return two values: display string and whether NODE was expanded.
+
+An expanded form is echoed from SOURCE-TEXT rather than re-printed from the
+CST, because three things depend on the text being what is on disk:
+
+  - lisp-patch-form matches old_text as raw, whitespace-sensitive text, so an
+    agent copying an expanded line out of here has to get the file's own
+    characters back or the patch reports \"not found\";
+  - the per-line numbers only line up with the file while the line breaks do,
+    and a re-print reflows them, silently shifting every number after the
+    reflow onto the wrong line;
+  - comments sitting inside a form survive, where re-printing dropped them.
+
+Collapsed forms are still printed, since a signature is a summary rather than
+a quotation, and so is the CONTENT-SCANNER's subject: matching runs against the
+printed form so that content_pattern keeps matching structure rather than
+whitespace."
   (let* ((form (cst-node-value node))
          (head (and (consp form) (car form)))
          (names (%definition-names form))
@@ -431,7 +453,7 @@ object across multiple positions in the form tree."
          (start-line (cst-node-start-line node))
          (display (cond
                     (expand?
-                     (%add-line-numbers (or full-string (%form->string form))
+                     (%add-line-numbers (%node-source-text node source-text)
                                         start-line line-width))
                     ((member head '(defun defmacro defvar defparameter defconstant defclass
                                      defstruct defgeneric defmethod))
@@ -500,7 +522,7 @@ object across multiple positions in the form tree."
                          (write-string comment out))
                        (setf pending-comments nil))
                      (multiple-value-bind (line expanded?)
-                         (%format-lisp-form node name-scanner
+                         (%format-lisp-form node text name-scanner
                                             content-scanner line-width)
                        (when expanded? (incf expanded))
                        (write-string (ensure-trailing-newline line) out))
@@ -704,6 +726,12 @@ Use 'name_pattern' to locate specific definitions (e.g., functions, classes)
 without reading the entire file.
 Use 'collapsed=true' (default) to see only signatures, or 'collapsed=false'
 for full source.
+A form expanded by name_pattern or content_pattern is echoed from the file
+verbatim, comments inside it included, and each 'NNN:' prefix is that line of
+the file -- so text copied out of an expanded form can be used directly as
+lisp-patch-form's 'old_text', which matches raw text exactly. Collapsed
+signature lines are printed rather than quoted, as is the form
+content_pattern matches against.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
 to guide pagination. Use the suggested offset value in a follow-up call."

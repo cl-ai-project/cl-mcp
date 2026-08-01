@@ -174,6 +174,15 @@ Inputs:
   `false`; defaults to `offset=0`, `limit=500` lines. When truncated, a
   `[Showing lines A-B of N. Use offset=B to read more.]` footer is appended.
 
+An **expanded** form is echoed from the file verbatim, so its text — including
+comments inside the form — is exactly what is on disk, and the `NNN:` prefix on
+each line is that line of the file. Text copied out of an expanded form can
+therefore be used directly as `lisp-patch-form`'s `old_text`, which matches raw,
+whitespace-sensitive text. **Collapsed** signature lines are printed rather than
+quoted (a signature is a summary, not a quotation), and so is the subject of
+`content_pattern`: the pattern matches the printed form, so it describes
+structure rather than the file's whitespace.
+
 Output fields:
 - `content`: formatted text (collapsed Lisp view, raw slice, or filtered text).
 - `path`: normalized native pathname.

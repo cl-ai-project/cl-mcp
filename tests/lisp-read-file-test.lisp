@@ -974,3 +974,87 @@ not reader output: no backquote encloses it, so it must print as a list.")
         (setf cl-mcp/src/lisp-read-file::*source-pprint-dispatch* saved
               cl-mcp/src/lisp-read-file::*signature-pprint-dispatch*
               saved-signature)))))
+
+(deftest lisp-read-file-expanded-form-echoes-the-file
+  ;; Expanded forms used to be re-printed from the CST rather than echoed, and
+  ;; two things broke because of it.  lisp-patch-form matches old_text as raw,
+  ;; whitespace-sensitive text, so an agent copying an expanded line straight
+  ;; out of this tool got "not found" whenever the printer had reflowed it.
+  ;; And each printed line still carried a number that read as a file line, so
+  ;; a form the printer reflowed shifted every number after it -- silently.
+  (with-temp-lisp-file
+   "tests/tmp/raw-echo-demo.lisp"
+   (format nil "~{~A~%~}"
+           (list "(defgeneric raw-echo-demo (x)"
+                 "  (:documentation \"Doc.\"))"
+                 ""
+                 "(defun raw-echo-caller (x)"
+                 "  ;; an inner comment"
+                 "  (restart-case (raw-echo-demo x)"
+                 "    (:give-up ()"
+                 "      :report \"stop\""
+                 "      nil)))"))
+   (lambda (path)
+     (let ((content (gethash "content"
+                             (lisp-read-file path
+                                             :name-pattern "^raw-echo-caller$"))))
+       (testing "the file's own text is echoed, not a re-print of it"
+         (ok (search "(:give-up ()" content)
+             "an empty lambda list stays () rather than becoming NIL")
+         (ok (null (search "(:give-up nil" content))))
+       (testing "a comment inside the form survives expansion"
+         (ok (search ";; an inner comment" content)))
+       (testing "each numbered line is that line of the file"
+         (ok (search "4: (defun raw-echo-caller (x)" content))
+         (ok (search "5:   ;; an inner comment" content))
+         (ok (search "7:     (:give-up ()" content))
+         (ok (search "9:       nil)))" content)))))))
+
+(deftest lisp-read-file-expanded-form-keeps-numbers-aligned-with-the-file
+  ;; The regression that motivated the previous test: a defgeneric the printer
+  ;; splits across three lines where the file uses two.  Every number after the
+  ;; split pointed one line too far -- here at a line the file leaves blank.
+  (with-temp-lisp-file
+   "tests/tmp/raw-echo-defgeneric.lisp"
+   (format nil "~{~A~%~}"
+           (list "(defgeneric spanning-demo (x)"
+                 "  (:documentation \"Doc.\"))"
+                 ""
+                 "(defun after-the-generic () 42)"))
+   (lambda (path)
+     (let ((content (gethash "content"
+                             (lisp-read-file path
+                                             :name-pattern "^spanning-demo$"))))
+       (testing "the two source lines stay two lines, numbered 1 and 2"
+         (ok (search "1: (defgeneric spanning-demo (x)" content))
+         (ok (search "2:   (:documentation \"Doc.\"))" content)))
+       (testing "nothing is reported on line 3, which the file leaves blank"
+         (ok (null (search "3:   (:documentation" content))))))))
+
+(deftest lisp-read-file-content-pattern-sees-backquote-reader-syntax
+  ;; Now that expanded forms are echoed rather than printed, the display no
+  ;; longer exercises the source printer -- the three tests above pass by
+  ;; construction. content_pattern still matches against the *printed* form,
+  ;; so that a pattern describes structure rather than the file's whitespace,
+  ;; and that is the path a quasiquote-printing regression would break: the
+  ;; body would render as eclector.reader internals and stop matching.
+  (with-temp-lisp-file
+   "tests/tmp/backquote-content-match.lisp"
+   (format nil "~{~A~%~}"
+           (list "(defmacro bq-content-demo (a b &body forms)"
+                 "  `(let ((,a ,b)) ,@forms))"
+                 ""
+                 "(defun bq-content-other () :unrelated)"))
+   (lambda (path)
+     (testing "a comma-at in a macro body is matchable through content_pattern"
+       (let ((content (gethash "content"
+                               (lisp-read-file path :content-pattern ",@forms"))))
+         (ok (search "bq-content-demo" content))
+         (ok (search ",@forms" content)
+             "the matched form is echoed with its reader syntax intact")))
+     (testing "a pattern naming eclector internals matches nothing"
+       (let ((content (gethash "content"
+                               (lisp-read-file path
+                                               :content-pattern "eclector"))))
+         (ok (null (search "`(let" content))
+             "no form expanded, so the macro body is not shown"))))))

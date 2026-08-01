@@ -19,10 +19,28 @@
 
 (in-package #:cl-mcp/src/frame-inspector)
 
+(defun %restart-name-string (restart)
+  "Return RESTART's name printed the way INVOKE-RESTART has to receive it.
+Printed readably and relative to *PACKAGE*, so a keyword keeps its colon and a
+symbol homed in another package keeps its qualifier.
+
+INVOKE-RESTART compares names with EQ, and cl-mcp's own prompts tell library
+authors to name restarts with keywords for that reason. Printing the name with
+~A rendered :RETURN-NIL and RETURN-NIL as the same text, so the field an agent
+reads to decide which of the two to type could not tell them apart. During
+repl-eval *PACKAGE* is the package the caller asked for, which makes the
+printed name exactly what they would have to write there."
+  (let ((name (restart-name restart)))
+    (if name
+        (prin1-to-string name)
+        "NIL")))
+
 (defun %collect-restarts ()
-  "Return list of available restarts with names and descriptions."
+  "Return list of available restarts with names and descriptions.
+Names are printed readably by %RESTART-NAME-STRING so that a keyword-named
+restart is distinguishable from a symbol-named one."
   (loop for restart in (compute-restarts)
-        collect (list :name (string (restart-name restart))
+        collect (list :name (%restart-name-string restart)
                       :description (or (ignore-errors
                                          (princ-to-string restart))
                                        ""))))
