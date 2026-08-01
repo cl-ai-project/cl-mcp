@@ -504,13 +504,29 @@ force しない** ので、src のほとんどはキャッシュ済み fasl が�
     (uiop:delete-directory-tree cache :validate (constantly t)))
   (ensure-directories-exist cache))
 
+(defparameter *third-party-dependencies*
+  '("alexandria" "cl-ppcre" "yason" "usocket" "bordeaux-threads"
+    "eclector" "hunchentoot")
+  "cl-mcp.asd の :depends-on から cl-mcp/main を除いたもの。
+
+これらは計装しない。third-party を計装しても数値には出ない
+（summary-rows が src/ で絞る）一方、実行時間とメモリだけが膨らむ。")
+
 (defun run-full (root cache)
   "src 全体を計装し、全テストスイートを回してサマリを書き出す。"
   (clear-coverage-cache cache)
-  ;; 1. 依存ライブラリを計装なしでロードしてキャッシュに置く。
-  ;;    third-party を計装しても数値には出ない（summary-rows が src/ で絞る）一方、
-  ;;    実行時間とメモリだけが膨らむ。
-  (asdf:load-system :cl-mcp)
+  ;; 1. 依存ライブラリだけを計装なしでロードする。
+  ;;
+  ;;    ここで :cl-mcp 自体をロードしてはならない。cl-mcp のファイルが一度
+  ;;    非計装でコンパイル・ロードされると、後の計装コンパイルの時点で
+  ;;    パッケージも defvar も既に存在してしまい、定義系トップレベルフォーム
+  ;;    （defpackage, in-package, declaim, defvar, defparameter, defclass,
+  ;;    define-condition, defstruct）の初回定義経路が二度と実行されない。
+  ;;    その結果それらが一律に未カバーとして数えられる。実測では約 323 フォーム、
+  ;;    全体の 1.35% にあたるが、小さいファイルでは支配的になり、
+  ;;    ロジックが 100% テストされている core.lisp が 33.3% と表示されていた。
+  (dolist (system *third-party-dependencies*)
+    (asdf:load-system system))
   ;; 2. 計装 ON にして cl-mcp 自身のシステムだけを強制再コンパイルする。
   (let ((systems (cl-mcp-source-systems root)))
     (proclaim '(optimize sb-cover:store-coverage-data))
