@@ -40,27 +40,32 @@
 | `src/worker/init-hook.lisp` | 202/223 (90.6%) | 親で実行 |
 
 `handlers.lisp`・`server.lisp`・`init-hook.lisp` は 0% どころか 75〜90% という高い値が
-出ている。理由は `tests/worker-test.lisp` の `with-handler-server` マクロ（237〜273行目）
+出ている。理由は `tests/worker-test.lisp` の `with-handler-server` マクロ（247〜273行目）
 にある。このマクロは `bordeaux-threads:make-thread` で `start-accept-loop` を**計測対象
 プロセスと同じ SBCL イメージ内のスレッド**として起動し、そこへ実 TCP ソケットで接続して
 JSON-RPC をやり取りする。`sb-ext:run-program` によるプロセス起動は一切行っていない。
-`tests/worker-init-hook-test.lisp` も同様に `handle-init-start`/`handle-init-status` を
-計測プロセス内で直接呼び出している。つまりこの 3 ファイルの本番での実行場所（ワーカー
-子プロセス内）と、計測パイプラインがそのロジックを実際に踏む場所（計測プロセス自身）が
-一致しており、sb-cover の「自プロセスしか見えない」制約に引っかからない。数値は正しく
-出ている。
+`tests/worker-init-hook-test.lisp`（125〜166行目）も同じ仕組みで検証している:
+`bt:make-thread` でサーバーを計測プロセス内のスレッドとして起動し、実 TCP ソケット越しに
+`worker/init-start`・`worker/init-status` という JSON-RPC メソッドを送って応答を確認して
+いる（`handle-init-start`/`handle-init-status` という関数を直接呼んでいるわけではない。
+その2関数名は `tests/` 配下のどこにも出現しない）。つまりこの 3 ファイルの本番での実行
+場所（ワーカー子プロセス内）と、計測パイプラインがそのロジックを実際に踏む場所（計測
+プロセス自身）が一致しており、sb-cover の「自プロセスしか見えない」制約に引っかからない。
+数値は正しく出ている。
 
-対照的に `src/worker/main.lisp` の `start`（191行目）と、それが呼ぶ `%try-start-swank`
+対照的に `src/worker/main.lisp` の `start`（175行目）と、それが呼ぶ `%try-start-swank`
 （41行目）・`%install-signal-handlers`（115行目）・`%start-parent-watchdog`（128行目）は、
-`tests/worker-test.lisp` 643行目のテスト自身のコメントが明言する通り
+`tests/worker-test.lisp` 631行目の `worker-start-creates-server-and-handshakes` テスト
+内、635〜636行目のコメントが明言する通り
 「We cannot call start directly because it blocks in start-accept-loop」——実際に spawn
 された子プロセスの中でしか実行できない。これは `tests/pool-startup-latency-test.lisp` や
 `tests/pool-test.lisp` が `spawn-available-p` を確認した上で本物の SBCL 子プロセスを
 起動して確認している e2e パスであり、そこで実行される `start` 以下のコードは計測プロセス
 から見て完全に別プロセスなので sb-cover には映らない。`main.lisp` の 46/264 (17.4%) の
-内訳は、`%output-handshake`・`%setup-project-root`・`%get-pid` のような**プロセス起動を
-伴わない純粋関数**だけが `tests/worker-test.lisp`（591, 610, 623, 684, 883行目）で親
-プロセス内から直接ユニットテストされている分であり、`start` 以下の本体（プロセス生存確認・
+内訳は、`%output-handshake`・`%setup-project-root` のような**プロセス起動を伴わない
+純粋関数**が `tests/worker-test.lisp`（591, 610, 623, 684, 883行目）で親プロセス内から
+直接ユニットテストされている分（`%get-pid` は単体では直接呼ばれないが、`%output-handshake`
+が内部で呼ぶため間接的にカバーされる）であり、`start` 以下の本体（プロセス生存確認・
 シグナルハンドラ・Swank 起動・接続受理ループ）は計測不能な設計上のワーカー専用コードと
 して残る。0% ではなく 17.4% だからといって「一部しかテストされていない」と読むのは誤り
 ――純粋関数の部分は完全にテストされており、低い % は「ワーカー専用の本体コードが計測に
@@ -213,7 +218,7 @@ sb-cover は「フォームが存在するだけ」では ok にせず「実行�
 | src/validate.lisp | 親で実行 | 親プロセス内で動く |
 | src/worker-client.lisp | 親で実行 | 親プロセス内で動く。ワーカー子プロセスを spawn・監視する側のコードであり、これ自体は親プロセスの責務 |
 | src/worker/handlers.lisp | 親で実行 | 本番はワーカー子プロセス内で動くディスパッチ層だが、tests/worker-test.lisp の with-handler-server マクロが実プロセスを spawn せず bordeaux-threads のスレッドとして計測プロセス内で起動し実TCP接続で検証しているため、数値(301/377, 79.8%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
-| src/worker/init-hook.lisp | 親で実行 | 本番はワーカー内の非同期初期化ハンドラだが、tests/worker-init-hook-test.lisp が handle-init-start・handle-init-status を計測プロセス内から直接呼び出して検証しており、数値(202/223, 90.6%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
+| src/worker/init-hook.lisp | 親で実行 | 本番はワーカー内の非同期初期化ハンドラだが、tests/worker-init-hook-test.lisp:125-166 が bt:make-thread でサーバーを計測プロセス内のスレッドとして起動し、実TCPソケット越しに worker/init-start・worker/init-status という JSON-RPC メソッドを送って検証しており(handlers.lisp/server.lispと同じ機序で、関数を直接呼んでいるわけではない)、数値(202/223, 90.6%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
 | src/worker/main.lisp | ワーカー専用 | start・%try-start-swank・%install-signal-handlers・%start-parent-watchdogは実際にspawnされたワーカー子プロセス内でのみ実行される。tests/worker-test.lisp自身が「startを直接呼べない、start-accept-loop内でブロックするため」と明記しており、pool-startup-latency-test.lisp等が本物のSBCL子プロセスを起動して検証している。%output-handshake等の純粋関数のみ親プロセス内で直接テストされ、それが46/264(17.4%)の内訳。詳細は「src/worker/ と *-core の判定根拠」参照 |
 | src/worker/server.lisp | 親で実行 | 本番はワーカー子プロセス内で動くTCPサーバーだが、with-handler-serverハーネス(bordeaux-threadsによるスレッド、実プロセスspawnなし)で計測プロセス内から直接駆動されており、数値(263/349, 75.4%)は正しく出る。詳細は「src/worker/ と *-core の判定根拠」参照 |
 
