@@ -81,7 +81,21 @@
     ;; read, so depth must keep climbing across the chain instead.
     (ok (= 4 (getf (scan-parens "#+t#+t#+t(and)") :max-depth))))
   (testing "#- behaves the same as #+"
-    (ok (= 1 (getf (scan-parens "#-t x") :max-depth)))))
+    (ok (= 1 (getf (scan-parens "#-t x") :max-depth))))
+  (testing "a multi-character feature name is one token, not one resolve per character"
+    ;; Regression for the Critical: #+t (a single-character feature name)
+    ;; happened to still work even when %SCAN-RESOLVE-PENDING-PREFIXES fired
+    ;; once per character instead of once per token, because there was only
+    ;; one character to fire on. #+sbcl -- the ordinary, ubiquitous spelling
+    ;; -- has three, and each one past the first used to pop or no-op the
+    ;; marker again before the guarded form was ever reached.
+    (ok (= 1 (getf (scan-parens "#+sbcl x") :max-depth))))
+  (testing "chained #+ blocks with multi-character feature names accumulate, not collapse to 1"
+    (let* ((prefix (with-output-to-string (s)
+                     (dotimes (i 5)
+                       (write-string "#+sbcl " s))))
+           (source (concatenate 'string prefix ":x")))
+      (ok (= 5 (getf (scan-parens source) :max-depth))))))
 
 (deftest scan-parens-counts-sharp-equals-labels
   (testing "#n= adds one level, like quote"
@@ -100,4 +114,11 @@
 (deftest max-nesting-depth-is-far-above-real-code
   (testing "the limit leaves ordinary source far below it"
     ;; src/proxy.lisp と src/pool.lisp が実測 20 で、このリポジトリの最大。
-    (ok (> *max-nesting-depth* 200))))
+    (ok (> *max-nesting-depth* 200)))
+  (testing "the limit stays far below the measured CST break floor"
+    ;; Nothing above catches *MAX-NESTING-DEPTH* being raised toward or past
+    ;; the break floor, which would restore the original crash. Task 1
+    ;; (.superpowers/sdd/2026-08-02-deep-nesting-control-stack-exhaustion/
+    ;; task-1-report.md) measured the Eclector CST path surviving depth 1750
+    ;; and dying at 1875; assert against the low end of that measured range.
+    (ok (< *max-nesting-depth* 1750))))

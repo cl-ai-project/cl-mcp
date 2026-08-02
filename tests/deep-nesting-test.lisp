@@ -105,6 +105,29 @@
       (ok (string= "too-deep" (gethash "kind" res))
           "it is a depth rejection, matching scan-parens's :max-depth"))))
 
+(deftest check-parens-sharp-plus-ordinary-spelling-chain-does-not-let-feature-conditionals-bypass-the-guard
+  (testing "a long chain of #+sbcl (ordinary multi-character feature name) blocks is caught as too-deep"
+    ;; Reproduction of the Critical this branch's own review found: #+(and)
+    ;; above uses a bracketed feature-expression, which goes through the
+    ;; open/close-bracket branches of %SCAN-HANDLE-NORMAL and was never at
+    ;; risk. #+sbcl -- the ordinary, ubiquitous spelling, with no brackets
+    ;; at all -- resolved its pending marker once per character of "sbcl"
+    ;; instead of once per token, popping the marker before the guarded
+    ;; form was even reached. scan-parens reported max-depth 1 for this
+    ;; exact shape no matter how long the chain, so lisp-check-parens
+    ;; scanned it clean and a real (READ) on it exhausts the control stack
+    ;; -- silently reopening the audit's Critical on the tool that exists
+    ;; to catch it.
+    (let* ((prefix (with-output-to-string (s)
+                     (dotimes (i 20000)
+                       (write-string "#+sbcl " s))))
+           (source (concatenate 'string prefix ":x"))
+           (res (lisp-check-parens :code source)))
+      (ok (null (gethash "ok" res))
+          "the deep #+sbcl chain must be rejected, not read")
+      (ok (string= "too-deep" (gethash "kind" res))
+          "it is a depth rejection, matching scan-parens's :max-depth"))))
+
 (deftest cst-rejects-depth-over-the-limit
   (testing "the CST path signals instead of exhausting the stack"
     (ok (handler-case

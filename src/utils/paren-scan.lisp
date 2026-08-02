@@ -41,9 +41,11 @@
 枯渇は捕捉に頼れない（src/macroexpand-core.lisp の *max-walk-expansions* に同じ実測が
 記録されている）ので、届かせないことだけが効く。
 
-この値は Task 1 で実測した破綻深度（Eclector CST 経路で深度 1750 は生存、1875 で
-制御スタック枯渇により死亡と確認、境界はこの間のどこか）のはるか下、このリポジトリの
-実コードの最大ネスト深さ 20（src/proxy.lisp、src/pool.lisp）のはるか上に置いてある。
+この値は実測した破綻深度（Eclector CST 経路で深度 1750 は生存、1875 で制御スタック
+枯渇により死亡と確認、境界はこの間のどこか。実測手順と結果は
+.superpowers/sdd/2026-08-02-deep-nesting-control-stack-exhaustion/task-1-report.md
+を参照）のはるか下、このリポジトリの実コードの最大ネスト深さ 20（src/proxy.lisp、
+src/pool.lisp）のはるか上に置いてある。
 
 この上限を検査する SCAN-PARENS（src/utils/paren-scan.lisp）は安価な一次防御であり、
 網羅的な防御ではない。3 回の監査を経て、標準リーダーを再帰させ、かつ対応する閉じ文字を
@@ -100,7 +102,8 @@
   (block-depth 0 :type fixnum)
   (block-open-pos 0 :type fixnum)
   (depth 0 :type fixnum)
-  (max-depth 0 :type fixnum))
+  (max-depth 0 :type fixnum)
+  (prev-constituent nil :type boolean))
 
 (defun %scan-handle-line-comment (state ch)
   (when (char= ch #\Newline)
@@ -125,10 +128,10 @@
   (member ch '(#\Space #\Tab #\Newline #\Return #\Linefeed #\Page) :test #'char=))
 
 (defun %scan-push-prefix (state)
-  "Record one level of a prefix reader macro (', `, ,, ,@, or #') on
-STATE's stack. These have no closing delimiter of their own -- the depth
-they add is unwound by %SCAN-RESOLVE-PENDING-PREFIXES once the form they
-prefix has been read."
+  "Record one level of a prefix reader macro (', `, ,, ,@, #', or a #n=
+label) on STATE's stack. These have no closing delimiter of their own --
+the depth they add is unwound by %SCAN-RESOLVE-PENDING-PREFIXES once the
+form they prefix has been read."
   (push :prefix (scan-state-stack state))
   (incf (scan-state-depth state))
   (setf (scan-state-max-depth state)
@@ -196,114 +199,136 @@ error there instead of scanning cleanly."
 (defun %scan-handle-normal (state ch next idx base-offset text)
   "Handle a character in normal (non-string, non-comment) context.
 Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
-indicating how many additional characters past CH were consumed."
-  (cond
-   ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
-   ((char= ch #\")
-    (%scan-resolve-pending-prefixes state)
-    (setf (scan-state-in-string state) t)
-    (values nil nil))
-   ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
-   ;; delimiter characters like #\( are not treated as open-parens.
-   ((and (char= ch #\#) next (char= next #\\))
-    (%scan-resolve-pending-prefixes state)
-    (let ((skip 1))  ; at minimum skip the backslash
-      (let ((char-pos (+ idx 2)))
-        (when (< char-pos (length text))
-          (incf skip)  ; skip the character after backslash
-          ;; Named character literals: consume remaining alpha chars
-          (when (alpha-char-p (char text char-pos))
-            (loop for k from (1+ char-pos) below (length text)
-                  while (alpha-char-p (char text k))
-                  do (incf skip)))))
-      (values nil skip)))
-   ((and (char= ch #\#) next (char= next #\|))
-    (when (zerop (scan-state-block-depth state))
-      (setf (scan-state-block-open-pos state) (+ base-offset idx)))
-    (incf (scan-state-block-depth state))
-    (values nil 1))
-   ;; #' is the FUNCTION reader macro (CLHS 2.4.6): like ', it makes the
-   ;; reader recurse once for its operand and has no closing delimiter.
-   ((and (char= ch #\#) next (char= next #\'))
-    (%scan-push-prefix state)
-    (values nil 1))
-   ;; #+/#- (CLHS 1.5.2, 2.4.8.16/17): a feature conditional issues TWO
-   ;; independent recursive reads -- first the feature-expression, then
-   ;; (regardless of the test's outcome, since even a failing test must
-   ;; skip over the guarded form) the guarded form itself. The first read
-   ;; is tracked with a distinct marker so %SCAN-RESOLVE-PENDING-PREFIXES
-   ;; can convert it into an ordinary pending prefix -- rather than
-   ;; popping it -- once the feature-expression's target is reached: that
-   ;; keeps depth from dropping to baseline between the two reads, so a
-   ;; #+/#- chained into the guarded-form position (its own #+/#- as the
-   ;; "form") still accumulates depth instead of resetting every block.
-   ((and (char= ch #\#) next (or (char= next #\+) (char= next #\-)))
-    (%scan-push-feature-expr state)
-    (values nil 1))
-   ;; #n=object (CLHS 2.4.8.14) reads OBJECT via one recursive READ, the
-   ;; same shape as quote -- and, like quote, #n= can chain (#1=#2=...=x
-   ;; is valid) to accumulate real recursion depth. #n# (CLHS 2.4.8.15),
-   ;; by contrast, is a leaf back-reference to an already-read object: it
-   ;; consumes only its own digits and has no operand to recurse on, so it
-   ;; needs no marker and is left to fall through to the default case
-   ;; below unchanged.
-   ((and (char= ch #\#) next (digit-char-p next))
-    (let ((k (1+ idx)))
-      (loop while (and (< k (length text)) (digit-char-p (char text k)))
-            do (incf k))
-      (if (and (< k (length text)) (char= (char text k) #\=))
-          (progn
-            (%scan-push-prefix state)
-            (values nil (- k idx)))
-          (values nil nil))))
-   ;; Quote and quasiquote (CLHS 2.4.5, 2.4.6): single-character prefix
-   ;; macros.  Both make the standard reader call itself for the next
-   ;; form; neither has a closing delimiter, so the depth they add is
-   ;; unwound by %SCAN-RESOLVE-PENDING-PREFIXES once that form (or, for a
-   ;; list, its closing delimiter) is reached.
-   ((or (char= ch #\') (char= ch #\`))
-    (%scan-push-prefix state)
-    (values nil nil))
-   ;; Unquote and unquote-splicing (CLHS 2.4.6): ",@" is a single reader
-   ;; construct, so the optional "@" is consumed without adding a second
-   ;; level.
-   ((char= ch #\,)
-    (%scan-push-prefix state)
-    (if (and next (char= next #\@))
-        (values nil 1)
-        (values nil nil)))
-   ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
-    (setf (scan-state-stack state)
-            (%scan-parens-push-open (scan-state-stack state)
-             (scan-state-line state) (scan-state-col state) base-offset ch
-             idx))
-    (incf (scan-state-depth state))
-    (setf (scan-state-max-depth state)
-            (max (scan-state-max-depth state) (scan-state-depth state)))
-    (values nil nil))
-   ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
-    ;; A lone marker directly before a closer (e.g. "')" or a malformed
-    ;; "#+)") has no operand of its own; drain it first so
-    ;; %SCAN-PARENS-POP-OPEN never sees a marker where it expects a
-    ;; bracket frame.
-    (%scan-drain-leading-markers state)
-    (multiple-value-bind (new-stack err)
-        (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
-         (scan-state-col state) base-offset ch idx)
-      (setf (scan-state-stack state) new-stack)
-      (unless err
-        (decf (scan-state-depth state))
-        ;; Closing this bracket also resolves any prefixes that preceded
-        ;; it (e.g. the quote in "'(a)", or the feature-expression of a
-        ;; "#+(a b) form" whose expression was itself the list just
-        ;; closed): their recursive reads return together with the
-        ;; list's own.
-        (%scan-resolve-pending-prefixes state))
-      (values err nil)))
-   (t
-    (unless (%scan-whitespace-char-p ch)
-      (%scan-resolve-pending-prefixes state))
-    (values nil nil))))
+indicating how many additional characters past CH were consumed.
+
+Ordinary constituent characters (the final clause below) can span several
+consecutive calls -- one per character of a multi-character token such as
+\"ab\" or \"sbcl\". %SCAN-RESOLVE-PENDING-PREFIXES must fire once per
+TOKEN, at the token's first character, not once per character: firing
+again on a later character of the same token would see whatever marker
+that same token's first character already converted or popped, and
+incorrectly convert or pop it a second time before the token -- and
+whatever follows it -- has actually been read. STATE's PREV-CONSTITUENT
+tracks whether the previous character was itself an unresolved ordinary
+constituent; only a character whose predecessor was NOT such a
+constituent is a token's first character. Every other branch below
+handles a self-contained reader-macro character that can never be part of
+such a run, so this function unconditionally clears the flag on entry and
+only the final clause may set it again."
+  (let ((was-constituent (scan-state-prev-constituent state)))
+    (setf (scan-state-prev-constituent state) nil)
+    (cond
+     ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
+     ((char= ch #\")
+      (%scan-resolve-pending-prefixes state)
+      (setf (scan-state-in-string state) t)
+      (values nil nil))
+     ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
+     ;; delimiter characters like #\( are not treated as open-parens.
+     ((and (char= ch #\#) next (char= next #\\))
+      (%scan-resolve-pending-prefixes state)
+      (let ((skip 1))  ; at minimum skip the backslash
+        (let ((char-pos (+ idx 2)))
+          (when (< char-pos (length text))
+            (incf skip)  ; skip the character after backslash
+            ;; Named character literals: consume remaining alpha chars
+            (when (alpha-char-p (char text char-pos))
+              (loop for k from (1+ char-pos) below (length text)
+                    while (alpha-char-p (char text k))
+                    do (incf skip)))))
+        (values nil skip)))
+     ((and (char= ch #\#) next (char= next #\|))
+      (when (zerop (scan-state-block-depth state))
+        (setf (scan-state-block-open-pos state) (+ base-offset idx)))
+      (incf (scan-state-block-depth state))
+      (values nil 1))
+     ;; #' is the FUNCTION reader macro (CLHS 2.4.6): like ', it makes the
+     ;; reader recurse once for its operand and has no closing delimiter.
+     ((and (char= ch #\#) next (char= next #\'))
+      (%scan-push-prefix state)
+      (values nil 1))
+     ;; #+/#- (CLHS 1.5.2, 2.4.8.16/17): a feature conditional issues TWO
+     ;; independent recursive reads -- first the feature-expression, then
+     ;; (regardless of the test's outcome, since even a failing test must
+     ;; skip over the guarded form) the guarded form itself. The first read
+     ;; is tracked with a distinct marker so %SCAN-RESOLVE-PENDING-PREFIXES
+     ;; can convert it into an ordinary pending prefix -- rather than
+     ;; popping it -- once the feature-expression's target is reached: that
+     ;; keeps depth from dropping to baseline between the two reads, so a
+     ;; #+/#- chained into the guarded-form position (its own #+/#- as the
+     ;; "form") still accumulates depth instead of resetting every block.
+     ((and (char= ch #\#) next (or (char= next #\+) (char= next #\-)))
+      (%scan-push-feature-expr state)
+      (values nil 1))
+     ;; #n=object (CLHS 2.4.8.14) reads OBJECT via one recursive READ, the
+     ;; same shape as quote -- and, like quote, #n= can chain (#1=#2=...=x
+     ;; is valid) to accumulate real recursion depth. #n# (CLHS 2.4.8.15),
+     ;; by contrast, is a leaf back-reference to an already-read object: it
+     ;; consumes only its own digits and has no operand to recurse on, so it
+     ;; needs no marker and is left to fall through to the default case
+     ;; below unchanged.
+     ((and (char= ch #\#) next (digit-char-p next))
+      (let ((k (1+ idx)))
+        (loop while (and (< k (length text)) (digit-char-p (char text k)))
+              do (incf k))
+        (if (and (< k (length text)) (char= (char text k) #\=))
+            (progn
+              (%scan-push-prefix state)
+              (values nil (- k idx)))
+            (values nil nil))))
+     ;; Quote and quasiquote (CLHS 2.4.5, 2.4.6): single-character prefix
+     ;; macros.  Both make the standard reader call itself for the next
+     ;; form; neither has a closing delimiter, so the depth they add is
+     ;; unwound by %SCAN-RESOLVE-PENDING-PREFIXES once that form (or, for a
+     ;; list, its closing delimiter) is reached.
+     ((or (char= ch #\') (char= ch #\`))
+      (%scan-push-prefix state)
+      (values nil nil))
+     ;; Unquote and unquote-splicing (CLHS 2.4.6): ",@" is a single reader
+     ;; construct, so the optional "@" is consumed without adding a second
+     ;; level.
+     ((char= ch #\,)
+      (%scan-push-prefix state)
+      (if (and next (char= next #\@))
+          (values nil 1)
+          (values nil nil)))
+     ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
+      (setf (scan-state-stack state)
+              (%scan-parens-push-open (scan-state-stack state)
+               (scan-state-line state) (scan-state-col state) base-offset ch
+               idx))
+      (incf (scan-state-depth state))
+      (setf (scan-state-max-depth state)
+              (max (scan-state-max-depth state) (scan-state-depth state)))
+      (values nil nil))
+     ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
+      ;; A lone marker directly before a closer (e.g. "')" or a malformed
+      ;; "#+)") has no operand of its own; drain it first so
+      ;; %SCAN-PARENS-POP-OPEN never sees a marker where it expects a
+      ;; bracket frame.
+      (%scan-drain-leading-markers state)
+      (multiple-value-bind (new-stack err)
+          (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
+           (scan-state-col state) base-offset ch idx)
+        (setf (scan-state-stack state) new-stack)
+        (unless err
+          (decf (scan-state-depth state))
+          ;; Closing this bracket also resolves any prefixes that preceded
+          ;; it (e.g. the quote in "'(a)", or the feature-expression of a
+          ;; "#+(a b) form" whose expression was itself the list just
+          ;; closed): their recursive reads return together with the
+          ;; list's own.
+          (%scan-resolve-pending-prefixes state))
+        (values err nil)))
+     (t
+      (cond
+        ((%scan-whitespace-char-p ch))
+        (was-constituent
+         (setf (scan-state-prev-constituent state) t))
+        (t
+         (%scan-resolve-pending-prefixes state)
+         (setf (scan-state-prev-constituent state) t)))
+      (values nil nil)))))
 
 (defun %scan-advance-position (state ch)
   (cond
