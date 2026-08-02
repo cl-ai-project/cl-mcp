@@ -160,43 +160,50 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                                exhaustion cannot be caught, so they are rejected before ~
                                the reader sees them."
                           (getf scan :max-depth 0) *max-nesting-depth*))
-          (return-from lisp-check-parens h))))
-    (let ((paren-result (scan-parens text :base-offset base-off))
-          (reader-info  (%try-reader-check text base-off)))
+          (return-from lisp-check-parens h)))
       (destructuring-bind (&key ok kind expected found
                                 (offset base-off) (line 1) (column 1)
                                 &allow-other-keys)
-          paren-result
-        (let ((h (make-hash-table :test #'equal)))
-          (cond
-            ((not ok)
-             ;; Paren error takes priority
-             (setf (gethash "ok" h) nil
-                   (gethash "kind" h) kind
-                   (gethash "expected" h) expected
-                   (gethash "found" h) found)
-             (let ((pos (make-hash-table :test #'equal)))
-               (setf (gethash "offset" pos) offset
-                     (gethash "line" pos) line
-                     (gethash "column" pos) column)
-               (setf (gethash "position" h) pos))
-             (%maybe-add-lisp-edit-guidance h kind))
-            (reader-info
-             ;; Parens OK but reader error detected
-             (setf (gethash "ok" h) nil
-                   (gethash "kind" h) (getf reader-info :kind)
-                   (gethash "message" h) (getf reader-info :message))
-             (let ((pos (make-hash-table :test #'equal))
-                   (r-line (getf reader-info :line))
-                   (r-col  (getf reader-info :column)))
-               (setf (gethash "offset" pos) (getf reader-info :offset))
-               (when r-line   (setf (gethash "line" pos) r-line))
-               (when r-col    (setf (gethash "column" pos) r-col))
-               (setf (gethash "position" h) pos)))
-            (t
-             ;; Both checks passed
-             (setf (gethash "ok" h) t)))
-          h)))))
+          scan
+        ;; SCAN-PARENS stops at its first delimiter error, so :MAX-DEPTH and
+        ;; the rest of SCAN describe only the text up to that point -- text
+        ;; past a shallow mismatch is unmeasured and may still be arbitrarily
+        ;; deeply nested.  A mismatched delimiter such as `]' or `}' is an
+        ;; ordinary constituent character to the standard reader, not an
+        ;; error, so it would sail straight through into that unmeasured
+        ;; nesting.  Therefore the reader must never run when the scan itself
+        ;; already found an error: only run it when the scan says OK.
+        (let ((reader-info (and ok (%try-reader-check text base-off))))
+          (let ((h (make-hash-table :test #'equal)))
+            (cond
+              ((not ok)
+               ;; Paren error takes priority
+               (setf (gethash "ok" h) nil
+                     (gethash "kind" h) kind
+                     (gethash "expected" h) expected
+                     (gethash "found" h) found)
+               (let ((pos (make-hash-table :test #'equal)))
+                 (setf (gethash "offset" pos) offset
+                       (gethash "line" pos) line
+                       (gethash "column" pos) column)
+                 (setf (gethash "position" h) pos))
+               (%maybe-add-lisp-edit-guidance h kind))
+              (reader-info
+               ;; Parens OK but reader error detected
+               (setf (gethash "ok" h) nil
+                     (gethash "kind" h) (getf reader-info :kind)
+                     (gethash "message" h) (getf reader-info :message))
+               (let ((pos (make-hash-table :test #'equal))
+                     (r-line (getf reader-info :line))
+                     (r-col  (getf reader-info :column)))
+                 (setf (gethash "offset" pos) (getf reader-info :offset))
+                 (when r-line   (setf (gethash "line" pos) r-line))
+                 (when r-col    (setf (gethash "column" pos) r-col))
+                 (setf (gethash "position" h) pos)))
+              (t
+               ;; Both checks passed
+               (setf (gethash "ok" h) t)))
+            h))))))
 
 (define-tool "lisp-check-parens"
   :description "Check balanced parentheses/brackets in a file slice or provided code.
@@ -246,18 +253,29 @@ exempt from reader checking to avoid false positives."
                            (pos      (gethash "position" check-result))
                            (line     (and pos (gethash "line" pos)))
                            (col      (and pos (gethash "column" pos))))
-                      (if (string= kind "reader-error")
-                          (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
-                                  line col (or message "unknown"))
-                          (let ((ef (if (and expected found)
-                                        (format nil " (expected ~A, found ~A)" expected found)
-                                        "")))
-                            (format nil
-                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
-                                    kind ef line col
-                                    (if next-tool
-                                        " Use lisp-edit-form for existing Lisp files."
-                                        ""))))))))
+                      (cond
+                        ((string= kind "reader-error")
+                         (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
+                                 line col (or message "unknown")))
+                        ((string= kind "too-deep")
+                         ;; Parens ARE balanced here; the rejection is about
+                         ;; depth, not balance, so MESSAGE (already computed
+                         ;; above) carries the caller-visible explanation
+                         ;; instead of the generic "Unbalanced parentheses"
+                         ;; wording below.
+                         (or message
+                             (format nil "Nesting too deep: found ~A, limit ~A"
+                                     found expected)))
+                        (t
+                         (let ((ef (if (and expected found)
+                                       (format nil " (expected ~A, found ~A)" expected found)
+                                       "")))
+                           (format nil
+                                   "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
+                                   kind ef line col
+                                   (if next-tool
+                                       " Use lisp-edit-form for existing Lisp files."
+                                       "")))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))
                  (found    (gethash "found" check-result))
