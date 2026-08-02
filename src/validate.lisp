@@ -10,7 +10,8 @@
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paren-scan
-                #:scan-parens)
+                #:scan-parens
+                #:*max-nesting-depth*)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -141,6 +142,25 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                 (gethash "column" pos) 1)
           (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
+    (let ((scan (scan-parens text :base-offset base-off)))
+      (when (> (getf scan :max-depth 0) *max-nesting-depth*)
+        (let ((h (make-hash-table :test #'equal)))
+          (setf (gethash "ok" h) nil
+                (gethash "kind" h) "too-deep"
+                (gethash "expected" h) (format nil "~D" *max-nesting-depth*)
+                (gethash "found" h) (format nil "~D" (getf scan :max-depth 0)))
+          (let ((pos (make-hash-table :test #'equal)))
+            (setf (gethash "offset" pos) base-off
+                  (gethash "line" pos) 1
+                  (gethash "column" pos) 1)
+            (setf (gethash "position" h) pos))
+          (setf (gethash "message" h)
+                  (format nil "Nesting is ~D levels deep, over the limit of ~D. ~
+                               Deeply nested forms exhaust the control stack, and that ~
+                               exhaustion cannot be caught, so they are rejected before ~
+                               the reader sees them."
+                          (getf scan :max-depth 0) *max-nesting-depth*))
+          (return-from lisp-check-parens h))))
     (let ((paren-result (scan-parens text :base-offset base-off))
           (reader-info  (%try-reader-check text base-off)))
       (destructuring-bind (&key ok kind expected found

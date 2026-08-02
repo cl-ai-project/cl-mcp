@@ -54,7 +54,8 @@
   (:import-from #:cl-mcp/tests/pool-kill-worker-test)
   (:import-from #:cl-mcp/tests/pool-init-config-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test)
-  (:import-from #:cl-mcp/tests/lisp-macroexpand-test))
+  (:import-from #:cl-mcp/tests/lisp-macroexpand-test)
+  (:import-from #:cl-mcp/tests/deep-nesting-test))
 
 (in-package #:cl-mcp/tests)
 
