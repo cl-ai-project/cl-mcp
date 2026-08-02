@@ -8,7 +8,10 @@
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
   (:import-from #:cl-mcp/src/utils/paren-scan
-                #:*max-nesting-depth*))
+                #:*max-nesting-depth*)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:nesting-too-deep))
 
 (in-package #:cl-mcp/tests/deep-nesting-test)
 
@@ -99,3 +102,18 @@
           "the deep #+ chain must be rejected, not read")
       (ok (string= "too-deep" (gethash "kind" res))
           "it is a depth rejection, matching scan-parens's :max-depth"))))
+
+(deftest cst-rejects-depth-over-the-limit
+  (testing "the CST path signals instead of exhausting the stack"
+    (ok (handler-case
+            (progn (parse-top-level-forms (nested-source 20000)) nil)
+          (nesting-too-deep () t))
+        "depth 20000 must signal nesting-too-deep")))
+
+(deftest cst-accepts-real-source
+  (testing "the deepest file in this repo still parses"
+    ;; src/proxy.lisp は実測でネスト深さ 20、このリポジトリの最大。
+    (let ((text (uiop:read-file-string
+                 (asdf:system-relative-pathname :cl-mcp "src/proxy.lisp"))))
+      (ok (parse-top-level-forms text)
+          "ordinary source must be unaffected by the depth limit"))))

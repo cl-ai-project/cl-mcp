@@ -11,6 +11,9 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/utils/paren-scan
+                #:scan-parens
+                #:*max-nesting-depth*)
   (:export #:cst-node
            #:cst-node-kind
            #:cst-node-value
@@ -20,6 +23,8 @@
            #:cst-node-start-line
            #:cst-node-end-line
            #:parse-top-level-forms
+           #:nesting-too-deep
+           #:nesting-too-deep-depth
            ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
            ;; the same question this file answers while parsing: which
            ;; IN-PACKAGE is in effect at a given point in the file.
@@ -253,12 +258,28 @@ specify the 'readtable' parameter with the named-readtable designator ~
 (e.g., readtable: \"interpol-syntax\")."
                      e)))))))))
 
+(define-condition nesting-too-deep (error)
+  ((depth :initarg :depth :reader nesting-too-deep-depth)
+   (limit :initarg :limit :reader nesting-too-deep-limit))
+  (:report
+   (lambda (condition stream)
+     (format stream
+             "Nesting is ~D levels deep, over the limit of ~D. ~
+              Deeply nested forms exhaust the control stack while being read, ~
+              and that exhaustion cannot be caught, so the form is rejected ~
+              before the reader sees it."
+             (nesting-too-deep-depth condition)
+             (nesting-too-deep-limit condition)))))
+
 (defun parse-top-level-forms (text &key readtable source-path initial-package)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
 stub packages that are cleaned up after parsing.
 When an IN-PACKAGE form is encountered, *PACKAGE* is updated so that
 package-local-nicknames activate for subsequent forms."
+  (let ((depth (getf (scan-parens text) :max-depth 0)))
+    (when (> depth *max-nesting-depth*)
+      (error 'nesting-too-deep :depth depth :limit *max-nesting-depth*)))
   (let ((*line-table* (%build-line-table text))
         (*package* *package*))
     (cond
