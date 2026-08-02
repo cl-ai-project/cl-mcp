@@ -22,16 +22,26 @@
 それは応答しない接続とスレッドリークを意味するので、代わりにここまで巻き戻す。
 
 **脱出が要である。** *invoke-debugger-hook* に束縛した関数が非局所脱出せずに
-戻ると、戻った先で結局デバッガに入る。CATCH がその脱出先である。"
+戻ると、戻った先で結局デバッガに入る。CATCH がその脱出先である。
+
+**フック本体で新たに条件が発生しても、脱出は無条件でなければならない。** SBCL の
+RUN-HOOK はフック関数を呼ぶ間 *invoke-debugger-hook* 自身を NIL に再束縛する
+（フックがフック自身を無限に再入させないための仕組み）。したがってフック本体
+（ログ出力など）の中で条件が飛ぶと、この関数へは戻ってこず、*invoke-debugger-hook*
+が NIL のまま本物のデバッガに落ち、スレッドはここが防ぐはずだった停止と同じ形で
+永久に止まる。そのためフック本体全体を UNWIND-PROTECT で覆い、THROW を後始末節に
+置く: 本体側で何が起きても、THROW による脱出だけは必ず実行される。"
   (let ((tag (gensym "SERVING")))
     (catch tag
       (let ((sb-ext:*invoke-debugger-hook*
               (lambda (condition hook)
                 (declare (ignore hook))
-                (log-event :error "serving.debugger-suppressed"
-                           "label" label
-                           "condition_type" (string (type-of condition))
-                           "message" (ignore-errors
-                                      (princ-to-string condition)))
-                (throw tag :debugger-suppressed))))
+                (unwind-protect
+                     (ignore-errors
+                      (log-event :error "serving.debugger-suppressed"
+                                 "label" label
+                                 "condition_type" (string (type-of condition))
+                                 "message" (ignore-errors
+                                            (princ-to-string condition))))
+                  (throw tag :debugger-suppressed)))))
         (funcall thunk)))))

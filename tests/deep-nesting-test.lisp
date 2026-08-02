@@ -13,7 +13,9 @@
                 #:parse-top-level-forms
                 #:nesting-too-deep)
   (:import-from #:cl-mcp/src/tcp
-                #:serve-tcp))
+                #:serve-tcp)
+  (:import-from #:cl-mcp/src/utils/serving
+                #:call-without-debugger))
 
 (in-package #:cl-mcp/tests/deep-nesting-test)
 
@@ -172,3 +174,32 @@
                     (ok socket "the server must still accept a new connection")
                  (ignore-errors (usocket:socket-close socket)))))
         (ignore-errors (bordeaux-threads:destroy-thread server))))))
+
+(deftest call-without-debugger-escapes-a-debugger-entry
+  (testing "invoke-debugger inside the thunk returns :debugger-suppressed, not the thunk's own value"
+    ;; This is the direct unit test the connection-thread test above cannot
+    ;; be: that test sends "{", which process-json-line catches as an
+    ;; ordinary parse error and answers normally -- the debugger hook is
+    ;; never approached, so deleting CALL-WITHOUT-DEBUGGER entirely would
+    ;; still leave that test, and the rest of this suite, green.
+    ;;
+    ;; INVOKE-DEBUGGER is called directly here rather than via ERROR/SIGNAL.
+    ;; A plain (error "boom") inside the thunk gets intercepted by whatever
+    ;; HANDLER-CASE the calling harness itself installs around a test body
+    ;; (verified empirically: both repl-eval's error-context capture and,
+    ;; separately, evaluating this same shape via Rove both catch a plain
+    ;; ERROR before *INVOKE-DEBUGGER-HOOK* is ever consulted, since
+    ;; HANDLER-CASE intercepts at the SIGNAL call site, upstream of
+    ;; INVOKE-DEBUGGER) -- which would make the assertion below pass or
+    ;; fail for the wrong reason regardless of whether the hook works.
+    ;; Calling INVOKE-DEBUGGER directly reaches *INVOKE-DEBUGGER-HOOK* the
+    ;; same way a genuinely unhandled condition does in production,
+    ;; independent of any such wrapping.
+    (ok (eq :debugger-suppressed
+            (call-without-debugger
+             "unit-test"
+             (lambda ()
+               (invoke-debugger (make-condition 'simple-error
+                                                 :format-control "boom"))
+               :thunk-returned)))
+        "the hook must escape via THROW, not let the thunk's own return value win")))

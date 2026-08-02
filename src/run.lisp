@@ -47,6 +47,13 @@ NIL runs all tools in-process.  When not supplied, the current value of
          (let ((state (make-state))
                (cl-mcp/src/protocol:*current-session-id* "stdio"))
            (log-event :info "stdio.start")
+           ;; Unlike the TCP/HTTP transports, where CALL-WITHOUT-DEBUGGER
+           ;; wraps each connection or request individually, this call wraps
+           ;; the entire read loop below: stdio serves exactly one client
+           ;; for the process's whole lifetime, so a suppressed debugger
+           ;; ends the session rather than just one request. That is the
+           ;; correct scope here, not a narrower one left unwrapped by
+           ;; oversight.
            (call-without-debugger
             "stdio"
             (lambda ()
