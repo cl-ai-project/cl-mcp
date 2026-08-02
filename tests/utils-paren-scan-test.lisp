@@ -67,6 +67,36 @@
   (testing "a quote character literal does not count as a prefix macro"
     (ok (= 1 (getf (scan-parens "(f #\\')") :max-depth)))))
 
+(deftest scan-parens-counts-feature-conditionals
+  (testing "a bare feature-expression atom adds one level for the guarded form"
+    (ok (= 1 (getf (scan-parens "#+t x") :max-depth))))
+  (testing "the feature-expression's own nesting is counted too"
+    (ok (= 2 (getf (scan-parens "#+(and) x") :max-depth))))
+  (testing "the guarded form's own nesting stacks on top"
+    (ok (= 2 (getf (scan-parens "#+t (a b)") :max-depth))))
+  (testing "chained #+ blocks accumulate, not reset, between blocks"
+    ;; Each block's own (and)/(or) closes its own bracket depth back to 0
+    ;; -- a bracket-only scan would see 3 independent shallow pairs. The
+    ;; real reader recurses once per block for the pending guarded-form
+    ;; read, so depth must keep climbing across the chain instead.
+    (ok (= 4 (getf (scan-parens "#+t#+t#+t(and)") :max-depth))))
+  (testing "#- behaves the same as #+"
+    (ok (= 1 (getf (scan-parens "#-t x") :max-depth)))))
+
+(deftest scan-parens-counts-sharp-equals-labels
+  (testing "#n= adds one level, like quote"
+    (ok (= 1 (getf (scan-parens "#1=x") :max-depth))))
+  (testing "multi-digit labels are consumed as one token"
+    (ok (= 1 (getf (scan-parens "#123=x") :max-depth))))
+  (testing "chained #n= labels accumulate before their target"
+    (ok (= 3 (getf (scan-parens "#1=#2=#3=x") :max-depth)))))
+
+(deftest scan-parens-sharp-hash-references-do-not-recurse
+  (testing "#n# is a leaf back-reference: it adds no depth of its own"
+    (ok (= 1 (getf (scan-parens "#1=1 #1#") :max-depth))))
+  (testing "#n# alone, with no enclosing form, is depth 0"
+    (ok (= 0 (getf (scan-parens "#1#") :max-depth)))))
+
 (deftest max-nesting-depth-is-far-above-real-code
   (testing "the limit leaves ordinary source far below it"
     ;; src/proxy.lisp と src/pool.lisp が実測 20 で、このリポジトリの最大。

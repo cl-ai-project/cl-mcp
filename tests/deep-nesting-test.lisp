@@ -78,3 +78,24 @@
           "the deep quote run must be rejected, not read")
       (ok (string= "too-deep" (gethash "kind" res))
           "it is a depth rejection, matching scan-parens's :max-depth"))))
+
+(deftest check-parens-sharp-plus-chain-does-not-let-feature-conditionals-bypass-the-guard
+  (testing "a long chain of #+(and) blocks is caught as too-deep"
+    ;; Reproduction: #+/#- (CLHS 1.5.2, 2.4.8.16/17) issue two independent
+    ;; recursive reads -- the feature-expression, then the guarded form --
+    ;; neither gated by *read-eval*. Chaining "#+(and)" as each block's
+    ;; guarded form (rather than a bare atom) makes each block's own
+    ;; (and)/(or) close its own bracket depth back to 0, so a bracket-only
+    ;; scan sees only shallow, independent pairs and misses that the real
+    ;; reader recurses once per block for the pending guarded-form read,
+    ;; same hazard class as the quote-chain and shallow-mismatch cases
+    ;; above.
+    (let* ((prefix (with-output-to-string (s)
+                     (dotimes (i 20000)
+                       (write-string "#+(and)" s))))
+           (source (concatenate 'string prefix ":x"))
+           (res (lisp-check-parens :code source)))
+      (ok (null (gethash "ok" res))
+          "the deep #+ chain must be rejected, not read")
+      (ok (string= "too-deep" (gethash "kind" res))
+          "it is a depth rejection, matching scan-parens's :max-depth"))))
