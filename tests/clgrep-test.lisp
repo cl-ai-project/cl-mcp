@@ -80,7 +80,17 @@
         ;; Should find defmethod results (there are exactly 2 defmethod forms)
         ;; Each form may have multiple line matches, but all should be defmethod
         (ok (> (length results) 0) "Should find at least one defmethod")
-        (ok (< (length results) 20) "Should not return excessive results")
+        ;; Pattern "." matches every line, so clgrep-search returns one
+        ;; result per matching *line* inside a defmethod's body, not one per
+        ;; defmethod. This count therefore tracks how many lines the
+        ;; project's two defmethod forms happen to span (22 as of this
+        ;; writing), not how many defmethods exist -- it will drift with
+        ;; ordinary edits to either defmethod's body. The bound below is a
+        ;; loose sanity check against the regression this test was written
+        ;; for -- clgrep-search silently ignoring the form-types filter and
+        ;; returning thousands of unfiltered results -- not a pin on the
+        ;; current line count.
+        (ok (< (length results) 200) "Should not return excessive results")
         ;; All results must be defmethod
         (dolist (r results)
           (let ((form-type (cdr (assoc :form-type r))))
