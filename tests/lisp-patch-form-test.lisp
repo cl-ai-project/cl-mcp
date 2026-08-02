@@ -258,6 +258,39 @@ running as root), THUNK is skipped instead."
           (ok (search "old_text must not be empty" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-rejects-too-deep-result
+  (testing "a patch producing excessively nested output gets a usable error instead of a dropped connection"
+    ;; The reconstructed form-text reaches READ-FROM-STRING inside
+    ;; %VALIDATE-FORM-PARSEABLE with no depth check before this test's fix.
+    ;; Control-stack exhaustion is a STORAGE-CONDITION, not an ERROR, so it
+    ;; would slip past every HANDLER-CASE here and in DEFINE-TOOL's body and
+    ;; drop the connection with no response at all.
+    (with-temp-file "tests/tmp/patch-too-deep.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil)
+              (deep (concatenate 'string
+                                  (make-string 20000 :initial-element #\()
+                                  ":deep"
+                                  (make-string 20000 :initial-element #\)))))
+          (ok (handler-case
+                  (progn
+                    (lisp-patch-form :file-path path
+                                     :form-type "defun"
+                                     :form-name "target"
+                                     :old-text "(+ x 1)"
+                                     :new-text deep)
+                    nil)
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t))
+              "a too-deep new_text argument must signal, not hang or crash")
+          (ok (and err-msg (search "nested" err-msg))
+              "the error message should explain the nesting-depth rejection")
+          (ok (string= before (fs-read-file path))
+              "no changes must be written when the patch result is rejected"))))))
+
 ;;; ============================================================
 ;;; Dry-run
 ;;; ============================================================

@@ -117,6 +117,40 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (error () (setf raised t)))
           (ok raised))))))
 
+(deftest lisp-edit-form-rejects-too-deep-content
+  (testing "excessively nested content gets a usable error instead of a dropped connection"
+    ;; content reaches READ-FROM-STRING inside %VALIDATE-AND-REPAIR-CONTENT
+    ;; with no depth check before this test's fix. Control-stack exhaustion
+    ;; is a STORAGE-CONDITION, not an ERROR, so the JSON-RPC layer's generic
+    ;; (error (e) ...) clause never catches it and the connection just drops
+    ;; with no response. Reject the depth here, before READ-FROM-STRING ever
+    ;; sees it, the same way lisp-check-parens does.
+    (with-temp-file "tests/tmp/edit-form-too-deep.lisp"
+        "(defun target () :old)
+"
+      (lambda (path)
+        (let ((err-msg nil)
+              (deep (concatenate 'string
+                                  (make-string 20000 :initial-element #\()
+                                  ":deep"
+                                  (make-string 20000 :initial-element #\)))))
+          (ok (handler-case
+                  (progn
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "target"
+                                    :operation "replace"
+                                    :content deep)
+                    nil)
+                (error (e)
+                  (setf err-msg (princ-to-string e))
+                  t))
+              "a too-deep content argument must signal, not hang or crash")
+          (ok (and err-msg (search "nested" err-msg))
+              "the error message should explain the nesting-depth rejection")
+          (ok (search ":old" (fs-read-file path))
+              "no changes must be written when content is rejected"))))))
+
 (deftest lisp-edit-form-dry-run-preview
   (testing "dry-run returns preview without writing the file"
     (with-temp-file "tests/tmp/edit-form-dry-run.lisp"

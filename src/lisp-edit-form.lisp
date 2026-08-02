@@ -26,6 +26,9 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
+  (:import-from #:cl-mcp/src/utils/paren-scan
+                #:scan-parens
+                #:*max-nesting-depth*)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -110,7 +113,21 @@ Unknown package prefixes are handled leniently via stub packages.
 As a convenience, CONTENT consisting entirely of comments (and whitespace)
 is accepted verbatim. This allows `replace' to delete a form by replacing
 it with a `;; removed' comment marker, and `insert_*' to place bare
-comments near a target form."
+comments near a target form.
+
+CONTENT's nesting depth is checked with SCAN-PARENS before any READ-FROM-STRING
+call below is reached. Control-stack exhaustion is a STORAGE-CONDITION, not an
+ERROR, so it would otherwise pass straight through every HANDLER-CASE in this
+function and in its caller's DEFINE-TOOL body, dropping the connection with no
+response at all instead of returning a usable error."
+  (let ((content-depth (getf (scan-parens content) :max-depth 0)))
+    (when (> content-depth *max-nesting-depth*)
+      (error 'arg-validation-error :arg-name "content"
+             :message (format nil "content is nested ~D levels deep, over the limit of ~D. ~
+                                    Deeply nested forms exhaust the control stack, and that ~
+                                    exhaustion cannot be caught, so content this deep is ~
+                                    rejected before the reader sees it."
+                               content-depth *max-nesting-depth*))))
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable* (if custom-rt custom-rt (copy-readtable nil))))
