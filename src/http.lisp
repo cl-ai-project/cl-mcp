@@ -9,6 +9,8 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session
                 #:%warn-if-init-without-pool)
+  (:import-from #:cl-mcp/src/utils/serving
+                #:call-without-debugger)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -447,10 +449,19 @@ attacks like localhost.evil.com."
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor mcp-acceptor) request)
   "Dispatch incoming requests."
-  (let ((handler (mcp-dispatcher request)))
-    (if handler
-        (funcall handler)
-        (call-next-method))))
+  (call-without-debugger
+   (or (ignore-errors
+        (format nil "http.request ~A ~A remote=~A session=~A"
+                (hunchentoot:request-method request)
+                (hunchentoot:script-name request)
+                (hunchentoot:remote-addr request)
+                (hunchentoot:header-in :mcp-session-id request)))
+       "http.request")
+   (lambda ()
+     (let ((handler (mcp-dispatcher request)))
+       (if handler
+           (funcall handler)
+           (call-next-method))))))
 
 (defun http-server-running-p ()
   "Return T when the HTTP server is running."

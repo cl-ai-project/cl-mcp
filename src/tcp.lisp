@@ -6,6 +6,8 @@
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
+  (:import-from #:cl-mcp/src/utils/serving
+                #:call-without-debugger)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/pool
@@ -238,7 +240,9 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
              (let ((remote (ignore-errors (usocket:get-peer-address client))))
                (log-event :info "tcp.accept" "conn" conn-id "remote" remote)
                (setf stream (usocket:socket-stream client))
-               (%process-stream stream client conn-id remote)))
+               (call-without-debugger
+                (format nil "tcp.conn.~A" conn-id)
+                (lambda () (%process-stream stream client conn-id remote)))))
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))

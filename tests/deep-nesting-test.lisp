@@ -11,7 +11,9 @@
                 #:*max-nesting-depth*)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
-                #:nesting-too-deep))
+                #:nesting-too-deep)
+  (:import-from #:cl-mcp/src/tcp
+                #:serve-tcp))
 
 (in-package #:cl-mcp/tests/deep-nesting-test)
 
@@ -117,3 +119,33 @@
                  (asdf:system-relative-pathname :cl-mcp "src/proxy.lisp"))))
       (ok (parse-top-level-forms text)
           "ordinary source must be unaffected by the depth limit"))))
+
+(deftest serious-condition-does-not-park-the-connection-thread
+  (testing "a serious condition closes one connection and leaves the server serving"
+    (let* ((port nil)
+           (ready (bordeaux-threads:make-semaphore))
+           (server (bordeaux-threads:make-thread
+                    (lambda ()
+                      (serve-tcp :host "127.0.0.1" :port 0 :accept-once nil
+                                 :on-listening
+                                 (lambda (p)
+                                   (setf port p)
+                                   (bordeaux-threads:signal-semaphore ready)))))))
+      (unwind-protect
+           (progn
+             (ok (bordeaux-threads:wait-on-semaphore ready :timeout 10)
+                 "server must come up")
+             ;; 壊れた JSON-RPC を送りつけた後、別接続が生きていることを確かめる。
+             ;; 目的はサーバが応答し続けることであって、この行が何を返すかではない。
+             (let ((socket (usocket:socket-connect "127.0.0.1" port)))
+               (unwind-protect
+                    (progn
+                      (format (usocket:socket-stream socket) "~A~%" "{")
+                      (force-output (usocket:socket-stream socket)))
+                 (ignore-errors (usocket:socket-close socket))))
+             (let ((socket (usocket:socket-connect "127.0.0.1" port
+                                                   :timeout 10)))
+               (unwind-protect
+                    (ok socket "the server must still accept a new connection")
+                 (ignore-errors (usocket:socket-close socket)))))
+        (ignore-errors (bordeaux-threads:destroy-thread server))))))
