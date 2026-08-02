@@ -144,7 +144,8 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
     (let ((paren-result (scan-parens text :base-offset base-off))
           (reader-info  (%try-reader-check text base-off)))
       (destructuring-bind (&key ok kind expected found
-                                (offset base-off) (line 1) (column 1))
+                                (offset base-off) (line 1) (column 1)
+                                &allow-other-keys)
           paren-result
         (let ((h (make-hash-table :test #'equal)))
           (cond

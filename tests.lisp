@@ -28,6 +28,7 @@
   (:import-from #:cl-mcp/tests/test-runner-test)
   (:import-from #:cl-mcp/tests/tools-helpers-test)
   (:import-from #:cl-mcp/tests/utils-paths-test)
+  (:import-from #:cl-mcp/tests/utils-paren-scan-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)

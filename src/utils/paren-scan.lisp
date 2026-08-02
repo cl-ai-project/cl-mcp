@@ -12,9 +12,22 @@
 
 (defpackage #:cl-mcp/src/utils/paren-scan
   (:use #:cl)
-  (:export #:scan-parens))
+  (:export #:scan-parens
+           #:*max-nesting-depth*))
 
 (in-package #:cl-mcp/src/utils/paren-scan)
+
+(defparameter *max-nesting-depth* 300
+  "1 つのフォームに許すネストの深さの上限。
+
+これを超える入力は、リーダーに渡す前に拒否する。深いネストは Eclector CST 経路でも
+標準 CL リーダー経路でも再帰で処理され、到達すれば SBCL の制御スタックを枯渇させる。
+枯渇は捕捉に頼れない（src/macroexpand-core.lisp の *max-walk-expansions* に同じ実測が
+記録されている）ので、届かせないことだけが効く。
+
+この値は Task 1 で実測した破綻深度（Eclector CST 経路で深度 1750 は生存、1875 で
+制御スタック枯渇により死亡と確認、境界はこの間のどこか）のはるか下、このリポジトリの
+実コードの最大ネスト深さ 20（src/proxy.lisp、src/pool.lisp）のはるか上に置いてある。")
 
 (defun %closing (opener)
   (ecase opener
@@ -57,7 +70,9 @@
   (escape nil :type boolean)
   (line-comment nil :type boolean)
   (block-depth 0 :type fixnum)
-  (block-open-pos 0 :type fixnum))
+  (block-open-pos 0 :type fixnum)
+  (depth 0 :type fixnum)
+  (max-depth 0 :type fixnum))
 
 (defun %scan-handle-line-comment (state ch)
   (when (char= ch #\Newline)
@@ -107,12 +122,17 @@ indicating how many additional characters past CH were consumed."
             (%scan-parens-push-open (scan-state-stack state)
              (scan-state-line state) (scan-state-col state) base-offset ch
              idx))
+    (incf (scan-state-depth state))
+    (setf (scan-state-max-depth state)
+            (max (scan-state-max-depth state) (scan-state-depth state)))
     (values nil nil))
    ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
     (multiple-value-bind (new-stack err)
         (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
          (scan-state-col state) base-offset ch idx)
       (setf (scan-state-stack state) new-stack)
+      ;; エラー時（extra-close）はスタックが縮んでいないので深さも戻さない。
+      (unless err (decf (scan-state-depth state)))
       (values err nil)))
    (t (values nil nil))))
 
@@ -126,7 +146,9 @@ indicating how many additional characters past CH were consumed."
 
 (defun scan-parens (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
-Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column."
+Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line,
+:column, :max-depth (fixnum, the deepest the open-paren stack ever reached,
+even along early-return error paths)."
   (let ((state (make-scan-state))
         (len (length text))
         (idx 0))
@@ -147,7 +169,8 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                (multiple-value-bind (err consumed)
                    (%scan-handle-normal state ch next idx base-offset text)
                  (when err
-                   (return-from scan-parens err))
+                   (return-from scan-parens
+                     (append err (list :max-depth (scan-state-max-depth state)))))
                  (when consumed
                    (let ((n (if (integerp consumed) consumed 1)))
                      (incf idx n)
@@ -168,7 +191,8 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                 :found nil
                 :offset open-pos
                 :line r-line
-                :column r-col))))
+                :column r-col
+                :max-depth (scan-state-max-depth state)))))
     (when (scan-state-stack state)
       (destructuring-bind (ch l c off) (pop (scan-state-stack state))
         (return-from scan-parens
@@ -178,5 +202,6 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                 :found nil
                 :offset off
                 :line l
-                :column c))))
-    (list :ok t)))
+                :column c
+                :max-depth (scan-state-max-depth state)))))
+    (list :ok t :max-depth (scan-state-max-depth state))))
