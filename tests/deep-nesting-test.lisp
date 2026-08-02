@@ -61,3 +61,20 @@
           "the shallow mismatch must still be reported as an error")
       (ok (string= "mismatch" (gethash "kind" res))
           "the mismatch, not a hang or crash, must be what is reported"))))
+
+(deftest check-parens-quote-run-does-not-let-prefix-macros-bypass-the-guard
+  (testing "a long run of quote characters with no parens is caught as too-deep"
+    ;; Reproduction: ', `, ,, ,@ and #' make the standard reader recurse
+    ;; just as parens do (CLHS 2.4.5, 2.4.6), but scan-parens originally
+    ;; only tracked bracket depth -- so 20,000 consecutive quote characters
+    ;; with no parens at all looked like depth 0 and sailed past the guard
+    ;; straight into the reader, reproducing the same control-stack
+    ;; exhaustion the guard exists to prevent.
+    (let* ((source (concatenate 'string
+                                 (make-string 20000 :initial-element #\')
+                                 ":x"))
+           (res (lisp-check-parens :code source)))
+      (ok (null (gethash "ok" res))
+          "the deep quote run must be rejected, not read")
+      (ok (string= "too-deep" (gethash "kind" res))
+          "it is a depth rejection, matching scan-parens's :max-depth"))))

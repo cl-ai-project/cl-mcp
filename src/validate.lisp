@@ -259,13 +259,12 @@ exempt from reader checking to avoid false positives."
                                  line col (or message "unknown")))
                         ((string= kind "too-deep")
                          ;; Parens ARE balanced here; the rejection is about
-                         ;; depth, not balance, so MESSAGE (already computed
-                         ;; above) carries the caller-visible explanation
-                         ;; instead of the generic "Unbalanced parentheses"
-                         ;; wording below.
-                         (or message
-                             (format nil "Nesting too deep: found ~A, limit ~A"
-                                     found expected)))
+                         ;; depth, not balance. The lisp-check-parens
+                         ;; too-deep branch always sets MESSAGE, so no
+                         ;; fallback is needed here; a missing MESSAGE would
+                         ;; be a bug in that branch, not a case to paper
+                         ;; over silently.
+                         message)
                         (t
                          (let ((ef (if (and expected found)
                                        (format nil " (expected ~A, found ~A)" expected found)

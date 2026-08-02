@@ -1,10 +1,18 @@
 ;;;; src/utils/paren-scan.lisp
 ;;;;
-;;;; Lisp テキストを文字単位で走査し、括弧の釣り合いを調べる。
+;;;; Lisp テキストを文字単位で走査し、括弧の釣り合いと、標準リーダーが再帰的に
+;;;; 処理する構文全体のネスト深さを調べる。
+;;;;
+;;;; 括弧 ( [ { } ] ) に加えて、クォート系のプレフィックス構文 ' ` , ,@ #' も
+;;;; 深さに数える。標準リーダーはこれらに出会うたびに次のフォームを読むために
+;;;; 自身を再帰呼び出しするため、括弧だけを数えると実際の再帰深度を過小評価
+;;;; してしまう。プレフィックス構文には対応する閉じ文字がなく、次のフォーム
+;;;; （アトム・文字列・文字リテラル、あるいは開き括弧なら対応する閉じ括弧）を
+;;;; 読み終えた時点で再帰が戻るため、その時点でまとめて深さを戻す。
 ;;;;
 ;;;; 文字列リテラル・文字リテラル・行コメント・ネストしたブロックコメントの
-;;;; 中の括弧は数えない。素朴な括弧カウントでは "(((((" を含む正当なファイルを
-;;;; 誤って弾くため、この区別に意味がある。
+;;;; 中の括弧・プレフィックス文字は数えない。素朴な括弧カウントでは "((((("
+;;;; を含む正当なファイルを誤って弾くため、この区別に意味がある。
 ;;;;
 ;;;; src/validate.lisp から移設。validate は fs と tools/* に依存するツール層の
 ;;;; モジュールで、低レベルの src/cst.lisp から参照させたくないため、双方の共通
@@ -92,16 +100,44 @@
     (decf (scan-state-block-depth state))
     t))
 
+(defun %scan-whitespace-char-p (ch)
+  "Return T if CH is whitespace under the standard CL reader."
+  (member ch '(#\Space #\Tab #\Newline #\Return #\Linefeed #\Page) :test #'char=))
+
+(defun %scan-push-prefix (state)
+  "Record one level of a prefix reader macro (', `, ,, ,@, or #') on
+STATE's stack. These have no closing delimiter of their own -- the depth
+they add is unwound by %SCAN-RESOLVE-PENDING-PREFIXES once the form they
+prefix has been read."
+  (push :prefix (scan-state-stack state))
+  (incf (scan-state-depth state))
+  (setf (scan-state-max-depth state)
+          (max (scan-state-max-depth state) (scan-state-depth state))))
+
+(defun %scan-resolve-pending-prefixes (state)
+  "Pop any prefix-macro markers now on top of STATE's stack, decrementing
+DEPTH for each. A prefix macro's reader recursion returns as soon as the
+form it prefixes has been read, so its extra depth must unwind at that
+point instead of persisting into sibling forms -- otherwise depth would
+drift upward across ordinary files and never recover."
+  (loop while (eq :prefix (car (scan-state-stack state)))
+        do (pop (scan-state-stack state))
+           (decf (scan-state-depth state))))
+
 (defun %scan-handle-normal (state ch next idx base-offset text)
   "Handle a character in normal (non-string, non-comment) context.
 Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
 indicating how many additional characters past CH were consumed."
   (cond
    ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
-   ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
+   ((char= ch #\")
+    (%scan-resolve-pending-prefixes state)
+    (setf (scan-state-in-string state) t)
+    (values nil nil))
    ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
    ;; delimiter characters like #\( are not treated as open-parens.
    ((and (char= ch #\#) next (char= next #\\))
+    (%scan-resolve-pending-prefixes state)
     (let ((skip 1))  ; at minimum skip the backslash
       (let ((char-pos (+ idx 2)))
         (when (< char-pos (length text))
@@ -117,6 +153,27 @@ indicating how many additional characters past CH were consumed."
       (setf (scan-state-block-open-pos state) (+ base-offset idx)))
     (incf (scan-state-block-depth state))
     (values nil 1))
+   ;; #' is the FUNCTION reader macro (CLHS 2.4.6): like ', it makes the
+   ;; reader recurse once for its operand and has no closing delimiter.
+   ((and (char= ch #\#) next (char= next #\'))
+    (%scan-push-prefix state)
+    (values nil 1))
+   ;; Quote and quasiquote (CLHS 2.4.5, 2.4.6): single-character prefix
+   ;; macros.  Both make the standard reader call itself for the next
+   ;; form; neither has a closing delimiter, so the depth they add is
+   ;; unwound by %SCAN-RESOLVE-PENDING-PREFIXES once that form (or, for a
+   ;; list, its closing delimiter) is reached.
+   ((or (char= ch #\') (char= ch #\`))
+    (%scan-push-prefix state)
+    (values nil nil))
+   ;; Unquote and unquote-splicing (CLHS 2.4.6): ",@" is a single reader
+   ;; construct, so the optional "@" is consumed without adding a second
+   ;; level.
+   ((char= ch #\,)
+    (%scan-push-prefix state)
+    (if (and next (char= next #\@))
+        (values nil 1)
+        (values nil nil)))
    ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
     (setf (scan-state-stack state)
             (%scan-parens-push-open (scan-state-stack state)
@@ -127,14 +184,25 @@ indicating how many additional characters past CH were consumed."
             (max (scan-state-max-depth state) (scan-state-depth state)))
     (values nil nil))
    ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
+    ;; A lone prefix directly before a closer (e.g. "')") has no operand
+    ;; of its own; resolve it first so %SCAN-PARENS-POP-OPEN never sees a
+    ;; prefix marker where it expects a bracket frame.
+    (%scan-resolve-pending-prefixes state)
     (multiple-value-bind (new-stack err)
         (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
          (scan-state-col state) base-offset ch idx)
       (setf (scan-state-stack state) new-stack)
-      ;; エラー時（extra-close）はスタックが縮んでいないので深さも戻さない。
-      (unless err (decf (scan-state-depth state)))
+      (unless err
+        (decf (scan-state-depth state))
+        ;; Closing this bracket also resolves any prefixes that preceded
+        ;; it (e.g. the quote in "'(a)"): their recursive reads return
+        ;; together with the list's own.
+        (%scan-resolve-pending-prefixes state))
       (values err nil)))
-   (t (values nil nil))))
+   (t
+    (unless (%scan-whitespace-char-p ch)
+      (%scan-resolve-pending-prefixes state))
+    (values nil nil))))
 
 (defun %scan-advance-position (state ch)
   (cond
@@ -147,8 +215,10 @@ indicating how many additional characters past CH were consumed."
 (defun scan-parens (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line,
-:column, :max-depth (fixnum, the deepest the open-paren stack ever reached,
-even along early-return error paths)."
+:column, :max-depth (fixnum, the deepest the standard reader's recursion
+would reach scanning TEXT -- brackets plus the prefix macros ', `, ,, ,@,
+and #', which have no closing delimiter of their own -- even along
+early-return error paths)."
   (let ((state (make-scan-state))
         (len (length text))
         (idx 0))
@@ -193,6 +263,12 @@ even along early-return error paths)."
                 :line r-line
                 :column r-col
                 :max-depth (scan-state-max-depth state)))))
+    ;; A trailing prefix marker (e.g. an unterminated "'" at end of input)
+    ;; has no bracket to match, so it is not an "unclosed" error in the
+    ;; sense the check below reports; drop it. The reader would raise
+    ;; END-OF-FILE trying to read its operand, which %TRY-READER-CHECK
+    ;; already handles.
+    (%scan-resolve-pending-prefixes state)
     (when (scan-state-stack state)
       (destructuring-bind (ch l c off) (pop (scan-state-stack state))
         (return-from scan-parens
