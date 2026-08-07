@@ -135,6 +135,9 @@ Example:
   (extract-arg args \"path\" :type :string :required t)
   (extract-arg args \"limit\" :type :integer)"
   (let ((value (and args (gethash name args))))
+    ;; Treat empty string as absent — some clients send default values
+    (when (and (stringp value) (string= value ""))
+      (setf value nil))
     (cond
       ;; Required but missing
       ((and required (null value))
