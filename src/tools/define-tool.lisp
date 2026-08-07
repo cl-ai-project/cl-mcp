@@ -48,9 +48,12 @@
            :required nil
            :default nil
            :enum nil
-           :description nil))
+           :description nil
+           :empty-string-is-absent t))
     (list
-     (destructuring-bind (name &key json-name type required default enum description)
+     (destructuring-bind
+         (name &key json-name type required default enum description
+                    (empty-string-is-absent t))
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
@@ -58,7 +61,8 @@
              :required required
              :default default
              :enum enum
-             :description description)))))
+             :description description
+             :empty-string-is-absent empty-string-is-absent)))))
 
 (defun %type-to-json-type (type)
   "Convert Lisp type keyword to JSON Schema type string."
@@ -76,12 +80,15 @@
         (json-name (getf parsed-spec :json-name))
         (type (getf parsed-spec :type))
         (required (getf parsed-spec :required))
-        (default (getf parsed-spec :default)))
+        (default (getf parsed-spec :default))
+        (empty-string-is-absent
+          (getf parsed-spec :empty-string-is-absent)))
     (if (eq type :boolean)
         `(,name (extract-boolean-arg ,args-var ,json-name :default ,default))
         `(,name (extract-arg ,args-var ,json-name
                              :type ,type
-                             :required ,required)))))
+                             :required ,required
+                             :empty-string-is-absent ,empty-string-is-absent)))))
 
 (defun %generate-schema-property (parsed-spec)
   "Generate schema property setter form for a parsed argument spec."

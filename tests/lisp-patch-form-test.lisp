@@ -112,6 +112,47 @@ running as root), THUNK is skipped instead."
           (ok (search "(* x 2)" updated))
           (ok (null (search "(+ x 1)" updated))))))))
 
+(deftest lisp-patch-form-empty-new-text-deletes
+  (testing "an explicit empty new_text deletes old_text"
+    (with-temp-file "tests/tmp/patch-empty-new-text.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (lisp-patch-form :file-path path
+                         :form-type "defun"
+                         :form-name "target"
+                         :old-text "(+ x 1)"
+                         :new-text "")
+        (let ((updated (fs-read-file path)))
+          (ok (null (search "(+ x 1)" updated)))
+          (ok (search "(defun target (x)" updated)))))))
+
+(deftest lisp-patch-form-handler-missing-new-text-deletes-with-warning
+  (testing "omitting new_text deletes old_text and signals a warning"
+    (with-temp-file "tests/tmp/patch-missing-new-text.lisp"
+        (format nil "(defun target (x)~%  (+ x 1))~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "old_text" "(+ x 1)"))
+               (warning-message nil))
+          (handler-bind
+              ((warning (lambda (condition)
+                          (setf warning-message (princ-to-string condition))
+                          (muffle-warning condition))))
+            (let ((response (funcall handler state "test-missing-new-text" args)))
+              (ok (gethash "result" response)
+                  "omitting new_text should still produce a result")))
+          (ok (and warning-message
+                   (search "new_text was omitted" warning-message))
+              "the compatibility fallback should warn callers")
+          (let ((updated (fs-read-file path)))
+            (ok (null (search "(+ x 1)" updated))
+                "the omitted new_text fallback should delete old_text")))))))
+
 (deftest lisp-patch-form-preserves-surrounding
   (testing "patch only modifies target form, rest of file unchanged"
     (with-temp-file "tests/tmp/patch-preserve.lisp"
@@ -463,8 +504,8 @@ running as root), THUNK is skipped instead."
             "form_name should be required")
         (ok (find "old_text" required :test #'string=)
             "old_text should be required")
-        (ok (find "new_text" required :test #'string=)
-            "new_text should be required"))
+        (ok (not (find "new_text" required :test #'string=))
+            "new_text should be optional for backward-compatible deletion"))
       ;; Should NOT have structural operation params
       (let ((properties (gethash "properties" schema)))
         (ok (null (gethash "content" properties))

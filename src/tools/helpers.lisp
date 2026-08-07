@@ -118,7 +118,15 @@ TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any).
                                   (:object "an object"))))))))
 
 (declaim (ftype (function ((or hash-table null) string &key (:type (or keyword null)) (:required boolean)) t) extract-arg))
-(defun extract-arg (args name &key type required)
+
+(declaim (ftype (function ((or hash-table null) string
+                           &key (:type (or keyword null))
+                                (:required boolean)
+                                (:empty-string-is-absent boolean))
+                          t)
+                         extract-arg))
+
+(defun extract-arg (args name &key type required (empty-string-is-absent t))
   "Extract argument NAME from ARGS hash-table with optional validation.
 
 Arguments:
@@ -126,17 +134,21 @@ Arguments:
   NAME     - String key to extract
   TYPE     - Expected type (:string :integer :number :boolean :array :object)
              If NIL, no type checking is performed.
-  REQUIRED - If T, signal error when argument is missing
+  REQUIRED - If T, signal error when argument is missing.
+  EMPTY-STRING-IS-ABSENT - If T, treat an empty string as missing. Defaults to
+                           T for compatibility with clients that send defaults.
 
 Returns the argument value, or NIL if optional and not provided.
 Signals ARG-VALIDATION-ERROR on validation failure.
 
 Example:
-  (extract-arg args \"path\" :type :string :required t)
-  (extract-arg args \"limit\" :type :integer)"
+  (extract-arg args \"path\" :type :string :required t)"
   (let ((value (and args (gethash name args))))
-    ;; Treat empty string as absent — some clients send default values
-    (when (and (stringp value) (string= value ""))
+    ;; Some clients send empty defaults for every argument. A tool can opt out
+    ;; when an empty string is semantically meaningful, such as replacement text.
+    (when (and empty-string-is-absent
+               (stringp value)
+               (string= value ""))
       (setf value nil))
     (cond
       ;; Required but missing
@@ -146,6 +158,11 @@ Example:
               :message (format nil "~A is required" name)))
       ;; Present - check type
       (value
+       (%check-type-match value type name)
+       value)
+      ;; An explicitly present empty string is meaningful when requested.
+      ((and (not empty-string-is-absent)
+            (stringp value))
        (%check-type-match value type name)
        value)
       ;; Optional and missing
