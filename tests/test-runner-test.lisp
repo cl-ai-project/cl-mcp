@@ -481,6 +481,90 @@
       (ignore-errors
        (uiop/filesystem:delete-directory-tree tmp-dir :validate t))))))
 
+(deftest rove-purge-ghost-suites-resolves-names-from-the-registry-only
+  (testing "%rove-purge-ghost-suites must not load a dependency's .asd"
+    ;; Resolving dependency names with ASDF:FIND-SYSTEM loads the .asd of any
+    ;; name that is merely discoverable, which both builds systems as a side
+    ;; effect (:defsystem-depends-on) and, outside an ASDF session, re-runs the
+    ;; source-registry search on every call -- 103 seconds on a project whose
+    ;; graph reaches 905 systems.  Pin the registry-only lookup by leaving a
+    ;; discoverable-but-unregistered dependency in the graph and asserting the
+    ;; purge never registers it.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-purge-registry-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (root-name "cl-mcp-purge-registry-root")
+           (leaf-name "cl-mcp-purge-registry-leaf")
+           (root-asd (uiop:merge-pathnames*
+                      (format nil "~A.asd" root-name) tmp-dir))
+           (leaf-asd (uiop:merge-pathnames*
+                      (format nil "~A.asd" leaf-name) tmp-dir))
+           (asdf:*central-registry* (cons tmp-dir asdf:*central-registry*)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s root-asd :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :depends-on (~S))~%"
+                       root-name leaf-name))
+             (with-open-file (s leaf-asd :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S)~%" leaf-name))
+             (asdf/find-system:load-asd root-asd)
+             (ok (asdf:registered-system root-name)
+                 "root system is registered before the purge")
+             (ok (null (asdf:registered-system leaf-name))
+                 "leaf system is discoverable but unregistered before the purge")
+             ;; Guard against a false pass: the purge returns immediately when
+             ;; Rove's registry is empty, which would satisfy the assertion
+             ;; below without the walk ever running.
+             (ok (plusp (hash-table-count
+                         (symbol-value
+                          (find-symbol "*PACKAGE-SUITES*"
+                                       :rove/core/suite/package))))
+                 "Rove holds at least one suite, so the purge really walks")
+             (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites root-name)
+             (ok (null (asdf:registered-system leaf-name))
+                 "purge must not load a dependency's .asd to resolve its name"))
+        (ignore-errors (asdf/system-registry:clear-system root-name))
+        (ignore-errors (asdf/system-registry:clear-system leaf-name))
+        (ignore-errors
+         (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest extract-defpackage-names-does-not-intern-into-cl-user
+  (testing "%extract-defpackage-names-from-file leaves CL-USER untouched"
+    ;; READ interns every unqualified symbol it reads into *PACKAGE*.  A purge
+    ;; traversal scans over a thousand files, so scanning in CL-USER dumps all
+    ;; of their symbols there.
+    (let* ((tmp-dir
+             (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-scan-package-~A-~A/"
+                       (get-universal-time) (random 100000))
+               (uiop:temporary-directory))))
+           (src-path (uiop:merge-pathnames* "scan-target.lisp" tmp-dir))
+           (pkg-name "CL-MCP-SCAN-TARGET-PACKAGE")
+           (marker "CL-MCP-SCAN-MARKER-SYMBOL"))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s src-path :direction :output :if-exists :supersede)
+               (format s "(defpackage #:~A~%  (:use #:cl))~%" pkg-name)
+               (format s "(in-package #:~A)~%" pkg-name)
+               (format s "(defun ~A (x) x)~%" marker))
+             (ok (null (find-symbol marker :cl-user))
+                 "marker symbol is absent from CL-USER before the scan")
+             (let ((names
+                     (cl-mcp/src/test-runner-core::%extract-defpackage-names-from-file
+                      src-path)))
+               (ok (member pkg-name names :test #'string-equal)
+                   "the defpackage name is still extracted"))
+             (ok (null (find-symbol marker :cl-user))
+                 "scanning must not intern the file's symbols into CL-USER"))
+        (ignore-errors
+         (uiop:delete-directory-tree tmp-dir :validate t))))))
+
 (deftest format-load-error-includes-compiler-output
   (testing "no compiler output: message is just the base error"
     (let ((msg (cl-mcp/src/test-runner-core::%format-load-error
