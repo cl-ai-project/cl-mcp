@@ -488,32 +488,50 @@ representation covers both Rove and FiveAM target-resolution failures."
                    (format nil "~A~%~%Hint: ~A" detail hint)
                    detail))))))
 
-(defun %extract-defpackage-names-from-file (pathname)
+(defun %extract-defpackage-names-from-file (pathname &optional scan-package)
   "Return a list of package names mentioned in `(defpackage ...)' forms
-of the Lisp source file at PATHNAME. Silently returns NIL on any error."
-  (handler-case
-      (with-open-file (stream pathname :direction :input)
-        (let ((*read-eval* nil)
-              (*package* (find-package :cl-user))
-              (names nil))
-          (loop
-           (let ((form (handler-case (read stream nil :eof)
-                         (error () :eof))))
-             (when (eq form :eof) (return))
-             (when (and (consp form)
-                        (symbolp (car form))
-                        (or (string= (symbol-name (car form)) "DEFPACKAGE")
-                            (string= (symbol-name (car form)) "DEFINE-PACKAGE"))
-                        (consp (cdr form)))
-               (let ((name-form (second form)))
-                 (push
-                  (cond
-                    ((stringp name-form) name-form)
-                    ((symbolp name-form) (symbol-name name-form))
-                    (t nil))
-                  names)))))
-          (remove-if-not #'stringp (nreverse names))))
-    (error () nil)))
+of the Lisp source file at PATHNAME. Silently returns NIL on any error.
+
+READ interns every unqualified symbol it reads into *PACKAGE*, so the scan
+must not run in CL-USER: one %ROVE-PURGE-GHOST-SUITES traversal of a large
+dependency graph reads over a thousand files and would leave every symbol
+in them behind.  SCAN-PACKAGE names a throwaway package to intern into.
+When it is NIL one is created and deleted around the read; a caller
+scanning many files should create one and pass it in.
+
+The scan package uses CL, so DEFPACKAGE, keywords, #:-prefixed uninterned
+symbols and package-qualified symbols all read exactly as they did in
+CL-USER -- only the resting place of newly created symbols changes.  The
+names returned are strings and stay valid after the package is deleted."
+  (let ((own-package (unless scan-package
+                       (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
+                                     :use '(:cl)))))
+    (unwind-protect
+        (handler-case
+            (with-open-file (stream pathname :direction :input)
+              (let ((*read-eval* nil)
+                    (*package* (or scan-package own-package))
+                    (names nil))
+                (loop
+                 (let ((form (handler-case (read stream nil :eof)
+                               (error () :eof))))
+                   (when (eq form :eof) (return))
+                   (when (and (consp form)
+                              (symbolp (car form))
+                              (or (string= (symbol-name (car form)) "DEFPACKAGE")
+                                  (string= (symbol-name (car form)) "DEFINE-PACKAGE"))
+                              (consp (cdr form)))
+                     (let ((name-form (second form)))
+                       (push
+                        (cond
+                          ((stringp name-form) name-form)
+                          ((symbolp name-form) (symbol-name name-form))
+                          (t nil))
+                        names)))))
+                (remove-if-not #'stringp (nreverse names))))
+          (error () nil))
+      (when own-package
+        (ignore-errors (delete-package own-package))))))
 
 (defun %rove-purge-ghost-suites (system-name)
   "Remove Rove suite entries for every test package associated with
@@ -538,48 +556,70 @@ package-inferred-system and classic ASDF layouts:
      tree under SYSTEM-NAME, read each source file, and clear
      packages named in its `(defpackage ...)' forms. Catches classic
      defsystems where the package name does not match any ASDF
-     sub-system name."
+     sub-system name.
+
+Names resolve through ASDF:REGISTERED-SYSTEM, never FIND-SYSTEM -- the
+rule %TRANSITIVE-DEPENDENCY-NAMES follows, for the same two reasons.
+FIND-SYSTEM resolves a name by *loading the .asd*, which may carry
+:DEFSYSTEM-DEPENDS-ON and build whole systems as a side effect, here in
+the middle of RUN-TESTS.  It is also ruinous for latency: outside an ASDF
+session every call re-runs the source-registry search, measured at 114 ms,
+and a large package-inferred project reaches 905 systems -- 103 seconds of
+purging before a single test runs.  REGISTERED-SYSTEM makes the same
+traversal cost 0.3 seconds and loses nothing, because a system that is not
+registered has never been loaded: its packages do not exist, so Rove holds
+no suite for them and there is no ghost to purge.
+
+Nothing is walked when Rove's registry is empty, and the source scan
+interns into one throwaway package, deleted afterwards, rather than into
+CL-USER."
   (let ((pkgs-var (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
     (when (and pkgs-var (boundp pkgs-var)
-               (hash-table-p (symbol-value pkgs-var)))
+               (hash-table-p (symbol-value pkgs-var))
+               (plusp (hash-table-count (symbol-value pkgs-var))))
       (let ((suites (symbol-value pkgs-var))
             (visited-systems (make-hash-table :test #'equal))
-            (visited-files (make-hash-table :test #'equal)))
-        (labels ((clear-pkg (pkg-name)
-                   (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
-                     (when pkg (remhash pkg suites))))
-                 (walk-components (component)
-                   (when component
-                     (cond
-                       ((typep component 'asdf:cl-source-file)
-                        (let ((path (ignore-errors
-                                      (asdf:component-pathname component))))
-                          (when (and path
-                                     (not (gethash (namestring path)
-                                                   visited-files))
-                                     (probe-file path))
-                            (setf (gethash (namestring path) visited-files) t)
-                            (dolist (pkg-name
-                                     (%extract-defpackage-names-from-file path))
-                              (clear-pkg pkg-name)))))
-                       ((ignore-errors (asdf:component-children component))
-                        (dolist (child (asdf:component-children component))
-                          (walk-components child))))))
-                 (walk-system (name)
-                   (when (and (stringp name)
-                              (not (gethash name visited-systems)))
-                     (setf (gethash name visited-systems) t)
-                     (clear-pkg name)
-                     (let ((sys (ignore-errors (asdf:find-system name nil))))
-                       (when sys
-                         (walk-components sys)
-                         (dolist (dep (ignore-errors
-                                        (asdf:system-depends-on sys)))
-                           (cond
-                             ((stringp dep) (walk-system dep))
-                             ((and (consp dep) (stringp (second dep)))
-                              (walk-system (second dep))))))))))
-          (walk-system system-name))))))
+            (visited-files (make-hash-table :test #'equal))
+            (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
+                                        :use '(:cl))))
+        (unwind-protect
+            (labels ((clear-pkg (pkg-name)
+                       (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
+                         (when pkg (remhash pkg suites))))
+                     (walk-components (component)
+                       (when component
+                         (cond
+                           ((typep component 'asdf:cl-source-file)
+                            (let ((path (ignore-errors
+                                          (asdf:component-pathname component))))
+                              (when (and path
+                                         (not (gethash (namestring path)
+                                                       visited-files))
+                                         (probe-file path))
+                                (setf (gethash (namestring path) visited-files) t)
+                                (dolist (pkg-name
+                                         (%extract-defpackage-names-from-file
+                                          path scan-package))
+                                  (clear-pkg pkg-name)))))
+                           ((ignore-errors (asdf:component-children component))
+                            (dolist (child (asdf:component-children component))
+                              (walk-components child))))))
+                     (walk-system (name)
+                       (when (and (stringp name)
+                                  (not (gethash name visited-systems)))
+                         (setf (gethash name visited-systems) t)
+                         (clear-pkg name)
+                         (let ((sys (ignore-errors (asdf:registered-system name))))
+                           (when sys
+                             (walk-components sys)
+                             (dolist (dep (ignore-errors
+                                            (asdf:system-depends-on sys)))
+                               (cond
+                                 ((stringp dep) (walk-system dep))
+                                 ((and (consp dep) (stringp (second dep)))
+                                  (walk-system (second dep))))))))))
+              (walk-system system-name))
+          (ignore-errors (delete-package scan-package)))))))
 
 (defun %ensure-rove-test-name-method ()
   "Add a TEST-NAME method for FAILED-ASSERTION if Rove is loaded and the
