@@ -205,8 +205,8 @@ Reader macro prefixes #: and : are stripped automatically, so
          (old_text :type :string :required t
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
-         (new_text :type :string :required t
-                   :description "Replacement text")
+         (new_text :type :string :empty-string-is-absent nil
+                   :description "Replacement text. An empty string deletes old_text. If omitted, old_text is deleted with a warning.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (readtable :type :string
@@ -220,13 +220,15 @@ is used instead of Eclector, which means comments are NOT preserved."))
            (error (e)
              (error 'arg-validation-error :arg-name "readtable"
                     :message (format nil "~A" e))))))
+    (unless new_text
+      (warn "new_text was omitted; deleting old_text. Pass new_text explicitly to silence this warning."))
     (handler-case
         (multiple-value-bind (updated changed-p)
             (lisp-patch-form :file-path file_path
                              :form-type form_type
                              :form-name form_name
                              :old-text old_text
-                             :new-text new_text
+                             :new-text (or new_text "")
                              :dry-run dry_run
                              :readtable readtable-designator)
           (if dry_run
@@ -234,7 +236,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
                      (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])~
-                                      ~%~%--- original ---~%~A~%~%--- preview ---~%~A"
+                                    ~%~%--- original ---~%~A~%~%--- preview ---~%~A"
                                       form_type form_name file_path would-change
                                       original-form preview)))
                 (result id
