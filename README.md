@@ -1,4 +1,6 @@
 # cl-mcp
+
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fcxxxr-common-lisp-repl.svg)](https://mcptoplist.com/server/pulsemcp%2Fcxxxr-common-lisp-repl)
 [![CI](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/ci.yml)
 [![Lint](https://github.com/cl-ai-project/cl-mcp/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/cl-ai-project/cl-mcp/actions/workflows/lint.yml)
 
