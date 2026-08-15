@@ -27,6 +27,9 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
+  (:import-from #:cl-mcp/src/utils/paren-scan
+                #:scan-parens
+                #:*max-nesting-depth*)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
@@ -96,7 +99,21 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
                                            package-name source-path)
   "Validate that FORM-TEXT parses as a single complete Lisp form.
 Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR if the text
-does not parse correctly."
+does not parse correctly.
+
+FORM-TEXT's nesting depth is checked with SCAN-PARENS before any
+READ-FROM-STRING call below is reached. Control-stack exhaustion is a
+STORAGE-CONDITION, not an ERROR, so it would otherwise pass straight through
+every HANDLER-CASE here and in the caller's DEFINE-TOOL body, dropping the
+connection with no response at all instead of returning a usable error."
+  (let ((form-depth (getf (scan-parens form-text) :max-depth 0)))
+    (when (> form-depth *max-nesting-depth*)
+      (error 'patch-operation-error
+             :reason (format nil "patch result is nested ~D levels deep, over the limit of ~D. ~
+                                   Deeply nested forms exhaust the control stack, and that ~
+                                   exhaustion cannot be caught, so a patch producing content ~
+                                   this deep is rejected before the reader sees it."
+                              form-depth *max-nesting-depth*))))
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*

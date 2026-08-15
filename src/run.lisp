@@ -8,6 +8,8 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:%warn-if-init-without-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
+  (:import-from #:cl-mcp/src/utils/serving
+                #:call-without-debugger)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited #:+max-json-line-bytes+
                 #:line-too-long)
@@ -45,41 +47,51 @@ NIL runs all tools in-process.  When not supplied, the current value of
          (let ((state (make-state))
                (cl-mcp/src/protocol:*current-session-id* "stdio"))
            (log-event :info "stdio.start")
-           (loop for line = (handler-case
-                                 (%read-line-limited in :eof +max-json-line-bytes+)
-                               (line-too-long (e)
-                                 (log-event :warn "stdio.read.line-too-long"
-                                            "error" (princ-to-string e))
-                                 ;; Drain remaining bytes on the current line
-                                 ;; so the next read-line starts fresh.
-                                 (loop for ch = (read-char in nil nil)
-                                       while (and ch (not (char= ch #\Newline))))
-                                 :read-error))
-                 until (eq line :eof)
-                 do (cond
-                      ((eq line :read-error)
-                       ;; Return JSON-RPC error for the oversized line
-                       (handler-case
-                           (progn
-                             (write-line
-                              "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
-                              out)
-                             (force-output out))
-                         (stream-error (e)
-                           (log-event :warn "stdio.write.error"
-                                      "error" (princ-to-string e))
-                           (return))))
-                      (t
-                       (let ((resp (process-json-line line state)))
-                         (when resp
-                           (handler-case
-                               (progn
-                                 (write-line resp out)
-                                 (force-output out))
-                             (stream-error (e)
-                               (log-event :warn "stdio.write.error"
-                                          "error" (princ-to-string e))
-                               (return))))))))
+           ;; Unlike the TCP/HTTP transports, where CALL-WITHOUT-DEBUGGER
+           ;; wraps each connection or request individually, this call wraps
+           ;; the entire read loop below: stdio serves exactly one client
+           ;; for the process's whole lifetime, so a suppressed debugger
+           ;; ends the session rather than just one request. That is the
+           ;; correct scope here, not a narrower one left unwrapped by
+           ;; oversight.
+           (call-without-debugger
+            "stdio"
+            (lambda ()
+              (loop for line = (handler-case
+                                    (%read-line-limited in :eof +max-json-line-bytes+)
+                                  (line-too-long (e)
+                                    (log-event :warn "stdio.read.line-too-long"
+                                               "error" (princ-to-string e))
+                                    ;; Drain remaining bytes on the current line
+                                    ;; so the next read-line starts fresh.
+                                    (loop for ch = (read-char in nil nil)
+                                          while (and ch (not (char= ch #\Newline))))
+                                    :read-error))
+                    until (eq line :eof)
+                    do (cond
+                         ((eq line :read-error)
+                          ;; Return JSON-RPC error for the oversized line
+                          (handler-case
+                              (progn
+                                (write-line
+                                 "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
+                                 out)
+                                (force-output out))
+                            (stream-error (e)
+                              (log-event :warn "stdio.write.error"
+                                         "error" (princ-to-string e))
+                              (return))))
+                         (t
+                          (let ((resp (process-json-line line state)))
+                            (when resp
+                              (handler-case
+                                  (progn
+                                    (write-line resp out)
+                                    (force-output out))
+                                (stream-error (e)
+                                  (log-event :warn "stdio.write.error"
+                                             "error" (princ-to-string e))
+                                  (return))))))))))
            (log-event :info "stdio.stop")
            t)
        (when *use-worker-pool* (ignore-errors (shutdown-pool)))))

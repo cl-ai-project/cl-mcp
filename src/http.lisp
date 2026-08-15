@@ -9,6 +9,8 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session
                 #:%warn-if-init-without-pool)
+  (:import-from #:cl-mcp/src/utils/serving
+                #:call-without-debugger)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -446,11 +448,31 @@ attacks like localhost.evil.com."
   (:documentation "Custom acceptor for MCP HTTP server."))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor mcp-acceptor) request)
-  "Dispatch incoming requests."
-  (let ((handler (mcp-dispatcher request)))
-    (if handler
-        (funcall handler)
-        (call-next-method))))
+  "Dispatch incoming requests.
+When CALL-WITHOUT-DEBUGGER suppresses a debugger entry, its :DEBUGGER-SUPPRESSED
+sentinel must not reach Hunchentoot as the response body: Hunchentoot calls
+(LENGTH CONTENT) on whatever is returned here, which signals a fresh, unguarded
+TYPE-ERROR for a keyword and turns one suppressed request into a noisy 500 with
+no useful body. Translate the sentinel into a short string response instead."
+  (let ((response
+          (call-without-debugger
+           (or (ignore-errors
+                (format nil "http.request ~A ~A remote=~A session=~A"
+                        (hunchentoot:request-method request)
+                        (hunchentoot:script-name request)
+                        (hunchentoot:remote-addr request)
+                        (hunchentoot:header-in :mcp-session-id request)))
+               "http.request")
+           (lambda ()
+             (let ((handler (mcp-dispatcher request)))
+               (if handler
+                   (funcall handler)
+                   (call-next-method)))))))
+    (if (eq response :debugger-suppressed)
+        (progn
+          (setf (hunchentoot:return-code*) 500)
+          "Internal error")
+        response)))
 
 (defun http-server-running-p ()
   "Return T when the HTTP server is running."

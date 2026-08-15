@@ -9,6 +9,9 @@
                 #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/paren-scan
+                #:scan-parens
+                #:*max-nesting-depth*)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -16,171 +19,6 @@
 
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
-
-(defun %closing (opener)
-  (ecase opener
-    (#\( #\))
-    (#\[ #\])
-    (#\{ #\})))
-
-(defun %scan-parens-push-open (stack line col base-offset ch idx)
-  (cons (list ch line col (+ base-offset idx)) stack))
-
-(defun %scan-parens-pop-open (stack line col base-offset ch idx)
-  (if (null stack)
-      (values stack
-              (list :ok nil
-                    :kind "extra-close"
-                    :expected nil
-                    :found (string ch)
-                    :offset (+ base-offset idx)
-                    :line line
-                    :column col))
-      (destructuring-bind (top-ch top-line top-col top-off) (car stack)
-        (declare (ignore top-line top-col top-off))
-        (let ((expected (%closing top-ch)))
-          (if (char= expected ch)
-              (values (cdr stack) nil)
-              (values stack
-                      (list :ok nil
-                            :kind "mismatch"
-                            :expected (string expected)
-                            :found (string ch)
-                            :offset (+ base-offset idx)
-                            :line line
-                            :column col)))))))
-
-(defstruct scan-state
-  (line 1 :type fixnum)
-  (col 1 :type fixnum)
-  (stack '() :type list)
-  (in-string nil :type boolean)
-  (escape nil :type boolean)
-  (line-comment nil :type boolean)
-  (block-depth 0 :type fixnum)
-  (block-open-pos 0 :type fixnum))
-
-(defun %scan-handle-line-comment (state ch)
-  (when (char= ch #\Newline)
-    (setf (scan-state-line-comment state) nil)))
-
-(defun %scan-handle-string (state ch)
-  (cond
-    ((scan-state-escape state)
-     (setf (scan-state-escape state) nil))
-    ((char= ch #\\)
-     (setf (scan-state-escape state) t))
-    ((char= ch #\")
-     (setf (scan-state-in-string state) nil))))
-
-(defun %scan-handle-block-comment (state ch next)
-  (when (and (char= ch #\|) next (char= next #\#))
-    (decf (scan-state-block-depth state))
-    t))
-
-(defun %scan-handle-normal (state ch next idx base-offset text)
-  "Handle a character in normal (non-string, non-comment) context.
-Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
-indicating how many additional characters past CH were consumed."
-  (cond
-   ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
-   ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
-   ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
-   ;; delimiter characters like #\( are not treated as open-parens.
-   ((and (char= ch #\#) next (char= next #\\))
-    (let ((skip 1))  ; at minimum skip the backslash
-      (let ((char-pos (+ idx 2)))
-        (when (< char-pos (length text))
-          (incf skip)  ; skip the character after backslash
-          ;; Named character literals: consume remaining alpha chars
-          (when (alpha-char-p (char text char-pos))
-            (loop for k from (1+ char-pos) below (length text)
-                  while (alpha-char-p (char text k))
-                  do (incf skip)))))
-      (values nil skip)))
-   ((and (char= ch #\#) next (char= next #\|))
-    (when (zerop (scan-state-block-depth state))
-      (setf (scan-state-block-open-pos state) (+ base-offset idx)))
-    (incf (scan-state-block-depth state))
-    (values nil 1))
-   ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
-    (setf (scan-state-stack state)
-            (%scan-parens-push-open (scan-state-stack state)
-             (scan-state-line state) (scan-state-col state) base-offset ch
-             idx))
-    (values nil nil))
-   ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
-    (multiple-value-bind (new-stack err)
-        (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
-         (scan-state-col state) base-offset ch idx)
-      (setf (scan-state-stack state) new-stack)
-      (values err nil)))
-   (t (values nil nil))))
-
-(defun %scan-advance-position (state ch)
-  (cond
-    ((char= ch #\Newline)
-     (incf (scan-state-line state))
-     (setf (scan-state-col state) 1))
-    (t
-     (incf (scan-state-col state)))))
-
-(defun %scan-parens (text &key (base-offset 0))
-  "Return a plist describing balance of delimiters in TEXT.
-Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column."
-  (let ((state (make-scan-state))
-        (len (length text))
-        (idx 0))
-    (loop while (< idx len)
-          for ch = (char text idx)
-          for next = (and (< (1+ idx) len) (char text (1+ idx)))
-          do
-            (cond
-              ((scan-state-line-comment state)
-               (%scan-handle-line-comment state ch))
-              ((scan-state-in-string state)
-               (%scan-handle-string state ch))
-              ((plusp (scan-state-block-depth state))
-               (when (%scan-handle-block-comment state ch next)
-                 (incf idx)
-                 (incf (scan-state-col state))))
-              (t
-               (multiple-value-bind (err consumed)
-                   (%scan-handle-normal state ch next idx base-offset text)
-                 (when err
-                   (return-from %scan-parens err))
-                 (when consumed
-                   (let ((n (if (integerp consumed) consumed 1)))
-                     (incf idx n)
-                     (incf (scan-state-col state) n))))))
-            (%scan-advance-position state ch)
-            (incf idx))
-    (when (plusp (scan-state-block-depth state))
-      (let* ((open-pos  (scan-state-block-open-pos state))
-             (local-pos (- open-pos base-offset))
-             (pre       (subseq text 0 (min local-pos (length text))))
-             (r-line    (1+ (count #\Newline pre)))
-             (col-start (or (position #\Newline pre :from-end t) -1))
-             (r-col     (- local-pos col-start)))
-        (return-from %scan-parens
-          (list :ok nil
-                :kind "unclosed-block-comment"
-                :expected nil
-                :found nil
-                :offset open-pos
-                :line r-line
-                :column r-col))))
-    (when (scan-state-stack state)
-      (destructuring-bind (ch l c off) (pop (scan-state-stack state))
-        (return-from %scan-parens
-          (list :ok nil
-                :kind "unclosed"
-                :expected (string (%closing ch))
-                :found nil
-                :offset off
-                :line l
-                :column c))))
-    (list :ok t)))
 
 (defun %maybe-add-lisp-edit-guidance (result kind)
   "Attach machine-readable remediation hints for broken Lisp delimiters."
@@ -304,41 +142,68 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                 (gethash "column" pos) 1)
           (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
-    (let ((paren-result (%scan-parens text :base-offset base-off))
-          (reader-info  (%try-reader-check text base-off)))
-      (destructuring-bind (&key ok kind expected found
-                                (offset base-off) (line 1) (column 1))
-          paren-result
+    (let ((scan (scan-parens text :base-offset base-off)))
+      (when (> (getf scan :max-depth 0) *max-nesting-depth*)
         (let ((h (make-hash-table :test #'equal)))
-          (cond
-            ((not ok)
-             ;; Paren error takes priority
-             (setf (gethash "ok" h) nil
-                   (gethash "kind" h) kind
-                   (gethash "expected" h) expected
-                   (gethash "found" h) found)
-             (let ((pos (make-hash-table :test #'equal)))
-               (setf (gethash "offset" pos) offset
-                     (gethash "line" pos) line
-                     (gethash "column" pos) column)
-               (setf (gethash "position" h) pos))
-             (%maybe-add-lisp-edit-guidance h kind))
-            (reader-info
-             ;; Parens OK but reader error detected
-             (setf (gethash "ok" h) nil
-                   (gethash "kind" h) (getf reader-info :kind)
-                   (gethash "message" h) (getf reader-info :message))
-             (let ((pos (make-hash-table :test #'equal))
-                   (r-line (getf reader-info :line))
-                   (r-col  (getf reader-info :column)))
-               (setf (gethash "offset" pos) (getf reader-info :offset))
-               (when r-line   (setf (gethash "line" pos) r-line))
-               (when r-col    (setf (gethash "column" pos) r-col))
-               (setf (gethash "position" h) pos)))
-            (t
-             ;; Both checks passed
-             (setf (gethash "ok" h) t)))
-          h)))))
+          (setf (gethash "ok" h) nil
+                (gethash "kind" h) "too-deep"
+                (gethash "expected" h) (format nil "~D" *max-nesting-depth*)
+                (gethash "found" h) (format nil "~D" (getf scan :max-depth 0)))
+          (let ((pos (make-hash-table :test #'equal)))
+            (setf (gethash "offset" pos) base-off
+                  (gethash "line" pos) 1
+                  (gethash "column" pos) 1)
+            (setf (gethash "position" h) pos))
+          (setf (gethash "message" h)
+                  (format nil "Nesting is ~D levels deep, over the limit of ~D. ~
+                               Deeply nested forms exhaust the control stack, and that ~
+                               exhaustion cannot be caught, so they are rejected before ~
+                               the reader sees them."
+                          (getf scan :max-depth 0) *max-nesting-depth*))
+          (return-from lisp-check-parens h)))
+      (destructuring-bind (&key ok kind expected found
+                                (offset base-off) (line 1) (column 1)
+                                &allow-other-keys)
+          scan
+        ;; SCAN-PARENS stops at its first delimiter error, so :MAX-DEPTH and
+        ;; the rest of SCAN describe only the text up to that point -- text
+        ;; past a shallow mismatch is unmeasured and may still be arbitrarily
+        ;; deeply nested.  A mismatched delimiter such as `]' or `}' is an
+        ;; ordinary constituent character to the standard reader, not an
+        ;; error, so it would sail straight through into that unmeasured
+        ;; nesting.  Therefore the reader must never run when the scan itself
+        ;; already found an error: only run it when the scan says OK.
+        (let ((reader-info (and ok (%try-reader-check text base-off))))
+          (let ((h (make-hash-table :test #'equal)))
+            (cond
+              ((not ok)
+               ;; Paren error takes priority
+               (setf (gethash "ok" h) nil
+                     (gethash "kind" h) kind
+                     (gethash "expected" h) expected
+                     (gethash "found" h) found)
+               (let ((pos (make-hash-table :test #'equal)))
+                 (setf (gethash "offset" pos) offset
+                       (gethash "line" pos) line
+                       (gethash "column" pos) column)
+                 (setf (gethash "position" h) pos))
+               (%maybe-add-lisp-edit-guidance h kind))
+              (reader-info
+               ;; Parens OK but reader error detected
+               (setf (gethash "ok" h) nil
+                     (gethash "kind" h) (getf reader-info :kind)
+                     (gethash "message" h) (getf reader-info :message))
+               (let ((pos (make-hash-table :test #'equal))
+                     (r-line (getf reader-info :line))
+                     (r-col  (getf reader-info :column)))
+                 (setf (gethash "offset" pos) (getf reader-info :offset))
+                 (when r-line   (setf (gethash "line" pos) r-line))
+                 (when r-col    (setf (gethash "column" pos) r-col))
+                 (setf (gethash "position" h) pos)))
+              (t
+               ;; Both checks passed
+               (setf (gethash "ok" h) t)))
+            h))))))
 
 (define-tool "lisp-check-parens"
   :description "Check balanced parentheses/brackets in a file slice or provided code.
@@ -388,18 +253,28 @@ exempt from reader checking to avoid false positives."
                            (pos      (gethash "position" check-result))
                            (line     (and pos (gethash "line" pos)))
                            (col      (and pos (gethash "column" pos))))
-                      (if (string= kind "reader-error")
-                          (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
-                                  line col (or message "unknown"))
-                          (let ((ef (if (and expected found)
-                                        (format nil " (expected ~A, found ~A)" expected found)
-                                        "")))
-                            (format nil
-                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
-                                    kind ef line col
-                                    (if next-tool
-                                        " Use lisp-edit-form for existing Lisp files."
-                                        ""))))))))
+                      (cond
+                        ((string= kind "reader-error")
+                         (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
+                                 line col (or message "unknown")))
+                        ((string= kind "too-deep")
+                         ;; Parens ARE balanced here; the rejection is about
+                         ;; depth, not balance. The lisp-check-parens
+                         ;; too-deep branch always sets MESSAGE, so no
+                         ;; fallback is needed here; a missing MESSAGE would
+                         ;; be a bug in that branch, not a case to paper
+                         ;; over silently.
+                         message)
+                        (t
+                         (let ((ef (if (and expected found)
+                                       (format nil " (expected ~A, found ~A)" expected found)
+                                       "")))
+                           (format nil
+                                   "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
+                                   kind ef line col
+                                   (if next-tool
+                                       " Use lisp-edit-form for existing Lisp files."
+                                       "")))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))
                  (found    (gethash "found" check-result))
