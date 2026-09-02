@@ -119,13 +119,17 @@
   各要素は `(:line n :original "..." :repaired "..." :delta d)`。
   `d` は当該行で追加した閉じ括弧数(削除なら負)。行番号は現行スキャナと同じく
   `text` 内の 1 始まり行番号で、`base-offset` は `:offset` にだけ加算する。
-- `:repair-failed` は修復結果に `]` または `}` が残る、または修復結果が
-  標準リーダーで読めないときに `t`。このとき `:likely-fixes` は `nil`。
+- `:repair-failed` は修復結果に(文字列・コメント外の)`]` または `}` が残る、
+  または修復結果を `scan-delimiters` にかけても釣り合わないときに `t`。
+  このとき `:likely-fixes` は `nil`。標準リーダーでの読み直しは行わない
+  (未知パッケージで偽陽性になるため)。
 - `:next-top-level-line` は深さが 0 でないのに列 0 に `(` が現れた最初の行番号。
   なければ `nil`。文字列、行コメント、ブロックコメント、文字リテラルは
   スキャナと同じ規則で除外する。
-- `:unclosed-form-line` と `:unclosed-form-head` は閉じられていない最外フォームの
-  開始行番号と、その行の先頭から最大 40 文字。`kind` が `"unclosed"` のときのみ。
+- `:unclosed-form-line` と `:unclosed-form-head` は、スキャナが報告する
+  閉じられていないフォーム(スタックに残った最内の開き括弧。末尾に閉じ括弧が
+  連なる典型例では最外フォームと一致する)の開始行番号と、その行を trim した
+  先頭最大 40 文字。`kind` が `"unclosed"` のときのみ。
 
 **`count-delimiter-depth (text)`**
 文字列、行コメント、ブロックコメント、文字リテラルを除いた開き括弧数と
@@ -188,8 +192,8 @@ Replace it with ")".
 ### 5.2 `lisp-edit-form`(`src/lisp-edit-form.lisp`)
 
 - `%validate-and-repair-content` は修復成功時に、警告文字列に加えて
-  修復後テキストを返す(第 3 値)。警告文は `count-delimiter-depth` で
-  原文と修復後の閉じ括弧数を比べ、
+  変更行差分(`repair-line-differences` の結果)を第 3 値として返す。
+  修復後テキストは従来通り第 1 値。警告文は差分の `delta` を集計して、
   「N closing delimiter(s) added by parinfer」と
   「N extra closing delimiter(s) dropped by parinfer」を別々に出す。
   負数は出さない。両方起きた場合は両方を並べる。
