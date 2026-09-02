@@ -373,6 +373,18 @@ dry-run summary show the edited form instead of the whole updated file.
          (%trim-outer-whitespace content)
          (ensure-trailing-newline content)))))
 
+(defun %repair-summary (warning fixes repaired-form &key include-form)
+  "Return the text appended to a success summary when parinfer repaired the
+content, or NIL when WARNING is NIL. Lists the changed lines and, when
+INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET)."
+  (when warning
+    (with-output-to-string (s)
+      (format s "~%WARNING: ~A" warning)
+      (when fixes
+        (format s "~%Changed lines:~A" (format-repair-lines fixes)))
+      (when include-form
+        (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form))))))
+
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
         (normalize-blank-lines t) readtable)
@@ -512,7 +524,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (error 'arg-validation-error :arg-name "content"
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
-        (multiple-value-bind (updated parinfer-warning changed-p)
+        (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
+                              repaired-form)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -532,9 +545,11 @@ is used instead of Eclector, which means comments are NOT preserved."))
                      (pw (gethash "parinfer_warning" updated))
                      (summary
                       (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~
-                                   ~@[~%WARNING: ~A~]~@[~%~%--- original ---~%~A~]~
+                                   ~@[~A~]~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
-                              operation form_type form_name file_path would-change pw
+                              operation form_type form_name file_path would-change
+                              (%repair-summary pw (gethash "repair_fixes" updated)
+                                               preview-form)
                               (%truncate-snippet original-form)
                               (%truncate-snippet preview-form))))
                 (result id
@@ -553,11 +568,15 @@ is used instead of Eclector, which means comments are NOT preserved."))
               (let ((summary
                      (cond
                        ((not changed-p)
-                        (format nil "No change to ~A ~A in ~A (content matches existing form)~@[~%WARNING: ~A~]"
-                                form_type form_name file_path parinfer-warning))
+                        (format nil "No change to ~A ~A in ~A (content matches existing form)~@[~A~]"
+                                form_type form_name file_path
+                                (%repair-summary parinfer-warning repair-fixes
+                                                 repaired-form :include-form t)))
                        (t
-                        (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~%WARNING: ~A~]"
-                                operation form_type form_name file_path (length updated) parinfer-warning)))))
+                        (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~A~]"
+                                operation form_type form_name file_path (length updated)
+                                (%repair-summary parinfer-warning repair-fixes
+                                                 repaired-form :include-form t))))))
                 (result id
                         (make-ht "path" file_path
                                  "operation" operation
@@ -566,6 +585,12 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                  "would_change" (json-bool changed-p)
                                  "bytes" (length updated)
                                  "content" (text-content summary))))))
+      (content-unrepairable-error (e)
+        (tool-error id (sanitize-for-json (princ-to-string e))
+                    :protocol-version (protocol-version state)))
+      (file-unparseable-error (e)
+        (tool-error id (sanitize-for-json (princ-to-string e))
+                    :protocol-version (protocol-version state)))
       (multiple-top-level-forms-error ()
         (if (and (protocol-version state)
                  (string>= (protocol-version state) "2025-11-25"))

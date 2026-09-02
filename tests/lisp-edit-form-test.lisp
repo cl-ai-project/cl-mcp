@@ -1267,3 +1267,90 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                                    :content (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))"))))
           (ok (stringp (gethash "parinfer_warning" res)))
           (ok (= (length (gethash "repair_fixes" res)) 1)))))))
+
+(deftest lisp-edit-form-summary-shows-repaired-form
+  (testing "non-dry-run summary shows what parinfer actually wrote"
+    (with-temp-file "tests/tmp/edit-form-summary-repaired.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "content" (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))")))
+               (response (funcall handler state "repaired-1" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ok (search "Applied replace to defun target" text))
+          (ok (search "WARNING: 1 closing delimiter added by parinfer" text))
+          (ok (search "Changed lines:" text))
+          (ok (search "line 2: \"  (let ((y 1)\"  ->  add 1 \")\"" text))
+          (ok (search "--- repaired form ---" text))
+          (ok (search "(let ((y 1))" text)))))))
+
+(deftest lisp-edit-form-dry-run-summary-shows-changed-lines
+  (testing "dry-run summary lists the changed lines but not a second copy of the form"
+    (with-temp-file "tests/tmp/edit-form-dry-run-changed-lines.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "dry_run" t
+                      "content" (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))")))
+               (response (funcall handler state "repaired-dry" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ok (search "Changed lines:" text))
+          (ok (search "--- preview ---" text))
+          (ng (search "--- repaired form ---" text)))))))
+
+(deftest lisp-edit-form-handler-stray-bracket-is-tool-error
+  (testing "unrepairable content is an isError result on the new protocol"
+    (with-temp-file "tests/tmp/edit-form-handler-stray.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "content" (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "stray-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "found \"]\"" text))))))))
+
+(deftest lisp-edit-form-handler-broken-file-is-tool-error
+  (testing "a file that does not parse yields guidance as an isError result"
+    (with-temp-file "tests/tmp/edit-form-handler-broken.lisp"
+        (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "b"
+                      "operation" "replace"
+                      "content" "(defun b () 3)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "broken-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "Run lisp-check-parens with path=" text))
+            (ok (search "Next top-level form begins at line 4" text))))))))
