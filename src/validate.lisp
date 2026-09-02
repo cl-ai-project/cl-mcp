@@ -5,7 +5,8 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
   (:import-from #:cl-mcp/src/paren-diagnostics
-                #:scan-delimiters)
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -112,13 +113,26 @@ syntax error in the file itself."
               :line    nil
               :column  nil)))))
 
+(defun %fix->hash (fix)
+  "Convert one (:line :original :repaired :delta) plist into a string-keyed hash."
+  (let ((h (make-hash-table :test #'equal)))
+    (setf (gethash "line" h) (getf fix :line)
+          (gethash "original" h) (getf fix :original)
+          (gethash "repaired" h) (getf fix :repaired)
+          (gethash "delta" h) (getf fix :delta))
+    h))
+
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Also checks for reader errors (e.g. unknown dispatch characters, #. with
 *read-eval* nil) even when parentheses are balanced.
 Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
-plus a \"position\" hash with \"line\", \"column\", \"offset\"."
+plus a \"position\" hash with \"line\", \"column\", \"offset\".
+Delimiter failures also carry \"likely_fixes\" (vector of line/original/
+repaired/delta hashes inferred by parinfer), \"next_top_level_line\" when a
+later top-level form was swallowed, and \"diagnosis_text\" (the guidance the
+MCP summary appends; not part of the MCP payload)."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -141,11 +155,13 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                 (gethash "column" pos) 1)
           (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
-    (let ((paren-result (scan-delimiters text :base-offset base-off))
-          (reader-info  (%try-reader-check text base-off)))
+    (let ((diagnosis (diagnose-delimiters text :base-offset base-off))
+          (reader-info (%try-reader-check text base-off)))
       (destructuring-bind (&key ok kind expected found
-                                (offset base-off) (line 1) (column 1))
-          paren-result
+                                (offset base-off) (line 1) (column 1)
+                                likely-fixes next-top-level-line
+                           &allow-other-keys)
+          diagnosis
         (let ((h (make-hash-table :test #'equal)))
           (cond
             ((not ok)
@@ -159,6 +175,13 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                      (gethash "line" pos) line
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
+             (unless (string= kind "unclosed-block-comment")
+               (setf (gethash "likely_fixes" h)
+                     (map 'vector #'%fix->hash likely-fixes)
+                     (gethash "diagnosis_text" h)
+                     (format-delimiter-diagnosis diagnosis :target (or path "code")))
+               (when next-top-level-line
+                 (setf (gethash "next_top_level_line" h) next-top-level-line)))
              (%maybe-add-lisp-edit-guidance h kind))
             (reader-info
              ;; Parens OK but reader error detected
@@ -232,11 +255,12 @@ exempt from reader checking to avoid false positives."
                                         (format nil " (expected ~A, found ~A)" expected found)
                                         "")))
                             (format nil
-                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
+                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A~@[~%~A~]"
                                     kind ef line col
                                     (if next-tool
                                         " Use lisp-edit-form for existing Lisp files."
-                                        ""))))))))
+                                        "")
+                                    (gethash "diagnosis_text" check-result))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))
                  (found    (gethash "found" check-result))
@@ -258,6 +282,12 @@ exempt from reader checking to avoid false positives."
               (setf (gethash "next_tool" payload) next-tool))
             (when required-args
               (setf (gethash "required_args" payload) required-args))
+            (let ((fixes (gethash "likely_fixes" check-result))
+                  (next-line (gethash "next_top_level_line" check-result)))
+              (when fixes
+                (setf (gethash "likely_fixes" payload) fixes))
+              (when next-line
+                (setf (gethash "next_top_level_line" payload) next-line)))
             (result id payload)))
       (error (e)
         (result id (make-ht "content" (text-content (format nil "Error: ~A" e))

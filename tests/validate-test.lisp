@@ -225,3 +225,52 @@
       (ok (%ok? res-ok) "ok should be truthy for success")
       (ok (eq t (gethash "ok" res-ok))
           "ok for success must be t"))))
+
+(deftest lisp-check-parens-likely-fixes-field
+  (testing "unbalanced result carries parinfer likely fixes and diagnosis text"
+    (let* ((res (lisp-check-parens
+                 :code (format nil "(defun f (x)~%  (let ((y 1)~%    (+ x y)))")))
+           (fixes (gethash "likely_fixes" res))
+           (first-fix (and fixes (plusp (length fixes)) (aref fixes 0))))
+      (ok (not (%ok? res)))
+      (ok (vectorp fixes) "likely_fixes should be a vector")
+      (ok (= (length fixes) 1))
+      (ok (= (gethash "line" first-fix) 2))
+      (ok (= (gethash "delta" first-fix) 1))
+      (ok (string= (gethash "original" first-fix) "  (let ((y 1)"))
+      (ok (string= (gethash "repaired" first-fix) "  (let ((y 1))"))
+      (ok (search "Likely fix" (gethash "diagnosis_text" res)))
+      (ok (null (gethash "next_top_level_line" res))))))
+
+(deftest lisp-check-parens-next-top-level-line-field
+  (testing "a file-shaped input reports the next top-level form line"
+    (let ((res (lisp-check-parens
+                :code (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%"))))
+      (ok (string= (%kind res) "unclosed"))
+      (ok (= (gethash "next_top_level_line" res) 4)))))
+
+(deftest lisp-check-parens-summary-includes-diagnosis
+  (testing "MCP summary text carries the likely-fix guidance"
+    (let* ((state (cl-mcp/src/state:make-state))
+           (args (cl-mcp/src/tools/helpers:make-ht
+                  "code" (format nil "(defun f (x)~%  (let ((y 1)~%    (+ x y)))")))
+           ;; define-tool generates <tool-name>-handler (see lisp-edit-form-handler
+           ;; in tests/lisp-edit-form-test.lisp); check src/tools/define-tool.lisp
+           ;; if this symbol is not found.
+           (response (cl-mcp/src/validate::lisp-check-parens-handler state "cp-1" args))
+           (result-obj (gethash "result" response))
+           (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+      (ok (search "Unbalanced parentheses: unclosed at line 1, column 1" text)
+          "existing first line is preserved")
+      (ok (search "Likely fix, inferred from indentation:" text))
+      (ok (search "line 2:" text))
+      (ok (vectorp (gethash "likely_fixes" result-obj))
+          "sibling likely_fixes field is present")
+      (ok (null (gethash "diagnosis_text" result-obj))
+          "internal diagnosis_text is not leaked into the payload"))))
+
+(deftest lisp-check-parens-balanced-has-no-fix-fields
+  (testing "balanced input has no likely_fixes"
+    (let ((res (lisp-check-parens :code "(+ 1 2)")))
+      (ok (%ok? res))
+      (ok (null (gethash "likely_fixes" res))))))
