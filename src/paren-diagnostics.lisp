@@ -375,7 +375,8 @@ one; otherwise a repair-failed sentence is printed instead."
                  target found line column found))
         ((string= kind "mismatch")
          (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
-                    \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be auto-repaired.~%~
+                    \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be ~
+                    auto-repaired.~%~
                     Replace it with ~S."
                  target expected found line column expected))
         (t
@@ -385,7 +386,9 @@ one; otherwise a repair-failed sentence is printed instead."
         (fixes
          (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
         (failed
-         (format s "~%Automatic repair could not produce a readable form; fix the delimiters by hand.")))
+         (format s "~%Automatic repair could not produce a readable form; ~
+                    fix the delimiters by hand.")))
       (when (and next-line (string= kind "unclosed"))
-        (format s "~%Next top-level form begins at line ~D, so the missing \")\" must come before it."
+        (format s "~%Next top-level form begins at line ~D, ~
+                   so the missing \")\" must come before it."
                 next-line)))))
