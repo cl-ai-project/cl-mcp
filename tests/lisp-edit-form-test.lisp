@@ -1198,3 +1198,72 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               "sibling preview field reflects the deletion")
           (ok (string= before (fs-read-file path))
               "dry-run writes nothing to disk"))))))
+
+(deftest lisp-edit-form-warning-distinguishes-added-and-dropped
+  (testing "extra closing parens are reported as dropped, never as a negative count"
+    (with-temp-file "tests/tmp/edit-form-dropped.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed-p fixes)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (let ((y 1))~%    (+ x y))))"))
+          (declare (ignore updated changed-p))
+          (ok (search "1 extra closing delimiter dropped by parinfer" warning))
+          (ng (search "-1" warning))
+          (ok (= (length fixes) 1))
+          (ok (= (getf (first fixes) :line) 3))
+          (ok (= (getf (first fixes) :delta) -1)))))))
+
+(deftest lisp-edit-form-warning-added-wording
+  (testing "missing closing parens are reported as added"
+    (with-temp-file "tests/tmp/edit-form-added.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed-p fixes)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))"))
+          (declare (ignore updated changed-p))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (= (getf (first fixes) :line) 2))
+          (ok (search "(let ((y 1))" (fs-read-file path))
+              "the binding list was closed on line 2, not at the end"))))))
+
+(deftest lisp-edit-form-refuses-stray-bracket
+  (testing "content with ] where ) was meant is rejected and nothing is written"
+    (with-temp-file "tests/tmp/edit-form-stray-bracket.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal content-unrepairable-error")
+          (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." err))
+          (ok (search "Replace it with \")\"." err))
+          (ok (string= before (fs-read-file path)) "file untouched"))))))
+
+(deftest lisp-edit-form-dry-run-carries-repair-fixes
+  (testing "dry-run hash exposes the repair line diff"
+    (with-temp-file "tests/tmp/edit-form-dry-run-fixes.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((res (lisp-edit-form :file-path path
+                                   :form-type "defun"
+                                   :form-name "target"
+                                   :operation "replace"
+                                   :dry-run t
+                                   :content (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))"))))
+          (ok (stringp (gethash "parinfer_warning" res)))
+          (ok (= (length (gethash "repair_fixes" res)) 1)))))))

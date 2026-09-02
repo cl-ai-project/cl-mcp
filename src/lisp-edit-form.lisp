@@ -14,11 +14,16 @@
                 #:log-event)
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis
+                #:repair-line-differences
+                #:format-repair-lines)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:rpc-error #:text-content
-                #:arg-validation-error #:json-bool)
+                #:arg-validation-error #:json-bool #:tool-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -32,7 +37,8 @@
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
-                #:%locate-target-form)
+                #:%locate-target-form
+                #:file-unparseable-error)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
 
@@ -56,6 +62,31 @@
            "example_operation_sequence" (vector "insert_after" "insert_after")
            "required_args"
            (vector "file_path" "form_type" "form_name" "operation" "content")))
+
+(define-condition content-unrepairable-error (error)
+  ((message :initarg :message :reader content-unrepairable-message))
+  (:report (lambda (c s) (write-string (content-unrepairable-message c) s)))
+  (:documentation "Signaled when CONTENT is unbalanced and parinfer cannot make it readable."))
+
+(defun %repair-warning (fixes)
+  "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string.
+Added and dropped closing delimiters are reported separately; the count is
+never negative."
+  (let ((added (loop for fix in fixes
+                     for delta = (getf fix :delta)
+                     when (plusp delta) sum delta))
+        (dropped (loop for fix in fixes
+                       for delta = (getf fix :delta)
+                       when (minusp delta) sum (- delta))))
+    (format nil "~{~A~^; ~}"
+            (remove nil
+                    (list (when (plusp added)
+                            (format nil "~D closing delimiter~:P added by parinfer" added))
+                          (when (plusp dropped)
+                            (format nil "~D extra closing delimiter~:P dropped by parinfer"
+                                    dropped))
+                          (when (and (zerop added) (zerop dropped))
+                            "content repaired by parinfer"))))))
 
 (defun %ensure-blank-separation (prefix between)
   "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
@@ -103,7 +134,9 @@ blank line. For EOF boundary use a single newline."
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
+using parinfer:apply-indent-mode. Returns three values: the validated
+(possibly repaired) content, a parinfer warning string or NIL, and the
+repair line diff or NIL.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -180,22 +213,29 @@ comments near a target form."
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
-            (values result nil)
-            (let ((repaired (apply-indent-mode content)))
+            (values result nil nil)
+            (let* ((diagnosis (diagnose-delimiters content))
+                   (repaired (apply-indent-mode content)))
+              (when (and (not (getf diagnosis :ok))
+                         (getf diagnosis :repair-failed))
+                (error 'content-unrepairable-error
+                       :message (format-delimiter-diagnosis diagnosis
+                                                            :target "content")))
               (multiple-value-bind (repaired-result repaired-err)
                   (try-parse repaired)
                 (cond
                   (repaired-result
                    (log-event :info "lisp.edit.form" "auto-repair" "success"
                               "original-error" (princ-to-string err))
-                   (let ((added-count (- (length repaired) (length content))))
-                     (values repaired-result
-                             (format nil "~D closing delimiter~:P ~
-                                          ~[were~;was~:;were~] added by parinfer"
-                                     added-count added-count))))
+                   (let ((fixes (repair-line-differences content repaired)))
+                     (values repaired-result (%repair-warning fixes) fixes)))
                   ((and (typep err 'multiple-top-level-forms-error)
                         (typep repaired-err 'multiple-top-level-forms-error))
                    (error err))
+                  ((not (getf diagnosis :ok))
+                   (error 'content-unrepairable-error
+                          :message (format-delimiter-diagnosis diagnosis
+                                                               :target "content")))
                   (t
                    (error "content parse error: ~A (repair also failed: ~A)"
                           err repaired-err))))))))))
@@ -347,7 +387,11 @@ Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
-to use for parsing both the file and the new content."
+to use for parsing both the file and the new content.
+
+For non-delete operations without DRY-RUN, returns five values: the updated
+file text, the parinfer warning or NIL, whether the file changed, the repair
+line diff or NIL, and the validated content that was spliced in."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -394,7 +438,7 @@ to use for parsing both the file and the new content."
               (values updated nil t))
              (t (values updated nil nil))))
           ;; Non-delete path: validate and repair content
-          (multiple-value-bind (validated-content parinfer-warning)
+          (multiple-value-bind (validated-content parinfer-warning repair-fixes)
               (%validate-and-repair-content content readtable file-package-name
                                             abs)
             (let* ((updated
@@ -418,11 +462,13 @@ to use for parsing both the file and the new content."
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized)
                   (when parinfer-warning
-                    (setf (gethash "parinfer_warning" result) parinfer-warning))
+                    (setf (gethash "parinfer_warning" result) parinfer-warning
+                          (gethash "repair_fixes" result) repair-fixes))
                   result))
                (would-change (fs-write-file rel updated)
-                (values updated parinfer-warning t))
-               (t (values updated parinfer-warning nil)))))))))
+                (values updated parinfer-warning t repair-fixes validated-content))
+               (t (values updated parinfer-warning nil repair-fixes
+                          validated-content)))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
