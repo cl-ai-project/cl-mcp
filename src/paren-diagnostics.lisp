@@ -198,18 +198,145 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
 ;;; ---------------------------------------------------------------------------
 
 (defun diagnose-delimiters (text &key (base-offset 0))
-  "Stub; replaced in Task 2."
-  (scan-delimiters text :base-offset base-offset))
+  "Scan TEXT like SCAN-DELIMITERS and, when it is unbalanced, add repair hints:
+:likely-fixes (parinfer line diff), :repair-failed, :next-top-level-line,
+and for kind \"unclosed\" also :unclosed-form-line and :unclosed-form-head.
+A balanced TEXT or an unclosed block comment returns the plain scan plist."
+  (let* ((scan (scan-delimiters text :base-offset base-offset))
+         (kind (getf scan :kind)))
+    (if (or (getf scan :ok)
+            (string= kind "unclosed-block-comment"))
+        scan
+        (multiple-value-bind (fixes failed) (%likely-fixes text)
+          (append scan
+                  (list :likely-fixes fixes
+                        :repair-failed failed
+                        :next-top-level-line (%next-top-level-line text))
+                  (when (string= kind "unclosed")
+                    (let ((line (getf scan :line)))
+                      (list :unclosed-form-line line
+                            :unclosed-form-head (%form-head text line)))))))))
+
+(defun %map-code-characters (text function)
+  "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
+outside strings, line comments, block comments and character literals.
+LINE and COL are 1-based."
+  (let ((len (length text)) (idx 0) (line 1) (col 1)
+        (in-string nil) (escape nil) (line-comment nil) (block-depth 0))
+    (loop while (< idx len)
+          do (let ((ch (char text idx))
+                   (next (and (< (1+ idx) len) (char text (1+ idx)))))
+               (cond
+                 (line-comment
+                  (when (char= ch #\Newline) (setf line-comment nil)))
+                 (in-string
+                  (cond (escape (setf escape nil))
+                        ((char= ch #\\) (setf escape t))
+                        ((char= ch #\") (setf in-string nil))))
+                 ((plusp block-depth)
+                  (cond ((and (char= ch #\|) next (char= next #\#))
+                         (decf block-depth) (incf idx) (incf col))
+                        ((and (char= ch #\#) next (char= next #\|))
+                         (incf block-depth) (incf idx) (incf col))))
+                 ((char= ch #\;) (setf line-comment t))
+                 ((char= ch #\") (setf in-string t))
+                 ((and (char= ch #\#) next (char= next #\|))
+                  (incf block-depth) (incf idx) (incf col))
+                 ((and (char= ch #\#) next (char= next #\\))
+                  ;; #\x or #\Name: skip the backslash and the literal itself.
+                  (let ((skip 1))
+                    (when (< (+ idx 2) len)
+                      (incf skip)
+                      (when (alpha-char-p (char text (+ idx 2)))
+                        (loop for k from (+ idx 3) below len
+                              while (alpha-char-p (char text k))
+                              do (incf skip))))
+                    (incf idx skip)
+                    (incf col skip)))
+                 (t (funcall function ch idx line col)))
+               (if (char= ch #\Newline)
+                   (setf line (1+ line) col 1)
+                   (incf col))
+               (incf idx)))))
+
+(defun %next-top-level-line (text)
+  "Return the 1-based line of the first \"(\" in column 1 that appears while an
+earlier form is still open, or NIL. Such a line almost always means the
+previous top-level form was never closed."
+  (let ((depth 0))
+    (%map-code-characters
+     text
+     (lambda (ch idx line col)
+       (declare (ignore idx))
+       (case ch
+         (#\( (when (and (= col 1) (plusp depth))
+                (return-from %next-top-level-line line))
+              (incf depth))
+         (#\) (when (plusp depth) (decf depth))))))
+    nil))
+
+(defun %line-text (text line)
+  "Return the LINE-th (1-based) line of TEXT, or \"\" when out of range."
+  (let ((lines (split-string text :separator '(#\Newline))))
+    (if (<= 1 line (length lines))
+        (nth (1- line) lines)
+        "")))
+
+(defun %form-head (text line)
+  "Return the trimmed first 40 characters of LINE in TEXT, for naming a form."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Return) (%line-text text line))))
+    (if (> (length trimmed) 40)
+        (subseq trimmed 0 40)
+        trimmed)))
+
+(defun %stray-bracket-p (text)
+  "Return T when TEXT contains ] or } outside strings, comments and char literals."
+  (%map-code-characters
+   text
+   (lambda (ch idx line col)
+     (declare (ignore idx line col))
+     (when (or (char= ch #\]) (char= ch #\}))
+       (return-from %stray-bracket-p t))))
+  nil)
+
+(defun %likely-fixes (text)
+  "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
+FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
+when the repaired text still has a stray ] or }, or is still unbalanced;
+FIXES is NIL in that case."
+  (let ((repaired (apply-indent-mode text)))
+    (if (or (%stray-bracket-p repaired)
+            (not (getf (scan-delimiters repaired) :ok)))
+        (values nil t)
+        (values (repair-line-differences text repaired) nil))))
 
 (defun count-delimiter-depth (text)
-  "Stub; replaced in Task 2."
-  (declare (ignore text))
-  (values 0 0))
+  "Return two values: the number of \"(\" and the number of \")\" in TEXT
+outside strings, comments and character literals. Only round parentheses
+are counted; [ and { are constituent characters in Common Lisp."
+  (let ((opens 0) (closes 0))
+    (%map-code-characters
+     text
+     (lambda (ch idx line col)
+       (declare (ignore idx line col))
+       (case ch
+         (#\( (incf opens))
+         (#\) (incf closes)))))
+    (values opens closes)))
 
 (defun repair-line-differences (original repaired)
-  "Stub; replaced in Task 2."
-  (declare (ignore original repaired))
-  nil)
+  "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
+Return a list of (:line n :original str :repaired str :delta d) for every
+line that changed, where D is the number of \")\" added (negative if removed).
+Both texts must have the same number of lines, which parinfer guarantees."
+  (loop for orig in (split-string original :separator '(#\Newline))
+        for rep in (split-string repaired :separator '(#\Newline))
+        for line from 1
+        unless (string= orig rep)
+          collect (list :line line
+                        :original orig
+                        :repaired rep
+                        :delta (- (count #\) rep) (count #\) orig)))))
 
 (defun format-repair-lines (fixes)
   "Stub; replaced in Task 3."

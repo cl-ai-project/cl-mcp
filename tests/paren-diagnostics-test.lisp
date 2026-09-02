@@ -77,3 +77,91 @@
   (testing "parens inside strings, comments and #\\( are not counted"
     (ok (getf (scan-delimiters "(list \")\" #\\( #\\) ; )
  #| ) |# )") :ok))))
+
+(deftest count-delimiter-depth-basic
+  (testing "counts only code parens"
+    (multiple-value-bind (opens closes) (count-delimiter-depth "(if (> y 10)")
+      (ok (= opens 2))
+      (ok (= closes 1)))
+    (multiple-value-bind (opens closes)
+        (count-delimiter-depth "(list \")\" #\\( #\\) ; )
+ #| ( |# )")
+      (ok (= opens 1))
+      (ok (= closes 1)))))
+
+(deftest repair-line-differences-reports-changed-lines
+  (testing "only changed lines are listed, with the added count"
+    (let ((diff (repair-line-differences
+                 (format nil "(a~%  (b~%  c)")
+                 (format nil "(a~%  (b)~%  c)"))))
+      (ok (= (length diff) 1))
+      (ok (= (getf (first diff) :line) 2))
+      (ok (string= (getf (first diff) :original) "  (b"))
+      (ok (string= (getf (first diff) :repaired) "  (b)"))
+      (ok (= (getf (first diff) :delta) 1))))
+  (testing "removed parens give a negative delta"
+    (let ((diff (repair-line-differences "(a))" "(a)")))
+      (ok (= (getf (first diff) :delta) -1)))))
+
+(deftest diagnose-let-binding-unclosed
+  (testing "likely fix points at the let binding line"
+    (let* ((d (diagnose-delimiters +let-binding-unclosed+))
+           (fixes (getf d :likely-fixes)))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ng (getf d :repair-failed))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 2))
+      (ok (= (getf (first fixes) :delta) 1))
+      (ok (= (getf d :unclosed-form-line) 1))
+      (ok (string= (getf d :unclosed-form-head) "(defun f (x)"))
+      (ng (getf d :next-top-level-line)))))
+
+(deftest diagnose-trailing-extra-close
+  (testing "likely fix removes one paren from the last line"
+    (let* ((d (diagnose-delimiters +trailing-extra-close+))
+           (fixes (getf d :likely-fixes)))
+      (ok (string= (getf d :kind) "extra-close"))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 3))
+      (ok (= (getf (first fixes) :delta) -1)))))
+
+(deftest diagnose-when-body-unclosed
+  (testing "likely fix points at the last line of the when body"
+    (let* ((d (diagnose-delimiters +when-body-unclosed+))
+           (fixes (getf d :likely-fixes)))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 4))
+      (ok (= (getf (first fixes) :delta) 1)))))
+
+(deftest diagnose-file-middle-form-unclosed
+  (testing "file-level diagnosis names the open form and the next top-level line"
+    (let* ((d (diagnose-delimiters +file-middle-form-unclosed+))
+           (fixes (getf d :likely-fixes)))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ok (= (getf d :unclosed-form-line) 3))
+      (ok (string= (getf d :unclosed-form-head) "(defun probe-a (x)"))
+      (ok (= (getf d :next-top-level-line) 11))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 8))
+      (ok (= (getf (first fixes) :delta) 1)))))
+
+(deftest diagnose-stray-bracket-is-repair-failed
+  (testing "] cannot be repaired: no fixes, repair-failed t"
+    (let ((d (diagnose-delimiters +stray-bracket+)))
+      (ok (string= (getf d :kind) "mismatch"))
+      (ok (getf d :repair-failed))
+      (ng (getf d :likely-fixes)))))
+
+(deftest diagnose-ok-has-no-extra-keys
+  (testing "balanced text returns the plain scan plist"
+    (let ((d (diagnose-delimiters "(+ 1 2)")))
+      (ok (getf d :ok))
+      (ng (getf d :likely-fixes))
+      (ng (getf d :next-top-level-line)))))
+
+(deftest diagnose-form-head-is-trimmed-and-bounded
+  (testing "unclosed-form-head trims indentation and stops at 40 chars"
+    (let* ((long-name (make-string 60 :initial-element #\a))
+           (d (diagnose-delimiters (format nil "   (defun ~A (x)~%  x" long-name))))
+      (ok (= (length (getf d :unclosed-form-head)) 40))
+      (ok (string= (subseq (getf d :unclosed-form-head) 0 7) "(defun ")))))
