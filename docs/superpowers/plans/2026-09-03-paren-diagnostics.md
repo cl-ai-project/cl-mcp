@@ -35,7 +35,7 @@ Spec: `docs/superpowers/specs/2026-09-03-paren-diagnostics-design.md`
 |---|---|---|
 | `src/paren-diagnostics.lisp` (new) | Delimiter scanner (moved), `diagnose-delimiters`, `count-delimiter-depth`, `repair-line-differences`, `format-repair-lines`, `format-delimiter-diagnosis`. Depends only on `cl-mcp/src/parinfer` and `uiop`. | 1 |
 | `tests/paren-diagnostics-test.lisp` (new) | Unit tests for every public function above. | 1 |
-| `src/validate.lisp` | Loses the scanner; `lisp-check-parens` calls `diagnose-delimiters` and appends the diagnosis text to the summary. | 1 |
+| `src/validate.lisp` | Loses the scanner (Task 1); `lisp-check-parens` calls `diagnose-delimiters` and appends the diagnosis text to the summary (Task 4). | 1 |
 | `tests/validate-test.lisp` | New assertions for `likely_fixes`, `next_top_level_line`, summary text. | 1 |
 | `tests.lisp` | Registers the new test package. | 1 |
 | `src/lisp-edit-form-core.lisp` | Defines `file-unparseable-error`; `%locate-target-form` converts parse failures into it. | 2 |
@@ -54,7 +54,7 @@ Spec: `docs/superpowers/specs/2026-09-03-paren-diagnostics-design.md`
 - Create: `src/paren-diagnostics.lisp`
 - Create: `tests/paren-diagnostics-test.lisp`
 - Modify: `tests.lisp` (add one `:import-from`)
-- Reference: `src/validate.lisp:19-186` (the scanner to move; do not delete it yet — Task 4 does that)
+- Modify: `src/validate.lisp` (delete the moved scanner, import and call `scan-delimiters` instead of `%scan-parens`; everything else in that file is untouched until Task 4)
 
 **Interfaces:**
 - Produces: `cl-mcp/src/paren-diagnostics:scan-delimiters (text &key (base-offset 0))` → plist `(:ok bool :kind string-or-nil :expected string-or-nil :found string-or-nil :offset int :line int :column int)`. Identical behaviour to today's `%scan-parens`.
@@ -391,12 +391,42 @@ Add temporary stubs for the other exported names so the test package loads (they
 Run `run-tests` with `{"system": "cl-mcp/tests/paren-diagnostics-test"}`.
 Expected: 6 tests pass.
 
-- [ ] **Step 6: Lint and commit**
+- [ ] **Step 6: Move, do not copy: make `src/validate.lisp` use the new scanner**
+
+The scanner must exist in exactly one place. In `src/validate.lisp`:
+
+6a. Patch the `defpackage` (`lisp-patch-form`, `form_type` `defpackage`, `form_name` `cl-mcp/src/validate`), `old_text`:
+```
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-file)
+```
+`new_text`:
+```
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-file)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:scan-delimiters)
+```
+
+6b. Delete the moved forms with `lisp-edit-form` `delete`, one call each: `defun %closing`, `defun %scan-parens-push-open`, `defun %scan-parens-pop-open`, `defstruct scan-state`, `defun %scan-handle-line-comment`, `defun %scan-handle-string`, `defun %scan-handle-block-comment`, `defun %scan-handle-normal`, `defun %scan-advance-position`, `defun %scan-parens`. Keep `%maybe-add-lisp-edit-guidance`, `%custom-readtable-p`, `%truncate-message`, `%try-reader-check`.
+
+6c. Patch `defun lisp-check-parens`, `old_text`:
+```
+    (let ((paren-result (%scan-parens text :base-offset base-off))
+```
+`new_text`:
+```
+    (let ((paren-result (scan-delimiters text :base-offset base-off))
+```
+
+6d. Run `lisp-check-parens` on `src/validate.lisp`, then `run-tests` with `{"system": "cl-mcp/tests/validate-test"}`. Expected: all existing validate tests pass unchanged.
+
+- [ ] **Step 7: Lint and commit**
 
 ```bash
-mallet src/paren-diagnostics.lisp
-git add src/paren-diagnostics.lisp tests/paren-diagnostics-test.lisp tests.lisp
-git commit -m "feat(paren-diagnostics): new module with the delimiter scanner moved from validate"
+mallet src/paren-diagnostics.lisp src/validate.lisp
+git add src/paren-diagnostics.lisp tests/paren-diagnostics-test.lisp tests.lisp src/validate.lisp
+git commit -m "feat(paren-diagnostics): new module; move the delimiter scanner out of validate"
 ```
 
 ---
@@ -924,7 +954,7 @@ Expected: the 4 new tests fail; existing ones pass.
 
 - [ ] **Step 3: Rewrite `src/validate.lisp`**
 
-3a. Replace the `defpackage` (`lisp-edit-form` `replace`, `form_type` `defpackage`, `form_name` `cl-mcp/src/validate`):
+3a. Replace the `defpackage` (`lisp-edit-form` `replace`, `form_type` `defpackage`, `form_name` `cl-mcp/src/validate`); `scan-delimiters` is no longer needed here after this task:
 
 ```lisp
 (defpackage #:cl-mcp/src/validate
@@ -943,7 +973,7 @@ Expected: the 4 new tests fail; existing ones pass.
            #:*check-parens-max-bytes*))
 ```
 
-3b. Delete the moved scanner with `lisp-edit-form` `delete`, one form each: `defun %closing`, `defun %scan-parens-push-open`, `defun %scan-parens-pop-open`, `defstruct scan-state`, `defun %scan-handle-line-comment`, `defun %scan-handle-string`, `defun %scan-handle-block-comment`, `defun %scan-handle-normal`, `defun %scan-advance-position`, `defun %scan-parens`. Keep `%maybe-add-lisp-edit-guidance`, `%custom-readtable-p`, `%truncate-message`, `%try-reader-check`.
+3b. (The scanner was already moved out in Task 1; nothing to delete.)
 
 3c. Replace `defun lisp-check-parens`:
 
