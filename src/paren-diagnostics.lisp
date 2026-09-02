@@ -339,11 +339,53 @@ Both texts must have the same number of lines, which parinfer guarantees."
                         :delta (- (count #\) rep) (count #\) orig)))))
 
 (defun format-repair-lines (fixes)
-  "Stub; replaced in Task 3."
-  (declare (ignore fixes))
-  "")
+  "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
+preceded by a newline, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\"."
+  (with-output-to-string (s)
+    (dolist (fix fixes)
+      (let ((delta (getf fix :delta)))
+        (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
+                (getf fix :line)
+                (getf fix :original)
+                (if (minusp delta) "remove" "add")
+                (abs delta))))))
 
 (defun format-delimiter-diagnosis (diagnosis &key (target "code"))
-  "Stub; replaced in Task 3."
-  (declare (ignore diagnosis target))
-  "")
+  "Render DIAGNOSIS (from DIAGNOSE-DELIMITERS) as guidance text.
+TARGET is the subject of the first sentence: \"code\", \"content\", \"new_text\",
+or a file path. The likely-fix block is included only when parinfer produced
+one; otherwise a repair-failed sentence is printed instead."
+  (let ((kind (getf diagnosis :kind))
+        (line (getf diagnosis :line))
+        (column (getf diagnosis :column))
+        (expected (getf diagnosis :expected))
+        (found (getf diagnosis :found))
+        (fixes (getf diagnosis :likely-fixes))
+        (failed (getf diagnosis :repair-failed))
+        (next-line (getf diagnosis :next-top-level-line)))
+    (with-output-to-string (s)
+      (cond
+        ((string= kind "unclosed")
+         (format s "Unbalanced parentheses in ~A: unclosed (form starting at line ~D: ~S)."
+                 target (getf diagnosis :unclosed-form-line)
+                 (getf diagnosis :unclosed-form-head)))
+        ((string= kind "extra-close")
+         (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D.~%~
+                    Either remove that ~S or check for a form opened earlier that was never closed."
+                 target found line column found))
+        ((string= kind "mismatch")
+         (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
+                    \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be auto-repaired.~%~
+                    Replace it with ~S."
+                 target expected found line column expected))
+        (t
+         (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
+                 target kind line column)))
+      (cond
+        (fixes
+         (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
+        (failed
+         (format s "~%Automatic repair could not produce a readable form; fix the delimiters by hand.")))
+      (when (and next-line (string= kind "unclosed"))
+        (format s "~%Next top-level form begins at line ~D, so the missing \")\" must come before it."
+                next-line)))))

@@ -165,3 +165,48 @@
            (d (diagnose-delimiters (format nil "   (defun ~A (x)~%  x" long-name))))
       (ok (= (length (getf d :unclosed-form-head)) 40))
       (ok (string= (subseq (getf d :unclosed-form-head) 0 7) "(defun ")))))
+
+(deftest format-repair-lines-wording
+  (testing "add/remove wording and quoting"
+    (let ((text (format-repair-lines
+                 (list (list :line 2 :original "  (let ((y 1)" :repaired "  (let ((y 1))" :delta 1)
+                       (list :line 9 :original "  x))" :repaired "  x)" :delta -1)))))
+      (ok (search (format nil "~%  line 2: \"  (let ((y 1)\"  ->  add 1 \")\"") text))
+      (ok (search (format nil "~%  line 9: \"  x))\"  ->  remove 1 \")\"") text))))
+  (testing "no fixes gives an empty string"
+    (ok (string= (format-repair-lines nil) ""))))
+
+(deftest format-diagnosis-unclosed
+  (testing "unclosed names the form, the likely fix and the next top-level line"
+    (let ((text (format-delimiter-diagnosis
+                 (diagnose-delimiters +file-middle-form-unclosed+)
+                 :target "/tmp/probe.lisp")))
+      (ok (search "Unbalanced parentheses in /tmp/probe.lisp: unclosed (form starting at line 3: \"(defun probe-a (x)\")." text))
+      (ok (search "Likely fix, inferred from indentation:" text))
+      (ok (search "line 8:" text))
+      (ok (search "add 1 \")\"" text))
+      (ok (search "Next top-level form begins at line 11, so the missing \")\" must come before it." text)))))
+
+(deftest format-diagnosis-unclosed-without-next-top-level
+  (testing "single-form input omits the next-top-level sentence"
+    (let ((text (format-delimiter-diagnosis (diagnose-delimiters +let-binding-unclosed+))))
+      (ok (search "Unbalanced parentheses in code: unclosed (form starting at line 1: \"(defun f (x)\")." text))
+      (ok (search "line 2:" text))
+      (ng (search "Next top-level form" text)))))
+
+(deftest format-diagnosis-extra-close
+  (testing "extra-close offers both readings and the parinfer removal"
+    (let ((text (format-delimiter-diagnosis (diagnose-delimiters +trailing-extra-close+))))
+      (ok (search "Unbalanced parentheses in code: extra \")\" at line 3, column 14." text))
+      (ok (search "Either remove that \")\" or check for a form opened earlier that was never closed." text))
+      (ok (search "line 3:" text))
+      (ok (search "remove 1 \")\"" text)))))
+
+(deftest format-diagnosis-mismatch
+  (testing "mismatch explains that ] is a symbol character"
+    (let ((text (format-delimiter-diagnosis (diagnose-delimiters +stray-bracket+) :target "content")))
+      (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." text))
+      (ok (search "\"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be auto-repaired." text))
+      (ok (search "Replace it with \")\"." text))
+      (ok (search "Automatic repair could not produce a readable form; fix the delimiters by hand." text))
+      (ng (search "Likely fix" text)))))
