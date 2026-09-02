@@ -295,8 +295,8 @@ followed by the next steps; otherwise only the sanitized reader error."
     (if (getf diagnosis :ok)
         (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
         (format nil "~A~%The file itself does not parse, so no form can be located.~%~
-                     Run lisp-check-parens with path=~S to see the full diagnosis, then ~
-                     use lisp-edit-form (operation \"replace\") on the form~@[ starting at line ~D~]."
+                     Run lisp-check-parens with path=~S to see the full diagnosis, then use ~
+                     lisp-edit-form (operation \"replace\") on the form~@[ starting at line ~D~]."
                 (format-delimiter-diagnosis diagnosis :target path)
                 path line))))
 
