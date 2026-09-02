@@ -34,6 +34,7 @@
   (:import-from #:cl-mcp/tests/define-tool-test)
   (:import-from #:cl-mcp/tests/integration-test)
   (:import-from #:cl-mcp/tests/parinfer-test)
+  (:import-from #:cl-mcp/tests/paren-diagnostics-test)
   (:import-from #:cl-mcp/tests/http-test)
   (:import-from #:cl-mcp/tests/clgrep-utils-test)
   (:import-from #:cl-mcp/tests/clgrep-test)
