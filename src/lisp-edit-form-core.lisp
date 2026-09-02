@@ -18,11 +18,16 @@
                 #:parse-top-level-forms)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -38,7 +43,12 @@
            #:%parse-readtable-designator
            #:%detect-readtable-before-node
            #:%whitespace-char-p
-           #:%locate-target-form))
+           #:%locate-target-form
+           #:file-unparseable-error
+           #:file-unparseable-path
+           #:file-unparseable-diagnosis
+           #:file-unparseable-cause
+           #:file-unparseable-message))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
 
@@ -275,8 +285,32 @@ before TARGET's start position."
                      (consp (cdr value)))
             (setf result (second value))))))))
 
+(defun file-unparseable-message (condition)
+  "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
+When the delimiter scan found the breakage, the text is the shared diagnosis
+followed by the next steps; otherwise only the sanitized reader error."
+  (let* ((path (file-unparseable-path condition))
+         (diagnosis (file-unparseable-diagnosis condition))
+         (line (getf diagnosis :unclosed-form-line)))
+    (if (getf diagnosis :ok)
+        (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
+        (format nil "~A~%The file itself does not parse, so no form can be located.~%~
+                     Run lisp-check-parens with path=~S to see the full diagnosis, then ~
+                     use lisp-edit-form (operation \"replace\") on the form~@[ starting at line ~D~]."
+                (format-delimiter-diagnosis diagnosis :target path)
+                path line))))
+
+(define-condition file-unparseable-error (error)
+  ((path :initarg :path :reader file-unparseable-path)
+   (diagnosis :initarg :diagnosis :reader file-unparseable-diagnosis)
+   (cause :initarg :cause :reader file-unparseable-cause))
+  (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
+  (:documentation "Signaled when the target file cannot be parsed into top-level forms."))
+
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
+Signals FILE-UNPARSEABLE-ERROR, carrying a delimiter diagnosis, when the file
+cannot be parsed at all.
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -290,9 +324,15 @@ Returns eight values:
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
       (let* ((original (fs-read-file abs))
-             (nodes (parse-top-level-forms original
-                                           :readtable readtable
-                                           :source-path abs))
+             (nodes (handler-case
+                        (parse-top-level-forms original
+                                               :readtable readtable
+                                               :source-path abs)
+                      (error (e)
+                        (error 'file-unparseable-error
+                               :path (namestring abs)
+                               :diagnosis (diagnose-delimiters original)
+                               :cause (sanitize-error-message (princ-to-string e))))))
              (target (%find-target nodes form-type-str form-name)))
         (unless target
           (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))

@@ -1025,6 +1025,31 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (and text (search "not found" text))
                 "error message should mention not found")))))))
 
+(deftest lisp-edit-form-broken-file-gives-guidance
+  (testing "editing a file that does not parse names the open form and the next tool"
+    (with-temp-file "tests/tmp/edit-form-broken-file.lisp"
+        (format nil "(in-package #:cl-user)~%~%(defun probe-a (x)~%  (let ((y (* x 2)))~%    (if (> y 10)~%        (format t \"big\")~%        (format t \"small\")~%    y))~%~%(defun probe-c (x)~%  (list x x x))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "probe-c"
+                              :operation "replace"
+                              :content "(defun probe-c (x) (list x))")
+            (cl-mcp/src/lisp-edit-form-core::file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal file-unparseable-error")
+          (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" err))
+          (ok (search "Likely fix, inferred from indentation:" err))
+          (ok (search "line 7:" err))
+          (ok (search "Next top-level form begins at line 10" err))
+          (ok (search "The file itself does not parse, so no form can be located." err))
+          (ok (search "Run lisp-check-parens with path=" err))
+          (ok (search "starting at line 3" err))
+          (ok (string= before (fs-read-file path)) "file untouched"))))))
+
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
   (testing "old protocol errors return -32603 rpc-error, not isError"
     (with-temp-file "tests/tmp/edit-old-proto.lisp"
