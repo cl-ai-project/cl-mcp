@@ -133,6 +133,9 @@ indicating how many additional characters past CH were consumed."
     (t
      (incf (scan-state-col state)))))
 
+;; Known limitation: |...| multiple-escape symbols are not recognised here, so
+;; a "(" or ")" inside such a symbol name is counted as code and can produce a
+;; spurious imbalance report.
 (defun scan-delimiters (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column.
@@ -217,6 +220,9 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
                       (list :unclosed-form-line line
                             :unclosed-form-head (%form-head text line)))))))))
 
+;; Known limitation: |...| multiple-escape symbols are not recognised here, so
+;; a "(" or ")" inside such a symbol name is treated as code and reaches
+;; FUNCTION like any other delimiter.
 (defun %map-code-characters (text function)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
 outside strings, line comments, block comments and character literals.
@@ -324,37 +330,64 @@ are counted; [ and { are constituent characters in Common Lisp."
          (#\) (incf closes)))))
     (values opens closes)))
 
+(defun %strip-trailing-cr (line)
+  "Return LINE without a trailing #\\Return, so CRLF text does not leak a raw
+carriage return into the rendered guidance."
+  (let ((len (length line)))
+    (if (and (plusp len) (char= (char line (1- len)) #\Return))
+        (subseq line 0 (1- len))
+        line)))
+
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
 Return a list of (:line n :original str :repaired str :delta d) for every
 line that changed, where D is the number of \")\" added (negative if removed).
+A trailing #\\Return is stripped from both sides before comparing, so CRLF
+input does not leak a carriage return into the guidance, and lines whose D
+would be 0 (whitespace-only changes) are skipped because they would render as
+a meaningless \"add 0\" entry.
 Both texts must have the same number of lines, which parinfer guarantees."
-  (loop for orig in (split-string original :separator '(#\Newline))
-        for rep in (split-string repaired :separator '(#\Newline))
+  (loop for raw-orig in (split-string original :separator '(#\Newline))
+        for raw-rep in (split-string repaired :separator '(#\Newline))
         for line from 1
-        unless (string= orig rep)
+        for orig = (%strip-trailing-cr raw-orig)
+        for rep = (%strip-trailing-cr raw-rep)
+        for delta = (- (count #\) rep) (count #\) orig))
+        unless (or (string= orig rep) (zerop delta))
           collect (list :line line
                         :original orig
                         :repaired rep
-                        :delta (- (count #\) rep) (count #\) orig)))))
+                        :delta delta)))
 
 (defun format-repair-lines (fixes)
   "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
-preceded by a newline, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\"."
-  (with-output-to-string (s)
-    (dolist (fix fixes)
-      (let ((delta (getf fix :delta)))
-        (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
-                (getf fix :line)
-                (getf fix :original)
-                (if (minusp delta) "remove" "add")
-                (abs delta))))))
+preceded by a newline, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\".
+At most 10 entries are rendered in full; when more lines changed, a trailing
+\"  ... and N more changed lines\" names the remainder, so a wholesale
+reindentation cannot flood the guidance."
+  (let* ((limit 10)
+         (total (length fixes))
+         (shown (if (> total limit) (subseq fixes 0 limit) fixes)))
+    (with-output-to-string (s)
+      (dolist (fix shown)
+        (let ((delta (getf fix :delta)))
+          (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
+                  (getf fix :line)
+                  (getf fix :original)
+                  (if (minusp delta) "remove" "add")
+                  (abs delta))))
+      (when (> total limit)
+        (format s "~%  ... and ~D more changed lines" (- total limit))))))
 
 (defun format-delimiter-diagnosis (diagnosis &key (target "code"))
   "Render DIAGNOSIS (from DIAGNOSE-DELIMITERS) as guidance text.
+Only failure plists are rendered: when DIAGNOSIS is balanced (:ok true) this
+returns NIL, because there is nothing to explain.
 TARGET is the subject of the first sentence: \"code\", \"content\", \"new_text\",
 or a file path. The likely-fix block is included only when parinfer produced
 one; otherwise a repair-failed sentence is printed instead."
+  (when (getf diagnosis :ok)
+    (return-from format-delimiter-diagnosis nil))
   (let ((kind (getf diagnosis :kind))
         (line (getf diagnosis :line))
         (column (getf diagnosis :column))
@@ -373,12 +406,21 @@ one; otherwise a repair-failed sentence is printed instead."
          (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D.~%~
                     Either remove that ~S or check for a form opened earlier that was never closed."
                  target found line column found))
-        ((string= kind "mismatch")
+        ((and (string= kind "mismatch") (equal expected ")"))
          (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
                     \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be ~
                     auto-repaired.~%~
                     Replace it with ~S."
                  target expected found line column expected))
+        ((string= kind "mismatch")
+         ;; EXPECTED is "]" or "}": the opener was a bracket or brace, which in
+         ;; Common Lisp may legitimately be part of a symbol name.  Advising a
+         ;; replacement here would break valid code such as (list [a b).
+         (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
+                    The ~S opened earlier is being treated as an opening delimiter; if it is ~
+                    part of a symbol name this diagnosis is a false positive."
+                 target expected found line column
+                 (if (equal expected "]") "[" "{")))
         (t
          (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
                  target kind line column)))

@@ -103,6 +103,24 @@
     (let ((diff (repair-line-differences "(a))" "(a)")))
       (ok (= (getf (first diff) :delta) -1)))))
 
+(deftest repair-line-differences-strips-carriage-returns
+  (testing "CRLF input does not leak a #\\Return into :original or :repaired"
+    (let ((diff (repair-line-differences
+                 (format nil "(a~C~%  (b~C~%  c)" #\Return #\Return)
+                 (format nil "(a~C~%  (b)~C~%  c)" #\Return #\Return))))
+      (ok (= (length diff) 1))
+      (ok (= (getf (first diff) :line) 2))
+      (ok (string= (getf (first diff) :original) "  (b"))
+      (ok (string= (getf (first diff) :repaired) "  (b)"))
+      (ng (find #\Return (getf (first diff) :original)))
+      (ng (find #\Return (getf (first diff) :repaired))))))
+
+(deftest repair-line-differences-skips-zero-delta-lines
+  (testing "a whitespace-only difference yields no entry"
+    (ok (null (repair-line-differences
+               (format nil "(a  ~%  (b))")
+               (format nil "(a~%  (b))"))))))
+
 (deftest diagnose-let-binding-unclosed
   (testing "likely fix points at the let binding line"
     (let* ((d (diagnose-delimiters +let-binding-unclosed+))
@@ -176,6 +194,22 @@
   (testing "no fixes gives an empty string"
     (ok (string= (format-repair-lines nil) ""))))
 
+(deftest format-repair-lines-caps-at-ten-entries
+  (testing "12 fixes render 10 lines plus a remainder sentence"
+    (let* ((fixes (loop for n from 1 to 12
+                        collect (list :line n :original "x" :repaired "x)" :delta 1)))
+           (text (format-repair-lines fixes)))
+      (ok (search (format nil "~%  line 10: ") text))
+      (ng (search (format nil "~%  line 11: ") text))
+      (ng (search (format nil "~%  line 12: ") text))
+      (ok (search (format nil "~%  ... and 2 more changed lines") text))))
+  (testing "exactly 10 fixes render in full with no remainder sentence"
+    (let* ((fixes (loop for n from 1 to 10
+                        collect (list :line n :original "x" :repaired "x)" :delta 1)))
+           (text (format-repair-lines fixes)))
+      (ok (search (format nil "~%  line 10: ") text))
+      (ng (search "more changed lines" text)))))
+
 (deftest format-diagnosis-unclosed
   (testing "unclosed names the form, the likely fix and the next top-level line"
     (let ((text (format-delimiter-diagnosis
@@ -210,3 +244,17 @@
       (ok (search "Replace it with \")\"." text))
       (ok (search "Automatic repair could not produce a readable form; fix the delimiters by hand." text))
       (ng (search "Likely fix" text)))))
+
+(deftest format-diagnosis-mismatch-bracket-opener
+  (testing "a [ opener does not get a \"replace it\" instruction"
+    (let ((text (format-delimiter-diagnosis (diagnose-delimiters "(list [a b)"))))
+      (ok (search "Unbalanced parentheses in code: expected \"]\" but found \")\" at line 1, column 11."
+                  text))
+      (ok (search "The \"[\" opened earlier is being treated as an opening delimiter; if it is part of a symbol name this diagnosis is a false positive."
+                  text))
+      (ng (search "Replace it with" text)))))
+
+(deftest format-diagnosis-balanced-returns-nil
+  (testing "a balanced diagnosis has nothing to explain"
+    (ok (null (format-delimiter-diagnosis (diagnose-delimiters "(+ 1 2)"))))
+    (ok (null (format-delimiter-diagnosis (list :ok t) :target "content")))))
