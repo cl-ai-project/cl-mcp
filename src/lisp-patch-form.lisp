@@ -27,12 +27,17 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:count-delimiter-depth
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
                 #:%detect-readtable-before-node
                 #:%whitespace-char-p
-                #:%locate-target-form)
+                #:%locate-target-form
+                #:file-unparseable-error)
   (:documentation "Scoped text replacement within a matched top-level Lisp form.")
   (:export #:lisp-patch-form))
 
@@ -42,6 +47,32 @@
   ((reason :initarg :reason :reader patch-operation-reason))
   (:report (lambda (c s) (write-string (patch-operation-reason c) s)))
   (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
+
+(defun %check-depth-balance (old-text new-text)
+  "Signal PATCH-OPERATION-ERROR when NEW-TEXT opens/closes a different net
+number of parentheses than OLD-TEXT. Since a patch changes only one region,
+a net difference guarantees the form will not parse, so this is checked
+before the file is read."
+  (multiple-value-bind (old-open old-close) (count-delimiter-depth old-text)
+    (multiple-value-bind (new-open new-close) (count-delimiter-depth new-text)
+      (let ((diff (- (- new-open new-close) (- old-open old-close))))
+        (unless (zerop diff)
+          (let ((n (abs diff)))
+            (error 'patch-operation-error
+                   :reason
+                   (if (plusp diff)
+                       (format nil "new_text closes ~D fewer \")\" than old_text ~
+                                    (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                                    The patch would leave the form unclosed. ~
+                                    Add ~D \")\" to new_text, or remove ~D \"(\". ~
+                                    No changes were written to disk."
+                               n old-open old-close new-open new-close n n)
+                       (format nil "new_text closes ~D more \")\" than old_text ~
+                                    (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                                    The patch would add an extra closing parenthesis. ~
+                                    Remove ~D \")\" from new_text, or add ~D \"(\". ~
+                                    No changes were written to disk."
+                               n old-open old-close new-open new-close n n)))))))))
 
 (defun %apply-patch-operation (text node old-text new-text)
   "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
@@ -149,6 +180,7 @@ to use for parsing the file."
     (error "old_text and new_text must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
+  (%check-depth-balance old-text new-text)
   (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
       (%locate-target-form file-path form-type form-name readtable)
     (declare (ignore _))

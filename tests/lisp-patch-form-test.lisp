@@ -209,7 +209,8 @@ running as root), THUNK is skipped instead."
                 (error (e)
                   (setf err-msg (princ-to-string e))
                   t)))
-          (ok (search "invalid Lisp" err-msg))
+          (ok (or (search "invalid Lisp" err-msg)
+                  (search "fewer \")\"" err-msg)))
           (ok (search "No changes were written" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
@@ -233,7 +234,8 @@ running as root), THUNK is skipped instead."
                   t)))
           (ok (or (search "invalid Lisp" err-msg)
                   (search "trailing content" err-msg)
-                  (search "malformed form text" err-msg))
+                  (search "malformed form text" err-msg)
+                  (search "fewer \")\"" err-msg))
               "error message should describe the structural problem")
           (ok (string= before (fs-read-file path))))))))
 
@@ -666,3 +668,66 @@ running as root), THUNK is skipped instead."
                 "message must not carry an internal-error prefix")
             (ok (and message (search "patch-readonly-legacy" message))
                 "message should name the file that could not be written")))))))
+
+(deftest lisp-patch-form-depth-mismatch-fewer-closes
+  (testing "new_text missing a ) is refused before the file is read"
+    (with-temp-file "tests/tmp/patch-depth-fewer.lisp"
+        (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(print x)"
+                               :new-text "(print x")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "new_text closes 1 fewer \")\" than old_text" err-msg))
+          (ok (search "(old_text: 1 open / 1 close, new_text: 1 open / 0 close)" err-msg))
+          (ok (search "The patch would leave the form unclosed." err-msg))
+          (ok (search "Add 1 \")\" to new_text, or remove 1 \"(\"." err-msg))
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-mismatch-more-closes
+  (testing "new_text with an extra ) is refused with the opposite advice"
+    (with-temp-file "tests/tmp/patch-depth-more.lisp"
+        (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
+      (lambda (path)
+        (let ((err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(print x)"
+                               :new-text "(print x))")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok (search "new_text closes 1 more \")\" than old_text" err-msg))
+          (ok (search "The patch would add an extra closing parenthesis." err-msg))
+          (ok (search "Remove 1 \")\" from new_text, or add 1 \"(\"." err-msg)))))))
+
+(deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
+  (testing "parens inside strings and #\\( do not trip the depth check"
+    (with-temp-file "tests/tmp/patch-depth-strings.lisp"
+        (format nil "(defun target ()~%  (list 1))~%")
+      (lambda (path)
+        (lisp-patch-form :file-path path
+                         :form-type "defun"
+                         :form-name "target"
+                         :old-text "(list 1)"
+                         :new-text "(list \")\" #\\( 1)")
+        (ok (search "(list \")\" #\\( 1)" (fs-read-file path)))))))
+
+(deftest lisp-patch-form-depth-mismatch-does-not-need-a-readable-file
+  (testing "the depth check fires even when the file path does not exist"
+    (let ((err-msg nil))
+      (handler-case
+          (lisp-patch-form :file-path (project-path "tests/tmp/does-not-exist-xyzzy.lisp")
+                           :form-type "defun"
+                           :form-name "target"
+                           :old-text "(a)"
+                           :new-text "(a")
+        (error (e) (setf err-msg (princ-to-string e))))
+      (ok (search "new_text closes 1 fewer" err-msg)))))
