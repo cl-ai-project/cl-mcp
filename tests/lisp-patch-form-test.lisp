@@ -731,3 +731,46 @@ running as root), THUNK is skipped instead."
                            :new-text "(a")
         (error (e) (setf err-msg (princ-to-string e))))
       (ok (search "new_text closes 1 fewer" err-msg)))))
+
+(deftest lisp-patch-form-nesting-breakage-gets-diagnosis
+  (testing "equal depth but an early ) yields trailing content and a diagnosis"
+    (with-temp-file "tests/tmp/patch-nesting.lisp"
+        (format nil "(defun target (x)~%  (let ((y 1))~%    (print y)~%    y))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(let ((y 1))"
+                               :new-text ")) (let ((y 1)) ((")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "invalid Lisp" err-msg))
+          (ok (search "Unbalanced parentheses in the patched form" err-msg))
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-broken-file-gives-guidance
+  (testing "patching a file that does not parse returns the shared guidance"
+    (with-temp-file "tests/tmp/patch-broken-file.lisp"
+        (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "b"
+                     "old_text" "2"
+                     "new_text" "3")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "patch-broken-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "unclosed (form starting at line 1: \"(defun a ()\")" text))
+            (ok (search "Next top-level form begins at line 4" text))
+            (ok (search "Run lisp-check-parens with path=" text))))))))

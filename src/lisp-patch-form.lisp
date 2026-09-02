@@ -123,11 +123,22 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
                          (subseq text end))))
       (values modified-file modified-form))))
 
+(defun %diagnosed-reason (form-text fallback)
+  "Return the patch failure reason for FORM-TEXT. When the delimiter scan
+finds the breakage, the shared diagnosis is used; otherwise FALLBACK."
+  (let ((diagnosis (diagnose-delimiters form-text)))
+    (if (getf diagnosis :ok)
+        fallback
+        (format nil "patch operation produced invalid Lisp. ~A ~
+                     Line numbers are within the patched form. ~
+                     No changes were written to disk."
+                (format-delimiter-diagnosis diagnosis :target "the patched form")))))
+
 (defun %validate-form-parseable (form-text &optional readtable-designator
                                            package-name source-path)
   "Validate that FORM-TEXT parses as a single complete Lisp form.
-Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR if the text
-does not parse correctly."
+Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR, carrying a
+delimiter diagnosis when one applies, if the text does not parse correctly."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*
@@ -148,17 +159,23 @@ does not parse correctly."
                                    (length form-text))))
                (when (< rest-start (length form-text))
                  (error 'patch-operation-error
-                        :reason "patch produced malformed form text (trailing content after form)")))
+                        :reason (%diagnosed-reason
+                                 form-text
+                                 (format nil "patch produced malformed form text (trailing ~
+                                              content after form). No changes were written ~
+                                              to disk.")))))
              form-text))
          :source-path source-path)
       (patch-operation-error (e)
         (error e))
       (error (e)
         (error 'patch-operation-error
-               :reason (format nil "patch operation produced invalid Lisp: ~A. ~
-                The form could not be parsed after replacement. ~
-                No changes were written to disk."
-                               e))))))
+               :reason (%diagnosed-reason
+                        form-text
+                        (format nil "patch operation produced invalid Lisp: ~A. ~
+                                     The form could not be parsed after replacement. ~
+                                     No changes were written to disk."
+                                e)))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
@@ -299,6 +316,10 @@ is used instead of Eclector, which means comments are NOT preserved."))
       ;; ARG-VALIDATION-ERROR are both subtypes of ERROR, so both must stay
       ;; ahead of the generic clause; reordering silently changes the response
       ;; shape of every expected failure rather than breaking the build.
+      (file-unparseable-error (e)
+        (tool-error id
+                    (sanitize-for-json (princ-to-string e))
+                    :protocol-version (protocol-version state)))
       (patch-operation-error (e)
         (tool-error id
                     (sanitize-for-json
