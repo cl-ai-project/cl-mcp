@@ -221,6 +221,33 @@
                (ok (string= (uiop:read-file-string abs-path) initial)))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-fs-write-allows-unparseable-lisp
+  (testing "tools/call fs-write-file may overwrite an existing .lisp file that does not parse"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/unparseable-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(defun a ()~%  (list 1)~%"))
+             (repaired (format nil "(defun a ()~%  (list 1))~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\","
+                           "\"content\":\"(defun a ()\\n  (list 1))\\n\"}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp)))
+               (ok (null (gethash "error" obj))
+                   "overwriting an unparseable Lisp file is not an error")
+               (ok (gethash "result" obj))
+               (ok (string= (uiop:read-file-string abs-path) repaired)
+                   "the repaired content was written"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-fs-write-allows-new-lisp
   (testing "tools/call fs-write-file allows creating new .lisp files"
     (with-test-project-root

@@ -295,26 +295,16 @@ previous top-level form was never closed."
         (subseq trimmed 0 40)
         trimmed)))
 
-(defun %stray-bracket-p (text)
-  "Return T when TEXT contains ] or } outside strings, comments and char literals."
-  (%map-code-characters
-   text
-   (lambda (ch idx line col)
-     (declare (ignore idx line col))
-     (when (or (char= ch #\]) (char= ch #\}))
-       (return-from %stray-bracket-p t))))
-  nil)
-
 (defun %likely-fixes (text)
   "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
 FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
-when the repaired text still has a stray ] or }, or is still unbalanced;
-FIXES is NIL in that case."
+when the repaired text is still unbalanced per SCAN-DELIMITERS, which also
+covers a ] or } closing a paren; FIXES is NIL in that case. Balanced [...]
+or {...} pairs, as used by some reader macros, are accepted as-is."
   (let ((repaired (apply-indent-mode text)))
-    (if (or (%stray-bracket-p repaired)
-            (not (getf (scan-delimiters repaired) :ok)))
-        (values nil t)
-        (values (repair-line-differences text repaired) nil))))
+    (if (getf (scan-delimiters repaired) :ok)
+        (values (repair-line-differences text repaired) nil)
+        (values nil t))))
 
 (defun count-delimiter-depth (text)
   "Return two values: the number of \"(\" and the number of \")\" in TEXT

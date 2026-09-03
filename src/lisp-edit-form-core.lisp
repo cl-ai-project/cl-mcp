@@ -288,15 +288,21 @@ before TARGET's start position."
 (defun file-unparseable-message (condition)
   "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
 When the delimiter scan found the breakage, the text is the shared diagnosis
-followed by the next steps; otherwise only the sanitized reader error."
+followed by an executable recovery path (fs-read-file, hand-apply the likely
+fix, fs-write-file, which permits overwriting a file that does not parse);
+otherwise only the sanitized reader error."
   (let* ((path (file-unparseable-path condition))
          (diagnosis (file-unparseable-diagnosis condition))
          (line (getf diagnosis :unclosed-form-line)))
     (if (getf diagnosis :ok)
         (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
-        (format nil "~A~%The file itself does not parse, so no form can be located.~%~
-                     Run lisp-check-parens with path=~S to see the full diagnosis, then use ~
-                     lisp-edit-form (operation \"replace\") on the form~@[ starting at line ~D~]."
+        (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
+                     lisp-patch-form cannot locate any form in it.~%~
+                     Run lisp-check-parens with path=~S to see the full diagnosis, ~
+                     then read the file with fs-read-file, apply the change shown ~
+                     under \"Likely fix\"~@[ to the form starting at line ~D~], and ~
+                     write the whole file back with fs-write-file (overwriting is ~
+                     allowed while the file does not parse)."
                 (format-delimiter-diagnosis diagnosis :target path)
                 path line))))
 

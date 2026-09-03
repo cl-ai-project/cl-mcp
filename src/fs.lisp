@@ -3,6 +3,7 @@
 (defpackage #:cl-mcp/src/fs
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/paren-diagnostics #:scan-delimiters)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:*project-root-lock*)
@@ -149,12 +150,33 @@ Returns T on success."
                  '("lisp" "asd")
                  :test #'string=))))
 
+(defun %lisp-file-unparseable-p (pn)
+  "Return T when the Lisp source at PN cannot be edited structurally: its
+delimiters are unbalanced, or the standard reader (with *READ-EVAL* NIL)
+hits a reader error or end of file. Files using named-readtables are only
+delimiter-checked, and a missing package is not a parse failure."
+  (let ((text (%read-file-string pn nil nil)))
+    (or (not (getf (scan-delimiters text) :ok))
+        (and (not (search "in-readtable" text))
+             (with-input-from-string (stream text)
+               (handler-case
+                   (let ((*read-eval* nil)
+                         (*readtable* (copy-readtable nil)))
+                     (loop (when (eq :eof (read stream nil :eof))
+                             (return nil))))
+                 (reader-error (e) (not (typep e 'package-error)))
+                 (end-of-file () t)
+                 (error () nil)))))))
+
 (defun %existing-lisp-overwrite-error (id path)
   "Return a structured RPC error for forbidden Lisp overwrite, or NIL.
-New Lisp source file creation is allowed."
+New Lisp source file creation is allowed. Overwriting is also allowed when
+the existing file does not parse: lisp-edit-form and lisp-patch-form cannot
+locate any form in such a file, so rewriting it is the only repair path."
   (let ((pn (ensure-write-path path)))
     (when (and (probe-file pn)
-               (%lisp-source-pathname-p pn))
+               (%lisp-source-pathname-p pn)
+               (not (%lisp-file-unparseable-p pn)))
       (rpc-error id -32602
                  "Cannot overwrite existing .lisp/.asd with fs-write-file; use lisp-edit-form."
                  (make-ht "code" "existing_lisp_overwrite_forbidden"
@@ -331,7 +353,9 @@ collapsed signatures view that saves ~70% of context window tokens."
 Parent directories are automatically created if they do not exist.
 Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
 For editing EXISTING Lisp source code, you MUST use 'lisp-edit-form' instead
-to preserve structure and comments."
+to preserve structure and comments. The one exception: when an existing .lisp
+file no longer parses (unbalanced parentheses), lisp-edit-form cannot locate
+any form in it, so overwriting it here is permitted as the repair path."
   :args ((path :type :string :required t
                :description "Relative path under the project root; absolute paths are rejected")
          (content :type :string :required t

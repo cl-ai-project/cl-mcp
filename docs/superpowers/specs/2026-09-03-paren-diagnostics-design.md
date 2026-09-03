@@ -320,3 +320,13 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   括弧を挿入するため、そのようなフォームでは `:repair-failed` となり
   `Likely fix` は出ない(`:unclosed-form-line` と `:next-top-level-line` は
   出る)。parinfer 側の修正はフォローアップとする。
+- **§4.2 の `:repair-failed` 判定**: 修復結果に `]`/`}` が残るだけでは失敗と
+  しない。`scan-delimiters` で釣り合わない場合のみ失敗とする(`]` が `(` を
+  閉じている打ち間違いは `mismatch` として引き続き拒否される)。リーダー
+  マクロで `{...}` や `[...]` を対で使う内容を誤拒否しないため(Codex レビュー
+  P1 への対応)。
+- **§5.3 の誘導文**: 「`lisp-edit-form` で replace せよ」ではループする
+  (`lisp-edit-form` も同じファイルをパースして同じエラーになる)。誘導は
+  「`fs-read-file` で読み、Likely fix を手で当てて `fs-write-file` で書き戻す」に
+  変更し、`fs-write-file` の既存 `.lisp` 上書き禁止は「ファイルがパースできない
+  間は許可」に緩めた(Codex レビュー P2 への対応)。

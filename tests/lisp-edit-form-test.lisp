@@ -1046,9 +1046,14 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Likely fix, inferred from indentation:" err))
           (ok (search "line 7:" err))
           (ok (search "Next top-level form begins at line 10" err))
-          (ok (search "The file itself does not parse, so no form can be located." err))
+          (ok (search "The file itself does not parse, so lisp-edit-form and lisp-patch-form" err))
+          (ok (search "cannot locate any form in it." err))
           (ok (search "Run lisp-check-parens with path=" err))
           (ok (search "starting at line 3" err))
+          (ok (search "write the whole file back with fs-write-file" err)
+              "recovery path must be executable with cl-mcp tools alone")
+          (ng (search "use lisp-edit-form (operation" err)
+              "must not send the caller back into the tool that just failed")
           (ok (string= before (fs-read-file path)) "file untouched"))))))
 
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
@@ -1254,6 +1259,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." err))
           (ok (search "Replace it with \")\"." err))
           (ok (string= before (fs-read-file path)) "file untouched"))))))
+
+(deftest lisp-edit-form-accepts-balanced-braces-with-missing-paren
+  (testing "content using {...} reader-macro syntax is still auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-braces.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (foo {a b}~%  (bar x))"))
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "(foo {a b})" (fs-read-file path))
+              "the paren was added after the braces, and the braces were kept"))))))
 
 (deftest lisp-edit-form-dry-run-carries-repair-fixes
   (testing "dry-run hash exposes the repair line diff"

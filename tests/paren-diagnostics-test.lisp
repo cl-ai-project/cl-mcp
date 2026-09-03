@@ -170,6 +170,21 @@
       (ok (getf d :repair-failed))
       (ng (getf d :likely-fixes)))))
 
+(deftest diagnose-balanced-braces-are-repairable
+  (testing "balanced {...} pairs (reader-macro syntax) do not block the likely fix"
+    (let* ((d (diagnose-delimiters (format nil "(defun f ()~%  (foo {a b}~%  (bar 1))")))
+           (fixes (getf d :likely-fixes)))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ng (getf d :repair-failed))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 2))
+      (ok (= (getf (first fixes) :delta) 1))))
+  (testing "a ] closing a ( is still a mismatch, even though the result would read"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list foo]"))))
+      (ok (string= (getf d :kind) "mismatch"))
+      (ok (getf d :repair-failed))
+      (ng (getf d :likely-fixes)))))
+
 (deftest diagnose-ok-has-no-extra-keys
   (testing "balanced text returns the plain scan plist"
     (let ((d (diagnose-delimiters "(+ 1 2)")))
