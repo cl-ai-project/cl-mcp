@@ -288,24 +288,25 @@ before TARGET's start position."
 
 (defun file-unparseable-message (condition)
   "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
-When the delimiter scan found the breakage, the text is the shared diagnosis
-followed by an executable recovery path (fs-read-file, hand-apply the likely
-fix, fs-write-file, which permits overwriting a file that does not parse);
-otherwise only the sanitized reader error."
+The text opens with the shared delimiter diagnosis when the scan found the
+breakage, or with the sanitized reader error otherwise, and always ends with
+an executable recovery path: fs-read-file, hand-apply the fix, fs-write-file
+(which permits overwriting a file that does not parse)."
   (let* ((path (file-unparseable-path condition))
          (diagnosis (file-unparseable-diagnosis condition))
-         (line (getf diagnosis :unclosed-form-line)))
-    (if (getf diagnosis :ok)
-        (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
-        (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
-                     lisp-patch-form cannot locate any form in it.~%~
-                     Run lisp-check-parens with path=~S to see the full diagnosis, ~
-                     then read the file with fs-read-file, apply the change shown ~
-                     under \"Likely fix\"~@[ to the form starting at line ~D~], and ~
-                     write the whole file back with fs-write-file (overwriting is ~
-                     allowed while the file does not parse)."
-                (format-delimiter-diagnosis diagnosis :target path)
-                path line))))
+         (line (getf diagnosis :unclosed-form-line))
+         (head (if (getf diagnosis :ok)
+                   (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
+                   (format-delimiter-diagnosis diagnosis :target path))))
+    (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
+                 lisp-patch-form cannot locate any form in it.~%~
+                 Run lisp-check-parens with path=~S to see the full diagnosis, ~
+                 then read the file with fs-read-file, apply the change~
+                 ~:[ described above~; shown under \"Likely fix\"~]~
+                 ~@[ to the form starting at line ~D~], and ~
+                 write the whole file back with fs-write-file (overwriting is ~
+                 allowed while the file does not parse)."
+            head path (not (getf diagnosis :ok)) line)))
 
 (define-condition file-unparseable-error (error)
   ((path :initarg :path :reader file-unparseable-path)
@@ -317,9 +318,11 @@ otherwise only the sanitized reader error."
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR, carrying a delimiter diagnosis, when the file
-cannot be parsed at all. A file larger than the fs read cap is reported as
-such instead, because its truncated prefix would only yield a misleading
-delimiter diagnosis.
+cannot be parsed at all, or when the target form is not found and the lenient
+CL-reader pass (after an IN-READTABLE switch) stopped early on a read error;
+forms before such a breakage remain editable. A file larger than the fs read
+cap is reported as such instead, because its truncated prefix would only
+yield a misleading delimiter diagnosis.
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -338,28 +341,34 @@ Returns eight values:
           (error "~A exceeds the read limit (~@[~D characters, ~]only ~D read); ~
                   lisp-edit-form and lisp-patch-form cannot edit files this large"
                  (namestring abs) file-length (length original)))
-        (let* ((nodes (handler-case
-                          (parse-top-level-forms original
-                                                 :readtable readtable
-                                                 :source-path abs)
-                        (error (e)
-                          (error 'file-unparseable-error
-                                 :path (namestring abs)
-                                 :diagnosis (diagnose-delimiters original)
-                                 :cause (sanitize-error-message
-                                         (princ-to-string e))))))
-               (target (%find-target nodes form-type-str form-name)))
-          (unless target
-            (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))
-          (let ((target-snippet (subseq original
-                                       (cst-node-start target)
-                                       (cst-node-end target))))
-            (values abs rel original nodes target target-snippet form-type-str
-                    (extract-in-package-name-from-text original))))))))
+        (flet ((unparseable (cause)
+                 (error 'file-unparseable-error
+                        :path (namestring abs)
+                        :diagnosis (diagnose-delimiters original)
+                        :cause (sanitize-error-message (princ-to-string cause)))))
+          (multiple-value-bind (nodes swallowed)
+              (handler-case
+                  (parse-top-level-forms original
+                                         :readtable readtable
+                                         :source-path abs)
+                (error (e) (unparseable e)))
+            (let ((target (%find-target nodes form-type-str form-name)))
+              (unless target
+                (when swallowed
+                  (unparseable swallowed))
+                (error "Form ~A ~A not found in ~A" form-type form-name
+                       (namestring abs)))
+              (let ((target-snippet (subseq original
+                                           (cst-node-start target)
+                                           (cst-node-end target))))
+                (values abs rel original nodes target target-snippet form-type-str
+                        (extract-in-package-name-from-text original))))))))))
 
 (defun %file-unparseable-by-edit-tools-p (pn)
   "Return T when PARSE-TOP-LEVEL-FORMS cannot parse the file at PN, i.e. when
-lisp-edit-form and lisp-patch-form would signal FILE-UNPARSEABLE-ERROR for it.
+lisp-edit-form and lisp-patch-form would signal FILE-UNPARSEABLE-ERROR for it:
+either the parse signals, or its lenient CL-reader pass (after an IN-READTABLE
+switch) stopped early on a read error, which it reports as a second value.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
 permits overwriting exactly those files. A read truncated at the fs read cap
 returns NIL: a cut-off prefix of a valid file would look unparseable, and the
@@ -367,9 +376,10 @@ overwrite guard must stay in place for it."
   (multiple-value-bind (text truncated) (fs-read-file pn)
     (and (not truncated)
          (handler-case
-             (progn
-               (parse-top-level-forms text :source-path pn)
-               nil)
+             (multiple-value-bind (nodes swallowed)
+                 (parse-top-level-forms text :source-path pn)
+               (declare (ignore nodes))
+               (and swallowed t))
            (error () t)))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the

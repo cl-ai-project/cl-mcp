@@ -134,14 +134,19 @@ job -- no name list can enumerate every vendoring convention.")
 (defun %read-header-forms-from-text (text)
   "Read package-related header forms from TEXT using the CL reader.
 Stops after the first non-header top-level form once package header forms
-have begun, to avoid descending into the rest of the file."
+have begun, to avoid descending into the rest of the file. Extraction is
+best-effort: a read error or premature end of file (a malformed later form,
+custom reader syntax) ends the scan and the forms read so far are returned,
+so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
+instead of failing here first."
   (call-with-lenient-packages
    (lambda ()
      (let ((*read-eval* nil))
        (with-input-from-string (stream text)
          (let ((forms nil)
                (saw-header nil))
-           (loop for form = (read stream nil :eof)
+           (loop for form = (handler-case (read stream nil :eof)
+                              (error () :eof))
                  until (eq form :eof)
                  do (cond
                       ((%header-form-p form)

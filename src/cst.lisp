@@ -89,7 +89,11 @@ or the readtable is not found."
 
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
   "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
-Returns the complete list of nodes (including previously collected NODES)."
+Returns two values: the complete list of nodes (including previously collected
+NODES) and the read error that stopped reading early, or NIL when the stream
+was consumed to its end. Reading stays lenient so a partially broken file can
+still be displayed, but callers that need to know the file is unparseable
+(lisp-edit-form, the fs-write-file overwrite guard) inspect the second value."
   (let ((*readtable* custom-readtable)
         (*read-eval* nil))
     (loop
@@ -102,11 +106,11 @@ Returns the complete list of nodes (including previously collected NODES)."
         (setf start-pos (file-position stream))
         (let ((form (handler-case (read stream nil :eof)
                       (error (e)
-                        ;; On read error, return what we have so far
-                        (declare (ignore e))
-                        (return (nreverse nodes))))))
+                        ;; On read error, return what we have so far and
+                        ;; report the error as the second value.
+                        (return (values (nreverse nodes) e))))))
           (when (eq form :eof)
-            (return (nreverse nodes)))
+            (return (values (nreverse nodes) nil)))
           (let* ((end-pos (file-position stream))
                  (node (make-cst-node :kind :expr
                                       :value form
@@ -197,6 +201,14 @@ Returns the complete list of nodes (including previously collected NODES)."
                      :start-line (%pos->line start)
                      :end-line (%pos->line end)))))
 
+(define-condition unterminated-source (end-of-file)
+  ((message :initarg :message :reader unterminated-source-message))
+  (:report (lambda (c s) (write-string (unterminated-source-message c) s)))
+  (:documentation "Signaled when the reader hit end of input inside a form.
+Carries the same explanatory message as other reader errors but stays a
+subtype of END-OF-FILE, so callers that treat a premature end of input
+specially (lisp-read-file's unbalanced-parentheses hint) keep working."))
+
 (defun %parse-top-level-forms-core (text readtable)
   "Parse TEXT into CST nodes assuming *PACKAGE* and *LINE-TABLE* are already bound."
   (if readtable
@@ -241,24 +253,39 @@ Returns the complete list of nodes (including previously collected NODES)."
                                   stream nodes custom-rt)))))))))))
             (reader-error (e)
               (let ((msg (format nil "~A" e)))
-                (if (search "READ-EVAL" msg)
-                    (error
-                     "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
+                (cond
+                  ((search "READ-EVAL" msg)
+                   (error
+                    "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
 If you need to parse files containing #., consider removing or replacing the #. forms, ~
 or use a separate evaluation step."
-                     e)
-                    (error
-                     "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
-specify the 'readtable' parameter with the named-readtable designator ~
-(e.g., readtable: \"interpol-syntax\")."
-                     e)))))))))
+                    e))
+                  ((typep e 'end-of-file)
+                   ;; Keep the END-OF-FILE type: lisp-read-file turns it into
+                   ;; an unbalanced-parentheses hint.
+                   (error 'unterminated-source
+                          :stream stream
+                          :message (format nil "Reader error: ~A~%~%If this file uses custom ~
+reader macros (e.g., cl-interpol's #?), specify the 'readtable' parameter with the ~
+named-readtable designator (e.g., readtable: \"interpol-syntax\")."
+                                           e)))
+                  (t
+                   (error
+                    "Reader error: ~A~%~%If this file uses custom reader macros ~
+(e.g., cl-interpol's #?), specify the 'readtable' parameter with the ~
+named-readtable designator (e.g., readtable: \"interpol-syntax\")."
+                    e))))))))))
 
 (defun parse-top-level-forms (text &key readtable source-path initial-package)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
 stub packages that are cleaned up after parsing.
 When an IN-PACKAGE form is encountered, *PACKAGE* is updated so that
-package-local-nicknames activate for subsequent forms."
+package-local-nicknames activate for subsequent forms.
+Returns a second value: the read error that stopped the lenient CL-reader
+pass early (after an IN-READTABLE switch or when READTABLE is given), or NIL.
+In that mode a malformed later form does not signal; the nodes read so far
+are returned and the error is reported here instead."
   (let ((*line-table* (%build-line-table text))
         (*package* *package*))
     (cond

@@ -1082,6 +1082,44 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               "message names the cause instead of guessing at parentheses")
           (ok (null (search "Likely fix" err))))))))
 
+(deftest file-unparseable-after-in-readtable-switch
+  ;; After (in-readtable ...) the CST parser reads with the standard CL reader
+  ;; and swallows read errors, returning the nodes it has. That path only
+  ;; exists when named-readtables is loaded and the readtable resolves.
+  (if (and (%try-load "named-readtables")
+           (cl-mcp/src/cst::%try-switch-readtable :standard))
+      (progn
+        (testing "a form broken after an in-readtable switch still counts as unparseable"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-broken.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "the swallowed read error must make the hook return T")
+              (let ((err nil))
+                (handler-case
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "b"
+                                    :operation "replace"
+                                    :content "(defun b () 2)")
+                  (file-unparseable-error (e)
+                    (setf err (princ-to-string e))))
+                (ok err "editing the broken form signals file-unparseable-error, not not-found")
+                (ok (search "write the whole file back with fs-write-file" err)
+                    "recovery path is present")))))
+        (testing "a form before the breakage can still be edited"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
+            (lambda (path)
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "a"
+                              :operation "replace"
+                              :content "(defun a () 2)")
+              (ok (search "(defun a () 2)" (fs-read-file path)))))))
+      (skip "named-readtables not available; in-readtable switch path not exercised")))
+
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
   (testing "old protocol errors return -32603 rpc-error, not isError"
     (with-temp-file "tests/tmp/edit-old-proto.lisp"
