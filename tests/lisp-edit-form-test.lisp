@@ -1318,14 +1318,14 @@ Used to prove that a dry-run summary does not grow with the size of the file."
     (with-temp-file "tests/tmp/edit-form-handler-stray.lisp"
         (format nil "(defun target () :old)~%")
       (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
-               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
-               (args (cl-mcp/src/tools/helpers:make-ht
-                      "file_path" path
-                      "form_type" "defun"
-                      "form_name" "target"
-                      "operation" "replace"
-                      "content" (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))))
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "target"
+                     "operation" "replace"
+                     "content" (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))))
           (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
           (let* ((response (funcall handler state "stray-1" args))
                  (result-obj (gethash "result" response))
@@ -1339,14 +1339,14 @@ Used to prove that a dry-run summary does not grow with the size of the file."
     (with-temp-file "tests/tmp/edit-form-handler-broken.lisp"
         (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%")
       (lambda (path)
-        (let* ((state (cl-mcp/src/state:make-state))
-               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
-               (args (cl-mcp/src/tools/helpers:make-ht
-                      "file_path" path
-                      "form_type" "defun"
-                      "form_name" "b"
-                      "operation" "replace"
-                      "content" "(defun b () 3)")))
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "b"
+                     "operation" "replace"
+                     "content" "(defun b () 3)")))
           (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
           (let* ((response (funcall handler state "broken-1" args))
                  (result-obj (gethash "result" response))
