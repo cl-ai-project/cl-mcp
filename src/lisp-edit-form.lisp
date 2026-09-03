@@ -209,13 +209,13 @@ comments near a target form."
                  (error (e)
                    (values nil e)))))
       (when (comment-only-p content)
-        (return-from %validate-and-repair-content (values content nil)))
+        (return-from %validate-and-repair-content (values content nil nil)))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
             (values result nil nil)
-            (let* ((diagnosis (diagnose-delimiters content))
-                   (repaired (apply-indent-mode content)))
+            (let ((diagnosis (diagnose-delimiters content))
+                  (repaired (apply-indent-mode content)))
               (when (and (not (getf diagnosis :ok))
                          (getf diagnosis :repair-failed))
                 (error 'content-unrepairable-error
@@ -233,9 +233,13 @@ comments near a target form."
                         (typep repaired-err 'multiple-top-level-forms-error))
                    (error err))
                   ((not (getf diagnosis :ok))
+                   ;; Keep the reader error too: a paren problem often hides a
+                   ;; second, unrelated read error that the user still needs.
                    (error 'content-unrepairable-error
-                          :message (format-delimiter-diagnosis diagnosis
-                                                               :target "content")))
+                          :message (format nil "~A (repair also failed: ~A)"
+                                           (format-delimiter-diagnosis
+                                            diagnosis :target "content")
+                                           repaired-err)))
                   (t
                    (error "content parse error: ~A (repair also failed: ~A)"
                           err repaired-err))))))))))
@@ -568,7 +572,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
               (let ((summary
                      (cond
                        ((not changed-p)
-                        (format nil "No change to ~A ~A in ~A (content matches existing form)~@[~A~]"
+                        (format nil
+                                "No change to ~A ~A in ~A (content matches existing form)~@[~A~]"
                                 form_type form_name file_path
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t)))
