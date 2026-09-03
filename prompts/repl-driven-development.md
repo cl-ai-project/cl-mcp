@@ -224,7 +224,10 @@ Call `fs-set-project-root` with your working directory, or set `MCP_PROJECT_ROOT
 - Repeated crashes: circuit breaker trips after 3 crashes in 5 minutes; check server logs
 
 ### Parenthesis Mismatch
-Use `lisp-check-parens` to find exact position (line, column). Fix with `lisp-edit-form`.
+Use `lisp-check-parens` to find the position (line, column). When indentation is
+consistent it also prints `Likely fix, inferred from indentation:` with the exact
+line to change, and names the next top-level form when a form swallowed the rest of
+the file. Fix with `lisp-edit-form`.
 
 ### lisp-macroexpand returns "NOT EXPANDED" or a package error
 - The macro must be **defined in the worker image**, not just present on disk. Run

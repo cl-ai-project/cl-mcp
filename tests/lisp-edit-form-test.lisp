@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
-                #:%normalize-string)
+                #:%normalize-string
+                #:file-unparseable-error)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -1038,7 +1039,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                               :form-name "probe-c"
                               :operation "replace"
                               :content "(defun probe-c (x) (list x))")
-            (cl-mcp/src/lisp-edit-form-core::file-unparseable-error (e)
+            (file-unparseable-error (e)
               (setf err (princ-to-string e))))
           (ok err "should signal file-unparseable-error")
           (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" err))
