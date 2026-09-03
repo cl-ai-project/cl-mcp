@@ -1145,6 +1145,13 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                 (ok err "editing the broken form signals file-unparseable-error, not not-found")
                 (ok (search "write the whole file back with fs-write-file" err)
                     "recovery path is present")))))
+        (testing "a stray ) after the switch is classified structurally, not by reader wording"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1))~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "the stray ) is a delimiter failure"))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")

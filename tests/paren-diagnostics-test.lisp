@@ -89,6 +89,17 @@
       (ok (= opens 1))
       (ok (= closes 1)))))
 
+(deftest single-escaped-delimiters-are-not-code
+  (testing "a \\ outside a string escapes the next character in both walkers"
+    (multiple-value-bind (opens closes) (count-delimiter-depth "(foo bar\\) baz)")
+      (ok (= opens 1))
+      (ok (= closes 1)))
+    (ok (getf (scan-delimiters "(foo bar\\) baz)") :ok)
+        "scanner does not treat the escaped ) as a delimiter")
+    (multiple-value-bind (opens closes) (count-delimiter-depth "(foo \\( bar)")
+      (ok (= opens 1))
+      (ok (= closes 1)))))
+
 (deftest count-delimiter-depth-region-uses-lexical-context
   (testing "a region inside a string counts no parens"
     ;; positions 13-14 are the `a)` inside the string literal

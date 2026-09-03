@@ -191,24 +191,44 @@ reason, and so is a read truncated at *FS-READ-MAX-BYTES*."
                              t))
                       (error () nil))))))))
 
-(defun %existing-lisp-overwrite-error (id path)
-  "Return a structured RPC error for forbidden Lisp overwrite, or NIL.
-New Lisp source file creation is allowed. Overwriting is also allowed when
-the existing file does not parse: lisp-edit-form and lisp-patch-form cannot
-locate any form in such a file, so rewriting it is the only repair path."
+(defun %existing-lisp-overwrite-error (id path allow-unparseable)
+  "Return a structured RPC error for a forbidden Lisp overwrite, or NIL.
+New Lisp source file creation is always allowed. An existing .lisp/.asd file
+may be overwritten only when it does not parse (a missing or stray
+parenthesis, per %LISP-FILE-UNPARSEABLE-P) AND the caller passed
+ALLOW-UNPARSEABLE, i.e. explicitly judged that the breakage is real rather
+than custom reader syntax the structural tools could handle with a readtable.
+No heuristic can tell those two apart without knowing the readtable, so the
+decision is the caller's; the guard only makes sure a file that does parse
+is never rewritten wholesale."
   (let ((pn (ensure-write-path path)))
     (when (and (probe-file pn)
-               (%lisp-source-pathname-p pn)
-               (not (%lisp-file-unparseable-p pn)))
-      (rpc-error id -32602
-                 "Cannot overwrite existing .lisp/.asd with fs-write-file; use lisp-edit-form."
-                 (make-ht "code" "existing_lisp_overwrite_forbidden"
-                          "path" path
-                          "next_tool" "lisp-edit-form"
-                          "required_args"
-                          (vector "file_path" "form_type" "form_name"
-                                  "operation" "content")
-                          "new_file_creation_allowed" t)))))
+               (%lisp-source-pathname-p pn))
+      (let ((unparseable (%lisp-file-unparseable-p pn)))
+        (unless (and unparseable allow-unparseable)
+          (if unparseable
+              (rpc-error id -32602
+                         (format nil "Cannot overwrite existing .lisp/.asd with fs-write-file. ~
+This file does not parse (missing or stray parenthesis), so lisp-edit-form cannot ~
+locate its forms either. If the file uses no custom reader syntax, call fs-write-file ~
+again with allow_unparseable_overwrite=true to rewrite it; if it does, pass the ~
+readtable parameter to lisp-edit-form instead.")
+                         (make-ht "code" "existing_lisp_unparseable"
+                                  "path" path
+                                  "next_tool" "fs-write-file"
+                                  "required_args"
+                                  (vector "path" "content" "allow_unparseable_overwrite")
+                                  "new_file_creation_allowed" t))
+              (rpc-error id -32602
+                         (format nil "Cannot overwrite existing .lisp/.asd with ~
+fs-write-file; use lisp-edit-form.")
+                         (make-ht "code" "existing_lisp_overwrite_forbidden"
+                                  "path" path
+                                  "next_tool" "lisp-edit-form"
+                                  "required_args"
+                                  (vector "file_path" "form_type" "form_name"
+                                          "operation" "content")
+                                  "new_file_creation_allowed" t))))))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
@@ -377,14 +397,22 @@ Parent directories are automatically created if they do not exist.
 Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
 For editing EXISTING Lisp source code, you MUST use 'lisp-edit-form' instead
 to preserve structure and comments. The one exception: when an existing .lisp
-file no longer parses (unbalanced parentheses), lisp-edit-form cannot locate
-any form in it, so overwriting it here is permitted as the repair path."
+file no longer parses (a missing or stray parenthesis), lisp-edit-form cannot
+locate any form in it, so overwriting it here is the repair path -- but only
+with allow_unparseable_overwrite=true, because a file that only looks broken
+to the default reader may be valid under a custom readtable."
   :args ((path :type :string :required t
                :description "Relative path under the project root; absolute paths are rejected")
          (content :type :string :required t
-                  :description "Text content to write"))
+                  :description "Text content to write")
+         (allow-unparseable-overwrite
+          :type :boolean :default nil
+          :description "Permit overwriting an existing .lisp/.asd file that does not parse
+(missing or stray parenthesis). Pass true only when you know the file uses no custom
+reader syntax; otherwise use lisp-edit-form with the readtable parameter. Never
+overrides the guard for a file that parses."))
   :body
-  (or (%existing-lisp-overwrite-error id path)
+  (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
       (progn
         (fs-write-file path content)
         (result id

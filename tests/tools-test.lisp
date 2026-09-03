@@ -222,31 +222,52 @@
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-fs-write-allows-unparseable-lisp
-  (testing "tools/call fs-write-file may overwrite an existing .lisp file that does not parse"
-    (with-test-project-root
-      (let* ((tmp-path "tests/tmp/unparseable-overwrite.lisp")
-             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
-             (initial (format nil "(defun a ()~%  (list 1)~%"))
-             (repaired (format nil "(defun a ()~%  (list 1))~%"))
-             (req (format nil
-                          (concatenate
-                           'string
-                           "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\","
-                           "\"params\":{\"name\":\"fs-write-file\","
-                           "\"arguments\":{\"path\":\"~A\","
-                           "\"content\":\"(defun a ()\\n  (list 1))\\n\"}}}")
-                          tmp-path)))
-        (with-open-file (out abs-path :direction :output :if-exists :supersede)
-          (write-string initial out))
-        (unwind-protect
-             (let* ((resp (%pjl req))
-                    (obj (parse resp)))
-               (ok (null (gethash "error" obj))
-                   "overwriting an unparseable Lisp file is not an error")
-               (ok (gethash "result" obj))
-               (ok (string= (uiop:read-file-string abs-path) repaired)
-                   "the repaired content was written"))
-          (ignore-errors (delete-file abs-path)))))))
+  (flet ((call (tmp-path initial content-json id &key allow)
+           (let ((abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+                 (req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"fs-write-file\","
+                               "\"arguments\":{\"path\":\"~A\",\"content\":~A~
+                                ~:[~;,\"allow_unparseable_overwrite\":true~]}}}")
+                              id tmp-path content-json allow)))
+             (with-open-file (out abs-path :direction :output :if-exists :supersede)
+               (write-string initial out))
+             (unwind-protect
+                  (let ((obj (parse (%pjl req))))
+                    (values (gethash "error" obj)
+                            (uiop:read-file-string abs-path)))
+               (ignore-errors (delete-file abs-path))))))
+    (testing "an unparseable .lisp file is overwritten when the caller opts in"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/unparseable-overwrite.lisp"
+                  (format nil "(defun a ()~%  (list 1)~%")
+                  "\"(defun a ()\\n  (list 1))\\n\"" 91 :allow t)
+          (ok (null err) "opt-in overwrite of a broken file is not an error")
+          (ok (string= after (format nil "(defun a ()~%  (list 1))~%"))
+              "the repaired content was written"))))
+    (testing "without the opt-in the broken file is refused with a dedicated code"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/unparseable-no-optin.lisp"
+                  (format nil "(defun a ()~%  (list 1)~%")
+                  "\";; clobbered\"" 97)
+          (ok err "refused")
+          (ok (string= (gethash "code" (gethash "data" err)) "existing_lisp_unparseable"))
+          (ok (search "allow_unparseable_overwrite" (gethash "message" err)))
+          (ok (string= after (format nil "(defun a ()~%  (list 1)~%")) "file untouched"))))
+    (testing "the opt-in never overrides the guard for a file that parses"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/parseable-optin.lisp"
+                  (format nil "(defun a ()~%  (list 1))~%")
+                  "\";; clobbered\"" 98 :allow t)
+          (ok err "refused")
+          (ok (string= (gethash "code" (gethash "data" err))
+                       "existing_lisp_overwrite_forbidden"))
+          (ok (string= after (format nil "(defun a ()~%  (list 1))~%")) "file untouched"))))))
 
 (deftest tools-call-fs-write-keeps-guard-for-bracket-symbols
   (testing "a valid file whose symbol contains [ is still protected from overwrite"
@@ -312,7 +333,8 @@
                            'string
                            "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\","
                            "\"params\":{\"name\":\"fs-write-file\","
-                           "\"arguments\":{\"path\":\"~A\",\"content\":\"(defun a () 1)\\n\"}}}")
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\"(defun a () 1)\\n\","
+                           "\"allow_unparseable_overwrite\":true}}}")
                           tmp-path)))
         (with-open-file (out abs-path :direction :output :if-exists :supersede)
           (write-string initial out))

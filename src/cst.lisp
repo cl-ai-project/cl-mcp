@@ -93,9 +93,12 @@ or the readtable is not found."
   "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
 Returns two values: the complete list of nodes (including previously collected
 NODES) and the read error that stopped reading early, or NIL when the stream
-was consumed to its end. Reading stays lenient so a partially broken file can
-still be displayed, but callers that need to know the file is unparseable
-(lisp-edit-form, the fs-write-file overwrite guard) inspect the second value."
+was consumed to its end. A \")\" met where a form should start is reported as
+STRAY-RIGHT-PARENTHESIS without consulting the implementation's reader, so the
+classification does not depend on any implementation's error wording.
+Reading stays lenient so a partially broken file can still be displayed, but
+callers that need to know the file is unparseable (lisp-edit-form, the
+fs-write-file overwrite guard) inspect the second value."
   (let ((*readtable* custom-readtable)
         (*read-eval* nil))
     (loop
@@ -106,6 +109,13 @@ still be displayed, but callers that need to know the file is unparseable
                          (member ch '(#\Space #\Tab #\Newline #\Return)))
               do (read-char stream))
         (setf start-pos (file-position stream))
+        (when (eql (peek-char nil stream nil :eof) #\))
+          (return (values (nreverse nodes)
+                          (make-condition
+                           'stray-right-parenthesis
+                           :stream stream
+                           :message (format nil "Unmatched closing parenthesis ~
+character ). Remove the extra \")\" (lisp-check-parens reports its line and column).")))))
         (let ((form (handler-case (read stream nil :eof)
                       (error (e)
                         ;; On read error, return what we have so far and

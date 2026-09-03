@@ -94,6 +94,9 @@ indicating how many additional characters past CH were consumed."
   (cond
    ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
    ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
+   ;; Single escape outside a string: the next character belongs to a symbol,
+   ;; so \( and \) are not delimiters.
+   ((and (char= ch #\\) next) (values nil 1))
    ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
    ;; delimiter characters like #\( are not treated as open-parens.
    ((and (char= ch #\#) next (char= next #\\))
@@ -224,10 +227,14 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
 ;; Known limitation: |...| multiple-escape symbols are not recognised here, so
 ;; a "(" or ")" inside such a symbol name is treated as code and reaches
 ;; FUNCTION like any other delimiter.
+
 (defun %map-code-characters (text function)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
-outside strings, line comments, block comments and character literals.
-LINE and COL are 1-based."
+outside strings, line comments, block comments, character literals and
+single-escaped characters (a \\ outside a string makes the next character
+part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
+Known limitation: |...| multiple-escape symbols are not recognised, so a
+parenthesis inside one is still reported as code."
   (let ((len (length text)) (idx 0) (line 1) (col 1)
         (in-string nil) (escape nil) (line-comment nil) (block-depth 0))
     (loop while (< idx len)
@@ -247,6 +254,13 @@ LINE and COL are 1-based."
                          (incf block-depth) (incf idx) (incf col))))
                  ((char= ch #\;) (setf line-comment t))
                  ((char= ch #\") (setf in-string t))
+                 ((char= ch #\\)
+                  ;; Single escape outside a string: skip the escaped character.
+                  (when next
+                    (incf idx)
+                    (if (char= next #\Newline)
+                        (setf line (1+ line) col 0)
+                        (incf col))))
                  ((and (char= ch #\#) next (char= next #\|))
                   (incf block-depth) (incf idx) (incf col))
                  ((and (char= ch #\#) next (char= next #\\))

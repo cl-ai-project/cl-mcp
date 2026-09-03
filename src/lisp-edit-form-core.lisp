@@ -288,17 +288,16 @@ before TARGET's start position."
             (setf result (second value))))))))
 
 (defun %delimiter-failure-p (condition)
-  "Return T when CONDITION is a parse failure no readtable can fix: a missing
-\")\" (END-OF-FILE, including cst's UNTERMINATED-SOURCE) or a stray \")\"
-(cst's STRAY-RIGHT-PARENTHESIS, or SBCL's reader error for the CL-reader pass
-after an IN-READTABLE switch). Every other reader failure -- an unknown
-dispatch macro such as #?, a disabled #. -- might be resolved by the tools'
-readtable parameter, so it does not count."
+  "Return T when CONDITION is a parse failure the default reader attributes to
+delimiters: a missing \")\" (END-OF-FILE, including cst's UNTERMINATED-SOURCE)
+or a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises itself on
+both its parsing paths). Every other reader failure -- an unknown dispatch
+macro such as #?, a disabled #. -- is not counted. Even a delimiter failure
+is not proof that the file is broken (a reader macro supplied through the
+readtable parameter could consume the offending characters), which is why
+fs-write-file additionally requires the caller to opt in before overwriting."
   (or (typep condition 'end-of-file)
-      (typep condition 'stray-right-parenthesis)
-      (and (typep condition 'reader-error)
-           (not (null (search "unmatched close parenthesis"
-                              (princ-to-string condition)))))))
+      (typep condition 'stray-right-parenthesis)))
 
 (defun file-unparseable-message (condition)
   "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
@@ -323,8 +322,11 @@ points at the readtable parameter instead."
                      then read the file with fs-read-file, apply the change~
                      ~:[ described above~; shown under \"Likely fix\"~]~
                      ~@[ to the form starting at line ~D~], and ~
-                     write the whole file back with fs-write-file (overwriting is ~
-                     allowed while the file does not parse)."
+                     write the whole file back with fs-write-file, passing ~
+                     allow_unparseable_overwrite=true (it refuses to overwrite an ~
+                     existing Lisp file otherwise). If the file uses custom reader ~
+                     syntax that the default reader cannot parse, pass the readtable ~
+                     parameter to lisp-edit-form instead of overwriting."
                 head path (not scan-ok) line)
         (format nil "~A~%This is a reader-level failure, not a missing or stray ~
                      parenthesis, so it may depend on a readtable: if the file uses ~
