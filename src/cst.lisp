@@ -20,6 +20,8 @@
            #:cst-node-start-line
            #:cst-node-end-line
            #:parse-top-level-forms
+           #:unterminated-source
+           #:stray-right-parenthesis
            ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
            ;; the same question this file answers while parsing: which
            ;; IN-PACKAGE is in effect at a given point in the file.
@@ -209,6 +211,14 @@ Carries the same explanatory message as other reader errors but stays a
 subtype of END-OF-FILE, so callers that treat a premature end of input
 specially (lisp-read-file's unbalanced-parentheses hint) keep working."))
 
+(define-condition stray-right-parenthesis (reader-error)
+  ((message :initarg :message :reader stray-right-parenthesis-message))
+  (:report (lambda (c s) (write-string (stray-right-parenthesis-message c) s)))
+  (:documentation "Signaled when the reader met a \")\" with no open form.
+Like UNTERMINATED-SOURCE this keeps the failure identifiable as a delimiter
+problem, which no readtable can fix, so the fs-write-file overwrite guard can
+tell it apart from reader-macro failures that a readtable might resolve."))
+
 (defun %parse-top-level-forms-core (text readtable)
   "Parse TEXT into CST nodes assuming *PACKAGE* and *LINE-TABLE* are already bound."
   (if readtable
@@ -260,6 +270,15 @@ specially (lisp-read-file's unbalanced-parentheses hint) keep working."))
 If you need to parse files containing #., consider removing or replacing the #. forms, ~
 or use a separate evaluation step."
                     e))
+                  ((typep e 'eclector.reader:invalid-context-for-right-parenthesis)
+                   ;; A ")" with no open form: a delimiter failure no
+                   ;; readtable can fix, kept identifiable for the overwrite
+                   ;; guard in lisp-edit-form-core.
+                   (error 'stray-right-parenthesis
+                          :stream stream
+                          :message (format nil "Reader error: ~A~%~%Remove the extra \")\" ~
+(lisp-check-parens reports its line and column)."
+                                           e)))
                   ((typep e 'end-of-file)
                    ;; Keep the END-OF-FILE type: lisp-read-file turns it into
                    ;; an unbalanced-parentheses hint.

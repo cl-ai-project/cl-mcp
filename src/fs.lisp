@@ -3,7 +3,6 @@
 (defpackage #:cl-mcp/src/fs
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/paren-diagnostics #:scan-delimiters)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:*project-root-lock*)
@@ -162,21 +161,17 @@ because fs cannot import that parser without a dependency cycle. When NIL,
 a standard-reader fallback is used.")
 
 (defun %lisp-file-unparseable-p (pn)
-  "Return T when the structural editing tools cannot parse the Lisp source at
-PN in a way no readtable can fix. Delegates to *LISP-FILE-UNPARSEABLE-HOOK*
-when one is installed (the edit tools' own parser, which handles
-named-readtable declarations). Otherwise falls back to the standard reader
-with *READ-EVAL* NIL: a missing \")\" surfaces as END-OF-FILE and an extra one
-as a READER-ERROR; a missing package is not a parse failure, and files that
-activate a named readtable are reported as parseable because the standard
-reader could reject valid custom syntax. In both modes a reader failure only
-counts when the delimiter scan also finds the file unbalanced: custom reader
-syntax such as #?\"...\" fails the default reader but is editable once the
-tools are given the readtable, so its overwrite protection must remain. The
-scan alone is never trusted either, since it treats [ and { as openers and
-would misjudge a valid file containing a symbol such as foo[. A read
-truncated at *FS-READ-MAX-BYTES* is reported as parseable, since a cut-off
-prefix proves nothing."
+  "Return T when the Lisp source at PN is broken in a way no readtable can
+fix, so that overwriting it is the only repair path. Delegates to
+*LISP-FILE-UNPARSEABLE-HOOK* when one is installed (the edit tools' own
+parser, which handles named-readtable declarations). Otherwise falls back to
+the standard reader with *READ-EVAL* NIL and counts only delimiter failures:
+a missing \")\" surfaces as END-OF-FILE and an extra one as the reader error
+\"unmatched close parenthesis\". Any other reader error (an unknown dispatch
+macro such as #?, a missing package) is not proof that the file is broken,
+since a readtable or package may make it readable, so the guard stays. Files
+that activate a named readtable are reported as parseable for the same
+reason, and so is a read truncated at *FS-READ-MAX-BYTES*."
   (multiple-value-bind (text truncated) (%read-file-string pn nil nil)
     (and (not truncated)
          (if *lisp-file-unparseable-hook*
@@ -188,10 +183,13 @@ prefix proves nothing."
                               (*readtable* (copy-readtable nil)))
                           (loop (when (eq :eof (read stream nil :eof))
                                   (return nil))))
-                      (reader-error (e) (not (typep e 'package-error)))
                       (end-of-file () t)
-                      (error () nil)))
-                  (not (getf (scan-delimiters text) :ok)))))))
+                      (reader-error (e)
+                        (and (not (typep e 'package-error))
+                             (search "unmatched close parenthesis"
+                                     (princ-to-string e))
+                             t))
+                      (error () nil))))))))
 
 (defun %existing-lisp-overwrite-error (id path)
   "Return a structured RPC error for forbidden Lisp overwrite, or NIL.

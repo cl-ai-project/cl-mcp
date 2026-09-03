@@ -273,27 +273,33 @@
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-fs-write-keeps-guard-for-custom-reader-syntax
-  (testing "a file that only fails the default reader (balanced #?\"...\" syntax) stays protected"
-    (with-test-project-root
-      (let* ((tmp-path "tests/tmp/custom-syntax-overwrite.lisp")
-             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
-             (initial (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%"))
-             (req (format nil
-                          (concatenate
-                           'string
-                           "{\"jsonrpc\":\"2.0\",\"id\":95,\"method\":\"tools/call\","
-                           "\"params\":{\"name\":\"fs-write-file\","
-                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
-                          tmp-path)))
-        (with-open-file (out abs-path :direction :output :if-exists :supersede)
-          (write-string initial out))
-        (unwind-protect
-             (let* ((resp (%pjl req))
-                    (obj (parse resp)))
-               (ok (gethash "error" obj)
-                   "delimiters are balanced, so a reader failure does not prove the file is broken")
-               (ok (string= (uiop:read-file-string abs-path) initial) "file untouched"))
-          (ignore-errors (delete-file abs-path)))))))
+  (flet ((refused-p (tmp-path initial id)
+           (let ((abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+                 (req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"fs-write-file\","
+                               "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
+                              id tmp-path)))
+             (with-open-file (out abs-path :direction :output :if-exists :supersede)
+               (write-string initial out))
+             (unwind-protect
+                  (let* ((resp (%pjl req))
+                         (obj (parse resp)))
+                    (and (gethash "error" obj)
+                         (string= (uiop:read-file-string abs-path) initial)))
+               (ignore-errors (delete-file abs-path))))))
+    (testing "balanced #?\"...\" syntax only fails the default reader, so the file stays protected"
+      (with-test-project-root
+        (ok (refused-p "tests/tmp/custom-syntax-overwrite.lisp"
+                       (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+                       95))))
+    (testing "a reader macro that consumes delimiter-looking data also keeps the guard"
+      (with-test-project-root
+        (ok (refused-p "tests/tmp/custom-syntax-parens-overwrite.lisp"
+                       (format nil "(defun f ()~%  #?[(])~%")
+                       96))))))
 
 (deftest tools-call-fs-write-unparseable-check-follows-edit-tools
   (testing "a broken file that merely mentions in-readtable in a comment can be overwritten"

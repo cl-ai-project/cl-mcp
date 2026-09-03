@@ -1083,13 +1083,24 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search "Likely fix" err))))))))
 
 (deftest file-unparseable-hook-requires-delimiter-breakage
-  (testing "a default-reader failure with balanced delimiters is not unparseable"
+  (testing "custom syntax failing the default reader is not unparseable, even with odd parens"
     (with-temp-file "tests/tmp/edit-form-custom-syntax.lisp"
-        (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+        (format nil "(defun f ()~%  #?[(])~%")
       (lambda (path)
         (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
                    (pathname path)))
-            "lisp-edit-form could edit this with a readtable, so the guard must hold"))))
+            "the unknown #? macro may consume the ( as data, so the guard must hold"))))
+  (testing "a missing ) and an extra ) are delimiter failures no readtable can fix"
+    (with-temp-file "tests/tmp/edit-form-missing-close.lisp"
+        (format nil "(defun a ()~%  (list 1)~%")
+      (lambda (path)
+        (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+             (pathname path)))))
+    (with-temp-file "tests/tmp/edit-form-extra-close.lisp"
+        (format nil "(defun a ()~%  (list 1)))~%")
+      (lambda (path)
+        (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+             (pathname path))))))
   (testing "the reader-level failure message points at the readtable parameter"
     (with-temp-file "tests/tmp/edit-form-custom-syntax-2.lisp"
         (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
