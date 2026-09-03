@@ -328,6 +328,15 @@ carriage return into the rendered guidance."
         (subseq line 0 (1- len))
         line)))
 
+(defun %bound-line (line)
+  "Return LINE cut to 120 characters plus \"...\" when it is longer, so a
+single very long physical line cannot inflate a diagnosis or the
+likely_fixes payload."
+  (let ((limit 120))
+    (if (> (length line) limit)
+        (concatenate 'string (subseq line 0 limit) "...")
+        line)))
+
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
 Return a list of (:line n :original str :repaired str :delta d) for every
@@ -335,7 +344,9 @@ line that changed, where D is the number of \")\" added (negative if removed).
 A trailing #\\Return is stripped from both sides before comparing, so CRLF
 input does not leak a carriage return into the guidance, and lines whose D
 would be 0 (whitespace-only changes) are skipped because they would render as
-a meaningless \"add 0\" entry.
+a meaningless \"add 0\" entry. D is computed on the full lines, but the stored
+:original and :repaired are bounded by %BOUND-LINE so a pathological
+single-line input cannot inflate the response.
 Both texts must have the same number of lines, which parinfer guarantees."
   (loop for raw-orig in (split-string original :separator '(#\Newline))
         for raw-rep in (split-string repaired :separator '(#\Newline))
@@ -345,8 +356,8 @@ Both texts must have the same number of lines, which parinfer guarantees."
         for delta = (- (count #\) rep) (count #\) orig))
         unless (or (string= orig rep) (zerop delta))
           collect (list :line line
-                        :original orig
-                        :repaired rep
+                        :original (%bound-line orig)
+                        :repaired (%bound-line rep)
                         :delta delta)))
 
 (defun format-repair-lines (fixes)

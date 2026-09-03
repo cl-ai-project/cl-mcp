@@ -3,7 +3,6 @@
 (defpackage #:cl-mcp/src/fs
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/paren-diagnostics #:scan-delimiters)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:*project-root-lock*)
@@ -151,22 +150,24 @@ Returns T on success."
                  :test #'string=))))
 
 (defun %lisp-file-unparseable-p (pn)
-  "Return T when the Lisp source at PN cannot be edited structurally: its
-delimiters are unbalanced, or the standard reader (with *READ-EVAL* NIL)
-hits a reader error or end of file. Files using named-readtables are only
-delimiter-checked, and a missing package is not a parse failure."
+  "Return T when the Lisp source at PN cannot be read by the standard reader
+with *READ-EVAL* NIL: a missing \")\" surfaces as END-OF-FILE and an extra one
+as a READER-ERROR. A missing package is not a parse failure. Files that
+activate a named readtable are reported as parseable, because the standard
+reader could reject valid custom syntax. The delimiter scanner is deliberately
+not consulted: it treats [ and { as openers, so a valid file containing a
+symbol such as foo[ would otherwise lose its overwrite protection."
   (let ((text (%read-file-string pn nil nil)))
-    (or (not (getf (scan-delimiters text) :ok))
-        (and (not (search "in-readtable" text))
-             (with-input-from-string (stream text)
-               (handler-case
-                   (let ((*read-eval* nil)
-                         (*readtable* (copy-readtable nil)))
-                     (loop (when (eq :eof (read stream nil :eof))
-                             (return nil))))
-                 (reader-error (e) (not (typep e 'package-error)))
-                 (end-of-file () t)
-                 (error () nil)))))))
+    (and (not (search "in-readtable" text))
+         (with-input-from-string (stream text)
+           (handler-case
+               (let ((*read-eval* nil)
+                     (*readtable* (copy-readtable nil)))
+                 (loop (when (eq :eof (read stream nil :eof))
+                         (return nil))))
+             (reader-error (e) (not (typep e 'package-error)))
+             (end-of-file () t)
+             (error () nil))))))
 
 (defun %existing-lisp-overwrite-error (id path)
   "Return a structured RPC error for forbidden Lisp overwrite, or NIL.

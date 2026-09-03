@@ -103,6 +103,20 @@
     (let ((diff (repair-line-differences "(a))" "(a)")))
       (ok (= (getf (first diff) :delta) -1)))))
 
+(deftest repair-line-differences-bounds-long-lines
+  (testing "a very long changed line is truncated in the stored fix, delta still exact"
+    (let* ((filler (make-string 500 :initial-element #\x))
+           (orig (format nil "(a ~A" filler))
+           (rep (format nil "(a ~A)" filler))
+           (fix (first (repair-line-differences orig rep))))
+      (ok (= (getf fix :delta) 1))
+      (ok (< (length (getf fix :original)) 200)
+          "original line is bounded")
+      (ok (< (length (getf fix :repaired)) 200)
+          "repaired line is bounded")
+      (ok (search "..." (getf fix :original))
+          "truncation is marked"))))
+
 (deftest repair-line-differences-strips-carriage-returns
   (testing "CRLF input does not leak a #\\Return into :original or :repaired"
     (let ((diff (repair-line-differences
