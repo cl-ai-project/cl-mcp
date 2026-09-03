@@ -12,7 +12,8 @@
   (:import-from #:uiop
                 #:split-string)
   (:documentation "Delimiter balance diagnostics with repair hints.")
-  (:export #:scan-delimiters
+  (:export #:*repair-lines-limit*
+           #:scan-delimiters
            #:diagnose-delimiters
            #:count-delimiter-depth
            #:repair-line-differences
@@ -367,13 +368,18 @@ Both texts must have the same number of lines, which parinfer guarantees."
                         :repaired (%bound-line rep)
                         :delta delta)))
 
+(defparameter *repair-lines-limit* 10
+  "Maximum number of likely-fix entries rendered by FORMAT-REPAIR-LINES and
+serialized by lisp-check-parens; the rest are summarized as an omitted count
+so a response stays bounded however many lines parinfer changed.")
+
 (defun format-repair-lines (fixes)
   "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
 preceded by a newline, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\".
 At most 10 entries are rendered in full; when more lines changed, a trailing
 \"  ... and N more changed lines\" names the remainder, so a wholesale
 reindentation cannot flood the guidance."
-  (let* ((limit 10)
+  (let* ((limit *repair-lines-limit*)
          (total (length fixes))
          (shown (if (> total limit) (subseq fixes 0 limit) fixes)))
     (with-output-to-string (s)

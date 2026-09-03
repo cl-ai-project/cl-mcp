@@ -1082,6 +1082,32 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               "message names the cause instead of guessing at parentheses")
           (ok (null (search "Likely fix" err))))))))
 
+(deftest file-unparseable-hook-requires-delimiter-breakage
+  (testing "a default-reader failure with balanced delimiters is not unparseable"
+    (with-temp-file "tests/tmp/edit-form-custom-syntax.lisp"
+        (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+      (lambda (path)
+        (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path)))
+            "lisp-edit-form could edit this with a readtable, so the guard must hold"))))
+  (testing "the reader-level failure message points at the readtable parameter"
+    (with-temp-file "tests/tmp/edit-form-custom-syntax-2.lisp"
+        (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "greet"
+                              :operation "replace"
+                              :content "(defun greet (name) name)")
+            (file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "without a readtable the file does not parse")
+          (ok (search "readtable" err) "message mentions the readtable parameter")
+          (ok (null (search "overwriting is allowed" err))
+              "must not promise an overwrite that the guard will refuse"))))))
+
 (deftest file-unparseable-after-in-readtable-switch
   ;; After (in-readtable ...) the CST parser reads with the standard CL reader
   ;; and swallows read errors, returning the nodes it has. That path only

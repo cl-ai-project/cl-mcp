@@ -232,7 +232,8 @@ the file. Fix with `lisp-edit-form`.
 If the **file itself** no longer parses, `lisp-edit-form` and `lisp-patch-form` cannot
 locate any form in it. Recover with `fs-read-file`, apply the likely fix by hand, and
 write the whole file back with `fs-write-file` (overwriting an existing `.lisp` file is
-permitted only while it does not parse).
+permitted only while its parentheses are unbalanced). If the file parses except for
+custom reader syntax such as `#?"..."`, pass the `readtable` parameter instead.
 
 ### lisp-macroexpand returns "NOT EXPANDED" or a package error
 - The macro must be **defined in the worker image**, not just present on disk. Run

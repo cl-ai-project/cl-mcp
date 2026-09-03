@@ -5,6 +5,7 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file)
   (:import-from #:cl-mcp/src/paren-diagnostics
+                #:*repair-lines-limit*
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -130,9 +131,11 @@ Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
 plus a \"position\" hash with \"line\", \"column\", \"offset\".
 Delimiter failures also carry \"likely_fixes\" (vector of line/original/
-repaired/delta hashes inferred by parinfer), \"next_top_level_line\" when a
-later top-level form was swallowed, and \"diagnosis_text\" (the guidance the
-MCP summary appends; not part of the MCP payload)."
+repaired/delta hashes inferred by parinfer, capped at *REPAIR-LINES-LIMIT*
+entries with the rest counted in \"likely_fixes_omitted\"),
+\"next_top_level_line\" when a later top-level form was swallowed, and
+\"diagnosis_text\" (the guidance the MCP summary appends; not part of the
+MCP payload)."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -176,10 +179,14 @@ MCP summary appends; not part of the MCP payload)."
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
              (unless (string= kind "unclosed-block-comment")
-               (setf (gethash "likely_fixes" h)
-                     (map 'vector #'%fix->hash likely-fixes)
-                     (gethash "diagnosis_text" h)
-                     (format-delimiter-diagnosis diagnosis :target (or path "code")))
+               (let* ((total (length likely-fixes))
+                      (kept (min total *repair-lines-limit*)))
+                 (setf (gethash "likely_fixes" h)
+                       (map 'vector #'%fix->hash (subseq likely-fixes 0 kept))
+                       (gethash "diagnosis_text" h)
+                       (format-delimiter-diagnosis diagnosis :target (or path "code")))
+                 (when (> total kept)
+                   (setf (gethash "likely_fixes_omitted" h) (- total kept))))
                (when next-top-level-line
                  (setf (gethash "next_top_level_line" h) next-top-level-line)))
              (%maybe-add-lisp-edit-guidance h kind))
@@ -283,9 +290,12 @@ exempt from reader checking to avoid false positives."
             (when required-args
               (setf (gethash "required_args" payload) required-args))
             (let ((fixes (gethash "likely_fixes" check-result))
+                  (omitted (gethash "likely_fixes_omitted" check-result))
                   (next-line (gethash "next_top_level_line" check-result)))
               (when fixes
                 (setf (gethash "likely_fixes" payload) fixes))
+              (when omitted
+                (setf (gethash "likely_fixes_omitted" payload) omitted))
               (when next-line
                 (setf (gethash "next_top_level_line" payload) next-line)))
             (result id payload)))

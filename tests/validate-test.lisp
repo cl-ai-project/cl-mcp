@@ -242,6 +242,23 @@
       (ok (search "Likely fix" (gethash "diagnosis_text" res)))
       (ok (null (gethash "next_top_level_line" res))))))
 
+(deftest lisp-check-parens-likely-fixes-are-capped
+  (testing "the likely_fixes payload is bounded and reports how many entries were omitted"
+    ;; 40 nested lines, each dedented so parinfer closes one paren per line.
+    (let* ((code (with-output-to-string (s)
+                   (loop for i from 0 below 40
+                         do (format s "~A(a~%"
+                                    (make-string (* 2 (- 40 i)) :initial-element #\Space)))))
+           (res (lisp-check-parens :code code))
+           (fixes (gethash "likely_fixes" res))
+           (omitted (gethash "likely_fixes_omitted" res)))
+      (ok (not (%ok? res)))
+      (ok (vectorp fixes))
+      (ok (<= (length fixes) cl-mcp/src/paren-diagnostics::*repair-lines-limit*)
+          "payload vector is capped")
+      (ok (and (integerp omitted) (plusp omitted))
+          "omitted count is reported when entries were dropped"))))
+
 (deftest lisp-check-parens-next-top-level-line-field
   (testing "a file-shaped input reports the next top-level form line"
     (let ((res (lisp-check-parens
