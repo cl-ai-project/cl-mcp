@@ -36,7 +36,8 @@
                 #:send-root-to-session-worker)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
-  (:export #:fs-resolve-read-path
+  (:export #:*lisp-file-unparseable-hook*
+           #:fs-resolve-read-path
            #:fs-read-file
            #:fs-write-file
            #:fs-list-directory
@@ -149,25 +150,40 @@ Returns T on success."
                  '("lisp" "asd")
                  :test #'string=))))
 
+(defvar *lisp-file-unparseable-hook* nil
+  "Predicate of one argument (an absolute pathname) that returns T when the
+structural editing tools cannot parse that Lisp file. The fs-write-file
+overwrite guard consults it so that overwriting is permitted exactly when
+lisp-edit-form and lisp-patch-form cannot locate any form in the file.
+cl-mcp/src/lisp-edit-form-core installs a predicate built on its own parser
+(which understands named-readtable declarations); this indirection exists
+because fs cannot import that parser without a dependency cycle. When NIL,
+a standard-reader fallback is used.")
+
 (defun %lisp-file-unparseable-p (pn)
-  "Return T when the Lisp source at PN cannot be read by the standard reader
-with *READ-EVAL* NIL: a missing \")\" surfaces as END-OF-FILE and an extra one
-as a READER-ERROR. A missing package is not a parse failure. Files that
-activate a named readtable are reported as parseable, because the standard
-reader could reject valid custom syntax. The delimiter scanner is deliberately
-not consulted: it treats [ and { as openers, so a valid file containing a
-symbol such as foo[ would otherwise lose its overwrite protection."
-  (let ((text (%read-file-string pn nil nil)))
-    (and (not (search "in-readtable" text))
-         (with-input-from-string (stream text)
-           (handler-case
-               (let ((*read-eval* nil)
-                     (*readtable* (copy-readtable nil)))
-                 (loop (when (eq :eof (read stream nil :eof))
-                         (return nil))))
-             (reader-error (e) (not (typep e 'package-error)))
-             (end-of-file () t)
-             (error () nil))))))
+  "Return T when the structural editing tools cannot parse the Lisp source at
+PN. Delegates to *LISP-FILE-UNPARSEABLE-HOOK* when one is installed (the
+edit tools' own parser, which handles named-readtable declarations).
+Otherwise falls back to the standard reader with *READ-EVAL* NIL: a missing
+\")\" surfaces as END-OF-FILE and an extra one as a READER-ERROR; a missing
+package is not a parse failure, and files that activate a named readtable
+are reported as parseable because the standard reader could reject valid
+custom syntax. The delimiter scanner is deliberately not consulted: it treats
+[ and { as openers, so a valid file containing a symbol such as foo[ would
+otherwise lose its overwrite protection."
+  (if *lisp-file-unparseable-hook*
+      (and (funcall *lisp-file-unparseable-hook* pn) t)
+      (let ((text (%read-file-string pn nil nil)))
+        (and (not (search "in-readtable" text))
+             (with-input-from-string (stream text)
+               (handler-case
+                   (let ((*read-eval* nil)
+                         (*readtable* (copy-readtable nil)))
+                     (loop (when (eq :eof (read stream nil :eof))
+                             (return nil))))
+                 (reader-error (e) (not (typep e 'package-error)))
+                 (end-of-file () t)
+                 (error () nil)))))))
 
 (defun %existing-lisp-overwrite-error (id path)
   "Return a structured RPC error for forbidden Lisp overwrite, or NIL.

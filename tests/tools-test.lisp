@@ -272,6 +272,49 @@
                    "file untouched"))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-fs-write-unparseable-check-follows-edit-tools
+  (testing "a broken file that merely mentions in-readtable in a comment can be overwritten"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/in-readtable-comment-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil ";; see in-readtable docs~%(defun a ()~%  (list 1)~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\"(defun a () 1)\\n\"}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp)))
+               (ok (null (gethash "error" obj))
+                   "the edit tools cannot parse this file, so overwrite is the repair path")
+               (ok (string= (uiop:read-file-string abs-path) (format nil "(defun a () 1)~%"))))
+          (ignore-errors (delete-file abs-path))))))
+  (testing "a valid file with a real in-readtable declaration stays protected"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/in-readtable-valid-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(in-readtable :standard)~%(defun f () 1)~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp)))
+               (ok (gethash "error" obj) "parseable file: overwrite refused")
+               (ok (string= (uiop:read-file-string abs-path) initial) "file untouched"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-fs-write-allows-new-lisp
   (testing "tools/call fs-write-file allows creating new .lisp files"
     (with-test-project-root

@@ -24,6 +24,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
+                #:*lisp-file-unparseable-hook*
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -347,3 +348,18 @@ Returns eight values:
                                      (cst-node-end target))))
           (values abs rel original nodes target target-snippet form-type-str
                   (extract-in-package-name-from-text original)))))))
+
+(defun %file-unparseable-by-edit-tools-p (pn)
+  "Return T when PARSE-TOP-LEVEL-FORMS cannot parse the file at PN, i.e. when
+lisp-edit-form and lisp-patch-form would signal FILE-UNPARSEABLE-ERROR for it.
+Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
+permits overwriting exactly those files."
+  (handler-case
+      (progn
+        (parse-top-level-forms (fs-read-file pn) :source-path pn)
+        nil)
+    (error () t)))
+
+;; Register at load time so fs-write-file's overwrite guard agrees with the
+;; edit tools about which files are unparseable.
+(setf *lisp-file-unparseable-hook* #'%file-unparseable-by-edit-tools-p)
