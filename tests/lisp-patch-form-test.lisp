@@ -708,6 +708,26 @@ running as root), THUNK is skipped instead."
           (ok (search "The patch would add an extra closing parenthesis." err-msg))
           (ok (search "Remove 1 \")\" from new_text, or add 1 \"(\"." err-msg)))))))
 
+(deftest lisp-patch-form-depth-reason-respects-string-context
+  (testing "a ) inside a string is not code, so an unrelated reader error is not blamed on depth"
+    (with-temp-file "tests/tmp/patch-string-context.lisp"
+        (format nil "(defun target ()~%  \"a)\")~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "a)"
+                               :new-text "b\" #?")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the #? dispatch is invalid, so the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no false net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
   (testing "parens inside strings and #\\( do not trip the depth check"
     (with-temp-file "tests/tmp/patch-depth-strings.lisp"

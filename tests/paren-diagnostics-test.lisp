@@ -89,6 +89,20 @@
       (ok (= opens 1))
       (ok (= closes 1)))))
 
+(deftest count-delimiter-depth-region-uses-lexical-context
+  (testing "a region inside a string counts no parens"
+    ;; positions 13-14 are the `a)` inside the string literal
+    (multiple-value-bind (opens closes)
+        (count-delimiter-depth "(defun f () \"a)\")" :start 13 :end 15)
+      (ok (= opens 0))
+      (ok (= closes 0))))
+  (testing "a region in code counts only its own parens"
+    ;; positions 6-8 are `(a)`
+    (multiple-value-bind (opens closes)
+        (count-delimiter-depth "(list (a) (b))" :start 6 :end 9)
+      (ok (= opens 1))
+      (ok (= closes 1)))))
+
 (deftest repair-line-differences-reports-changed-lines
   (testing "only changed lines are listed, with the added count"
     (let ((diff (repair-line-differences

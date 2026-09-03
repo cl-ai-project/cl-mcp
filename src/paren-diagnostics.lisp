@@ -306,18 +306,25 @@ or {...} pairs, as used by some reader macros, are accepted as-is."
         (values (repair-line-differences text repaired) nil)
         (values nil t))))
 
-(defun count-delimiter-depth (text)
+(defun count-delimiter-depth (text &key (start 0) end)
   "Return two values: the number of \"(\" and the number of \")\" in TEXT
 outside strings, comments and character literals. Only round parentheses
-are counted; [ and { are constituent characters in Common Lisp."
-  (let ((opens 0) (closes 0))
+are counted; [ and { are constituent characters in Common Lisp.
+When START/END are given, only characters at positions START <= i < END are
+counted, but TEXT is still scanned from its beginning, so the region is
+judged in its real lexical context: a parenthesis inside a string or comment
+that opened before START is not code."
+  (let ((opens 0)
+        (closes 0)
+        (end (or end (length text))))
     (%map-code-characters
      text
      (lambda (ch idx line col)
-       (declare (ignore idx line col))
-       (case ch
-         (#\( (incf opens))
-         (#\) (incf closes)))))
+       (declare (ignore line col))
+       (when (and (<= start idx) (< idx end))
+         (case ch
+           (#\( (incf opens))
+           (#\) (incf closes))))))
     (values opens closes)))
 
 (defun %strip-trailing-cr (line)

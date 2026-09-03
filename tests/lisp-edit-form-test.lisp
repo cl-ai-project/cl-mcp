@@ -1056,6 +1056,32 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               "must not send the caller back into the tool that just failed")
           (ok (string= before (fs-read-file path)) "file untouched"))))))
 
+(deftest file-unparseable-hook-denies-truncated-reads
+  (testing "a valid file larger than the read cap is not classified as unparseable"
+    (with-temp-file "tests/tmp/edit-form-large-valid.lisp"
+        (format nil "(defun target ()~%  (list 1 2 3 4 5 6 7 8 9 10))~%")
+      (lambda (path)
+        (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+          (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                     (pathname path)))
+              "a truncated read must keep the overwrite guard in place")))))
+  (testing "editing such a file reports the read limit, not a paren diagnosis"
+    (with-temp-file "tests/tmp/edit-form-large-valid-2.lisp"
+        (format nil "(defun target ()~%  (list 1 2 3 4 5 6 7 8 9 10))~%")
+      (lambda (path)
+        (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16)
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () 1)")
+            (error (e) (setf err (princ-to-string e))))
+          (ok (search "read limit" err)
+              "message names the cause instead of guessing at parentheses")
+          (ok (null (search "Likely fix" err))))))))
+
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
   (testing "old protocol errors return -32603 rpc-error, not isError"
     (with-temp-file "tests/tmp/edit-old-proto.lisp"

@@ -317,7 +317,9 @@ otherwise only the sanitized reader error."
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR, carrying a delimiter diagnosis, when the file
-cannot be parsed at all.
+cannot be parsed at all. A file larger than the fs read cap is reported as
+such instead, because its truncated prefix would only yield a misleading
+delimiter diagnosis.
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -330,35 +332,45 @@ Returns eight values:
   (let ((form-type-str (string-downcase form-type)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
-      (let* ((original (fs-read-file abs))
-             (nodes (handler-case
-                        (parse-top-level-forms original
-                                               :readtable readtable
-                                               :source-path abs)
-                      (error (e)
-                        (error 'file-unparseable-error
-                               :path (namestring abs)
-                               :diagnosis (diagnose-delimiters original)
-                               :cause (sanitize-error-message (princ-to-string e))))))
-             (target (%find-target nodes form-type-str form-name)))
-        (unless target
-          (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))
-        (let ((target-snippet (subseq original
-                                     (cst-node-start target)
-                                     (cst-node-end target))))
-          (values abs rel original nodes target target-snippet form-type-str
-                  (extract-in-package-name-from-text original)))))))
+      (multiple-value-bind (original truncated file-length)
+          (fs-read-file abs)
+        (when truncated
+          (error "~A exceeds the read limit (~@[~D characters, ~]only ~D read); ~
+                  lisp-edit-form and lisp-patch-form cannot edit files this large"
+                 (namestring abs) file-length (length original)))
+        (let* ((nodes (handler-case
+                          (parse-top-level-forms original
+                                                 :readtable readtable
+                                                 :source-path abs)
+                        (error (e)
+                          (error 'file-unparseable-error
+                                 :path (namestring abs)
+                                 :diagnosis (diagnose-delimiters original)
+                                 :cause (sanitize-error-message
+                                         (princ-to-string e))))))
+               (target (%find-target nodes form-type-str form-name)))
+          (unless target
+            (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))
+          (let ((target-snippet (subseq original
+                                       (cst-node-start target)
+                                       (cst-node-end target))))
+            (values abs rel original nodes target target-snippet form-type-str
+                    (extract-in-package-name-from-text original))))))))
 
 (defun %file-unparseable-by-edit-tools-p (pn)
   "Return T when PARSE-TOP-LEVEL-FORMS cannot parse the file at PN, i.e. when
 lisp-edit-form and lisp-patch-form would signal FILE-UNPARSEABLE-ERROR for it.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
-permits overwriting exactly those files."
-  (handler-case
-      (progn
-        (parse-top-level-forms (fs-read-file pn) :source-path pn)
-        nil)
-    (error () t)))
+permits overwriting exactly those files. A read truncated at the fs read cap
+returns NIL: a cut-off prefix of a valid file would look unparseable, and the
+overwrite guard must stay in place for it."
+  (multiple-value-bind (text truncated) (fs-read-file pn)
+    (and (not truncated)
+         (handler-case
+             (progn
+               (parse-top-level-forms text :source-path pn)
+               nil)
+           (error () t)))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.

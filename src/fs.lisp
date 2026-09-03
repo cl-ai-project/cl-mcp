@@ -168,13 +168,15 @@ Otherwise falls back to the standard reader with *READ-EVAL* NIL: a missing
 \")\" surfaces as END-OF-FILE and an extra one as a READER-ERROR; a missing
 package is not a parse failure, and files that activate a named readtable
 are reported as parseable because the standard reader could reject valid
-custom syntax. The delimiter scanner is deliberately not consulted: it treats
-[ and { as openers, so a valid file containing a symbol such as foo[ would
-otherwise lose its overwrite protection."
+custom syntax. A read truncated at *FS-READ-MAX-BYTES* is also reported as
+parseable, since a cut-off prefix proves nothing. The delimiter scanner is
+deliberately not consulted: it treats [ and { as openers, so a valid file
+containing a symbol such as foo[ would otherwise lose its overwrite protection."
   (if *lisp-file-unparseable-hook*
       (and (funcall *lisp-file-unparseable-hook* pn) t)
-      (let ((text (%read-file-string pn nil nil)))
-        (and (not (search "in-readtable" text))
+      (multiple-value-bind (text truncated) (%read-file-string pn nil nil)
+        (and (not truncated)
+             (not (search "in-readtable" text))
              (with-input-from-string (stream text)
                (handler-case
                    (let ((*read-eval* nil)
