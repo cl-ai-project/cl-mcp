@@ -49,30 +49,30 @@
   (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
 
 (defun %check-depth-balance (old-text new-text)
-  "Signal PATCH-OPERATION-ERROR when NEW-TEXT opens/closes a different net
-number of parentheses than OLD-TEXT. Since a patch changes only one region,
-a net difference guarantees the form will not parse, so this is checked
-before the file is read."
+  "Return a message describing the net parenthesis difference between OLD-TEXT
+and NEW-TEXT, or NIL when the two are balanced against each other.
+A patch changes only one region, so a net difference in a code region
+guarantees the form will not parse. The same difference inside a string or a
+comment is a legitimate edit, however, so the caller keeps this message and
+uses it only when the patched form actually fails to parse."
   (multiple-value-bind (old-open old-close) (count-delimiter-depth old-text)
     (multiple-value-bind (new-open new-close) (count-delimiter-depth new-text)
       (let ((diff (- (- new-open new-close) (- old-open old-close))))
         (unless (zerop diff)
           (let ((n (abs diff)))
-            (error 'patch-operation-error
-                   :reason
-                   (if (plusp diff)
-                       (format nil "new_text closes ~D fewer \")\" than old_text ~
-                                    (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                                    The patch would leave the form unclosed. ~
-                                    Add ~D \")\" to new_text, or remove ~D \"(\". ~
-                                    No changes were written to disk."
-                               n old-open old-close new-open new-close n n)
-                       (format nil "new_text closes ~D more \")\" than old_text ~
-                                    (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                                    The patch would add an extra closing parenthesis. ~
-                                    Remove ~D \")\" from new_text, or add ~D \"(\". ~
-                                    No changes were written to disk."
-                               n old-open old-close new-open new-close n n)))))))))
+            (if (plusp diff)
+                (format nil "new_text closes ~D fewer \")\" than old_text ~
+                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                             The patch would leave the form unclosed. ~
+                             Add ~D \")\" to new_text, or remove ~D \"(\". ~
+                             No changes were written to disk."
+                        n old-open old-close new-open new-close n n)
+                (format nil "new_text closes ~D more \")\" than old_text ~
+                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                             The patch would add an extra closing parenthesis. ~
+                             Remove ~D \")\" from new_text, or add ~D \"(\". ~
+                             No changes were written to disk."
+                        n old-open old-close new-open new-close n n))))))))
 
 (defun %apply-patch-operation (text node old-text new-text)
   "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
@@ -134,11 +134,17 @@ finds the breakage, the shared diagnosis is used; otherwise FALLBACK."
                      No changes were written to disk."
                 (format-delimiter-diagnosis diagnosis :target "the patched form")))))
 
-(defun %validate-form-parseable (form-text &optional readtable-designator
-                                           package-name source-path)
+(defun %validate-form-parseable (form-text &key readtable-designator
+                                             package-name source-path
+                                             depth-reason)
   "Validate that FORM-TEXT parses as a single complete Lisp form.
 Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR, carrying a
-delimiter diagnosis when one applies, if the text does not parse correctly."
+delimiter diagnosis when one applies, if the text does not parse correctly.
+DEPTH-REASON, when non-NIL, is the net-parenthesis message from
+%CHECK-DEPTH-BALANCE; it takes precedence over the delimiter diagnosis
+whenever parsing fails, because it names the exact number of \")\" to add or
+remove. A DEPTH-REASON alone never rejects the patch: a parenthesis added
+inside a string or a comment is a legitimate edit and still parses."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*
@@ -159,23 +165,25 @@ delimiter diagnosis when one applies, if the text does not parse correctly."
                                    (length form-text))))
                (when (< rest-start (length form-text))
                  (error 'patch-operation-error
-                        :reason (%diagnosed-reason
-                                 form-text
-                                 (format nil "patch produced malformed form text (trailing ~
-                                              content after form). No changes were written ~
-                                              to disk.")))))
+                        :reason (or depth-reason
+                                    (%diagnosed-reason
+                                     form-text
+                                     (format nil "patch produced malformed form text (trailing ~
+                                                  content after form). No changes were written ~
+                                                  to disk."))))))
              form-text))
          :source-path source-path)
       (patch-operation-error (e)
         (error e))
       (error (e)
         (error 'patch-operation-error
-               :reason (%diagnosed-reason
-                        form-text
-                        (format nil "patch operation produced invalid Lisp: ~A. ~
-                                     The form could not be parsed after replacement. ~
-                                     No changes were written to disk."
-                                e)))))))
+               :reason (or depth-reason
+                           (%diagnosed-reason
+                            form-text
+                            (format nil "patch operation produced invalid Lisp: ~A. ~
+                                         The form could not be parsed after replacement. ~
+                                         No changes were written to disk."
+                                    e))))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
@@ -185,7 +193,10 @@ FORM-NAME identify the target form. OLD-TEXT and NEW-TEXT specify the replacemen
 
 OLD-TEXT must match exactly once within the form (whitespace-sensitive).
 Does NOT auto-repair parentheses; if the patch breaks form structure, an error
-is signaled immediately and no changes are written to disk.
+is signaled and no changes are written to disk. When NEW-TEXT changes the net
+parenthesis count, that difference is reported as the failure reason, but only
+if the patched form really does fail to parse -- adding a parenthesis inside a
+string or a comment is a legitimate edit.
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
@@ -197,40 +208,47 @@ to use for parsing the file."
     (error "old_text and new_text must be strings"))
   (unless (member dry-run '(t nil))
     (error "dry-run must be boolean"))
-  (%check-depth-balance old-text new-text)
-  (multiple-value-bind (abs rel original nodes target target-snippet _ file-package-name)
-      (%locate-target-form file-path form-type form-name readtable)
-    (declare (ignore _))
-    (multiple-value-bind (updated modified-form)
-        (%apply-patch-operation original target old-text new-text)
-      (let ((would-change (not (string= original updated))))
-        (when would-change
-          (%validate-form-parseable
-           modified-form
-           (or readtable
-               (%detect-readtable-before-node nodes target))
-           file-package-name
-           abs))
-        (log-event :debug "lisp.patch.form"
-                   "path" (namestring abs)
-                   "form_type" form-type
-                   "form_name" form-name
-                   "dry_run" dry-run
-                   "would_change" would-change)
-        (cond
-          (dry-run
-           (let ((result (make-hash-table :test #'equal)))
-             (setf (gethash "would_change" result) would-change
-                   (gethash "original" result) target-snippet
-                   (gethash "preview" result) modified-form
-                   (gethash "file_path" result) (namestring abs)
-                   (gethash "operation" result) "patch")
-             result))
-          (would-change
-           (fs-write-file rel updated)
-           (values updated t))
-          (t
-           (values updated nil)))))))
+  ;; Before the depth computation, so an empty old_text reports the argument
+  ;; problem rather than a net-parenthesis message.
+  (when (zerop (length old-text))
+    (error 'arg-validation-error :arg-name "old_text"
+           :message "old_text must not be empty"))
+  (let ((depth-reason (%check-depth-balance old-text new-text)))
+    (multiple-value-bind (abs rel original nodes target target-snippet _
+                          file-package-name)
+        (%locate-target-form file-path form-type form-name readtable)
+      (declare (ignore _))
+      (multiple-value-bind (updated modified-form)
+          (%apply-patch-operation original target old-text new-text)
+        (let ((would-change (not (string= original updated))))
+          (when would-change
+            (%validate-form-parseable
+             modified-form
+             :readtable-designator (or readtable
+                                       (%detect-readtable-before-node nodes target))
+             :package-name file-package-name
+             :source-path abs
+             :depth-reason depth-reason))
+          (log-event :debug "lisp.patch.form"
+                     "path" (namestring abs)
+                     "form_type" form-type
+                     "form_name" form-name
+                     "dry_run" dry-run
+                     "would_change" would-change)
+          (cond
+            (dry-run
+             (let ((result (make-hash-table :test #'equal)))
+               (setf (gethash "would_change" result) would-change
+                     (gethash "original" result) target-snippet
+                     (gethash "preview" result) modified-form
+                     (gethash "file_path" result) (namestring abs)
+                     (gethash "operation" result) "patch")
+               result))
+            (would-change
+             (fs-write-file rel updated)
+             (values updated t))
+            (t
+             (values updated nil))))))))
 
 (define-tool "lisp-patch-form"
   :description "Scoped text replacement within a matched top-level Lisp form.
@@ -255,7 +273,10 @@ Reader macro prefixes #: and : are stripped automatically, so
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
          (new_text :type :string :required t
-                   :description "Replacement text")
+                   :description "Replacement text.
+If new_text opens and closes a different net number of parentheses than old_text
+and the patched form no longer parses, the error says exactly how many \")\" to
+add or remove.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (readtable :type :string

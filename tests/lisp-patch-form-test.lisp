@@ -670,7 +670,7 @@ running as root), THUNK is skipped instead."
                 "message should name the file that could not be written")))))))
 
 (deftest lisp-patch-form-depth-mismatch-fewer-closes
-  (testing "new_text missing a ) is refused before the file is read"
+  (testing "new_text missing a ) breaks the form, so the depth message is reported"
     (with-temp-file "tests/tmp/patch-depth-fewer.lisp"
         (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
       (lambda (path)
@@ -692,7 +692,7 @@ running as root), THUNK is skipped instead."
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-depth-mismatch-more-closes
-  (testing "new_text with an extra ) is refused with the opposite advice"
+  (testing "new_text with an extra ) fails to parse and gets the opposite advice"
     (with-temp-file "tests/tmp/patch-depth-more.lisp"
         (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
       (lambda (path)
@@ -720,17 +720,36 @@ running as root), THUNK is skipped instead."
                          :new-text "(list \")\" #\\( 1)")
         (ok (search "(list \")\" #\\( 1)" (fs-read-file path)))))))
 
-(deftest lisp-patch-form-depth-mismatch-does-not-need-a-readable-file
-  (testing "the depth check fires even when the file path does not exist"
-    (let ((err-msg nil))
-      (handler-case
-          (lisp-patch-form :file-path (project-path "tests/tmp/does-not-exist-xyzzy.lisp")
-                           :form-type "defun"
-                           :form-name "target"
-                           :old-text "(a)"
-                           :new-text "(a")
-        (error (e) (setf err-msg (princ-to-string e))))
-      (ok (search "new_text closes 1 fewer" err-msg)))))
+(deftest lisp-patch-form-depth-mismatch-inside-docstring-is-allowed
+  (testing "an unbalanced paren added inside a docstring still parses, so it is applied"
+    (with-temp-file "tests/tmp/patch-depth-docstring.lisp"
+        (format nil "(defun target (x)~%  \"Return (1-based index.\"~%  x)~%")
+      (lambda (path)
+        (lisp-patch-form :file-path path
+                         :form-type "defun"
+                         :form-name "target"
+                         :old-text "(1-based index."
+                         :new-text "(1-based index.)")
+        (ok (search "(1-based index.)\"" (fs-read-file path)))))))
+
+(deftest lisp-patch-form-empty-old-text-is-an-argument-error
+  (testing "an empty old_text reports the argument problem, not a depth message"
+    (with-temp-file "tests/tmp/patch-empty-old-text.lisp"
+        (format nil "(defun target (x)~%  x)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text ""
+                               :new-text "(x")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "old_text must not be empty" err-msg))
+          (ng (search "new_text closes" err-msg))
+          (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-nesting-breakage-gets-diagnosis
   (testing "equal depth but an early ) yields trailing content and a diagnosis"
@@ -749,6 +768,8 @@ running as root), THUNK is skipped instead."
           (ok err-msg)
           (ok (search "invalid Lisp" err-msg))
           (ok (search "Unbalanced parentheses in the patched form" err-msg))
+          (ok (search "line 2" err-msg)
+              "the inferred line of the early ) is named")
           (ok (search "No changes were written to disk." err-msg))
           (ok (string= before (fs-read-file path))))))))
 
