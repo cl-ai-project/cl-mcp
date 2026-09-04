@@ -371,8 +371,9 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   委ねる: `fs-write-file` に `allow_unparseable_overwrite`(既定 false)を追加し、
   既存 `.lisp` の上書きは「この引数が真 **かつ** 区切り記号の破損でパースが失敗
   する」場合のみ許可する。パースできるファイルはフラグがあっても上書きしない。
-  余分な `)` は CL リーダー経路でも `cst` 自身が `peek-char` で検出して
-  `stray-right-parenthesis` を返すので、処理系のエラー文面には依存しない。
+  余分な `)` は CL リーダー経路でも `cst` 自身が空白と行・ブロックコメントを
+  読み飛ばしたうえで `peek-char` で検出して `stray-right-parenthesis` を返すので、
+  処理系のエラー文面には依存しない。
 - **単一エスケープ**: 文字列外の `\` は次の文字をシンボルの一部にするので、
   両方の走査器(`scan-delimiters`、`%map-code-characters`)で `\(` `\)` を
   区切り記号として数えない。

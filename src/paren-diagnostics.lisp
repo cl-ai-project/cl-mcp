@@ -95,8 +95,9 @@ indicating how many additional characters past CH were consumed."
    ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
    ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
    ;; Single escape outside a string: the next character belongs to a symbol,
-   ;; so \( and \) are not delimiters.
-   ((and (char= ch #\\) next) (values nil 1))
+   ;; so \( and \) are not delimiters. An escaped newline is left to the
+   ;; normal path so the line counter still advances over it.
+   ((and (char= ch #\\) next (char/= next #\Newline)) (values nil 1))
    ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
    ;; delimiter characters like #\( are not treated as open-parens.
    ((and (char= ch #\#) next (char= next #\\))

@@ -1152,6 +1152,19 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
                    (pathname path))
                   "the stray ) is a delimiter failure"))))
+        (testing "a stray ) behind a line or block comment is still recognised"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray-comment.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%;; note~%)~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "line comment before the stray )")))
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray-block.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%#| x #| y |# |# )~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "nested block comment before the stray )"))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")

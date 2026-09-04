@@ -89,6 +89,38 @@ or the readtable is not found."
         (when (and find-fn (fboundp find-fn))
           (funcall find-fn designator))))))
 
+(defun %skip-whitespace-and-comments (stream)
+  "Advance STREAM past whitespace, line comments and (nested) block comments,
+so the next character is the start of a form, a stray delimiter, or end of
+input. A lone # that does not open a block comment is left in place."
+  (loop
+    (let ((ch (peek-char nil stream nil :eof)))
+      (cond
+        ((and (characterp ch)
+              (member ch '(#\Space #\Tab #\Newline #\Return #\Page)))
+         (read-char stream))
+        ((eql ch #\;)
+         (loop for c = (read-char stream nil :eof)
+               until (or (eq c :eof) (char= c #\Newline))))
+        ((eql ch #\#)
+         (read-char stream)
+         (if (eql (peek-char nil stream nil :eof) #\|)
+             (progn
+               (read-char stream)
+               ;; Nested block comment: track depth until the matching |#.
+               (loop with depth = 1
+                     for c = (read-char stream nil :eof)
+                     until (eq c :eof)
+                     do (cond
+                          ((and (char= c #\|) (eql (peek-char nil stream nil :eof) #\#))
+                           (read-char stream)
+                           (when (zerop (decf depth)) (return)))
+                          ((and (char= c #\#) (eql (peek-char nil stream nil :eof) #\|))
+                           (read-char stream)
+                           (incf depth)))))
+             (progn (unread-char #\# stream) (return))))
+        (t (return))))))
+
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
   "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
 Returns two values: the complete list of nodes (including previously collected
@@ -103,11 +135,9 @@ fs-write-file overwrite guard) inspect the second value."
         (*read-eval* nil))
     (loop
       (let ((start-pos (file-position stream)))
-        ;; Skip whitespace
-        (loop for ch = (peek-char nil stream nil :eof)
-              while (and (characterp ch)
-                         (member ch '(#\Space #\Tab #\Newline #\Return)))
-              do (read-char stream))
+        ;; Skip whitespace and comments, so a stray ")" behind a comment is
+        ;; still seen by the structural check below.
+        (%skip-whitespace-and-comments stream)
         (setf start-pos (file-position stream))
         (when (eql (peek-char nil stream nil :eof) #\))
           (return (values (nreverse nodes)

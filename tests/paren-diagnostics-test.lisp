@@ -100,6 +100,12 @@
       (ok (= opens 1))
       (ok (= closes 1)))))
 
+(deftest escaped-newline-keeps-line-numbers
+  (testing "a \\ before a physical newline still advances the scanner's line counter"
+    (let ((res (scan-delimiters (format nil "(foo a\\~%b))"))))
+      (ok (string= (getf res :kind) "extra-close"))
+      (ok (= (getf res :line) 2) "the extra ) is on line 2, not line 1"))))
+
 (deftest count-delimiter-depth-region-uses-lexical-context
   (testing "a region inside a string counts no parens"
     ;; positions 13-14 are the `a)` inside the string literal
