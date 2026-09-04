@@ -1190,6 +1190,28 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                          ")foo is a symbol under this readtable, not a stray paren")))
               (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
                        :cl-mcp-test-bracket-lists))))
+        (testing "a readtable that redefines ; keeps its own reading of it"
+          ;; ; reads the following form (like quote), so ;(defun ...) is a defun.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-semicolon-reads :merge '(:standard))))
+            (set-macro-character #\; (lambda (s c) (declare (ignore c)) (read s t nil t))
+                                 nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-semicolon-readtable.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-semicolon-reads)~%~
+                                  ;(defun target () 1)~%")
+                   (lambda (path)
+                     (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                (pathname path))))
+                     (lisp-edit-form :file-path path
+                                     :form-type "defun"
+                                     :form-name "target"
+                                     :operation "replace"
+                                     :content "(defun target () 2)")
+                     (ok (search "(defun target () 2)" (fs-read-file path))
+                         "the form behind the redefined ; was located and replaced")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-semicolon-reads))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
