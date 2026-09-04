@@ -92,7 +92,10 @@ or the readtable is not found."
 (defun %skip-whitespace-and-comments (stream)
   "Advance STREAM past whitespace, line comments and (nested) block comments,
 so the next character is the start of a form, a stray delimiter, or end of
-input. A lone # that does not open a block comment is left in place."
+input. A lone # that does not open a block comment is left in place.
+Returns NIL normally, or an UNTERMINATED-SOURCE condition when input ended
+inside a block comment: that is a delimiter-class failure the caller must
+report, not a successfully skipped comment."
   (loop
     (let ((ch (peek-char nil stream nil :eof)))
       (cond
@@ -108,18 +111,26 @@ input. A lone # that does not open a block comment is left in place."
              (progn
                (read-char stream)
                ;; Nested block comment: track depth until the matching |#.
-               (loop with depth = 1
-                     for c = (read-char stream nil :eof)
-                     until (eq c :eof)
-                     do (cond
-                          ((and (char= c #\|) (eql (peek-char nil stream nil :eof) #\#))
-                           (read-char stream)
-                           (when (zerop (decf depth)) (return)))
-                          ((and (char= c #\#) (eql (peek-char nil stream nil :eof) #\|))
-                           (read-char stream)
-                           (incf depth)))))
-             (progn (unread-char #\# stream) (return))))
-        (t (return))))))
+               (let ((depth 1))
+                 (loop for c = (read-char stream nil :eof)
+                       until (eq c :eof)
+                       do (cond
+                            ((and (char= c #\|)
+                                  (eql (peek-char nil stream nil :eof) #\#))
+                             (read-char stream)
+                             (when (zerop (decf depth)) (return)))
+                            ((and (char= c #\#)
+                                  (eql (peek-char nil stream nil :eof) #\|))
+                             (read-char stream)
+                             (incf depth))))
+                 (when (plusp depth)
+                   (return (make-condition
+                            'unterminated-source
+                            :stream stream
+                            :message (format nil "Reader error: end of input inside a #| ~
+block comment (~D level~:P still open). Close it with |#." depth))))))
+             (progn (unread-char #\# stream) (return nil))))
+        (t (return nil))))))
 
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
   "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
@@ -136,8 +147,11 @@ fs-write-file overwrite guard) inspect the second value."
     (loop
       (let ((start-pos (file-position stream)))
         ;; Skip whitespace and comments, so a stray ")" behind a comment is
-        ;; still seen by the structural check below.
-        (%skip-whitespace-and-comments stream)
+        ;; still seen by the structural check below. An unterminated block
+        ;; comment is reported instead of being mistaken for a clean EOF.
+        (let ((comment-error (%skip-whitespace-and-comments stream)))
+          (when comment-error
+            (return (values (nreverse nodes) comment-error))))
         (setf start-pos (file-position stream))
         (when (eql (peek-char nil stream nil :eof) #\))
           (return (values (nreverse nodes)

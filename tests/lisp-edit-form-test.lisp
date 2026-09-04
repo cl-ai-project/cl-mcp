@@ -1165,6 +1165,14 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
                    (pathname path))
                   "nested block comment before the stray )"))))
+        (testing "an unterminated #| comment after the switch is a delimiter failure"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-open-block.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%~
+                           #| never closed~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "EOF inside a block comment must not look like a clean end of file"))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
