@@ -1173,6 +1173,23 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
                    (pathname path))
                   "EOF inside a block comment must not look like a clean end of file"))))
+        (testing "a readtable that redefines ) is left to interpret it itself"
+          ;; Bracket-list syntax: [ and ] read lists, ) is a plain constituent.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-bracket-lists :merge '(:standard))))
+            (set-macro-character #\[ (get-macro-character #\( ) nil rt)
+            (set-macro-character #\] (get-macro-character #\) ) nil rt)
+            (set-syntax-from-char #\) #\a rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-bracket-readtable.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-bracket-lists)~%~
+                                  [defun a [] 1]~%)foo~%")
+                   (lambda (path)
+                     (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                (pathname path)))
+                         ")foo is a symbol under this readtable, not a stray paren")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-bracket-lists))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")

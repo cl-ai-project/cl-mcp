@@ -143,7 +143,12 @@ Reading stays lenient so a partially broken file can still be displayed, but
 callers that need to know the file is unparseable (lisp-edit-form, the
 fs-write-file overwrite guard) inspect the second value."
   (let ((*readtable* custom-readtable)
-        (*read-eval* nil))
+        (*read-eval* nil)
+        ;; The structural stray-")" check below assumes ")" still terminates
+        ;; lists. A readtable that redefines ")" (constituent, or another
+        ;; macro) must interpret it itself, so the check is skipped for it.
+        (standard-close-p (eq (get-macro-character #\) custom-readtable)
+                              (get-macro-character #\) (copy-readtable nil)))))
     (loop
       (let ((start-pos (file-position stream)))
         ;; Skip whitespace and comments, so a stray ")" behind a comment is
@@ -153,7 +158,8 @@ fs-write-file overwrite guard) inspect the second value."
           (when comment-error
             (return (values (nreverse nodes) comment-error))))
         (setf start-pos (file-position stream))
-        (when (eql (peek-char nil stream nil :eof) #\))
+        (when (and standard-close-p
+                   (eql (peek-char nil stream nil :eof) #\)))
           (return (values (nreverse nodes)
                           (make-condition
                            'stray-right-parenthesis
