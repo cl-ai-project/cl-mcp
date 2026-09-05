@@ -181,7 +181,7 @@ the reader."
         fallback
         (format nil "patch operation produced invalid Lisp (line numbers below are ~
                      within the patched form). ~A~
-                     ~@[~%The reader itself reported: ~A.~] ~
+                     ~@[~%The reader itself reported: ~A.~]~%~
                      No changes were written to disk."
                 (format-delimiter-diagnosis diagnosis :target "the patched form")
                 (and (bracket-ambiguous-p diagnosis) reader-text)))))

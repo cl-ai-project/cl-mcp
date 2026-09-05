@@ -251,7 +251,9 @@ Notes:
 - When a `path` fails the scan, the file is also parsed with the editing tools'
   reader (`*read-eval*` off; an in-file `in-readtable` is honoured, so its
   reader macros run in the server process, as they do for `lisp-read-file`)
-  to decide the next step. When that reader accepts the file, the scan's
+  to decide the next step; inline `code` that fails the scan is read the same
+  way (an `in-readtable` inside the snippet is honoured too). When that reader
+  accepts the input, the scan's
   finding is a false positive: the text says so first, no `likely_fixes` /
   `next_top_level_line` are returned, and no "Replace it with" / "Close it
   with" instruction is attached. The overwrite hint is offered only for a file

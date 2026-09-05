@@ -50,6 +50,7 @@
            #:%locate-target-form
            #:%file-unparseable-by-edit-tools-p
            #:%delimiter-failure-p
+           #:%reader-level-failure-p
            #:file-unparseable-error
            #:file-unparseable-path
            #:file-unparseable-diagnosis
@@ -353,6 +354,17 @@ the readtable parameter could consume the offending characters), which is why
 fs-write-file additionally requires the caller to opt in before overwriting."
   (or (typep condition 'end-of-file)
       (typep condition 'stray-right-parenthesis)))
+
+(defun %reader-level-failure-p (condition)
+  "Return T when the reader itself rejected the text for a reason other than
+a delimiter: a disabled #., an unknown dispatch macro such as #?. Only such a
+failure makes a bracket verdict of the standard-syntax scan a finding rather
+than an instruction. END-OF-FILE is not a READER-ERROR and is excluded anyway
+as a delimiter failure; the edit tools' own synthesized errors (\"content is
+empty\", \"multiple top-level forms\") are plain ERRORs and do not count, so
+a genuinely stray ) keeps its instruction."
+  (and (typep condition 'reader-error)
+       (not (%delimiter-failure-p condition))))
 
 (defun file-unparseable-message (condition)
   "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.

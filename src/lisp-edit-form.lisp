@@ -41,7 +41,7 @@
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form
-                #:%delimiter-failure-p
+                #:%reader-level-failure-p
                 #:%detect-readtable-before-node
                 #:file-unparseable-error)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
@@ -253,7 +253,7 @@ comments near a target form."
                                         (format-delimiter-diagnosis
                                          diagnosis :target "content"
                                                    :false-positive
-                                                   (not (%delimiter-failure-p err)))
+                                                   (%reader-level-failure-p err))
                                         (sanitize-condition-text err))))
               ;; Parinfer already ran inside DIAGNOSE-DELIMITERS when the
               ;; scan found a delimiter problem; reuse its output. Only a
@@ -284,7 +284,7 @@ comments near a target form."
                                     (format-delimiter-diagnosis
                                      diagnosis :target "content"
                                                :false-positive
-                                               (not (%delimiter-failure-p repaired-err)))
+                                               (%reader-level-failure-p repaired-err))
                                     (and (not (member (getf diagnosis :kind)
                                                       '("unclosed-string"
                                                         "unclosed-block-comment")

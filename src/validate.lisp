@@ -83,7 +83,7 @@ sent to the overwrite path."
 
 (defun %code-verdict (text)
   "Return :PARSED when the editing tools' reader accepts inline TEXT (so a
-scan verdict against it is a false positive), else :READER-LEVEL. The same
+scan verdict against it is a false positive), else :UNPARSED. The same
 question %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P answers for a file, asked of a
 snippet: *read-eval* stays off and unknown packages are stubbed, as in the
 edit tools."
@@ -94,7 +94,7 @@ edit tools."
     ;; and PARSE-TOP-LEVEL-FORMS returns a swallowed error there on success
     ;; of its lenient pass: either way a non-NIL second value means "did not
     ;; read cleanly".
-    (if swallowed :reader-level :parsed)))
+    (if swallowed :unparsed :parsed)))
 
 (defun %truncate-message (condition)
   "Extract CONDITION's message for the client: SBCL stream representations
@@ -321,17 +321,26 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                                   path base-off (length text))))
                    (t
                     (setf (gethash "diagnosis_text" h)
-                          (format nil "~:[~;The editing tools' reader parses this file, ~
-                                       so the finding below is most likely a false ~
-                                       positive of the standard-syntax scan (a token ~
-                                       such as foo#|bar| or a[b reads as one symbol, or ~
-                                       a reader macro from the file's in-readtable ~
-                                       consumes that text); no repair is suggested, ~
-                                       and lisp-edit-form can still edit the file.~%~]~A"
-                                  false-positive
+                          ;; The false clause skips the two arguments the true
+                          ;; clause's nested directives would consume.
+                          (format nil "~:[~2*~;The editing tools' reader parses this ~
+                                       ~:[snippet~;file~], so the finding below is ~
+                                       most likely a false positive of the ~
+                                       standard-syntax scan (a token such as ~
+                                       foo#|bar| or a[b reads as one symbol, or a ~
+                                       reader macro from an in-readtable consumes ~
+                                       that text); no repair is suggested~:[~;, and ~
+                                       lisp-edit-form can still edit the file~].~%~]~
+                                       ~A~:[~;~%The editing tools' reader also fails ~
+                                       on this file, but not on a delimiter (a ~
+                                       reader macro or #.), so the overwrite path ~
+                                       does not apply; lisp-edit-form will report ~
+                                       the reader's complaint.~]"
+                                  false-positive (and path t) (and path t)
                                   (format-delimiter-diagnosis
                                    diagnosis :target (or path "code")
-                                             :false-positive false-positive)))
+                                             :false-positive false-positive)
+                                  (eq verdict :reader-level)))
                     ;; Parinfer fixes exist only for paren problems, not for
                     ;; an open #| comment or string, and never for a file the
                     ;; reader accepts.
@@ -437,7 +446,13 @@ sent to the fs-write-file overwrite path."
                                              ((string= kind "unclosed-block-comment")
                                               "Unterminated block comment")
                                              ((string= kind "too-large")
-                                              "Input too large to check")
+                                              (format nil "Input too large to check: ~
+                                               nothing was scanned. The read was cut ~
+                                               at the fs-read-file cap, so the ~
+                                               structural tools and the fs-write-file ~
+                                               overwrite path are closed for it too; ~
+                                               split the file or edit it outside ~
+                                               cl-mcp"))
                                              (t (format nil "Unbalanced parentheses: ~A"
                                                         kind)))))
                             (format nil

@@ -1662,6 +1662,24 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ng (search "Replace it with" err) "but not turned into an instruction")
           (ok (search "(reader: " err) "the reader's own complaint is what to act on"))))))
 
+(deftest lisp-edit-form-refusal-keeps-the-instruction-for-a-stray-close
+  (testing "a stray ) is a real delimiter problem: the instruction stays"
+    (with-temp-file "tests/tmp/edit-form-refusal-stray-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (foo x))~%  (bar x))"))
+            (error (e) (setf err (princ-to-string e))))
+          (ok err)
+          (ok (search "extra \")\"" err))
+          (ok (search "Either remove that" err)
+              "the edit tools' own errors do not make the finding a false positive"))))))
+
 (deftest lisp-edit-form-content-honours-in-readtable-in-file
   (testing "content is validated under the readtable the file switched to"
     ;; #?[...] reads raw text through ]; without the file's readtable the

@@ -620,7 +620,16 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   (`#.` や未知の `#?`)で止まった場合、`]` の指摘は所見だけにして
   「Replace it with」を付けない(`format-delimiter-diagnosis` の
   `false-positive`)。未終端の文字列・ブロックコメントには「repair also
-  failed」の付記を出さない。
+  failed」の付記を出さない。判定は `%reader-level-failure-p`
+  (`reader-error` かつ区切り記号の失敗ではない)で行う。`%delimiter-failure-p`
+  の否定では、編集ツール自身が合成する「content is empty」「複数フォーム」
+  などの `simple-error` まで偽陽性扱いになり、余分な `)` のように本当に
+  壊れた content から指示が消える。
+- **推定修正の描画は逐語的に適用できる形で**: 「add N `)`」の短い表記は、修復が
+  行末への追記そのものである場合にだけ使う。行末コメントの前への挿入など
+  それ以外の修復では修復後の行をそのまま示す(`repair-line-differences` の
+  `:append-only`)。行を指すだけでは、`; comment` で終わる行に「add 1 `)`」と
+  書くとコメントの後ろに付けて壊す。
 - **`file-unparseable-error` の非回復分岐**: スキャンが区切り記号の問題を見つけて
   いてもリーダーが別の理由で止まった場合、診断とリーダーの苦情の両方を示し、
   「区切り記号の問題ではない」と診断を否定する文は使わない。

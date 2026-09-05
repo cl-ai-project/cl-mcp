@@ -206,6 +206,23 @@
       (ok (getf d :repair-failed))
       (ng (getf d :likely-fixes)))))
 
+(deftest rendered-fix-shows-the-line-when-the-closer-is-not-appended
+  (testing "a closer before a trailing comment is rendered as the resulting line"
+    (let* ((text (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2) ; double it"))
+           (d (diagnose-delimiters text))
+           (fix (first (getf d :likely-fixes)))
+           (rendered (format-repair-lines (getf d :likely-fixes))))
+      (ng (getf fix :append-only))
+      (ok (search "->  \"    (* s 2))) ; double it\"" rendered)
+          "the line to write, not an ambiguous \"add 2 )\"")
+      (ng (search "add 2" rendered))))
+  (testing "a plain append keeps the terse form"
+    (let* ((d (diagnose-delimiters +let-binding-unclosed+))
+           (fix (first (getf d :likely-fixes))))
+      (ok (getf fix :append-only))
+      (ok (search "add 1 \")\"" (format-repair-lines (getf d :likely-fixes)))))))
+
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"
     ;; The string's closing quote never comes, so parinfer's closer would land

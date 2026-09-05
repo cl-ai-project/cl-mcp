@@ -591,14 +591,18 @@ caller can fall back to a plain count difference."
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
 Return a list of (:line n :original str :repaired str :delta d :added a
-:removed r) for every line that changed, where A is the number of \")\"
-parinfer appended, R the number it removed, and D = A - R. A line whose net
-D is 0 is still reported when it really changed (\")(a\" -> \"(a)\"); only
-differences with no parenthesis edits at all (whitespace, a trailing
-carriage return) are skipped. A trailing #\\Return is stripped from both
-sides before comparing. The stored :original and :repaired are bounded by
-%BOUND-LINE so a pathological single-line input cannot inflate the response.
-Both texts must have the same number of lines, which parinfer guarantees."
+:removed r :append-only p) for every line that changed, where A is the
+number of \")\" parinfer appended, R the number it removed, D = A - R, and
+P is T only when the repaired line is the original with closers appended at
+its very end -- the one shape a reader can apply from \"add N )\" alone; a
+closer inserted before a trailing ; comment is not, and must be shown as the
+resulting line. A line whose net D is 0 is still reported when it really
+changed (\")(a\" -> \"(a)\"); only differences with no parenthesis edits at
+all (whitespace, a trailing carriage return) are skipped. A trailing
+#\\Return is stripped from both sides before comparing. The stored :original
+and :repaired are bounded by %BOUND-LINE so a pathological single-line input
+cannot inflate the response. Both texts must have the same number of lines,
+which parinfer guarantees."
   (loop for raw-orig in (split-string original :separator '(#\Newline))
         for raw-rep in (split-string repaired :separator '(#\Newline))
         for line from 1
@@ -617,7 +621,14 @@ Both texts must have the same number of lines, which parinfer guarantees."
                         :repaired (%bound-line rep)
                         :delta delta
                         :added (or added (max delta 0))
-                        :removed (or removed (max (- delta) 0)))))
+                        :removed (or removed (max (- delta) 0))
+                        :append-only (and added (plusp added) (zerop removed)
+                                          (string= rep
+                                                   (concatenate
+                                                    'string orig
+                                                    (make-string added
+                                                                 :initial-element #\))))
+                                          t))))
 
 (defparameter *repair-lines-limit* 10
   "Maximum number of likely-fix entries rendered by FORMAT-REPAIR-LINES and
@@ -626,28 +637,36 @@ so a response stays bounded however many lines parinfer changed.")
 
 (defun format-repair-lines (fixes)
   "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
-preceded by a newline, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\".
-At most 10 entries are rendered in full; when more lines changed, a trailing
-\"  ... and N more changed lines\" names the remainder, so a wholesale
-reindentation cannot flood the guidance."
+preceded by a newline. A repair that appends closers at the very end of the
+line is rendered tersely, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\",
+which is exactly what to type, and a pure removal as \"remove N \\\")\\\"\";
+any other repair -- a closer inserted before a trailing ; comment, a
+relocation -- shows the resulting line, because \"add 1 )\" on a line
+ending in a comment would be applied after the comment and leave the text
+broken. A fix plist without the :append-only key (built by hand) is rendered
+tersely, as before that key existed. At most 10 entries are rendered in
+full; when more lines changed, a trailing \"  ... and N more changed lines\"
+names the remainder, so a wholesale reindentation cannot flood the guidance."
   (let* ((limit *repair-lines-limit*)
          (total (length fixes))
          (shown (if (> total limit) (subseq fixes 0 limit) fixes)))
     (with-output-to-string (s)
       (dolist (fix shown)
-        (let ((delta (getf fix :delta)))
-          (if (zerop delta)
-              ;; One ) removed and one appended (\")(a\" -> \"(a)\"): the net
-              ;; count says nothing useful, so show the resulting line.
-              (format s "~%  line ~D: ~S  ->  ~S"
-                      (getf fix :line)
-                      (getf fix :original)
-                      (getf fix :repaired))
-              (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
-                      (getf fix :line)
-                      (getf fix :original)
-                      (if (minusp delta) "remove" "add")
-                      (abs delta)))))
+        (let ((delta (getf fix :delta))
+              (append-only (getf fix :append-only :unknown)))
+          (cond
+            ((and (plusp delta) append-only)
+             (format s "~%  line ~D: ~S  ->  add ~D \")\""
+                     (getf fix :line) (getf fix :original) delta))
+            ((and (minusp delta) (zerop (getf fix :added 0)))
+             (format s "~%  line ~D: ~S  ->  remove ~D \")\""
+                     (getf fix :line) (getf fix :original) (- delta)))
+            (t
+             ;; A relocation (")(a" -> "(a)"), or an insertion that is not
+             ;; an append: the net count says nothing useful, so show the
+             ;; resulting line.
+             (format s "~%  line ~D: ~S  ->  ~S"
+                     (getf fix :line) (getf fix :original) (getf fix :repaired))))))
       (when (> total limit)
         (format s "~%  ... and ~D more changed lines" (- total limit))))))
 
@@ -730,7 +749,8 @@ one place, below, rather than per kind."
            ;; The repair may well read, but it would change text inside a
            ;; string or comment, so it is withheld rather than offered.
            (format s "~%Automatic repair would have changed text inside a string ~
-                      or comment, so no repair is offered; fix the delimiters by hand."))
+                      or comment, or in the middle of a token, so no repair is ~
+                      offered; fix the delimiters by hand."))
           ((and failed (not (string= kind "mismatch")))
            (format s "~%Automatic repair could not produce a readable form; ~
                       fix the delimiters by hand.")))
