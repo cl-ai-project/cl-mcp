@@ -8,6 +8,7 @@
                 #:scan-delimiters
                 #:diagnose-delimiters
                 #:count-delimiter-depth
+                #:lexical-state-at
                 #:repair-line-differences
                 #:format-repair-lines
                 #:format-delimiter-diagnosis))
@@ -119,6 +120,18 @@
         (count-delimiter-depth "(list (a) (b))" :start 6 :end 9)
       (ok (= opens 1))
       (ok (= closes 1)))))
+
+(deftest lexical-state-at-reports-context
+  (testing "the state at a position reflects strings, comments and code"
+    ;;            0123456789012345678901234
+    (let ((text (format nil "(a \"b\" ; c~% #| d |# e)")))
+      (ok (eq (lexical-state-at text 2) :code) "before the string")
+      (ok (eq (lexical-state-at text 4) :string) "inside \"b\"")
+      (ok (eq (lexical-state-at text 6) :code) "after the string")
+      (ok (eq (lexical-state-at text 9) :line-comment) "inside ; c")
+      (ok (eq (lexical-state-at text 15) :block-comment) "inside #| d |#")
+      (ok (eq (lexical-state-at text 21) :code) "after the block comment")
+      (ok (eq (lexical-state-at text (length text)) :code) "at the end"))))
 
 (deftest repair-line-differences-reports-changed-lines
   (testing "only changed lines are listed, with the added count"

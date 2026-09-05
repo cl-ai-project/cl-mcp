@@ -30,7 +30,8 @@
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:count-delimiter-depth
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis)
+                #:format-delimiter-diagnosis
+                #:lexical-state-at)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
@@ -53,33 +54,38 @@
 or NIL when it makes none. OLD-TEXT occupies FORM-TEXT from MATCH-POS and
 NEW-TEXT occupies MODIFIED-FORM from the same position; each region is
 counted in its real lexical context, so a parenthesis inside a string or a
-comment is not mistaken for code. A net difference in code guarantees the
-form will not parse, but the caller still uses this message only when the
-patched form actually fails to parse."
-  (multiple-value-bind (old-open old-close)
-      (count-delimiter-depth form-text
-                             :start match-pos
-                             :end (+ match-pos (length old-text)))
-    (multiple-value-bind (new-open new-close)
-        (count-delimiter-depth modified-form
-                               :start match-pos
-                               :end (+ match-pos (length new-text)))
-      (let ((diff (- (- new-open new-close) (- old-open old-close))))
-        (unless (zerop diff)
-          (let ((n (abs diff)))
-            (if (plusp diff)
-                (format nil "new_text closes ~D fewer \")\" than old_text ~
-                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                             The patch would leave the form unclosed. ~
-                             Add ~D \")\" to new_text, or remove ~D \"(\". ~
-                             No changes were written to disk."
-                        n old-open old-close new-open new-close n n)
-                (format nil "new_text closes ~D more \")\" than old_text ~
-                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                             The patch would add an extra closing parenthesis. ~
-                             Remove ~D \")\" from new_text, or add ~D \"(\". ~
-                             No changes were written to disk."
-                        n old-open old-close new-open new-close n n))))))))
+comment is not mistaken for code. The message is also withheld when the
+lexical state at the end of the replacement differs between the two texts
+(NEW-TEXT opened a string or comment that swallows the unchanged suffix):
+the region counts would then describe a reclassified suffix, not a real
+parenthesis difference, and the reader's own failure is the better report.
+A net difference in code guarantees the form will not parse, but the caller
+still uses this message only when the patched form actually fails to parse."
+  (let ((old-end (+ match-pos (length old-text)))
+        (new-end (+ match-pos (length new-text))))
+    (unless (eq (lexical-state-at form-text old-end)
+                (lexical-state-at modified-form new-end))
+      (return-from %check-depth-balance nil))
+    (multiple-value-bind (old-open old-close)
+        (count-delimiter-depth form-text :start match-pos :end old-end)
+      (multiple-value-bind (new-open new-close)
+          (count-delimiter-depth modified-form :start match-pos :end new-end)
+        (let ((diff (- (- new-open new-close) (- old-open old-close))))
+          (unless (zerop diff)
+            (let ((n (abs diff)))
+              (if (plusp diff)
+                  (format nil "new_text closes ~D fewer \")\" than old_text ~
+                               (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                               The patch would leave the form unclosed. ~
+                               Add ~D \")\" to new_text, or remove ~D \"(\". ~
+                               No changes were written to disk."
+                          n old-open old-close new-open new-close n n)
+                  (format nil "new_text closes ~D more \")\" than old_text ~
+                               (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                               The patch would add an extra closing parenthesis. ~
+                               Remove ~D \")\" from new_text, or add ~D \"(\". ~
+                               No changes were written to disk."
+                          n old-open old-close new-open new-close n n)))))))))
 
 (defun %apply-patch-operation (text node old-text new-text)
   "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.

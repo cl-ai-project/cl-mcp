@@ -16,6 +16,7 @@
            #:scan-delimiters
            #:diagnose-delimiters
            #:count-delimiter-depth
+           #:lexical-state-at
            #:repair-line-differences
            #:format-repair-lines
            #:format-delimiter-diagnosis))
@@ -229,18 +230,22 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
 ;; a "(" or ")" inside such a symbol name is treated as code and reaches
 ;; FUNCTION like any other delimiter.
 
-(defun %map-code-characters (text function)
+(defun %map-code-characters (text function &key end)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
 outside strings, line comments, block comments, character literals and
 single-escaped characters (a \\ outside a string makes the next character
 part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
+Scanning stops at position END (default: the end of TEXT) and the lexical
+state reached there is returned: :code, :string, :line-comment or
+:block-comment.
 Known limitation: |...| multiple-escape symbols are not recognised, so a
 parenthesis inside one is still reported as code."
-  (let ((len (length text)) (idx 0) (line 1) (col 1)
+  (let ((len (min (length text) (or end (length text))))
+        (idx 0) (line 1) (col 1)
         (in-string nil) (escape nil) (line-comment nil) (block-depth 0))
     (loop while (< idx len)
           do (let ((ch (char text idx))
-                   (next (and (< (1+ idx) len) (char text (1+ idx)))))
+                   (next (and (< (1+ idx) (length text)) (char text (1+ idx)))))
                (cond
                  (line-comment
                   (when (char= ch #\Newline) (setf line-comment nil)))
@@ -267,10 +272,10 @@ parenthesis inside one is still reported as code."
                  ((and (char= ch #\#) next (char= next #\\))
                   ;; #\x or #\Name: skip the backslash and the literal itself.
                   (let ((skip 1))
-                    (when (< (+ idx 2) len)
+                    (when (< (+ idx 2) (length text))
                       (incf skip)
                       (when (alpha-char-p (char text (+ idx 2)))
-                        (loop for k from (+ idx 3) below len
+                        (loop for k from (+ idx 3) below (length text)
                               while (alpha-char-p (char text k))
                               do (incf skip))))
                     (incf idx skip)
@@ -279,7 +284,24 @@ parenthesis inside one is still reported as code."
                (if (char= ch #\Newline)
                    (setf line (1+ line) col 1)
                    (incf col))
-               (incf idx)))))
+               (incf idx)))
+    (cond (line-comment :line-comment)
+          (in-string :string)
+          ((plusp block-depth) :block-comment)
+          (t :code))))
+
+(defun lexical-state-at (text pos)
+  "Return the lexical state in effect just before position POS of TEXT, as
+scanned from its beginning: :code, :string, :line-comment or :block-comment.
+lisp-patch-form compares this at the end of a replacement in the original
+and patched form texts; a mismatch means new_text opened a string or comment
+that swallows the unchanged suffix, so region parenthesis counts no longer
+describe a real delimiter difference."
+  (%map-code-characters text
+                        (lambda (ch idx line col)
+                          (declare (ignore ch idx line col))
+                          nil)
+                        :end pos))
 
 (defun %next-top-level-line (text)
   "Return the 1-based line of the first \"(\" in column 1 that appears while an
