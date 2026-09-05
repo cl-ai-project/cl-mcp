@@ -133,6 +133,23 @@
       (ok (eq (lexical-state-at text 21) :code) "after the block comment")
       (ok (eq (lexical-state-at text (length text)) :code) "at the end"))))
 
+(deftest lexical-state-at-distinguishes-pending-escape
+  (testing "a backslash pending inside a string is its own state"
+    (let ((text "(a \"b\\c\")"))
+      ;; characters: ( a space " b \ c " ) -- the backslash is index 5, so the
+      ;; state just before index 6 has the escape pending.
+      (ok (eq (lexical-state-at text 5) :string) "before the backslash")
+      (ok (eq (lexical-state-at text 6) :string-escape) "right after the backslash")
+      (ok (eq (lexical-state-at text 7) :string) "escape consumed by c"))))
+
+(deftest scan-delimiters-handles-nested-block-comments
+  (testing "a nested #| ... |# inside a block comment does not end it early"
+    (ok (getf (scan-delimiters "(a #| outer #| inner |# ( |# b)") :ok)
+        "the ( inside the outer comment is not code"))
+  (testing "an outer comment left open is still reported"
+    (let ((res (scan-delimiters "(a #| outer #| inner |# b)")))
+      (ok (string= (getf res :kind) "unclosed-block-comment")))))
+
 (deftest repair-line-differences-reports-changed-lines
   (testing "only changed lines are listed, with the added count"
     (let ((diff (repair-line-differences

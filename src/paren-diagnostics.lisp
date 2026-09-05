@@ -84,9 +84,17 @@
      (setf (scan-state-in-string state) nil))))
 
 (defun %scan-handle-block-comment (state ch next)
-  (when (and (char= ch #\|) next (char= next #\#))
-    (decf (scan-state-block-depth state))
-    t))
+  "Handle a character inside a #| ... |# comment. Returns T when a two-character
+sequence was consumed: |# closes one level, and a nested #| opens another, so
+an inner |# does not end the outer comment early."
+  (cond
+    ((and (char= ch #\|) next (char= next #\#))
+     (decf (scan-state-block-depth state))
+     t)
+    ((and (char= ch #\#) next (char= next #\|))
+     (incf (scan-state-block-depth state))
+     t)
+    (t nil)))
 
 (defun %scan-handle-normal (state ch next idx base-offset text)
   "Handle a character in normal (non-string, non-comment) context.
@@ -286,13 +294,16 @@ parenthesis inside one is still reported as code."
                    (incf col))
                (incf idx)))
     (cond (line-comment :line-comment)
+          ((and in-string escape) :string-escape)
           (in-string :string)
           ((plusp block-depth) :block-comment)
           (t :code))))
 
 (defun lexical-state-at (text pos)
   "Return the lexical state in effect just before position POS of TEXT, as
-scanned from its beginning: :code, :string, :line-comment or :block-comment.
+scanned from its beginning: :code, :string, :string-escape (inside a string
+with a backslash pending, so the next character is not a delimiter),
+:line-comment or :block-comment.
 lisp-patch-form compares this at the end of a replacement in the original
 and patched form texts; a mismatch means new_text opened a string or comment
 that swallows the unchanged suffix, so region parenthesis counts no longer

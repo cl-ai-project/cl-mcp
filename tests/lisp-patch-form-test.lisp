@@ -751,6 +751,28 @@ running as root), THUNK is skipped instead."
           (ok (search "No changes were written to disk." err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-depth-reason-sees-pending-string-escape
+  (testing "a trailing backslash inside the new string swallows the suffix quote"
+    (with-temp-file "tests/tmp/patch-boundary-escape.lisp"
+        (format nil "(defun target ()~%  (foo \"x\"))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; (foo "x -> "(\ : both ends are inside a string, but the new
+              ;; one has an escape pending that eats the following quote.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(foo \"x"
+                               :new-text "\"(\\")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "more \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
   (testing "parens inside strings and #\\( do not trip the depth check"
     (with-temp-file "tests/tmp/patch-depth-strings.lisp"
