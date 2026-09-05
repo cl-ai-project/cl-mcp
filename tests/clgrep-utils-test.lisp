@@ -428,8 +428,8 @@ Final line
         (ok (= 4 (toplevel-form-start-line b)))
         (ok (= (length content) (toplevel-form-end-pos b))
             "an unterminated form ends where the input ends")
-        (ok (>= (toplevel-form-end-line b) 8)
-            "and its line range covers the swallowed definition"))))
+        (ok (= 8 (toplevel-form-end-line b))
+            "and its line range ends on the swallowed definition's last line"))))
   (testing "EOF inside a string still yields the enclosing form, flagged"
     (let ((forms (scan-toplevel-forms
                   (format nil "(defun a ()~%  \"never closed~%(defun b () 1)~%"))))
@@ -440,6 +440,11 @@ Final line
                   (format nil "(defun a ()~%  #| never closed~%(defun b () 1)~%"))))
       (ok (= 1 (length forms)))
       (ok (toplevel-form-unterminated-p (first forms)))))
+  (testing "without a trailing newline the end line is still the last content line"
+    (let ((forms (scan-toplevel-forms "(defun a ()")))
+      (ok (= 1 (length forms)))
+      (ok (toplevel-form-unterminated-p (first forms)))
+      (ok (= 1 (toplevel-form-end-line (first forms))))))
   (testing "a balanced input flags nothing"
     (let ((forms (scan-toplevel-forms (format nil "(defun a () 1)~%(defun b () 2)~%"))))
       (ok (= 2 (length forms)))

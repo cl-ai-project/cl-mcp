@@ -159,12 +159,19 @@ lines it swallowed still belong to a form."
     ;; so the lines it swallowed still belong to a form instead of vanishing
     ;; from every result; callers decide how to present it.
     (when form-start-pos
-      (push (make-toplevel-form :start-pos form-start-pos
-                                :end-pos len
-                                :start-line form-start-line
-                                :end-line current-line
-                                :unterminated-p t)
-            forms))
+      ;; CURRENT-LINE has already moved past a trailing newline, so step back to
+      ;; the last line holding content: the closing-paren path above reports that
+      ;; line, and both paths must agree on what END-LINE means.
+      (let ((last-line (if (and (plusp len)
+                                (char= (char content (1- len)) #\Newline))
+                           (1- current-line)
+                           current-line)))
+        (push (make-toplevel-form :start-pos form-start-pos
+                                  :end-pos len
+                                  :start-line form-start-line
+                                  :end-line last-line
+                                  :unterminated-p t)
+              forms)))
     (nreverse forms)))
 
 (defun split-lines (text)
