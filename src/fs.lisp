@@ -151,14 +151,15 @@ Returns T on success."
                  :test #'string=))))
 
 (defvar *lisp-file-unparseable-hook* nil
-  "Predicate of one argument (an absolute pathname) that returns T when the
-structural editing tools cannot parse that Lisp file. The fs-write-file
-overwrite guard consults it so that overwriting is permitted exactly when
-lisp-edit-form and lisp-patch-form cannot locate any form in the file.
+  "Predicate of two arguments (an absolute pathname and the file's text) that
+returns T when the structural editing tools cannot parse that Lisp file in a
+way no readtable can fix. The fs-write-file overwrite guard consults it so
+that overwriting is permitted exactly when lisp-edit-form and
+lisp-patch-form cannot locate any form in the file.
 cl-mcp/src/lisp-edit-form-core installs a predicate built on its own parser
 (which understands named-readtable declarations); this indirection exists
-because fs cannot import that parser without a dependency cycle. When NIL,
-a standard-reader fallback is used.")
+because fs cannot import that parser without a dependency cycle. When NIL
+the guard always holds: there is no weaker fallback definition.")
 
 (defun %lisp-file-unparseable-p (pn)
   "Return T when the structural editing tools cannot parse the Lisp source at
@@ -172,10 +173,9 @@ second, weaker definition of \"unparseable\" to drift from the tools'.
 A read truncated at *FS-READ-MAX-BYTES* is reported as parseable, since a
 cut-off prefix proves nothing."
   (multiple-value-bind (text truncated) (%read-file-string pn nil nil)
-    (declare (ignore text))
     (and (not truncated)
          *lisp-file-unparseable-hook*
-         (funcall *lisp-file-unparseable-hook* pn)
+         (funcall *lisp-file-unparseable-hook* pn text)
          t)))
 
 (defun %existing-lisp-overwrite-error (id path allow-unparseable)

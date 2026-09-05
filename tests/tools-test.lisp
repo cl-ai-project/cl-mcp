@@ -283,7 +283,8 @@
                            'string
                            "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\","
                            "\"params\":{\"name\":\"fs-write-file\","
-                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                           "\"allow_unparseable_overwrite\":true}}}")
                           tmp-path)))
         (with-open-file (out abs-path :direction :output :if-exists :supersede)
           (write-string initial out))
@@ -304,7 +305,10 @@
                                'string
                                "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
                                "\"params\":{\"name\":\"fs-write-file\","
-                               "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
+                               "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                               ;; With the opt-in, so the classification is
+                               ;; what keeps the guard, not the missing flag.
+                               "\"allow_unparseable_overwrite\":true}}}")
                               id tmp-path)))
              (with-open-file (out abs-path :direction :output :if-exists :supersede)
                (write-string initial out))

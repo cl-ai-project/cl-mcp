@@ -915,6 +915,27 @@ running as root), THUNK is skipped instead."
               "new_text is balanced; the ( is symbol text")
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-bracket-typo-beats-depth-message
+  (testing "a ] typed for ) is reported as the typo, not as a missing )"
+    (with-temp-file "tests/tmp/patch-bracket-typo.lisp"
+        (format nil "(defun target ()~%  (list 1 2))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(list 1 2)"
+                               :new-text "(list 1 2]")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no net-count instruction that would write (list 1 2])")
+          (ok (search "found \"]\"" err-msg) "the ] is named")
+          (ok (search "Replace it with \")\"" err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth
   (testing "boundaries inside block comments at different nesting depths do not match"
     (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"

@@ -65,6 +65,11 @@
   (col 1 :type fixnum)
   (stack '() :type list)
   (in-string nil :type boolean)
+  ;; Where the current string literal opened, so an unterminated one can be
+  ;; reported at its opening quote rather than as a paren problem.
+  (string-open-line 1 :type fixnum)
+  (string-open-col 1 :type fixnum)
+  (string-open-pos 0 :type fixnum)
   ;; Inside a |...| multiple-escape symbol: delimiters there are symbol text.
   (in-multi-escape nil :type boolean)
   (escape nil :type boolean)
@@ -104,7 +109,12 @@ Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
 indicating how many additional characters past CH were consumed."
   (cond
    ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
-   ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
+   ((char= ch #\")
+    (setf (scan-state-in-string state) t
+          (scan-state-string-open-line state) (scan-state-line state)
+          (scan-state-string-open-col state) (scan-state-col state)
+          (scan-state-string-open-pos state) (+ base-offset idx))
+    (values nil nil))
    ;; Single escape outside a string: the next character belongs to a symbol,
    ;; so \( and \) are not delimiters. An escaped newline is left to the
    ;; normal path so the line counter still advances over it.
@@ -200,6 +210,17 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                      (incf (scan-state-col state) n))))))
             (%scan-advance-position state ch)
             (incf idx))
+    (when (scan-state-in-string state)
+      ;; Input ended inside a string literal: report the opening quote, not
+      ;; the enclosing form, so the caller is not sent chasing parentheses.
+      (return-from scan-delimiters
+        (list :ok nil
+              :kind "unclosed-string"
+              :expected "\""
+              :found nil
+              :offset (scan-state-string-open-pos state)
+              :line (scan-state-string-open-line state)
+              :column (scan-state-string-open-col state))))
     (when (plusp (scan-state-block-depth state))
       (let* ((open-pos  (scan-state-block-open-pos state))
              (local-pos (- open-pos base-offset))
@@ -239,7 +260,10 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
   (let* ((scan (scan-delimiters text :base-offset base-offset))
          (kind (getf scan :kind)))
     (if (or (getf scan :ok)
-            (string= kind "unclosed-block-comment"))
+            ;; Parinfer only reasons about parentheses: an open comment or
+            ;; string gets its own sentence and no likely-fix diff.
+            (string= kind "unclosed-block-comment")
+            (string= kind "unclosed-string"))
         scan
         (multiple-value-bind (fixes failed) (%likely-fixes text)
           (append scan
@@ -250,10 +274,6 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
                     (let ((line (getf scan :line)))
                       (list :unclosed-form-line line
                             :unclosed-form-head (%form-head text line)))))))))
-
-;; Known limitation: |...| multiple-escape symbols are not recognised here, so
-;; a "(" or ")" inside such a symbol name is treated as code and reaches
-;; FUNCTION like any other delimiter.
 
 (defun %map-code-characters (text function &key end state-fn)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
@@ -280,6 +300,7 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                    (line-comment :line-comment)
                    ((and in-string escape) :string-escape)
                    (in-string :string)
+                   ((and in-symbol escape) :symbol-escape)
                    (in-symbol :symbol)
                    ((plusp block-depth) :block-comment)
                    (t :code))))
@@ -639,6 +660,10 @@ one; otherwise a repair-failed sentence is printed instead."
          (format s "Unterminated block comment in ~A: the #| opened at line ~D, ~
                     column ~D was never closed. Close it with |#."
                  target line column))
+        ((string= kind "unclosed-string")
+         (format s "Unterminated string in ~A: the \" opened at line ~D, ~
+                    column ~D was never closed. Close it with \"."
+                 target line column))
         (t
          (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
                  target kind line column)))
@@ -649,6 +674,8 @@ one; otherwise a repair-failed sentence is printed instead."
          (format s "~%Automatic repair could not produce a readable form; ~
                     fix the delimiters by hand.")))
       (when (and next-line (string= kind "unclosed"))
+        ;; A column-0 "(" while a form is open is a strong hint, not proof
+        ;; (an unindented continuation line looks the same), so hedge.
         (format s "~%Next top-level form begins at line ~D, ~
-                   so the missing ~S must come before it."
+                   so the missing ~S most likely belongs before it."
                 next-line (or expected ")"))))))

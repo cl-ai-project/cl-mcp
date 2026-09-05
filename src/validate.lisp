@@ -136,8 +136,10 @@ Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
 plus a \"position\" hash with \"line\", \"column\", \"offset\".
 Delimiter failures also carry \"likely_fixes\" (vector of line/original/
-repaired/delta hashes inferred by parinfer, capped at *REPAIR-LINES-LIMIT*
-entries with the rest counted in \"likely_fixes_omitted\"),
+repaired/delta/added/removed hashes inferred by parinfer, capped at
+*REPAIR-LINES-LIMIT* entries with the rest counted in
+\"likely_fixes_omitted\"; \"original\" and \"repaired\" are cut to 120
+characters plus \"...\" and are then descriptive, not text to write back),
 \"next_top_level_line\" when a later top-level form was swallowed, and
 \"diagnosis_text\" (the guidance the MCP summary appends; not part of the
 MCP payload)."
@@ -187,7 +189,8 @@ MCP payload)."
              ;; exist only for paren problems, not for an open #| comment.
              (setf (gethash "diagnosis_text" h)
                    (format-delimiter-diagnosis diagnosis :target (or path "code")))
-             (unless (string= kind "unclosed-block-comment")
+             (unless (member kind '("unclosed-block-comment" "unclosed-string")
+                             :test #'string=)
                (let* ((total (length likely-fixes))
                       (kept (min total *repair-lines-limit*)))
                  (setf (gethash "likely_fixes" h)

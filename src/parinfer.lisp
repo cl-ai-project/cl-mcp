@@ -129,6 +129,12 @@ inside one is neither counted nor \"repaired\"."
                ((char= ch #\")
                 (write-char ch output)
                 (setf (state-in-string state) (not (state-in-string state))))
+               ;; Single escape outside a string: the next character is part
+               ;; of a symbol (so \( and \) are not parens); reuse the string
+               ;; escape flag, which the branch above consumes.
+               ((and (not (state-in-string state)) (char= ch #\\))
+                (write-char ch output)
+                (setf (state-escape state) t))
                ;; Multiple-escape symbol start (outside string)
                ((and (not (state-in-string state)) (char= ch #\|))
                 (write-char ch output)

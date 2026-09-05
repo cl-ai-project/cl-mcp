@@ -393,7 +393,10 @@ Returns eight values:
           (fs-read-file abs)
         (when truncated
           (error "~A exceeds the read limit (~@[~D characters, ~]only ~D read); ~
-                  lisp-edit-form and lisp-patch-form cannot edit files this large"
+                  lisp-edit-form and lisp-patch-form cannot edit files this large, ~
+                  and fs-write-file will not overwrite it either (a truncated read ~
+                  cannot prove the file is broken). Split the file or edit it ~
+                  outside cl-mcp."
                  (namestring abs) file-length (length original)))
         (flet ((unparseable (cause)
                  ;; Under a caller-supplied readtable the standard delimiter
@@ -427,7 +430,7 @@ Returns eight values:
                 (values abs rel original nodes target target-snippet form-type-str
                         (extract-in-package-name-from-text original))))))))))
 
-(defun %file-unparseable-by-edit-tools-p (pn)
+(defun %file-unparseable-by-edit-tools-p (pn &optional text)
   "Return T when the file at PN is broken in a way no readtable can fix:
 PARSE-TOP-LEVEL-FORMS fails (it signals, or its lenient CL-reader pass after
 an IN-READTABLE switch stopped early, reported as a second value) with a
@@ -435,10 +438,14 @@ delimiter failure per %DELIMITER-FAILURE-P. Any other reader failure -- an
 unknown dispatch macro such as #? that may even consume delimiter-looking
 characters as data -- is not evidence, since the tools' readtable parameter
 may make the file editable, so the overwrite guard must stay in place.
+TEXT, when supplied by the caller (fs-write-file has already read the file),
+avoids a second read; otherwise the file is read here, and a read truncated
+at the fs read cap returns NIL because a cut-off prefix of a valid file
+would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
-permits overwriting exactly the broken files. A read truncated at the fs
-read cap returns NIL: a cut-off prefix of a valid file would look unparseable."
-  (multiple-value-bind (text truncated) (fs-read-file pn)
+permits overwriting exactly the broken files."
+  (multiple-value-bind (text truncated)
+      (if text (values text nil) (fs-read-file pn))
     (and (not truncated)
          (handler-case
              (multiple-value-bind (nodes swallowed)

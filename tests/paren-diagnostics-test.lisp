@@ -157,6 +157,13 @@
       (ok (eq (lexical-state-at text 6) :string-escape) "right after the backslash")
       (ok (eq (lexical-state-at text 7) :string) "escape consumed by c"))))
 
+(deftest lexical-state-at-distinguishes-pending-symbol-escape
+  (testing "a backslash pending inside |...| is its own state too"
+    ;; characters: ( f space | a \   -- the backslash is index 5
+    (ok (eq (lexical-state-at "(f |a\\" 5) :symbol) "before the backslash")
+    (ok (eq (lexical-state-at "(f |a\\" 6) :symbol-escape) "right after it")
+    (ok (eq (lexical-state-at "(f |a\\|b" 7) :symbol) "\\| consumed, still in the symbol")))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3
@@ -405,7 +412,8 @@
       (ok (search "Likely fix, inferred from indentation:" text))
       (ok (search "line 8:" text))
       (ok (search "add 1 \")\"" text))
-      (ok (search "Next top-level form begins at line 11, so the missing \")\" must come before it." text)))))
+      (ok (search "Next top-level form begins at line 11, so the missing \")\"" text))
+      (ok (search "most likely belongs before it." text)))))
 
 (deftest format-diagnosis-unclosed-without-next-top-level
   (testing "single-form input omits the next-top-level sentence"
@@ -440,12 +448,26 @@
       (ok (search "Close it with |#." text))
       (ng (search "Likely fix" text)))))
 
+(deftest unterminated-string-is-its-own-kind
+  (testing "input ending inside a string literal is not a paren problem"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  \"oops)~%"))))
+      (ok (string= (getf d :kind) "unclosed-string"))
+      (ok (= (getf d :line) 2) "reported at the opening quote")
+      (ok (= (getf d :column) 3))
+      (ng (getf d :likely-fixes) "parinfer has nothing to say about a missing quote")
+      (let ((text (format-delimiter-diagnosis d :target "code")))
+        (ok (search "Unterminated string in code: the \" opened at line 2, column 3" text))
+        (ok (search "Close it with \"." text))
+        (ng (search "Unbalanced parentheses" text)))))
+  (testing "a string that closes on a later line is still fine"
+    (ok (getf (scan-delimiters (format nil "(a \"x~%y\" b)")) :ok))))
+
 (deftest format-diagnosis-names-the-expected-delimiter
   (testing "an unclosed [ asks for ], not for )"
     (let ((text (format-delimiter-diagnosis
                  (diagnose-delimiters (format nil "(foo [~%(bar)")))))
-      (ok (search "Next top-level form begins at line 2, so the missing \"]\" must come before it."
-                  text))
+      (ok (search "Next top-level form begins at line 2, so the missing \"]\"" text))
+      (ok (search "most likely belongs before it." text))
       (ng (search "missing \")\"" text)))))
 
 (deftest format-diagnosis-mismatch-bracket-opener

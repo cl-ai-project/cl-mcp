@@ -221,9 +221,14 @@ comments near a target form."
               (when (and (null custom-rt)
                          (not (getf diagnosis :ok))
                          (getf diagnosis :repair-failed))
+                ;; Keep the reader's own error too: for an ambiguous [ or ]
+                ;; the scan may be a false positive, and the reader error
+                ;; (an unknown #? macro, say) is then the actionable part.
                 (error 'content-unrepairable-error
-                       :message (format-delimiter-diagnosis diagnosis
-                                                            :target "content")))
+                       :message (format nil "~A (reader: ~A)"
+                                        (format-delimiter-diagnosis diagnosis
+                                                                    :target "content")
+                                        err)))
               (multiple-value-bind (repaired-result repaired-err)
                   (try-parse repaired)
                 (cond

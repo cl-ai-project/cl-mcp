@@ -31,7 +31,8 @@
                 #:count-delimiter-depth
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
-                #:lexical-state-at)
+                #:lexical-state-at
+                #:scan-delimiters)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%parse-readtable-designator
@@ -48,6 +49,18 @@
   ((reason :initarg :reason :reader patch-operation-reason))
   (:report (lambda (c s) (write-string (patch-operation-reason c) s)))
   (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
+
+(defun %bracket-mismatch-p (form-text)
+  "Return T when the delimiter scan of FORM-TEXT stops at a ] or } that
+closes a paren, or at a ) that closes a [ or {: the typo case where a net
+parenthesis count would advise adding or removing a \")\" and thereby write
+code that merely reads (as a symbol ending in ]) instead of naming the
+mistyped bracket."
+  (let ((scan (scan-delimiters form-text)))
+    (and (equal (getf scan :kind) "mismatch")
+         (or (member (getf scan :expected) '("]" "}") :test #'equal)
+             (member (getf scan :found) '("]" "}") :test #'equal))
+         t)))
 
 (defun %check-depth-balance (form-text modified-form match-pos old-text new-text)
   "Return a message describing the net parenthesis difference the patch makes,
@@ -160,14 +173,13 @@ failure in FALLBACK is kept alongside the diagnosis instead of discarded."
     (cond
       ((getf diagnosis :ok) fallback)
       (ambiguous
-       (format nil "patch operation produced invalid Lisp. ~A ~
-                    Line numbers are within the patched form. ~
-                    The reader itself reported: ~A"
+       (format nil "patch operation produced invalid Lisp (line numbers below are ~
+                    within the patched form). ~A~%The reader itself reported: ~A"
                (format-delimiter-diagnosis diagnosis :target "the patched form")
                fallback))
       (t
-       (format nil "patch operation produced invalid Lisp. ~A ~
-                    Line numbers are within the patched form. ~
+       (format nil "patch operation produced invalid Lisp (line numbers below are ~
+                    within the patched form). ~A ~
                     No changes were written to disk."
                (format-delimiter-diagnosis diagnosis :target "the patched form"))))))
 
@@ -268,7 +280,11 @@ to use for parsing the file."
              ;; trusted (a reader macro may consume raw parentheses as data),
              ;; so no depth message is offered at all; the reader's own
              ;; failure is reported through the normal diagnosis path.
+             ;; A ] or } typed for ) changes the net count too, but "add 1 )"
+             ;; would then write code that reads (as a symbol ending in ]);
+             ;; let the bracket diagnosis speak instead.
              (depth-reason (and (null readtable-designator)
+                                (not (%bracket-mismatch-p modified-form))
                                 (%check-depth-balance form-text modified-form
                                                       match-pos old-text new-text))))
         (when would-change

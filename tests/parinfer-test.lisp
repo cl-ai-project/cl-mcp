@@ -139,3 +139,20 @@
       ;; Without fix, #\) would prematurely close (list and drop the real close.
       (ok (equal output input)
           "Balanced input with #\\) should be unchanged"))))
+
+(deftest indent-mode-escapes-symbols-and-block-comments
+  (testing "a single-escaped paren is symbol text, not a delimiter"
+    (let ((input (format nil "(defun f ()~%  (list 'a\\(b)")))
+      (ok (equal (apply-indent-mode input) (format nil "(defun f ()~%  (list 'a\\(b))"))
+          "one ) is added for the unclosed defun; the \\( is left alone")))
+  (testing "parens inside |...| are symbol text"
+    (let ((input "(list '|a(b| 1)"))
+      (ok (equal (apply-indent-mode input) input))))
+  (testing "parens inside a #| ... |# block comment are neither counted nor repaired"
+    (let ((input (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1))"))
+          "the defun is closed after (bar 1); the comment is untouched")))
+  (testing "a nested block comment does not end at the inner |#"
+    (let ((input "(a #| x #| y |# ( |# b)"))
+      (ok (equal (apply-indent-mode input) input)))))
