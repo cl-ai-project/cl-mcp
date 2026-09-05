@@ -341,6 +341,97 @@
              (ng (search "window" (gethash "diagnosis_text" res))))
         (ignore-errors (delete-file abs))))))
 
+(defparameter *window-fixture*
+  (format nil "~{~A~%~}"
+          (list "(defun a ()"       ; line 1: offsets 0-10, newline at 11
+                "  (list 1 2))"     ; line 2: offsets 12-24, newline at 25
+                ""                  ; line 3: offset 26
+                "(defun b ()"       ; line 4: offsets 27-37, newline at 38
+                "  (list 3))"))     ; line 5: offsets 39-49, newline at 50
+  "A balanced two-definition file, 51 characters long. Windows into it look
+broken in ways the whole file is not.")
+
+(defparameter *window-comma-fixture*
+  (format nil "~{~A~%~}"
+          (list "(defun a ()"            ; offsets 0-10, newline at 11
+                "  \"Hello, world\")"))  ; line 2 from offset 12; the comma is offset 20
+  "Balanced; the only comma sits inside a docstring.")
+
+(defmacro with-window-fixture ((abs-var text) &body body)
+  "Write TEXT to tests/tmp/check-parens-window-abs.lisp under the project root,
+bind its absolute pathname to ABS-VAR and *project-root* to the root, run BODY,
+then delete the file."
+  `(let* ((root (asdf:system-source-directory :cl-mcp))
+          (,abs-var (merge-pathnames "tests/tmp/check-parens-window-abs.lisp" root))
+          (cl-mcp/src/project-root:*project-root* root))
+     (ensure-directories-exist ,abs-var)
+     (with-open-file (out ,abs-var :direction :output :if-exists :supersede)
+       (write-string ,text out))
+     (unwind-protect
+          (progn ,@body)
+       (ignore-errors (delete-file ,abs-var)))))
+
+(deftest lisp-check-parens-window-positions-are-file-absolute
+  (with-window-fixture (abs *window-fixture*)
+    (testing "a window starting at a line start reports that line, column unchanged"
+      ;; Offset 27 is the "(" of "(defun b ()"; 11 characters cover just that line.
+      (let ((res (lisp-check-parens :path (namestring abs) :offset 27 :limit 11)))
+        (ok (string= (%kind res) "unclosed"))
+        (ok (= 4 (%pos res "line")) "line 1 of the window is line 4 of the file")
+        (ok (= 1 (%pos res "column")))
+        (let ((window (gethash "window" res)))
+          (ok window "a window carries its own descriptor")
+          (ok (= 27 (gethash "offset" window)))
+          (ok (= 11 (gethash "length" window)))
+          (ok (= 4 (gethash "first_line" window))))))
+    (testing "a window starting mid-line adds the characters before it to the column"
+      ;; Offset 20 is the "1" in "  (list 1 2))": the window is "1 2))" plus the
+      ;; newline, and its first ")" (window column 4) is column 12 of line 2.
+      (let ((res (lisp-check-parens :path (namestring abs) :offset 20 :limit 6)))
+        (ok (string= (%kind res) "extra-close"))
+        (ok (= 2 (%pos res "line")))
+        (ok (= 12 (%pos res "column")))
+        (ok (= 23 (%pos res "offset")) "the offset was already absolute")
+        (ok (= 2 (gethash "first_line" (gethash "window" res))))))
+    (testing "the prefix is measured by streaming, so the fs read cap does not matter"
+      (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+        (let ((res (lisp-check-parens :path (namestring abs) :offset 27 :limit 11)))
+          (ok (= 4 (%pos res "line"))))))
+    (testing "a whole-file check carries no window descriptor"
+      (let ((res (lisp-check-parens :path (namestring abs))))
+        (ok (%ok? res))
+        (ok (null (gethash "window" res)))))))
+
+(deftest lisp-check-parens-window-reader-error-is-flagged-and-positioned
+  (with-window-fixture (abs *window-comma-fixture*)
+    ;; Offset 20 is the comma: the window ", wo" balances, and the reader then
+    ;; trips over a comma outside any backquote -- an artifact of the window.
+    (let ((res (lisp-check-parens :path (namestring abs) :offset 20 :limit 4))
+          (inline (lisp-check-parens :code ", wo")))
+      (testing "the reader error is reported"
+        (ok (null (%ok? res)))
+        (ok (string= (%kind res) "reader-error"))
+        (ok (string= (%kind inline) "reader-error")))
+      (testing "at the file's line and column, not the window's"
+        (ok (= 2 (%pos res "line")))
+        (ok (= (+ 8 (%pos inline "column")) (%pos res "column"))
+            "eight characters precede the window on line 2"))
+      (testing "and the text says it may be an artifact of the window"
+        (let ((text (gethash "diagnosis_text" res)))
+          (ok text)
+          (ok (search "Only a window" text))
+          (ok (search "artifact" text)))
+        (ok (gethash "window" res))))
+    (testing "the tool summary carries the window warning for a reader error"
+      (let* ((state (cl-mcp/src/state:make-state))
+             (args (cl-mcp/src/tools/helpers:make-ht "path" (namestring abs)
+                                                     "offset" 20 "limit" 4))
+             (response (cl-mcp/src/validate::lisp-check-parens-handler state "cp-w" args))
+             (text (gethash "text" (aref (gethash "content" (gethash "result" response)) 0))))
+        (ok (search "Reader error at line 2" text))
+        (ok (search "Only a window" text))
+        (ok (gethash "window" (gethash "result" response)))))))
+
 (deftest lisp-check-parens-eof-reader-error-has-position
   (testing "incomplete dispatch #X gives reader-error with non-nil position"
     ;; M1: end-of-file from incomplete #, should NOT report offset 0 / line nil
