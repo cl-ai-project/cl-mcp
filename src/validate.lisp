@@ -30,7 +30,7 @@
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
 
-(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable false-positive)
+(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable false-positive no-tool)
   "Attach machine-readable remediation hints for broken Lisp delimiters.
 The default next step is lisp-edit-form, which repairs and writes a form.
 When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
@@ -43,10 +43,14 @@ symbol such as a[b), fails for a reader-level reason (#., #?), or was only
 read in part never receives an instruction the guard would then refuse.
 When FALSE-POSITIVE -- that parser accepts the input -- only next_tool is
 set (lisp-edit-form can still edit the file); no fix_code or required_args,
-since they would name a fix for input that needs none."
-  (when (member kind '("extra-close" "mismatch" "unclosed"
-                       "unclosed-string" "unclosed-block-comment")
-                :test #'string=)
+since they would name a fix for input that needs none. When NO-TOOL -- a
+delimiter-broken file outside the project root, which neither fs-write-file
+nor the structural tools can touch -- nothing is set: the prose is the
+whole answer, and a next_tool would only send the caller into a loop."
+  (when (and (not no-tool)
+             (member kind '("extra-close" "mismatch" "unclosed"
+                            "unclosed-string" "unclosed-block-comment")
+                     :test #'string=))
     (cond
       (overwritable
        (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
@@ -386,10 +390,14 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                       (when (and next-top-level-line (string= kind "unclosed"))
                         (setf (gethash "next_top_level_line" h) next-top-level-line)))))
                  ;; fs-write-file only writes under the project root, so the
-                 ;; overwrite hint is promised only for a file it could write.
+                 ;; overwrite hint is promised only for a file it could write;
+                 ;; a delimiter-broken file it cannot write gets no next_tool
+                 ;; at all, so the payload agrees with the prose above.
                  (%maybe-add-lisp-edit-guidance h kind
                                                 :overwritable (and overwrite-hint t)
-                                                :false-positive false-positive))))
+                                                :false-positive false-positive
+                                                :no-tool (and overwritable
+                                                              (not overwrite-hint))))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil

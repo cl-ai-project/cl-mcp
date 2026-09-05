@@ -22,6 +22,7 @@
            #:format-delimiter-diagnosis
            #:bracket-ambiguous-p
            #:opener-ambiguous-p
+           #:format-opener-caveat
            #:format-bracket-warning
            #:format-overwrite-recovery
            #:format-relocation-note))
@@ -312,6 +313,24 @@ unclosed string returns the plain scan plist."
                             :unclosed-form-line line
                             :unclosed-form-head (%form-head text line)))))))))
 
+(defun %prefix-needs-object-p (ch before)
+  "Return T when CH, read as code, needs an object after it, so that a )
+placed right after it would not read: a quote, backquote, comma or single
+escape always; an @ only as the second half of ,@ (a lone @ is a symbol
+constituent, so bar@ is a symbol); a # only when it starts a token (BEFORE,
+the preceding character, is NIL at the start of the text or whitespace, an
+open paren, a prefix or a string quote), since # is non-terminating and
+bar# is a symbol. The one rule behind both %MAP-CODE-CHARACTERS' :pending
+state at END and %ANY-FIX-OUTSIDE-CODE-P's rejection of a closer after a
+prefix at the end of a line."
+  (case ch
+    ((#\' #\` #\, #\\) t)
+    (#\@ (eql before #\,))
+    (#\# (or (null before)
+             (member before '(#\Space #\Tab #\Newline #\Return #\( #\' #\` #\, #\"))
+             nil))
+    (t nil)))
+
 (defun %map-code-characters (text function &key end state-fn)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
 outside strings, line comments, block comments, character literals,
@@ -370,10 +389,13 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                            (decf block-depth) (incf idx) (incf col))
                           ((and (char= ch #\#) next (char= next #\|))
                            (incf block-depth) (incf idx) (incf col))))
-                   ((and last-p (find ch "\\#'`,@"))
+                   ((and last-p
+                         (%prefix-needs-object-p ch (and (plusp idx) (char text (1- idx)))))
                     ;; A two-character construct or a reader prefix would reach
                     ;; past END: stop here and report the token as pending
                     ;; instead of consulting text the caller asked us not to.
+                    ;; The same rule %ANY-FIX-OUTSIDE-CODE-P applies mid-text,
+                    ;; so bar@ and bar# at END stay symbols, not prefixes.
                     (setf pending t)
                     (return))
                    ((char= ch #\;) (setf line-comment t))
@@ -384,9 +406,9 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                     (if (char= next #\Newline)
                         (setf line (1+ line) col 0)
                         (incf col)))
-                   ((and (char= ch #\#) (char= next #\|))
+                   ((and (char= ch #\#) next (char= next #\|))
                     (incf block-depth) (incf idx) (incf col))
-                   ((and (char= ch #\#) (char= next #\\))
+                   ((and (char= ch #\#) next (char= next #\\))
                     ;; #\x or #\Name: skip the backslash and the literal itself,
                     ;; but never past END -- a literal cut off by the scan limit
                     ;; is reported as pending, like a lone \ or # would be.
@@ -517,22 +539,9 @@ character. Linear in the size of TEXT: the lexical states come from one
                  (or (not (eq (svref mask pos) :code))
                      (and (plusp pos)
                           (eq (svref mask (1- pos)) :code)
-                          (let ((prev (char text (1- pos)))
-                                (before (and (> pos 1) (char text (- pos 2)))))
-                            (case prev
-                              ;; Always a prefix: nothing can follow them but
-                              ;; an object.
-                              ((#\' #\` #\, #\\) t)
-                              ;; @ is a constituent (bar@ is a symbol) except
-                              ;; as the second half of ,@.
-                              (#\@ (eql before #\,))
-                              ;; # is non-terminating (bar# is a symbol) and
-                              ;; starts a dispatch only at a token start.
-                              (#\# (or (null before)
-                                       (member before '(#\Space #\Tab #\Newline
-                                                        #\Return #\( #\' #\` #\,
-                                                        #\" #\;))))
-                              (t nil))))))))
+                          (%prefix-needs-object-p
+                           (char text (1- pos))
+                           (and (> pos 1) (char text (- pos 2)))))))))
         (loop for fix in fixes
               for line = (getf fix :line)
               ;; Compared without a trailing #\Return, exactly as
@@ -813,8 +822,12 @@ one place, below, rather than per kind."
                  (getf diagnosis :unclosed-form-head)
                  opener-ambiguous opener line column))
         ((string= kind "extra-close")
-         (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D."
-                 target found line column))
+         ;; A stray ] or } may be a symbol character too (a] reads as one
+         ;; symbol), so it gets the same caveat as a bracket opener.
+         (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D.~
+                    ~:[~;~%That ~S is being treated as a closing delimiter; if it ~
+                    is part of a symbol name this diagnosis is a false positive.~]"
+                 target found line column ambiguous found))
         ((and (string= kind "mismatch") (equal expected ")"))
          ;; The "cannot be auto-repaired" sentence is an instruction's premise,
          ;; so it lives with the instruction below, not in the finding.
@@ -867,13 +880,7 @@ one place, below, rather than per kind."
            ;; The actionable-looking part must not outrank the caveat: for an
            ;; unclosed bracket, say what the fix assumes right after it.
            (when opener-ambiguous
-             ;; The bracket's own position: for a mismatch the scan reports
-             ;; the closer at :line/:column and the opener separately.
-             (format s "~%If the ~S at line ~D, column ~D was meant as \"(\", this fix is ~
-                        wrong: replace it and check again."
-                     opener
-                     (or (getf diagnosis :opener-line) line)
-                     (or (getf diagnosis :opener-column) column))))
+             (format s "~%~A" (format-opener-caveat diagnosis))))
           ((and (eq failed :outside-code) (not ambiguous))
            ;; The repair may well read, but it would change text that is not
            ;; code, so it is withheld rather than offered.
@@ -884,13 +891,20 @@ one place, below, rather than per kind."
           ((and failed (not ambiguous))
            (format s "~%Automatic repair could not produce a readable form; ~
                       fix the delimiters by hand.")))
-        (when (and next-line (string= kind "unclosed"))
+        (when (and next-line
+                   (string= kind "unclosed")
+                   ;; A fix on or after that line would contradict the hint
+                   ;; (the closer belongs before it), so one of the two must
+                   ;; go, and the fix is the one the caller can apply.
+                   (notany (lambda (fix) (>= (getf fix :line) next-line)) fixes))
           ;; A column-0 "(" while a form is open is a strong hint, not proof
-          ;; (an unindented continuation line looks the same), so hedge. An
-          ;; unclosed [ or { is not asked for as ]: it may be a symbol
-          ;; character, and the ) fixes above are what would be written.
-          (format s "~%Next top-level form begins at line ~D, ~
-                     so the missing ~S most likely belongs before it."
+          ;; (an unindented continuation line looks the same), so name the
+          ;; evidence and hedge. An unclosed [ or { is not asked for as ]: it
+          ;; may be a symbol character, and the ) fixes above are what would
+          ;; be written.
+          (format s "~%Next top-level form probably begins at line ~D (a \"(\" in ~
+                     column 1 while a form is still open), so the missing ~S most ~
+                     likely belongs before it."
                   next-line (if opener-ambiguous ")" (or expected ")"))))))))
 
 (defun bracket-ambiguous-p (diagnosis)
@@ -914,6 +928,20 @@ BRACKET-AMBIGUOUS-P together with this one."
   (and (not (getf diagnosis :ok))
        (member (getf diagnosis :expected) '("]" "}") :test #'equal)
        t))
+
+(defun format-opener-caveat (diagnosis &key (action "check"))
+  "Return the reminder that the ) fixes drawn from DIAGNOSIS (a scan for which
+OPENER-AMBIGUOUS-P holds: an unclosed [ or { is what the verdict rests on)
+are wrong if that bracket was meant as (, naming the bracket's own position
+(the scan's :opener-line/:opener-column for a mismatch, :line/:column for an
+unclosed one) and ending with \"replace it and ACTION again\". One wording,
+used by lisp-check-parens' diagnosis and lisp-edit-form's warning alike."
+  (format nil "If the ~S at line ~D, column ~D was meant as \"(\", the \")\" added ~
+               are wrong: replace it and ~A again."
+          (if (equal (getf diagnosis :expected) "]") "[" "{")
+          (or (getf diagnosis :opener-line) (getf diagnosis :line))
+          (or (getf diagnosis :opener-column) (getf diagnosis :column))
+          action))
 
 (defun format-bracket-warning (text &key (target "the content"))
   "Return a warning string when TEXT reads but its delimiter scan stops at a
@@ -972,13 +1000,17 @@ lisp-check-parens' diagnosis and lisp-edit-form's summary alike."
 (defun relocating-fix-lines (fixes text)
   "Return the 1-based lines of those FIXES (from REPAIR-LINE-DIFFERENCES over
 TEXT) that added closers on a line whose next code line sits at the same
-indentation. That is the shape of a body meant to stay inside the form --
-`(when x' followed by `(g x)' at the same column -- which parinfer, going by
-indentation alone, has just closed above it. A deeper next line is a body
-that stays inside; a shallower one is an explicit dedent; neither is a
-relocation worth a note, and for the common missing-) repair neither fires.
-Blank and comment-only lines are skipped when looking for the next code
-line."
+indentation, or on an indented line whose next code line sits in column 1.
+The first is the shape of a body meant to stay inside the form -- `(when x'
+followed by `(g x)' at the same column -- which parinfer, going by
+indentation alone, has just closed above it. The second is a body that lost
+its indentation (`(when x' followed by `(g x)' at the margin): parinfer
+closes every open form above it, and the writer cannot tell that shape from
+a new top-level form, so the note says the nesting is worth a look. A deeper
+next line is a body that stays inside; a shallower but still indented one is
+an explicit dedent; neither is a relocation worth a note, and for the common
+missing-) repair at the end of a form neither fires. Blank and comment-only
+lines are skipped when looking for the next code line."
   (let* ((lines (coerce (split-string text :separator '(#\Newline)) 'vector))
          (count (length lines)))
     (flet ((indent (i)
@@ -998,5 +1030,9 @@ line."
                       (<= 1 line count)
                       (let ((next (loop for i from line below count
                                         when (code-line-p i) return i)))
-                        (and next (= (indent next) (indent (1- line))))))
+                        (and next
+                             (let ((here (indent (1- line)))
+                                   (there (indent next)))
+                               (or (= there here)
+                                   (and (zerop there) (plusp here)))))))
               collect line))))

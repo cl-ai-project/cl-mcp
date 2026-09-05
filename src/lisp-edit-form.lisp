@@ -25,6 +25,7 @@
                 #:format-repair-lines
                 #:format-bracket-warning
                 #:opener-ambiguous-p
+                #:format-opener-caveat
                 #:format-relocation-note
                 #:scan-delimiters)
   (:import-from #:cl-mcp/src/state
@@ -86,24 +87,18 @@ or NIL when there are none. Added and dropped closing delimiters are summed
 from each fix's gross :added and :removed counts (not the net :delta, which
 hides a relocation such as \")(defun f () 1\" -> \"(defun f () 1)\") and
 reported separately; the count is never negative. When REPAIRED (the
-repaired content) still opens a [ or { that never closes, the warning adds
-that the ) fixes are wrong if that bracket was meant as ( -- a standard-syntax
-verdict, so not under a readtable that changes the syntax (NONSTANDARD-RT).
-The bracket's own position is named (the scan's :opener-line/:opener-column
-for a mismatch; :line/:column for an unclosed one)."
+repaired content) still opens a [ or { that never closes, the warning ends
+with FORMAT-OPENER-CAVEAT -- the same sentence lisp-check-parens prints --
+naming the bracket's position and saying the ) fixes are wrong if it was
+meant as (. That is a standard-syntax verdict, so it is not given under a
+readtable that changes the syntax (NONSTANDARD-RT)."
   (when fixes
     (let* ((added (loop for fix in fixes sum (getf fix :added 0)))
            (dropped (loop for fix in fixes sum (getf fix :removed 0)))
            (scan (and repaired (not nonstandard-rt) (scan-delimiters repaired)))
-           (opener-note
-             (and scan (opener-ambiguous-p scan)
-                  (format nil "the ~S at line ~D, column ~D was treated as a symbol ~
-                               character; if you meant \"(\", the \")\" added are wrong: ~
-                               replace it and edit again"
-                          (if (equal (getf scan :expected) "]") "[" "{")
-                          (or (getf scan :opener-line) (getf scan :line))
-                          (or (getf scan :opener-column) (getf scan :column))))))
-      (format nil "~{~A~^; ~}"
+           (caveat (and scan (opener-ambiguous-p scan)
+                        (format-opener-caveat scan :action "edit"))))
+      (format nil "~{~A~^; ~}~@[. ~A~]"
               (remove nil
                       (list (when (plusp added)
                               (format nil "~D closing delimiter~:P added by parinfer"
@@ -111,8 +106,8 @@ for a mismatch; :line/:column for an unclosed one)."
                             (when (plusp dropped)
                               (format nil "~D extra closing delimiter~:P dropped by ~
                                            parinfer"
-                                      dropped))
-                            opener-note))))))
+                                      dropped))))
+              caveat))))
 
 (defun %bracket-warning (text nonstandard-rt)
   "Return the shared bracket warning (FORMAT-BRACKET-WARNING) for TEXT, or
@@ -348,7 +343,8 @@ comments near a target form."
                                          (sanitize-condition-text repaired-err)))))
                     (t
                      (error "content parse error: ~A (repair also failed: ~A)"
-                            err repaired-err)))))))))))
+                            (sanitize-condition-text err)
+                            (sanitize-condition-text repaired-err))))))))))))
 
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))

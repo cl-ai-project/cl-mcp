@@ -1045,7 +1045,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" err))
           (ok (search "Likely fix, inferred from indentation:" err))
           (ok (search "line 7:" err))
-          (ok (search "Next top-level form begins at line 10" err))
+          (ok (search "Next top-level form probably begins at line 10" err))
           (ok (search "The file itself does not parse, so lisp-edit-form and lisp-patch-form" err))
           (ok (search "cannot locate any form in it." err))
           (ok (search "Run lisp-check-parens with path=" err))
@@ -1739,7 +1739,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                               :form-type "defun"
                               :form-name "target"
                               :operation "replace"
-                              :content "(defun target () (list @")
+                              :content "(defun target () (list '")
             (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
               (setf err (princ-to-string e))))
           (ok err "the only repair would follow an unfinished token, so it is not written")
@@ -1988,4 +1988,4 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ng (gethash "error" response))
             (ok (gethash "isError" result-obj))
             (ok (search "Run lisp-check-parens with path=" text))
-            (ok (search "Next top-level form begins at line 4" text))))))))
+            (ok (search "Next top-level form probably begins at line 4" text))))))))

@@ -325,6 +325,62 @@
         (ok (getf d :repair-failed) text)
         (ng (getf d :likely-fixes) text)))))
 
+(deftest one-prefix-rule-at-end-of-text-and-mid-text
+  (testing "a constituent @ or # at the very end of the text is a symbol, not a prefix"
+    ;; The scan's :pending state and the fix check share one rule: bar@ and
+    ;; bar# are symbols, so a ) may follow them and the fix is offered.
+    (dolist (tail '("bar@" "bar#"))
+      (let ((d (diagnose-delimiters (format nil "(defun target (x) (list x ~A" tail))))
+        (ok (eq (lexical-state-at (format nil "(list x ~A" tail) 100) :code) tail)
+        (ng (getf d :repair-failed) tail)
+        (ok (getf d :likely-fixes) tail))))
+  (testing "a real prefix at the very end of the text still gets no fix"
+    (dolist (tail '(",@" "'" " #"))
+      (let ((d (diagnose-delimiters (format nil "(defun target (x) (list x ~A" tail))))
+        (ok (eq (getf d :repair-failed) :outside-code) tail)))))
+
+(deftest relocation-note-for-a-body-that-lost-its-indentation
+  (testing "a closer added above a body line in column 1 is called out"
+    (let ((msg (format-delimiter-diagnosis
+                (diagnose-delimiters (format nil "(defun f (x)~%  (when x~%(g x)~%")))))
+      (ok (search "NOTE: the fix on line 2 closes a form there" msg))
+      (ok (search "no longer inside that form" msg))))
+  (testing "a body that merely dedents is not a relocation"
+    (let ((msg (format-delimiter-diagnosis
+                (diagnose-delimiters
+                 (format nil "(defun f (x)~%  (let ((y 1))~%      (g y)~%    (h y)")))))
+      (ng (search "NOTE:" msg)))))
+
+(deftest extra-close-bracket-carries-the-symbol-caveat
+  (testing "a stray ] is described as possibly part of a symbol"
+    (let* ((d (diagnose-delimiters "(list a) b]"))
+           (msg (format-delimiter-diagnosis d)))
+      (ok (string= (getf d :kind) "extra-close"))
+      (ok (search "extra \"]\" at line 1, column 11" msg))
+      (ok (search "if it is part of a symbol name this diagnosis is a false positive" msg))
+      (ng (search "could not produce a readable form" msg))))
+  (testing "a stray ) gets no such caveat"
+    (let ((msg (format-delimiter-diagnosis (diagnose-delimiters "(list a) b)"))))
+      (ok (search "extra \")\" at line 1, column 11" msg))
+      (ng (search "part of a symbol name" msg)))))
+
+(deftest next-top-level-hint-names-its-evidence-and-yields-to-the-fix
+  (testing "the hint says what it saw"
+    (let ((msg (format-delimiter-diagnosis
+                (diagnose-delimiters
+                 (format nil "(defun a ()~%  (list 1)~%~%(defun b () 2)~%")))))
+      (ok (search "Next top-level form probably begins at line 4" msg))
+      (ok (search "(a \"(\" in column 1 while a form is still open)" msg))))
+  (testing "a fix on or after the column-1 line contradicts the hint, so the hint is dropped"
+    ;; The defun closes on line 1, but the unclosed (list closes on line 3,
+    ;; after the column-1 line the hint would name.
+    (let* ((text (format nil "(defun f ()~%(list 1~%  2~%"))
+           (d (diagnose-delimiters text))
+           (msg (format-delimiter-diagnosis d)))
+      (ok (= (getf d :next-top-level-line) 2))
+      (ok (some (lambda (fix) (>= (getf fix :line) 2)) (getf d :likely-fixes)))
+      (ng (search "Next top-level form" msg)))))
+
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"
     ;; The string's closing quote never comes, so parinfer's closer would land
@@ -341,9 +397,10 @@
       ;; #\) is a character literal: appending ) after it works.
       (ng (getf d :repair-failed))
       (ok (= (getf (first (getf d :likely-fixes)) :delta) 2)))
-    (let ((d (diagnose-delimiters "(a @")))
+    (let ((d (diagnose-delimiters "(a ,@")))
       ;; The text ends in an unfinished token, so no ) can follow it:
-      ;; reported as :outside-code, not as unreadable.
+      ;; reported as :outside-code, not as unreadable. (A lone @ would be a
+      ;; symbol, so it is ,@ here.)
       (ok (eq (getf d :repair-failed) :outside-code))
       (ok (search "unfinished token" (format-delimiter-diagnosis d))))
     (let ((d (diagnose-delimiters (format nil "(defun f (x)~%  (let ((y 1]~%    (+ x y)))"))))
@@ -638,7 +695,8 @@
       (ok (search "Likely fix, inferred from indentation:" text))
       (ok (search "line 8:" text))
       (ok (search "add 1 \")\"" text))
-      (ok (search "Next top-level form begins at line 11, so the missing \")\"" text))
+      (ok (search "Next top-level form probably begins at line 11" text))
+      (ok (search "so the missing \")\"" text))
       (ok (search "most likely belongs before it." text)))))
 
 (deftest format-diagnosis-unclosed-without-next-top-level
@@ -693,7 +751,8 @@
   (testing "an unclosed [ is a possible symbol character: the hint asks for ), with a caveat"
     (let ((text (format-delimiter-diagnosis
                  (diagnose-delimiters (format nil "(foo [~%(bar)")))))
-      (ok (search "Next top-level form begins at line 2, so the missing \")\"" text))
+      (ok (search "Next top-level form probably begins at line 2" text))
+      (ok (search "so the missing \")\"" text))
       (ok (search "most likely belongs before it." text))
       (ok (search "if it is part of a symbol name this diagnosis is a false positive" text))
       (ng (search "missing \"]\"" text)))))

@@ -1200,5 +1200,5 @@ running as root), THUNK is skipped instead."
             (ng (gethash "error" response))
             (ok (gethash "isError" result-obj))
             (ok (search "unclosed (form starting at line 1: \"(defun a ()\")" text))
-            (ok (search "Next top-level form begins at line 4" text))
+            (ok (search "Next top-level form probably begins at line 4" text))
             (ok (search "Run lisp-check-parens with path=" text))))))))

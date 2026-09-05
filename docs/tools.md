@@ -244,9 +244,13 @@ Output:
   they go before a comment, and otherwise the resulting line; a line cut at the
   120-character bound is described by position, never offered as text to write.
   When a fix closes a form whose next code line sits at the same indentation
-  (the shape of a body that was meant to stay inside it), a NOTE says the
-  lines below have left that form; when the fix rests on an unclosed `[`/`{`,
-  a reminder says the `)` fixes are wrong if that bracket was meant as `(`.
+  (the shape of a body that was meant to stay inside it), or whose next code
+  line sits in column 1 below an indented fix line (a body that lost its
+  indentation), a NOTE says the lines below have left that form; when the
+  fix rests on an unclosed `[`/`{`, a reminder says the `)` fixes are wrong if
+  that bracket was meant as `(`. The next top-level form hint names its
+  evidence (a `(` in column 1 while a form is still open) and is dropped when
+  a likely fix lands on or after that line, since the two would contradict.
   A verdict the editing reader contradicts is headlined as a likely false
   positive, with no edit instruction.
 
@@ -258,7 +262,9 @@ Output:
   form in such a file. A file that parses (a symbol such as `a[b`), one that
   fails for a reader-level reason (`#.`, an unknown `#?`), or a windowed read
   keeps the `lisp-edit-form` hint, so the hint never promises an overwrite the
-  guard would refuse.
+  guard would refuse. A delimiter-broken file outside the project root gets
+  none of the three: neither `fs-write-file` nor the structural tools can act
+  on it, and the summary says to fix it outside cl-mcp.
 
 Notes:
 - Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file

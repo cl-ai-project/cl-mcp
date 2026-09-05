@@ -154,6 +154,33 @@
                (ok (string= (gethash "next_tool" res) "lisp-edit-form")))))
       (ignore-errors (delete-file abs)))))
 
+(deftest lisp-check-parens-broken-file-outside-root-names-no-tool
+  (testing "a delimiter-broken file outside the project root gets prose only, no next_tool"
+    (let* ((system-root (asdf:system-source-directory :cl-mcp))
+           ;; The project root is a subdirectory; the file sits beside it,
+           ;; still readable (under the ASDF system) but not writable by
+           ;; fs-write-file.
+           (root (merge-pathnames "tests/tmp/check-parens-root/" system-root))
+           (abs (merge-pathnames "tests/tmp/check-parens-outside.lisp" system-root))
+           (cl-mcp/src/project-root:*project-root* root))
+      (ensure-directories-exist root)
+      (ensure-directories-exist abs)
+      (unwind-protect
+           (progn
+             (with-open-file (out abs :direction :output :if-exists :supersede)
+               (write-string (format nil "(defun a ()~%  (list 1 2 3)~%~%~
+                                          (defun b ()~%  (list 4 5 6))~%")
+                             out))
+             (let ((res (lisp-check-parens :path (namestring abs))))
+               (ok (string= (%kind res) "unclosed"))
+               (ok (search "outside the project root" (gethash "guidance_text" res)))
+               (ng (gethash "next_tool" res) "no tool can act on it")
+               (ng (gethash "fix_code" res))
+               (ng (gethash "required_args" res))
+               (ok (vectorp (gethash "likely_fixes" res))
+                   "the fix itself is still described")))
+        (ignore-errors (delete-file abs))))))
+
 (deftest lisp-check-parens-guidance-agrees-with-the-overwrite-guard
   (let* ((root (asdf:system-source-directory :cl-mcp))
          (abs (merge-pathnames "tests/tmp/check-parens-guard-agreement.lisp" root))

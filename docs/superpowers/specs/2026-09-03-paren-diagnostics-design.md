@@ -151,7 +151,7 @@ kind ごとの雛形。`Likely fix` 以下は `:likely-fixes` が空でないと
 Unbalanced parentheses in <target>: unclosed (form starting at line 3: "(defun probe-a").
 Likely fix, inferred from indentation:
   line 8: "        (format t \"small ~A~%\" y)"  ->  add 1 ")"
-Next top-level form begins at line 11, so the missing ")" must come before it.
+Next top-level form probably begins at line 11 (a "(" in column 1 while a form is still open), so the missing ")" most likely belongs before it.
 ```
 最終行は `:next-top-level-line` があるときだけ出す。
 
@@ -453,7 +453,10 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   `[`/`{`)の場合はシンボル構成文字かもしれないので `)` を示し、偽陽性の
   注意書きを添える(`lisp-edit-form` が書くのも `)`)。
   列 0 ヒューリスティックは確実ではない(インデントされていない継続行)ので、
-  文面は「most likely」と断定を避ける。
+  文面は「probably」「most likely」と断定を避け、根拠(フォームが開いたまま
+  列 1 に `(` がある)を文中で名指しする。修正候補のいずれかがその行以降に
+  ある場合(`(defun f ()` の次の行に列 0 の `(list 1` が続き、その `(list` が
+  末尾で閉じられる形)は、案内と修正が矛盾するので案内文を出さない。
 - **未終端文字列 `unclosed-string`**: スキャナは文字列の開始位置を記録し、
   入力が文字列内で終わった場合は括弧の問題ではなく「L 行 C 桁で開いた `"` が
   閉じていない」として報告する(`unclosed-block-comment` と同じ扱いで、
@@ -649,6 +652,11 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   コメントの内側」だけでは `(a @` に対して偽になる。
 - **`lisp-check-parens` の再配置 NOTE**: `lisp-edit-form` の要約と同じ
   `format-relocation-note` を診断文にも出す。
+- **開き括弧の注意文は 1 つ**: 「`[` が `(` のつもりなら足した `)` は誤り」の
+  文は `format-opener-caveat` に 1 つで持ち、`lisp-check-parens` の診断文
+  (「check again」)と `lisp-edit-form` の警告(「edit again」)が同じ文を出す。
+- **`extra-close` の `]`/`}`**: 余分な閉じ記号が `]`/`}` の場合も、開き側と
+  同じくシンボル構成文字かもしれない旨の注意を添え、修復不能とは言わない。
 - **行末のリーダープレフィックスの直後には `)` を置けない**: `%any-fix-outside-code-p`
   は、挿入位置の直前の文字が `#` `\` `'` `` ` `` `,` `@` のいずれか(コード
   として分類されたもの)なら修正を却下する。テキスト末尾だけでなく行末
@@ -658,14 +666,19 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
 - **行末プレフィックスの判定の精度**: `'` `` ` `` `,` `\` は無条件に却下、`@` は
   直前が `,` のとき(`,@`)だけ、`#` はトークンの先頭にあるとき(直前が空白・
   `(` `'` `` ` `` `,` `"`、または行頭)だけ却下する。`bar@` や `bar#` は 1 つの
-  シンボルなので `)` を続けてよい。
+  シンボルなので `)` を続けてよい。この規則は述語 `%prefix-needs-object-p`
+  1 つに持ち、`%map-code-characters` がテキスト末尾で `:pending` を返す判定も
+  同じ述語を使う。以前は末尾の `@` `#` を無条件に未完扱いしていたため、
+  改行で終わらない `(list x bar@` の修復が却下されていた。
 - **開き括弧の位置**: スキャナは mismatch でも開き側の位置を捨てず
   `:opener-line`/`:opener-column`/`:opener-offset` で返す。開き括弧について述べる
   文(偽陽性の注意、修正後の開き括弧 NOTE)はその位置を使い、閉じ側の位置を
   `[` の位置として出さない。
 - **ルート外の壊れたファイル**: 区切り記号で壊れているがプロジェクトルート外の
   ファイルには、ループになる「Use lisp-edit-form」ではなく、`fs-write-file` も
-  構造編集も使えないので cl-mcp の外で直す旨を案内する。
+  構造編集も使えないので cl-mcp の外で直す旨を案内する。構造化フィールドも
+  文面と揃え、`next_tool`/`fix_code`/`required_args` は付けない
+  (`%maybe-add-lisp-edit-guidance` の `:no-tool`)。`likely_fixes` は残す。
 - **インデントの尺度は 1 つ**: `relocating-fix-lines` は parinfer の
   `%count-leading-spaces` と同じく先頭の空白・タブをそれぞれ 1 桁と数える。
   NOTE は修復を生んだ幾何で判断すべきで、見た目の幅(タブ 8 桁)で別の尺度を
@@ -688,7 +701,12 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   だけ NOTE を出す(`relocating-fix-lines`)。より深いインデントは本体が
   続く意図、浅いインデントは明示的なデデントなので、parinfer の修復は意図
   どおりであり NOTE は騒音になる。`(when x` の直後に同じインデントで
-  `(g x)` が続く形だけが本体の取りこぼしを疑うべき形。
+  `(g x)` が続く形が本体の取りこぼしを疑うべき形。例外として、インデントの
+  ある修正行の次のコード行が列 0 にある場合(`(when x` の直後に列 0 の
+  `(g x)`: インデントを失った本体)も NOTE を出す。parinfer は開いている
+  フォームをすべてそこで閉じるが、その行が新しいトップレベルフォームなのか
+  本体なのかは区別できないため、ファイル中ほどの閉じ忘れ(次の `defun` が
+  列 0 に続く)でも 1 文増える騒音は受け入れる。
 - **再配置 NOTE の上限**: NOTE に列挙する行番号も `*repair-lines-limit*`
   (10)で切り「and N more」と数える(修正一覧の上限を迂回して要約が肥大しない
   ため)。
