@@ -59,6 +59,25 @@
                (ok (not truncated) "and the read is not reported as truncated"))
           (ignore-errors (delete-file abs)))))))
 
+(deftest fs-read-file-undecodable-byte-past-cap-is-truncated-not-an-error
+  (testing "an invalid byte just past the read cap does not turn the read into an error"
+    (with-test-project-root
+      (let ((abs (merge-pathnames "tests/tmp/bad-byte-past-cap.lisp"
+                                  cl-mcp/src/project-root:*project-root*))
+            (cap cl-mcp/src/fs::*fs-read-max-bytes*))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (loop repeat cap do (write-byte 97 out))
+          (write-byte #xff out)
+          (write-byte #xfe out))
+        (unwind-protect
+             (multiple-value-bind (text truncated)
+                 (cl-mcp/src/fs::%read-file-string abs nil nil)
+               (ok (= (length text) cap) "the prefix up to the cap is returned")
+               (ok truncated "and it is reported as truncated"))
+          (ignore-errors (delete-file abs)))))))
+
 (deftest fs-write-file-project
   (testing "fs-write-file writes under project root"
     (with-test-project-root

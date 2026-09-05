@@ -29,7 +29,7 @@
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-error-message)
+                #:sanitize-condition-text)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -144,6 +144,10 @@ editor-hints.named-readtables package."
           (when (and find-fn (fboundp find-fn))
             (funcall find-fn designator)))))))
 
+(defvar *standard-readtable* (copy-readtable nil)
+  "A pristine standard readtable, the reference %STANDARD-SYNTAX-READTABLE-P
+compares a caller's readtable against. Never modified.")
+
 (defun %standard-syntax-readtable-p (rt)
   "Return T when readtable RT reads exactly like the standard one: the same
 readtable case, the same macro function and terminating status for every
@@ -153,8 +157,11 @@ designator itself) reads standard syntax and must not switch off the
 standard-syntax delimiter diagnostics.
 A dispatching macro character's own function is a fresh closure in every
 readtable copy (SBCL), so for a character that dispatches in both readtables
-the comparison is made on its sub-characters instead."
-  (let ((std (copy-readtable nil)))
+the comparison is made on its sub-characters instead.
+Known limit: only code points below 128 are compared, so a reader macro
+defined on a non-ASCII character is not noticed and the standard-syntax
+diagnostics stay on for that readtable."
+  (let ((std *standard-readtable*))
     (flet ((dispatching-p (table ch)
              (and (ignore-errors (progn (get-dispatch-macro-character ch #\a table) t))
                   t)))
@@ -452,7 +459,7 @@ Returns eight values:
                                        (diagnose-delimiters original))
                         :recoverable (and (null readtable)
                                           (%delimiter-failure-p cause))
-                        :cause (sanitize-error-message (princ-to-string cause)))))
+                        :cause (sanitize-condition-text cause))))
           (multiple-value-bind (nodes swallowed)
               (handler-case
                   (parse-top-level-forms original
@@ -484,7 +491,10 @@ avoids a second read; otherwise the file is read here, and a read truncated
 at the fs read cap returns NIL because a cut-off prefix of a valid file
 would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
-permits overwriting exactly the broken files."
+permits overwriting only files that are broken this way. (A file whose
+breakage lies after the target form is still partially editable by
+lisp-edit-form, which only reports it when the target is not found; the
+guard classifies such a file by the whole-file parse.)"
   (multiple-value-bind (text truncated)
       (if text (values text nil) (fs-read-file pn))
     (and (not truncated)

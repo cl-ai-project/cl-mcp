@@ -193,3 +193,10 @@
     (let ((input (format nil "(defun f ()~%  (list 1)~%#| trailing~%note |#")))
       (ok (equal (apply-indent-mode input)
                  (format nil "(defun f ()~%  (list 1))~%#| trailing~%note |#"))))))
+
+(deftest indent-mode-closes-on-code-after-a-comment-closer
+  (testing "a line that ends a block comment and then holds code receives the closers"
+    (let ((input (format nil "(defun f ()~%  (let ((x 1))~%    (foo~%#|~%c~%|# (bar)")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((x 1))~%    (foo~%#|~%c~%|# (bar))))"))
+          "(bar) stays inside foo; nothing is appended to the (foo line"))))

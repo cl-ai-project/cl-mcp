@@ -126,7 +126,9 @@ first, and the write is allowed only when the parse fails on a delimiter (a
 missing or stray `)`, or an unterminated string or `#|` comment) that no
 readtable could fix; a file that parses, a truncated read, or an unreadable
 file is still refused. The intended recovery loop is `lisp-check-parens` →
-`fs-read-file` → `fs-write-file` with the flag.
+`fs-read-file` → `fs-write-file` with the flag. The plain refusal (no flag)
+carries `allow_unparseable_overwrite_available: true` in its error data so a
+client can discover the opt-in.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -291,6 +293,18 @@ token-efficient way to make small changes to large forms.
 Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
 immediately and no changes are written to disk. Use `lisp-edit-form` instead when
 replacing or inserting entire forms.
+
+When the patched form no longer reads, the error explains the breakage: if
+`new_text` opens and closes a different net number of `)` than `old_text`
+(parentheses inside strings and comments do not count), the message says how
+many `)` to add to or remove from `new_text`; otherwise it carries the same
+line-level diagnosis as `lisp-check-parens`, with line numbers counted within
+the patched form, plus the reader's own error when a `]`/`}` may be a symbol
+character. Under a `readtable` (argument or `in-readtable` in the file) that
+changes the syntax, only the reader's error is reported. If the file itself
+does not parse, the error names the line to fix and the recovery path
+(`lisp-check-parens` → `fs-read-file` → `fs-write-file` with
+`allow_unparseable_overwrite`).
 
 Input:
 - `file_path` (string, required): absolute path or project-relative path

@@ -179,8 +179,11 @@ and everything else -- parentheses included -- is symbol text."
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column.
 :kind is one of \"extra-close\", \"mismatch\", \"unclosed\",
-\"unclosed-block-comment\". BASE-OFFSET is added to :offset only; :line and
-:column are always relative to the start of TEXT."
+\"unclosed-block-comment\", \"unclosed-string\". BASE-OFFSET is added to
+:offset only; :line and :column are always relative to the start of TEXT.
+Known divergence from the reader, shared by every lexer here: #| is taken
+to open a block comment even directly after token constituents, where the
+reader would read foo#|bar| as one symbol."
   (let ((state (make-scan-state))
         (len (length text))
         (idx 0))

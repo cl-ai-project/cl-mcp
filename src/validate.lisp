@@ -13,6 +13,8 @@
                 #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -37,9 +39,10 @@ false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
 
 (defun %truncate-message (condition)
-  "Extract condition message string, truncating to 200 chars to prevent
-SBCL stream representation leakage (e.g. reader-error ~A includes stream content)."
-  (let ((msg (format nil "~A" condition)))
+  "Extract CONDITION's message for the client: SBCL stream representations
+and the trailing \"Stream:\" section are removed (SANITIZE-ERROR-MESSAGE),
+then the text is truncated to 200 characters."
+  (let ((msg (sanitize-error-message (princ-to-string condition))))
     (if (> (length msg) 200)
         (concatenate 'string (subseq msg 0 197) "...")
         msg)))
@@ -293,8 +296,10 @@ exempt from reader checking to avoid false positives."
                                              (t (format nil "Unbalanced parentheses: ~A"
                                                         kind)))))
                             (format nil
-                                    "~A~A at line ~D, column ~D~A~@[~%~A~]"
-                                    label ef line col
+                                    ;; No position for too-large: nothing was
+                                    ;; scanned, so line 1 would be noise.
+                                    "~A~:[~A at line ~D, column ~D~;~*~*~*~]~A~@[~%~A~]"
+                                    label (string= kind "too-large") ef line col
                                     (if next-tool
                                         " Use lisp-edit-form for existing Lisp files."
                                         "")

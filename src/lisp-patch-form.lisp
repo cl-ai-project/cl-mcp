@@ -172,18 +172,13 @@ failure in FALLBACK is kept alongside the diagnosis instead of discarded."
          ;; closing a ( (found ]) can both be a legal symbol character.
          (ambiguous (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
                         (member (getf diagnosis :found) '("]" "}") :test #'equal))))
-    (cond
-      ((getf diagnosis :ok) fallback)
-      (ambiguous
-       (format nil "patch operation produced invalid Lisp (line numbers below are ~
-                    within the patched form). ~A~%The reader itself reported: ~A"
-               (format-delimiter-diagnosis diagnosis :target "the patched form")
-               fallback))
-      (t
-       (format nil "patch operation produced invalid Lisp (line numbers below are ~
-                    within the patched form). ~A ~
-                    No changes were written to disk."
-               (format-delimiter-diagnosis diagnosis :target "the patched form"))))))
+    (if (getf diagnosis :ok)
+        fallback
+        (format nil "patch operation produced invalid Lisp (line numbers below are ~
+                     within the patched form). ~A~
+                     ~:[ No changes were written to disk.~;~%The reader itself reported: ~A~]"
+                (format-delimiter-diagnosis diagnosis :target "the patched form")
+                ambiguous fallback))))
 
 (defun %validate-form-parseable (form-text &key readtable-designator
                                              package-name source-path
@@ -191,14 +186,16 @@ failure in FALLBACK is kept alongside the diagnosis instead of discarded."
   "Validate that FORM-TEXT parses as a single complete Lisp form.
 Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR, carrying a
 delimiter diagnosis when one applies, if the text does not parse correctly.
-DEPTH-REASON, when non-NIL, is the net-parenthesis message from
-%CHECK-DEPTH-BALANCE; it takes precedence over the delimiter diagnosis
-whenever parsing fails, because it names the exact number of \")\" to add or
-remove. A DEPTH-REASON alone never rejects the patch: a parenthesis added
-inside a string or a comment is a legitimate edit and still parses.
-Under a custom READTABLE-DESIGNATOR the standard delimiter diagnosis is not
-consulted at all (a reader macro may consume raw parentheses as data), so
-the reader's own failure is reported."
+DEPTH-REASON, when non-NIL, is a function of no arguments returning the
+net-parenthesis message from %CHECK-DEPTH-BALANCE or NIL; it is called only
+once parsing has failed, so a successful patch pays for no extra scans, and
+its message takes precedence over the delimiter diagnosis because it names
+the exact number of \")\" to add or remove. A depth message alone never
+rejects the patch: a parenthesis added inside a string or a comment is a
+legitimate edit and still parses.
+Under a READTABLE-DESIGNATOR that changes the syntax the standard delimiter
+diagnosis is not consulted at all (a reader macro may consume raw
+parentheses as data), so the reader's own failure is reported."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*
@@ -210,7 +207,9 @@ the reader's own failure is reported."
              ;; standard diagnosis; only a syntax change withholds it.
              (if (%nonstandard-readtable-p readtable-designator)
                  fallback
-                 (%diagnosed-reason form-text fallback))))
+                 (%diagnosed-reason form-text fallback)))
+           (depth-message ()
+             (and depth-reason (funcall depth-reason))))
       (handler-case
           (call-with-package-context
            package-name
@@ -225,7 +224,7 @@ the reader's own failure is reported."
                                      (length form-text))))
                  (when (< rest-start (length form-text))
                    (error 'patch-operation-error
-                          :reason (or depth-reason
+                          :reason (or (depth-message)
                                       (diagnosed
                                        (format nil "patch produced malformed form text ~
                                                     (trailing content after form). ~
@@ -236,7 +235,7 @@ the reader's own failure is reported."
           (error e))
         (error (e)
           (error 'patch-operation-error
-                 :reason (or depth-reason
+                 :reason (or (depth-message)
                              (diagnosed
                               (format nil "patch operation produced invalid Lisp: ~A. ~
                                            The form could not be parsed after replacement. ~
@@ -290,10 +289,14 @@ to use for parsing the file."
              ;; A ] or } typed for ) changes the net count too, but "add 1 )"
              ;; would then write code that reads (as a symbol ending in ]);
              ;; let the bracket diagnosis speak instead.
-             (depth-reason (and (not (%nonstandard-readtable-p readtable-designator))
-                                (not (%bracket-mismatch-p modified-form))
-                                (%check-depth-balance form-text modified-form
-                                                      match-pos old-text new-text))))
+             ;; Deferred: the scans behind it run only once the patched form
+             ;; has failed to parse, so a successful patch pays nothing.
+             (depth-reason
+               (lambda ()
+                 (and (not (%nonstandard-readtable-p readtable-designator))
+                      (not (%bracket-mismatch-p modified-form))
+                      (%check-depth-balance form-text modified-form
+                                            match-pos old-text new-text)))))
         (when would-change
           (%validate-form-parseable
            modified-form

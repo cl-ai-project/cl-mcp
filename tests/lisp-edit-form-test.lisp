@@ -1554,6 +1554,33 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Replace it with \")\"." err))
           (ok (string= before (fs-read-file path)) "file untouched"))))))
 
+(deftest lisp-edit-form-repairs-content-with-bracket-symbols
+  (testing "an unmatched [ that may be a symbol character does not block the repair"
+    (with-temp-file "tests/tmp/edit-form-bracket-symbol-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (list a[b x)"))
+          (declare (ignore updated))
+          (ok (search "closing delimiter" warning)
+              "the missing ) is added by parinfer as on main")
+          (ok (search "(list a[b x))" (fs-read-file path))
+              "a[b is left alone and the form is closed")))))
+  (testing "an unmatched [ opener with no other breakage is not refused either"
+    (with-temp-file "tests/tmp/edit-form-bracket-opener-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content (format nil "(defun target (x)~%  (foo [bar x"))
+        (ok (search "(foo [bar x))" (fs-read-file path)))))))
+
 (deftest lisp-edit-form-refusal-hides-reader-internals
   (testing "the reader error kept in a refusal carries no SBCL stream object"
     (with-temp-file "tests/tmp/edit-form-refusal-sanitized.lisp"
@@ -1695,7 +1722,9 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                          "no standard-syntax bracket advice under a custom readtable")
                      (ok (null (search "Likely fix" err)))
                      (ok (search "cl-mcp-test-raw-bracket" err)
-                         "the message names the readtable that was tried"))))
+                         "the message names the readtable that was tried")
+                     (ok (search "unexpected end of input" err)
+                         "the reader's end-of-file is worded, not a dangling clause"))))
             (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
                      :cl-mcp-test-raw-bracket)))
         (skip "named-readtables not available"))))

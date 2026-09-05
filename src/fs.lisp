@@ -77,9 +77,13 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
            ;; multibyte file can look bigger than the cap and still fit in
            ;; it: report truncation only when the buffer filled and input
            ;; really remains.
+           ;; The peek decodes one character past the cap; if that byte is
+           ;; not decodable the file simply continues, so it is truncated.
            (truncated (and raw-len (> effective capped)
                            (= count capped)
-                           (not (eq (peek-char nil in nil :eof) :eof)))))
+                           (handler-case
+                               (not (eq (peek-char nil in nil :eof) :eof))
+                             (error () t)))))
       (values text truncated raw-len))))
 
 (defun fs-resolve-read-path (path)

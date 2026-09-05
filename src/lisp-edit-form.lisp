@@ -224,9 +224,14 @@ comments near a target form."
               ;; trustworthy (a reader macro may consume raw parentheses as
               ;; data), so its verdicts are not used to refuse or explain;
               ;; only the reader's own outcome counts then.
+              ;; An unmatched [ or { (EXPECTED "]" or "}") is never grounds
+              ;; for refusal: it may be a symbol character, in which case
+              ;; parinfer's output reads fine and is written as before.
               (when (and (not nonstandard-rt)
                          (not (getf diagnosis :ok))
-                         (getf diagnosis :repair-failed))
+                         (getf diagnosis :repair-failed)
+                         (not (member (getf diagnosis :expected) '("]" "}")
+                                      :test #'equal)))
                 ;; Keep the reader's own error too: for an ambiguous [ or ]
                 ;; the scan may be a false positive, and the reader error
                 ;; (an unknown #? macro, say) is then the actionable part.
