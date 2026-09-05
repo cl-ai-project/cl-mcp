@@ -835,6 +835,29 @@ running as root), THUNK is skipped instead."
           (ok (search "No changes were written to disk." err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-diagnosis-suppressed-under-custom-readtable
+  (testing "with an in-readtable declaration, a parse failure keeps the reader's own message"
+    (with-temp-file "tests/tmp/patch-custom-readtable-diagnosis.lisp"
+        (format nil "(in-readtable :standard)~%(defun target ()~%  1)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; #. is disabled, so the reader fails; the standard delimiter
+              ;; scan must not replace that with a bracket diagnosis.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "1"
+                               :new-text "#.(+ 1 1) [(]")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (search "invalid Lisp" err-msg))
+          (ok (null (search "Unbalanced parentheses" err-msg))
+              "no standard-syntax diagnosis under a custom readtable")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth
   (testing "boundaries inside block comments at different nesting depths do not match"
     (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"
@@ -883,6 +906,28 @@ running as root), THUNK is skipped instead."
       (patch-error "tests/tmp/patch-boundary-quote.lisp"
                    (format nil "(defun target ()~%  foo)~%")
                    "foo" "('"))))
+
+(deftest lisp-patch-form-depth-reason-never-trusts-pending-boundaries
+  (testing "two pending boundaries of different kinds do not count as matching"
+    (with-temp-file "tests/tmp/patch-boundary-pending-kinds.lisp"
+        (format nil "(defun target ()~%  foo #|x|#)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; old ends with | (closes the comment with the suffix #),
+              ;; new ends with # (does not): both :pending, not equivalent.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "foo #|x|"
+                               :new-text "(foo #|x#")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
   (testing "parens inside strings and #\\( do not trip the depth check"

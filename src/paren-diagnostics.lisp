@@ -367,15 +367,35 @@ previous top-level form was never closed."
         (subseq trimmed 0 40)
         trimmed)))
 
+(defun %line-end-outside-code-p (text line)
+  "Return T when the end of the 1-based LINE of TEXT lies inside a string or a
+comment. Parinfer appends its closing parens at line ends, so a change on
+such a line landed in non-code text and must not be offered as a fix."
+  (let ((pos 0))
+    (loop repeat (1- line)
+          do (let ((nl (position #\Newline text :start pos)))
+               (if nl
+                   (setf pos (1+ nl))
+                   (return-from %line-end-outside-code-p nil))))
+    (let ((end (or (position #\Newline text :start pos) (length text))))
+      (not (member (lexical-state-at text end) '(:code :pending))))))
+
 (defun %likely-fixes (text)
   "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
 FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
 when the repaired text is still unbalanced per SCAN-DELIMITERS, which also
-covers a ] or } closing a paren; FIXES is NIL in that case. Balanced [...]
-or {...} pairs, as used by some reader macros, are accepted as-is."
+covers a ] or } closing a paren, or when parinfer changed a line whose end
+lies inside a string or a comment: parinfer is not comment-aware, so a
+closing paren it appends inside a #| |# comment would be ignored by the
+reader, and offering it as a fix would mislead. FIXES is NIL in either case.
+Balanced [...] or {...} pairs, as used by some reader macros, are accepted."
   (let ((repaired (apply-indent-mode text)))
     (if (getf (scan-delimiters repaired) :ok)
-        (values (repair-line-differences text repaired) nil)
+        (let ((fixes (repair-line-differences text repaired)))
+          (if (some (lambda (fix) (%line-end-outside-code-p text (getf fix :line)))
+                    fixes)
+              (values nil t)
+              (values fixes nil)))
         (values nil t))))
 
 (defun count-delimiter-depth (text &key (start 0) end)
@@ -521,5 +541,5 @@ one; otherwise a repair-failed sentence is printed instead."
                     fix the delimiters by hand.")))
       (when (and next-line (string= kind "unclosed"))
         (format s "~%Next top-level form begins at line ~D, ~
-                   so the missing \")\" must come before it."
-                next-line)))))
+                   so the missing ~S must come before it."
+                next-line (or expected ")"))))))

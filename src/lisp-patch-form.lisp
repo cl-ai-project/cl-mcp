@@ -64,10 +64,16 @@ still uses this message only when the patched form actually fails to parse."
   (let ((old-end (+ match-pos (length old-text)))
         (new-end (+ match-pos (length new-text))))
     ;; Both values matter: the state keyword and, for block comments, the
-    ;; nesting depth -- one open #| more or less reclassifies the suffix.
-    (unless (equal (multiple-value-list (lexical-state-at form-text old-end))
-                   (multiple-value-list (lexical-state-at modified-form new-end)))
-      (return-from %check-depth-balance nil))
+    ;; nesting depth -- one open #| more or less reclassifies the suffix. A
+    ;; :pending boundary is never trusted either: different unfinished
+    ;; constructs (a trailing | versus a trailing #, say) all report
+    ;; :pending yet combine differently with the unchanged suffix.
+    (multiple-value-bind (old-state old-depth) (lexical-state-at form-text old-end)
+      (multiple-value-bind (new-state new-depth) (lexical-state-at modified-form new-end)
+        (unless (and (eq old-state new-state)
+                     (eql old-depth new-depth)
+                     (not (eq old-state :pending)))
+          (return-from %check-depth-balance nil))))
     (multiple-value-bind (old-open old-close)
         (count-delimiter-depth form-text :start match-pos :end old-end)
       (multiple-value-bind (new-open new-close)
@@ -161,46 +167,51 @@ DEPTH-REASON, when non-NIL, is the net-parenthesis message from
 %CHECK-DEPTH-BALANCE; it takes precedence over the delimiter diagnosis
 whenever parsing fails, because it names the exact number of \")\" to add or
 remove. A DEPTH-REASON alone never rejects the patch: a parenthesis added
-inside a string or a comment is a legitimate edit and still parses."
+inside a string or a comment is a legitimate edit and still parses.
+Under a custom READTABLE-DESIGNATOR the standard delimiter diagnosis is not
+consulted at all (a reader macro may consume raw parentheses as data), so
+the reader's own failure is reported."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*
            (if custom-rt
                custom-rt
                (copy-readtable nil))))
-    (handler-case
-        (call-with-package-context
-         package-name
-         (lambda ()
-           (multiple-value-bind (form pos)
-               (read-from-string form-text nil :eof)
-             (when (eq form :eof)
-               (error 'patch-operation-error
-                      :reason "patch produced an empty form"))
-             (let ((rest-start (or (position-if-not #'%whitespace-char-p
-                                                    form-text :start pos)
-                                   (length form-text))))
-               (when (< rest-start (length form-text))
+    (flet ((diagnosed (fallback)
+             (if readtable-designator
+                 fallback
+                 (%diagnosed-reason form-text fallback))))
+      (handler-case
+          (call-with-package-context
+           package-name
+           (lambda ()
+             (multiple-value-bind (form pos)
+                 (read-from-string form-text nil :eof)
+               (when (eq form :eof)
                  (error 'patch-operation-error
-                        :reason (or depth-reason
-                                    (%diagnosed-reason
-                                     form-text
-                                     (format nil "patch produced malformed form text (trailing ~
-                                                  content after form). No changes were written ~
-                                                  to disk."))))))
-             form-text))
-         :source-path source-path)
-      (patch-operation-error (e)
-        (error e))
-      (error (e)
-        (error 'patch-operation-error
-               :reason (or depth-reason
-                           (%diagnosed-reason
-                            form-text
-                            (format nil "patch operation produced invalid Lisp: ~A. ~
-                                         The form could not be parsed after replacement. ~
-                                         No changes were written to disk."
-                                    e))))))))
+                        :reason "patch produced an empty form"))
+               (let ((rest-start (or (position-if-not #'%whitespace-char-p
+                                                      form-text :start pos)
+                                     (length form-text))))
+                 (when (< rest-start (length form-text))
+                   (error 'patch-operation-error
+                          :reason (or depth-reason
+                                      (diagnosed
+                                       (format nil "patch produced malformed form text ~
+                                                    (trailing content after form). ~
+                                                    No changes were written to disk."))))))
+               form-text))
+           :source-path source-path)
+        (patch-operation-error (e)
+          (error e))
+        (error (e)
+          (error 'patch-operation-error
+                 :reason (or depth-reason
+                             (diagnosed
+                              (format nil "patch operation produced invalid Lisp: ~A. ~
+                                           The form could not be parsed after replacement. ~
+                                           No changes were written to disk."
+                                      e)))))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)

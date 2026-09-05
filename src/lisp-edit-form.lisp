@@ -216,7 +216,12 @@ comments near a target form."
             (values result nil nil)
             (let ((diagnosis (diagnose-delimiters content))
                   (repaired (apply-indent-mode content)))
-              (when (and (not (getf diagnosis :ok))
+              ;; Under a custom readtable the standard delimiter scan is not
+              ;; trustworthy (a reader macro may consume raw parentheses as
+              ;; data), so its verdicts are not used to refuse or explain;
+              ;; only the reader's own outcome counts then.
+              (when (and (null custom-rt)
+                         (not (getf diagnosis :ok))
                          (getf diagnosis :repair-failed))
                 (error 'content-unrepairable-error
                        :message (format-delimiter-diagnosis diagnosis
@@ -232,7 +237,7 @@ comments near a target form."
                   ((and (typep err 'multiple-top-level-forms-error)
                         (typep repaired-err 'multiple-top-level-forms-error))
                    (error err))
-                  ((not (getf diagnosis :ok))
+                  ((and (null custom-rt) (not (getf diagnosis :ok)))
                    ;; Keep the reader error too: a paren problem often hides a
                    ;; second, unrelated read error that the user still needs.
                    (error 'content-unrepairable-error

@@ -1272,6 +1272,17 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                          "the stray ) behind the void macro counts as a delimiter failure")))
               (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
                        :cl-mcp-test-newline-void))))
+        (testing "a macro that consumes a balanced ) and then fails is not a stray paren"
+          ;; #S(...) with an unknown structure reads its balanced list and then
+          ;; signals; the stream stops right after ), which must not be
+          ;; mistaken for an unmatched close.
+          (with-temp-file "tests/tmp/edit-form-in-readtable-struct.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%~
+                           #S(cl-mcp-no-such-struct-xyz :a 1)~%")
+            (lambda (path)
+              (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                         (pathname path)))
+                  "a reader error after a balanced ) is not a delimiter failure"))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
@@ -1487,6 +1498,28 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." err))
           (ok (search "Replace it with \")\"." err))
           (ok (string= before (fs-read-file path)) "file untouched"))))))
+
+(deftest lisp-edit-form-custom-readtable-skips-delimiter-verdicts
+  (testing "with a readtable given, the standard scan neither refuses nor explains"
+    ;; Under a custom readtable ] may be meaningful, so the ] refusal that
+    ;; applies to plain content is not applied; the reader decides.
+    (if (%try-load "named-readtables")
+        (with-temp-file "tests/tmp/edit-form-custom-readtable-bracket.lisp"
+            (format nil "(defun target () :old)~%")
+          (lambda (path)
+            (multiple-value-bind (updated warning)
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :readtable :standard
+                                :content (format nil "(defun target ()~%  foo]"))
+              (declare (ignore updated))
+              (ok (search "closing delimiter" warning)
+                  "parinfer still closes the form under the custom readtable")
+              (ok (search "foo]" (fs-read-file path))
+                  "foo] was accepted as the readtable's business"))))
+        (skip "named-readtables not available"))))
 
 (deftest lisp-edit-form-accepts-balanced-braces-with-missing-paren
   (testing "content using {...} reader-macro syntax is still auto-repaired"

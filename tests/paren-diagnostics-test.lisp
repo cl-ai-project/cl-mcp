@@ -302,6 +302,13 @@
       (ok (getf d :repair-failed))
       (ng (getf d :likely-fixes)))))
 
+(deftest diagnose-rejects-repairs-inside-block-comments
+  (testing "a paren parinfer appends inside a #| |# comment is not offered as a fix"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)"))))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ok (getf d :repair-failed) "parinfer touched comment text, so the repair is not trusted")
+      (ng (getf d :likely-fixes)))))
+
 (deftest diagnose-ok-has-no-extra-keys
   (testing "balanced text returns the plain scan plist"
     (let ((d (diagnose-delimiters "(+ 1 2)")))
@@ -385,6 +392,14 @@
       (ok (search "Unterminated block comment in code: the #| opened at line 2, column 3" text))
       (ok (search "Close it with |#." text))
       (ng (search "Likely fix" text)))))
+
+(deftest format-diagnosis-names-the-expected-delimiter
+  (testing "an unclosed [ asks for ], not for )"
+    (let ((text (format-delimiter-diagnosis
+                 (diagnose-delimiters (format nil "(foo [~%(bar)")))))
+      (ok (search "Next top-level form begins at line 2, so the missing \"]\" must come before it."
+                  text))
+      (ng (search "missing \")\"" text)))))
 
 (deftest format-diagnosis-mismatch-bracket-opener
   (testing "a [ opener does not get a \"replace it\" instruction"

@@ -11,6 +11,8 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:count-delimiter-depth)
   (:export #:cst-node
            #:cst-node-kind
            #:cst-node-value
@@ -146,22 +148,27 @@ block comment (~D level~:P still open). Close it with |#." depth))))))
                (progn (unread-char #\# stream) (return nil))))
           (t (return nil)))))))
 
-(defun %classify-cl-read-error (condition stream standard-close-p)
-  "Return CONDITION, or a STRAY-RIGHT-PARENTHESIS when READ failed right after
-consuming a \")\" while STANDARD-CLOSE-P (\")\" still terminates lists in the
+(defun %classify-cl-read-error (condition stream text start-pos standard-close-p)
+  "Return CONDITION, or a STRAY-RIGHT-PARENTHESIS when READ failed on an
+unmatched \")\" while STANDARD-CLOSE-P (\")\" still terminates lists in the
 active readtable). This catches a stray \")\" that the structural pre-check
 could not see because a whitespace-like reader macro returning no values
-consumed the text before it within the same READ call. End-of-file
-conditions are left alone: an unterminated string may end in \")\" too, and
-they already classify as delimiter failures."
+consumed the text before it within the same READ call. The evidence is
+structural, not positional: the text READ consumed since START-POS must end
+in \")\" and, counted outside strings and comments, contain no \"(\" at all.
+A macro such as #S(...) that reads a balanced list and then signals stops
+right after \")\" too, but its consumed text opens a paren, so it keeps its
+own error. End-of-file conditions are left alone: they already classify as
+delimiter failures."
   (let ((pos (file-position stream)))
     (if (and standard-close-p
              (not (typep condition 'end-of-file))
              (integerp pos)
-             (plusp pos)
-             (progn (file-position stream (1- pos))
-                    (prog1 (eql (read-char stream nil nil) #\))
-                      (file-position stream pos))))
+             (< start-pos pos (1+ (length text)))
+             (char= (char text (1- pos)) #\))
+             (multiple-value-bind (opens closes)
+                 (count-delimiter-depth text :start start-pos :end pos)
+               (and (zerop opens) (plusp closes))))
         (make-condition
          'stray-right-parenthesis
          :stream stream
@@ -169,13 +176,16 @@ they already classify as delimiter failures."
 Remove the extra \")\" (lisp-check-parens reports its line and column)."))
         condition)))
 
-(defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
-  "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
+(defun %read-remaining-with-cl-reader (stream nodes custom-readtable text)
+  "Read remaining forms from STREAM (a string stream over TEXT) using the
+standard CL reader with CUSTOM-READTABLE.
 Returns two values: the complete list of nodes (including previously collected
 NODES) and the read error that stopped reading early, or NIL when the stream
 was consumed to its end. A \")\" met where a form should start is reported as
 STRAY-RIGHT-PARENTHESIS without consulting the implementation's reader, so the
-classification does not depend on any implementation's error wording.
+classification does not depend on any implementation's error wording; a
+\")\" that READ itself trips over (behind a whitespace-like macro) is
+recognised structurally by %CLASSIFY-CL-READ-ERROR.
 Reading stays lenient so a partially broken file can still be displayed, but
 callers that need to know the file is unparseable (lisp-edit-form, the
 fs-write-file overwrite guard) inspect the second value."
@@ -208,12 +218,11 @@ character ). Remove the extra \")\" (lisp-check-parens reports its line and colu
                         ;; On read error, return what we have so far and
                         ;; report the error as the second value, normalised
                         ;; to STRAY-RIGHT-PARENTHESIS when READ tripped over
-                        ;; a ")" that the structural check could not see
-                        ;; (a whitespace-like macro returning no values
-                        ;; consumed the text before it inside the same READ).
+                        ;; a ")" that the structural check could not see.
                         (return (values (nreverse nodes)
                                         (%classify-cl-read-error
-                                         e stream standard-close-p)))))))
+                                         e stream text start-pos
+                                         standard-close-p)))))))
           (when (eq form :eof)
             (return (values (nreverse nodes) nil)))
           (let* ((end-pos (file-position stream))
@@ -330,7 +339,7 @@ tell it apart from reader-macro failures that a readtable might resolve."))
             (call-with-lenient-packages
              (lambda ()
                (with-input-from-string (stream text)
-                 (%read-remaining-with-cl-reader stream nil custom-rt))))
+                 (%read-remaining-with-cl-reader stream nil custom-rt text))))
             (error "Readtable ~S not found." readtable)))
       (let ((*readtable* (copy-readtable))
             (*read-eval* nil)
@@ -363,7 +372,7 @@ tell it apart from reader-macro failures that a readtable might resolve."))
                              (when custom-rt
                                (return
                                  (%read-remaining-with-cl-reader
-                                  stream nodes custom-rt)))))))))))
+                                  stream nodes custom-rt text)))))))))))
             (reader-error (e)
               (let ((msg (format nil "~A" e)))
                 (cond
