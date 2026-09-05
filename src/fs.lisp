@@ -86,7 +86,12 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
                            (handler-case
                                (not (eq (peek-char nil in nil :eof) :eof))
                              (error () t))))
-           (truncated (and raw-len (> effective capped) remaining)))
+           ;; Without a known file length (FILE-LENGTH failed) an uncapped
+           ;; read that filled the buffer with input remaining is still a
+           ;; truncated read.
+           (truncated (if raw-len
+                          (and (> effective capped) remaining)
+                          (and (null limit) remaining))))
       (values text truncated raw-len remaining))))
 
 (defun fs-resolve-read-path (path)

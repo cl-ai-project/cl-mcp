@@ -74,6 +74,17 @@
         (ok (null (gethash "position" res))
             "nothing was scanned, so no position is reported")))))
 
+(deftest lisp-check-parens-too-large-inline-code-is-not-called-a-cut-read
+  (testing "the too-large summary for inline code does not talk about the file read cap"
+    (let* ((*check-parens-max-bytes* 1)
+           (state (cl-mcp/src/state:make-state))
+           (args (cl-mcp/src/tools/helpers:make-ht "code" "(abcd)"))
+           (response (cl-mcp/src/validate::lisp-check-parens-handler state "cp-tl" args))
+           (text (gethash "text" (aref (gethash "content" (gethash "result" response)) 0))))
+      (ok (search "Input too large to check" text))
+      (ok (search "smaller region" text))
+      (ng (search "fs-read-file cap" text)))))
+
 (deftest lisp-check-parens-truncated-read-is-too-large
   (testing "a file read cut at the fs cap is reported too-large, not diagnosed from its prefix"
     (let* ((root (asdf:system-source-directory :cl-mcp))

@@ -207,21 +207,35 @@
       (ng (getf d :likely-fixes)))))
 
 (deftest rendered-fix-shows-the-line-when-the-closer-is-not-appended
-  (testing "a closer before a trailing comment is rendered as the resulting line"
+  (testing "a closer before a trailing comment is rendered by position, with the resulting line"
     (let* ((text (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
                               (* s 2) ; double it"))
            (d (diagnose-delimiters text))
            (fix (first (getf d :likely-fixes)))
            (rendered (format-repair-lines (getf d :likely-fixes))))
       (ng (getf fix :append-only))
-      (ok (search "->  \"    (* s 2))) ; double it\"" rendered)
-          "the line to write, not an ambiguous \"add 2 )\"")
+      (ok (= (getf fix :column) 12) "the closers go before the space and the comment")
+      (ok (getf fix :before-comment))
+      (ok (search "insert 2 \")\" at column 12 (before the trailing ; comment)" rendered))
+      (ok (search "\"    (* s 2))) ; double it\"" rendered)
+          "the short resulting line is shown as well")
       (ng (search "add 2" rendered))))
   (testing "a plain append keeps the terse form"
     (let* ((d (diagnose-delimiters +let-binding-unclosed+))
            (fix (first (getf d :likely-fixes))))
       (ok (getf fix :append-only))
-      (ok (search "add 1 \")\"" (format-repair-lines (getf d :likely-fixes)))))))
+      (ok (search "add 1 \")\"" (format-repair-lines (getf d :likely-fixes))))))
+  (testing "a truncated line is never offered as text to write, nor shown as X -> X"
+    (let* ((long (make-string 110 :initial-element #\x))
+           (text (format nil "(defun f (a)~%  (let ((s (g a)))~%    (list s ~S) ; trailing~%"
+                         long))
+           (d (diagnose-delimiters text))
+           (fix (first (getf d :likely-fixes)))
+           (rendered (format-repair-lines (getf d :likely-fixes))))
+      (ok (getf fix :truncated))
+      (ok (search "insert 2 \")\" at column" rendered))
+      (ng (search "giving" rendered) "no resulting line for a truncated one")
+      (ng (search "->  \"    (list s \\\"xxx" rendered)))))
 
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"

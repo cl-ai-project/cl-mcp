@@ -446,13 +446,21 @@ sent to the fs-write-file overwrite path."
                                              ((string= kind "unclosed-block-comment")
                                               "Unterminated block comment")
                                              ((string= kind "too-large")
-                                              (format nil "Input too large to check: ~
-                                               nothing was scanned. The read was cut ~
-                                               at the fs-read-file cap, so the ~
-                                               structural tools and the fs-write-file ~
-                                               overwrite path are closed for it too; ~
-                                               split the file or edit it outside ~
-                                               cl-mcp"))
+                                              ;; A file hits this through the
+                                              ;; fs-read-file cap; inline code
+                                              ;; through the 2 MB check limit.
+                                              (if path
+                                                  (format nil "Input too large to check: ~
+                                                   nothing was scanned. The read was ~
+                                                   cut at the fs-read-file cap, so the ~
+                                                   structural tools and the ~
+                                                   fs-write-file overwrite path are ~
+                                                   closed for it too; split the file ~
+                                                   or edit it outside cl-mcp")
+                                                  (format nil "Input too large to check: ~
+                                                   nothing was scanned (the code ~
+                                                   exceeds the check limit); check a ~
+                                                   smaller region")))
                                              (t (format nil "Unbalanced parentheses: ~A"
                                                         kind)))))
                             (format nil

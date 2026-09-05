@@ -1680,6 +1680,53 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Either remove that" err)
               "the edit tools' own errors do not make the finding a false positive"))))))
 
+(deftest lisp-edit-form-leading-stray-close-is-a-delimiter-failure
+  (testing "a ) at the very start of content is classified structurally, not by SBCL's wording"
+    (with-temp-file "tests/tmp/edit-form-leading-stray-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil ")~%(defun target ()~%  (list a] 1)"))
+            (error (e) (setf err (princ-to-string e))))
+          (ok err)
+          (ok (search "extra \")\" at line 1, column 1" err))
+          (ok (search "Either remove that" err)
+              "the reader's own words agree with the scan, so the instruction stays"))))))
+
+(deftest lisp-edit-form-warns-about-a-bracket-that-still-reads
+  (testing "a ] where ) was meant that still reads is written but flagged, as lisp-patch-form does"
+    (with-temp-file "tests/tmp/edit-form-bracket-reads.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed fixes validated bracket-warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target () (list a] 1))")
+          (declare (ignore updated warning fixes validated))
+          (ok changed)
+          (ok (search "(list a] 1)" (fs-read-file path)))
+          (ok (and bracket-warning (search "\"]\"" bracket-warning)))))))
+  (testing "clean content carries no bracket warning"
+    (with-temp-file "tests/tmp/edit-form-bracket-clean.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed fixes validated bracket-warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target () (list a 1))")
+          (declare (ignore updated warning fixes validated))
+          (ok changed)
+          (ng bracket-warning))))))
+
 (deftest lisp-edit-form-content-honours-in-readtable-in-file
   (testing "content is validated under the readtable the file switched to"
     ;; #?[...] reads raw text through ]; without the file's readtable the

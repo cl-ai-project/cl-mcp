@@ -23,6 +23,9 @@
            #:unterminated-source
            #:stray-right-parenthesis
            #:*standard-readtable*
+           ;; Exported for lisp-edit-form's content check, which reads with
+           ;; the CL reader and needs the same structural stray-) evidence.
+           #:%skip-whitespace-and-comments
            ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
            ;; the same question this file answers while parsing: which
            ;; IN-PACKAGE is in effect at a given point in the file.

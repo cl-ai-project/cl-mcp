@@ -232,7 +232,11 @@ Output:
   `likely_fixes` or instruction is attached in that case.
 - The summary text repeats the diagnosis in prose: the unclosed form's line and
   head, a `Likely fix, inferred from indentation:` block, and the next top-level
-  form hint.
+  form hint. Each likely-fix line is written to be applied verbatim: `add N ")"`
+  only when the closers go at the very end of the line, `remove N ")"` for a
+  pure removal, `insert N ")" at column C (before the trailing ; comment)` when
+  they go before a comment, and otherwise the resulting line; a line cut at the
+  120-character bound is described by position, never offered as text to write.
 
 - `next_tool` / `fix_code` / `required_args`: for inline `code`, `lisp-edit-form`
   (which repairs and writes a form). For a `path` that the edit tools' own
@@ -297,7 +301,12 @@ readable code. The response therefore shows the changed lines and the repaired
 form; check them, and use `dry_run: true` when the content is non-trivial. A
 `]` or `}` left where `)` was meant, and any leftover the repair cannot make
 readable, is refused with the same line-level diagnosis as `lisp-check-parens`
-and nothing is written. A `readtable` argument (or an `in-readtable` earlier in
+and nothing is written. A repair that would change text inside a string or a
+comment is refused too, even when the result happens to read: a fix the tool
+would not suggest is not written either. Content that reads but whose scan
+finds a `]`/`}` where `)` was expected (`(list a] 1)`) is written and flagged
+with `bracket_warning` (also in the summary and in dry-run), as
+`lisp-patch-form` does. A `readtable` argument (or an `in-readtable` earlier in
 the file) that actually changes the syntax switches these standard-syntax
 verdicts off and leaves the verdict to the reader.
 

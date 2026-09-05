@@ -591,18 +591,19 @@ caller can fall back to a plain count difference."
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
 Return a list of (:line n :original str :repaired str :delta d :added a
-:removed r :append-only p) for every line that changed, where A is the
-number of \")\" parinfer appended, R the number it removed, D = A - R, and
-P is T only when the repaired line is the original with closers appended at
-its very end -- the one shape a reader can apply from \"add N )\" alone; a
-closer inserted before a trailing ; comment is not, and must be shown as the
-resulting line. A line whose net D is 0 is still reported when it really
+:removed r :append-only p :column c :before-comment b :truncated t) for
+every line that changed, where A is the number of \")\" parinfer appended, R
+the number it removed, D = A - R, P is T only when the repaired line is the
+original with closers appended at its very end (the one shape a reader can
+apply from \"add N )\" alone), C is the 1-based column of the first
+character that differs (where an insertion goes), B is T when the rest of
+the original line from that column is a ; comment, and the truncated flag
+says that :original/:repaired were cut by %BOUND-LINE and so are not text
+to write back. A line whose net D is 0 is still reported when it really
 changed (\")(a\" -> \"(a)\"); only differences with no parenthesis edits at
 all (whitespace, a trailing carriage return) are skipped. A trailing
-#\\Return is stripped from both sides before comparing. The stored :original
-and :repaired are bounded by %BOUND-LINE so a pathological single-line input
-cannot inflate the response. Both texts must have the same number of lines,
-which parinfer guarantees."
+#\\Return is stripped from both sides before comparing. Both texts must have
+the same number of lines, which parinfer guarantees."
   (loop for raw-orig in (split-string original :separator '(#\Newline))
         for raw-rep in (split-string repaired :separator '(#\Newline))
         for line from 1
@@ -612,23 +613,34 @@ which parinfer guarantees."
         for delta = (if added
                         (- added removed)
                         (- (count #\) rep) (count #\) orig)))
+        for first-diff = (mismatch orig rep)
         unless (or (string= orig rep)
                    (if added
                        (zerop (+ added removed))
                        (zerop delta)))
-          collect (list :line line
-                        :original (%bound-line orig)
-                        :repaired (%bound-line rep)
-                        :delta delta
-                        :added (or added (max delta 0))
-                        :removed (or removed (max (- delta) 0))
-                        :append-only (and added (plusp added) (zerop removed)
-                                          (string= rep
-                                                   (concatenate
-                                                    'string orig
-                                                    (make-string added
-                                                                 :initial-element #\))))
-                                          t))))
+          collect (let ((rest (and first-diff
+                                   (string-left-trim '(#\Space #\Tab)
+                                                     (subseq orig (min first-diff
+                                                                       (length orig)))))))
+                    (list :line line
+                          :original (%bound-line orig)
+                          :repaired (%bound-line rep)
+                          :delta delta
+                          :added (or added (max delta 0))
+                          :removed (or removed (max (- delta) 0))
+                          :append-only (and added (plusp added) (zerop removed)
+                                            (string= rep
+                                                     (concatenate
+                                                      'string orig
+                                                      (make-string
+                                                       added :initial-element #\))))
+                                            t)
+                          :column (and first-diff (1+ first-diff))
+                          :before-comment (and rest (plusp (length rest))
+                                               (char= (char rest 0) #\;)
+                                               t)
+                          :truncated (or (string/= (%bound-line orig) orig)
+                                         (string/= (%bound-line rep) rep))))))
 
 (defparameter *repair-lines-limit* 10
   "Maximum number of likely-fix entries rendered by FORMAT-REPAIR-LINES and
@@ -637,36 +649,52 @@ so a response stays bounded however many lines parinfer changed.")
 
 (defun format-repair-lines (fixes)
   "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
-preceded by a newline. A repair that appends closers at the very end of the
-line is rendered tersely, e.g. \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\",
-which is exactly what to type, and a pure removal as \"remove N \\\")\\\"\";
-any other repair -- a closer inserted before a trailing ; comment, a
-relocation -- shows the resulting line, because \"add 1 )\" on a line
-ending in a comment would be applied after the comment and leave the text
-broken. A fix plist without the :append-only key (built by hand) is rendered
-tersely, as before that key existed. At most 10 entries are rendered in
-full; when more lines changed, a trailing \"  ... and N more changed lines\"
-names the remainder, so a wholesale reindentation cannot flood the guidance."
+preceded by a newline, in a form that can be applied verbatim:
+  - a pure end-of-line append: \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\";
+  - a pure removal: \"remove N \\\")\\\"\";
+  - an insertion elsewhere (before a trailing ; comment): \"insert N \\\")\\\" at
+    column C (before the trailing ; comment)\", plus the resulting line when
+    it is short enough to be shown whole;
+  - anything else (a relocation): the resulting line when it is whole,
+    otherwise the counts and the column of the first change.
+A line cut by %BOUND-LINE is never presented as text to write back, and no
+fix is ever rendered as an unchanged X -> X. A fix plist without the newer
+keys (built by hand) is rendered tersely, as before those keys existed. At
+most 10 entries are rendered in full; when more lines changed, a trailing
+\"  ... and N more changed lines\" names the remainder, so a wholesale
+reindentation cannot flood the guidance."
   (let* ((limit *repair-lines-limit*)
          (total (length fixes))
          (shown (if (> total limit) (subseq fixes 0 limit) fixes)))
     (with-output-to-string (s)
       (dolist (fix shown)
-        (let ((delta (getf fix :delta))
-              (append-only (getf fix :append-only :unknown)))
+        (let ((line (getf fix :line))
+              (original (getf fix :original))
+              (repaired (getf fix :repaired))
+              (delta (getf fix :delta))
+              (added (getf fix :added 0))
+              (removed (getf fix :removed 0))
+              (append-only (getf fix :append-only :unknown))
+              (column (getf fix :column))
+              (truncated (getf fix :truncated)))
           (cond
             ((and (plusp delta) append-only)
-             (format s "~%  line ~D: ~S  ->  add ~D \")\""
-                     (getf fix :line) (getf fix :original) delta))
-            ((and (minusp delta) (zerop (getf fix :added 0)))
-             (format s "~%  line ~D: ~S  ->  remove ~D \")\""
-                     (getf fix :line) (getf fix :original) (- delta)))
+             (format s "~%  line ~D: ~S  ->  add ~D \")\"" line original delta))
+            ((and (minusp delta) (zerop added))
+             (format s "~%  line ~D: ~S  ->  remove ~D \")\"" line original (- delta)))
+            ((and (plusp delta) (zerop removed) column)
+             (format s "~%  line ~D: ~S  ->  insert ~D \")\" at column ~D~
+                        ~:[~; (before the trailing ; comment)~]~:[, giving ~S~;~*~]"
+                     line original delta column (getf fix :before-comment)
+                     truncated repaired))
+            ((or (not truncated) (null column))
+             ;; A relocation (")(a" -> "(a)"): the net count says nothing
+             ;; useful, so show the resulting line.
+             (format s "~%  line ~D: ~S  ->  ~S" line original repaired))
             (t
-             ;; A relocation (")(a" -> "(a)"), or an insertion that is not
-             ;; an append: the net count says nothing useful, so show the
-             ;; resulting line.
-             (format s "~%  line ~D: ~S  ->  ~S"
-                     (getf fix :line) (getf fix :original) (getf fix :repaired))))))
+             (format s "~%  line ~D: ~S  ->  remove ~D \")\" and add ~D \")\" ~
+                        (first change at column ~D)"
+                     line original removed added column)))))
       (when (> total limit)
         (format s "~%  ... and ~D more changed lines" (- total limit))))))
 
