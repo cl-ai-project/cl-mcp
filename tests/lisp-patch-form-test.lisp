@@ -975,6 +975,11 @@ running as root), THUNK is skipped instead."
               "no net-count instruction that would write (list 1 2])")
           (ok (search "found \"]\"" err-msg) "the ] is named")
           (ok (search "Replace it with \")\"" err-msg))
+          (ok (search "The reader itself reported: unexpected end of input" err-msg)
+              "the reader's own words are kept for the ambiguous bracket")
+          (ok (null (search "invalid Lisp" err-msg
+                            :start2 (1+ (search "invalid Lisp" err-msg))))
+              "the framing sentence appears once, not inside the reader text too")
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth

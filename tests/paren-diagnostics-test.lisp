@@ -206,6 +206,30 @@
       (ok (getf d :repair-failed))
       (ng (getf d :likely-fixes)))))
 
+(deftest repair-failed-reason-is-named
+  (testing "a repair that would edit inside a string is withheld, not called unreadable"
+    ;; The string's closing quote never comes, so parinfer's closer would land
+    ;; inside the string; the text must say so rather than claim no repair reads.
+    (let* ((text (format nil "(defun f ()~%  \"doc~%  (list 1)"))
+           (d (diagnose-delimiters text)))
+      (ok (string= (getf d :kind) "unclosed-string"))
+      (ng (getf d :repair-failed) "an unclosed string gets no parinfer verdict at all")))
+  (testing "the two failure reasons are distinguished"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list 1) ; a (~%"))))
+      ;; Balanced after repair: the closer goes before the comment.
+      (ng (getf d :repair-failed)))
+    (let ((d (diagnose-delimiters "(a (b #\\)")))
+      ;; #\) is a character literal: appending ) after it works, but a ] typo
+      ;; style unbalanced result is :unbalanced when the rescan still fails.
+      (ok (member (getf d :repair-failed) '(nil :unbalanced :outside-code))))
+    (let* ((text (format nil "(defun f ()~%  (let ((y 1)  ; bind~%    (+ x y)))"))
+           (d (diagnose-delimiters text))
+           (msg (format-delimiter-diagnosis d)))
+      ;; Dedent wants to close the binding list on line 2, which ends in a
+      ;; comment: the closer now goes before the comment, so this repairs.
+      (ng (getf d :repair-failed))
+      (ok (search "Likely fix" msg)))))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3

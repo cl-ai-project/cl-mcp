@@ -90,6 +90,50 @@
                    "the 16-character prefix is unbalanced but must not be diagnosed")))
         (ignore-errors (delete-file abs))))))
 
+(deftest lisp-check-parens-file-guidance-and-windows
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (abs (merge-pathnames "tests/tmp/check-parens-window.lisp" root))
+         (cl-mcp/src/project-root:*project-root* root)
+         (valid (format nil "(defun a ()~%  (list 1 2 3))~%~%(defun b ()~%  (list 4 5 6))~%")))
+    (ensure-directories-exist abs)
+    (unwind-protect
+         (progn
+           (with-open-file (out abs :direction :output :if-exists :supersede)
+             (write-string valid out))
+           (testing "a window into a valid file reports the slice's kind but offers no repair"
+             (let ((res (lisp-check-parens :path (namestring abs) :limit 25)))
+               (ok (null (%ok? res)))
+               (ok (string= (%kind res) "unclosed"))
+               (ok (null (gethash "likely_fixes" res)) "no likely fix from a prefix")
+               (ok (null (gethash "next_top_level_line" res)))
+               (ok (search "window" (gethash "diagnosis_text" res))
+                   "the text says only a window was checked")
+               (ok (string= (gethash "next_tool" res) "lisp-edit-form")
+                   "a window proves nothing about the file, so no overwrite hint")))
+           (testing "an offset window is a prefix too"
+             (let ((res (lisp-check-parens :path (namestring abs) :offset 29 :limit 20)))
+               (ok (null (%ok? res)))
+               (ok (null (gethash "likely_fixes" res)))))
+           (with-open-file (out abs :direction :output :if-exists :supersede)
+             (write-string (format nil "(defun a ()~%  (list 1 2 3)~%~%~
+                                        (defun b ()~%  (list 4 5 6))~%")
+                           out))
+           (testing "a file that really fails on a delimiter is sent to the overwrite path"
+             (let ((res (lisp-check-parens :path (namestring abs))))
+               (ok (string= (%kind res) "unclosed"))
+               (ok (vectorp (gethash "likely_fixes" res)))
+               (ok (string= (gethash "next_tool" res) "fs-write-file"))
+               (ok (string= (gethash "fix_code" res) "overwrite_with_allow_unparseable"))
+               (ok (find "allow_unparseable_overwrite" (gethash "required_args" res)
+                         :test #'string=))))
+           (with-open-file (out abs :direction :output :if-exists :supersede)
+             (write-string (format nil "(defun a ()~%  (list a[b 1))~%") out))
+           (testing "a possible bracket false positive keeps the lisp-edit-form hint"
+             (let ((res (lisp-check-parens :path (namestring abs))))
+               (ok (string= (%kind res) "mismatch"))
+               (ok (string= (gethash "next_tool" res) "lisp-edit-form")))))
+      (ignore-errors (delete-file abs)))))
+
 (deftest lisp-check-parens-eof-reader-error-has-position
   (testing "incomplete dispatch #X gives reader-error with non-nil position"
     ;; M1: end-of-file from incomplete #, should NOT report offset 0 / line nil

@@ -7,7 +7,8 @@
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis)
+                #:format-delimiter-diagnosis
+                #:bracket-ambiguous-p)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -23,13 +24,28 @@
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
 
-(defun %maybe-add-lisp-edit-guidance (result kind)
-  "Attach machine-readable remediation hints for broken Lisp delimiters."
-  (when (member kind '("extra-close" "mismatch" "unclosed") :test #'string=)
-    (setf (gethash "fix_code" result) "use_lisp_edit_form"
-          (gethash "next_tool" result) "lisp-edit-form"
-          (gethash "required_args" result)
-          (vector "file_path" "form_type" "form_name" "operation" "content")))
+(defun %maybe-add-lisp-edit-guidance (result kind &key from-file ambiguous partial)
+  "Attach machine-readable remediation hints for broken Lisp delimiters.
+For code passed inline the next step is lisp-edit-form, which repairs and
+writes a form. For a file (FROM-FILE) that really fails on a delimiter the
+structural tools cannot locate any form, so the next step is the overwrite
+path: fs-read-file, apply the fix, fs-write-file with
+allow_unparseable_overwrite. Two cases keep the lisp-edit-form hint even for
+a file: an AMBIGUOUS verdict (an unmatched [ or { that may be a symbol
+character, so the file may well parse) and a PARTIAL read (a window or a
+truncated prefix, which proves nothing about the whole file)."
+  (when (member kind '("extra-close" "mismatch" "unclosed"
+                       "unclosed-string" "unclosed-block-comment")
+                :test #'string=)
+    (if (and from-file (not ambiguous) (not partial))
+        (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
+              (gethash "next_tool" result) "fs-write-file"
+              (gethash "required_args" result)
+              (vector "path" "content" "allow_unparseable_overwrite"))
+        (setf (gethash "fix_code" result) "use_lisp_edit_form"
+              (gethash "next_tool" result) "lisp-edit-form"
+              (gethash "required_args" result)
+              (vector "file_path" "form_type" "form_name" "operation" "content"))))
   result)
 
 (defun %custom-readtable-p (text)
@@ -160,7 +176,13 @@ MCP payload)."
                        (fs-read-file path :offset offset :limit limit)
                      (setf truncated truncated-p)
                      slice)))
-         (base-off (or offset 0)))
+         (base-off (or offset 0))
+         ;; A window into a file (an offset, or a limit the file filled) is a
+         ;; prefix like a truncated read: a slice of a valid file looks
+         ;; unbalanced, so no repair hint may be built from it.
+         (partial (and path
+                       (or (plusp base-off)
+                           (and limit (= (length text) limit))))))
     ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
     ;; describe text the file does not end with, so it is reported as too
     ;; large rather than diagnosed.
@@ -192,23 +214,36 @@ MCP payload)."
                      (gethash "line" pos) line
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
-             ;; Every delimiter failure gets guidance text; parinfer fixes
-             ;; exist only for paren problems, not for an open #| comment.
-             (setf (gethash "diagnosis_text" h)
-                   (format-delimiter-diagnosis diagnosis :target (or path "code")))
-             (unless (member kind '("unclosed-block-comment" "unclosed-string")
-                             :test #'string=)
-               (let* ((total (length likely-fixes))
-                      (kept (min total *repair-lines-limit*)))
-                 (setf (gethash "likely_fixes" h)
-                       (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
-                 (when (> total kept)
-                   (setf (gethash "likely_fixes_omitted" h) (- total kept))))
-               ;; Only meaningful for an unclosed form, which is the only kind
-               ;; whose guidance text explains the number.
-               (when (and next-top-level-line (string= kind "unclosed"))
-                 (setf (gethash "next_top_level_line" h) next-top-level-line)))
-             (%maybe-add-lisp-edit-guidance h kind))
+             (cond
+               (partial
+                ;; A slice of the file: say what was seen, never how to fix it.
+                (setf (gethash "diagnosis_text" h)
+                      (format nil "Only a window of ~A was checked (offset ~D, ~D ~
+                                   characters), so this may be an artifact of the ~
+                                   window and no repair hint is offered; check the ~
+                                   whole file for one."
+                              path base-off (length text))))
+               (t
+                ;; Every delimiter failure gets guidance text; parinfer fixes
+                ;; exist only for paren problems, not for an open #| comment.
+                (setf (gethash "diagnosis_text" h)
+                      (format-delimiter-diagnosis diagnosis :target (or path "code")))
+                (unless (member kind '("unclosed-block-comment" "unclosed-string")
+                                :test #'string=)
+                  (let* ((total (length likely-fixes))
+                         (kept (min total *repair-lines-limit*)))
+                    (setf (gethash "likely_fixes" h)
+                          (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
+                    (when (> total kept)
+                      (setf (gethash "likely_fixes_omitted" h) (- total kept))))
+                  ;; Only meaningful for an unclosed form, which is the only
+                  ;; kind whose guidance text explains the number.
+                  (when (and next-top-level-line (string= kind "unclosed"))
+                    (setf (gethash "next_top_level_line" h) next-top-level-line)))))
+             (%maybe-add-lisp-edit-guidance h kind
+                                            :from-file (and path t)
+                                            :ambiguous (bracket-ambiguous-p diagnosis)
+                                            :partial partial))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil
@@ -296,9 +331,22 @@ exempt from reader checking to avoid false positives."
                                     ;; scanned, so line 1 would be noise.
                                     "~A~:[~A at line ~D, column ~D~;~*~*~*~]~A~@[~%~A~]"
                                     label (string= kind "too-large") ef line col
-                                    (if next-tool
-                                        " Use lisp-edit-form for existing Lisp files."
-                                        "")
+                                    (cond
+                                      ((equal next-tool "fs-write-file")
+                                       ;; The file does not parse, so the
+                                       ;; structural tools cannot find a
+                                       ;; form in it: name the overwrite path
+                                       ;; rather than sending the caller into
+                                       ;; a loop with lisp-edit-form.
+                                       (format nil " The file does not parse, so ~
+                                        lisp-edit-form and lisp-patch-form cannot ~
+                                        locate any form in it: read it with ~
+                                        fs-read-file, apply the fix below, and ~
+                                        write it back with fs-write-file passing ~
+                                        allow_unparseable_overwrite=true."))
+                                      (next-tool
+                                       " Use lisp-edit-form for existing Lisp files.")
+                                      (t ""))
                                     (gethash "diagnosis_text" check-result))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))

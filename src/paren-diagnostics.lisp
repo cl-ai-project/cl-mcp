@@ -19,7 +19,8 @@
            #:lexical-state-at
            #:repair-line-differences
            #:format-repair-lines
-           #:format-delimiter-diagnosis))
+           #:format-delimiter-diagnosis
+           #:bracket-ambiguous-p))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
 
@@ -300,8 +301,8 @@ lets a caller classify many positions in one pass instead of rescanning.
 Scanning stops at position END (default: the end of TEXT) and returns two
 values: the lexical state reached there (:code, :string, :string-escape,
 :symbol, :symbol-escape, :line-comment, :block-comment or :pending) and the
-block-comment
-nesting depth at that point. Nothing at or past END is ever consulted, so
+block-comment nesting depth at that point. Nothing at or past END is ever
+consulted, so
 the state at END depends only on the text before it: a construct that would
 need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
 ' ` , @ # that needs a following object) is reported as :pending instead."
@@ -445,9 +446,9 @@ previous top-level form was never closed."
   "Return a simple-vector of length (1+ (length TEXT)) whose element I is the
 lexical state in effect just before position I (:code, :string,
 :string-escape, :symbol, :symbol-escape, :line-comment, :block-comment,
-:pending), computed in one
-pass. Positions the scan skips as parts of a token (the character behind a
-\\, the body of a #\\x literal) are marked :token, which counts as non-code.
+:pending), computed in one pass. Positions the scan skips as parts of a
+token (the character behind a \\, the body of a #\\x literal) are marked
+:token, which counts as non-code.
 The final element is the state at the end of TEXT."
   (let ((mask (make-array (1+ (length text)) :initial-element :token)))
     (%map-code-characters text
@@ -499,21 +500,23 @@ character. Linear in the size of TEXT: the lexical states come from one
                      (return t))))))))
 
 (defun %likely-fixes (text)
-  "Run parinfer on TEXT and return (VALUES fixes repair-failed-p repaired).
-FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
-when the repaired text is still unbalanced per SCAN-DELIMITERS, which also
-covers a ] or } closing a paren, or when parinfer changed text that is not
-code (see %ANY-FIX-OUTSIDE-CODE-P). FIXES is NIL in either case. REPAIRED is
-parinfer's output either way, so a caller that goes on to try it does not
-run parinfer a second time.
-Balanced [...] or {...} pairs, as used by some reader macros, are accepted."
+  "Run parinfer on TEXT and return (VALUES fixes repair-failed repaired).
+FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED is NIL
+when the fixes can be offered, :UNBALANCED when the repaired text is still
+unbalanced per SCAN-DELIMITERS (which also covers a ] or } closing a paren),
+or :OUTSIDE-CODE when parinfer changed text that is not code (see
+%ANY-FIX-OUTSIDE-CODE-P) -- a repair that may well read but must not be
+offered. FIXES is NIL in either failure. REPAIRED is parinfer's output
+either way, so a caller that goes on to try it does not run parinfer a
+second time. Balanced [...] or {...} pairs, as used by some reader macros,
+are accepted."
   (let ((repaired (apply-indent-mode text)))
     (if (getf (scan-delimiters repaired) :ok)
         (let ((fixes (repair-line-differences text repaired)))
           (if (%any-fix-outside-code-p text repaired fixes)
-              (values nil t repaired)
+              (values nil :outside-code repaired)
               (values fixes nil repaired)))
-        (values nil t repaired))))
+        (values nil :unbalanced repaired))))
 
 (defun count-delimiter-depth (text &key (start 0) end)
   "Return two values: the number of \"(\" and the number of \")\" in TEXT
@@ -698,6 +701,11 @@ one; otherwise a repair-failed sentence is printed instead."
          (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
         ;; A mismatch already carries its own instruction (or a false-positive
         ;; caveat); a second, flat "fix by hand" sentence would only add noise.
+        ((and (eq failed :outside-code) (not (string= kind "mismatch")))
+         ;; The repair may well read, but it would change text inside a
+         ;; string or comment, so it is withheld rather than offered.
+         (format s "~%Automatic repair would have changed text inside a string ~
+                    or comment, so no repair is offered; fix the delimiters by hand."))
         ((and failed (not (string= kind "mismatch")))
          (format s "~%Automatic repair could not produce a readable form; ~
                     fix the delimiters by hand.")))
@@ -707,3 +715,15 @@ one; otherwise a repair-failed sentence is printed instead."
         (format s "~%Next top-level form begins at line ~D, ~
                    so the missing ~S most likely belongs before it."
                 next-line (or expected ")"))))))
+
+(defun bracket-ambiguous-p (diagnosis)
+  "Return T when DIAGNOSIS (from SCAN-DELIMITERS or DIAGNOSE-DELIMITERS) rests
+on a [ or { as an opener or a ] or } as a closer: in standard syntax those are
+symbol characters, so the verdict may be a false positive and the reader has
+the final word. The tools share this one rule: an unmatched opener (EXPECTED
+\"]\" or \"}\") is never grounds for refusing an edit, a FOUND \"]\" or \"}\"
+gets the reader's own error alongside the diagnosis."
+  (and (not (getf diagnosis :ok))
+       (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
+           (member (getf diagnosis :found) '("]" "}") :test #'equal))
+       t))

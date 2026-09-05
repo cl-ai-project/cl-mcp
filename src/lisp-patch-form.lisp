@@ -33,7 +33,8 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:lexical-state-at
-                #:scan-delimiters)
+                #:scan-delimiters
+                #:bracket-ambiguous-p)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
@@ -53,16 +54,14 @@
   (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
 
 (defun %bracket-mismatch-p (form-text)
-  "Return T when the delimiter scan of FORM-TEXT stops at a ] or } that
-closes a paren, or at a ) that closes a [ or {: the typo case where a net
+  "Return T when the delimiter scan of FORM-TEXT stops at a mismatch that
+rests on a bracket (see BRACKET-AMBIGUOUS-P): the typo case where a net
 parenthesis count would advise adding or removing a \")\" and thereby write
 code that merely reads (as a symbol ending in ]) instead of naming the
 mistyped bracket."
   (let ((scan (scan-delimiters form-text)))
     (and (equal (getf scan :kind) "mismatch")
-         (or (member (getf scan :expected) '("]" "}") :test #'equal)
-             (member (getf scan :found) '("]" "}") :test #'equal))
-         t)))
+         (bracket-ambiguous-p scan))))
 
 (defun %check-depth-balance (form-text modified-form match-pos old-text new-text)
   "Return a message describing the net parenthesis difference the patch makes,
@@ -161,24 +160,23 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
                          (subseq text end))))
       (values modified-file modified-form form-text match-pos))))
 
-(defun %diagnosed-reason (form-text fallback)
+(defun %diagnosed-reason (form-text fallback &optional reader-text)
   "Return the patch failure reason for FORM-TEXT. When the delimiter scan
-finds the breakage, the shared diagnosis is used; otherwise FALLBACK. A
-mismatch whose expected delimiter is ] or } is ambiguous (those characters
-may be part of a symbol name in standard syntax), so the reader's own
-failure in FALLBACK is kept alongside the diagnosis instead of discarded."
-  (let* ((diagnosis (diagnose-delimiters form-text))
-         ;; Either side may be a bracket: an unclosed [ (expected ]) or a ]
-         ;; closing a ( (found ]) can both be a legal symbol character.
-         (ambiguous (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
-                        (member (getf diagnosis :found) '("]" "}") :test #'equal))))
+finds the breakage, the shared diagnosis is used; otherwise FALLBACK, the
+complete message built from the reader's failure. A mismatch that rests on a
+] or } (see BRACKET-AMBIGUOUS-P) may be a false positive, so READER-TEXT --
+the reader's own words alone, without the sentence FALLBACK wraps them in --
+is kept alongside the diagnosis instead of discarded."
+  (let ((diagnosis (diagnose-delimiters form-text)))
     (if (getf diagnosis :ok)
         fallback
         (format nil "patch operation produced invalid Lisp (line numbers below are ~
                      within the patched form). ~A~
-                     ~:[ No changes were written to disk.~;~%The reader itself reported: ~A~]"
+                     ~:[ No changes were written to disk.~
+                     ~;~%The reader itself reported: ~A. No changes were written to disk.~]"
                 (format-delimiter-diagnosis diagnosis :target "the patched form")
-                ambiguous fallback))))
+                (bracket-ambiguous-p diagnosis)
+                (or reader-text fallback)))))
 
 (defun %validate-form-parseable (form-text &key readtable-designator
                                              package-name source-path
@@ -202,12 +200,12 @@ parentheses as data), so the reader's own failure is reported."
            (if custom-rt
                custom-rt
                (copy-readtable nil))))
-    (flet ((diagnosed (fallback)
+    (flet ((diagnosed (fallback &optional reader-text)
              ;; A readtable that is standard in all but name keeps the
              ;; standard diagnosis; only a syntax change withholds it.
              (if (%nonstandard-readtable-p readtable-designator)
                  fallback
-                 (%diagnosed-reason form-text fallback)))
+                 (%diagnosed-reason form-text fallback reader-text)))
            (depth-message ()
              (and depth-reason (funcall depth-reason))))
       (handler-case
@@ -236,14 +234,16 @@ parentheses as data), so the reader's own failure is reported."
         (error (e)
           (error 'patch-operation-error
                  :reason (or (depth-message)
-                             (diagnosed
-                              (format nil "patch operation produced invalid Lisp: ~A. ~
-                                           The form could not be parsed after replacement. ~
-                                           No changes were written to disk."
-                                      ;; Sanitized here, where the reader's
-                                      ;; text is embedded, so the diagnosis
-                                      ;; around it keeps its line breaks.
-                                      (sanitize-condition-text e))))))))))
+                             ;; Sanitized here, where the reader's text is
+                             ;; embedded, so the diagnosis around it keeps
+                             ;; its line breaks.
+                             (let ((reader-text (sanitize-condition-text e)))
+                               (diagnosed
+                                (format nil "patch operation produced invalid Lisp: ~A. ~
+                                             The form could not be parsed after ~
+                                             replacement. No changes were written to disk."
+                                        reader-text)
+                                reader-text)))))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)

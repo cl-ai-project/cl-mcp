@@ -543,6 +543,32 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   of input」に言い換えるのは型がちょうど `end-of-file` の場合だけ。cst の
   `unterminated-source` のように独自の報告文を持つ派生型はその文面を残す。
 - **`too-large` の `position`**: 何も走査していないので `position` は返さない。
+- **窓読みは接頭辞**: `lisp-check-parens` の `offset`/`limit` による窓も、読み取り
+  上限での切り詰めと同じく「ファイルの一部」なので、`kind`/`position` は返すが
+  `likely_fixes`・`next_top_level_line`・診断文は出さず、窓だけを検査した旨を
+  伝える(有効なファイルの一部に対して具体的な修正行を指さない)。
+- **`lisp-check-parens` の次の一手**: ファイルを対象に区切り記号の破損を見つけた
+  場合、`next_tool` は `lisp-edit-form` ではなく `fs-write-file`
+  (`allow_unparseable_overwrite`)にする。ファイルがパースできないので構造
+  編集ツールはフォームを見つけられず、従来の案内はループを生んでいた。
+  `[`/`{` の偽陽性(ファイルはパースできるかもしれない)と窓読みでは従来の
+  案内を残す。インライン `code` の場合も従来どおり。
+- **`repair-failed` の理由**: `%likely-fixes` は失敗理由を `:unbalanced`
+  (修復結果がまだ釣り合わない)と `:outside-code`(文字列・コメント内を書き
+  換える修復だったので採用しない)で区別し、文面もそれぞれに合わせる。
+  「自動修復できなかった」という断定を後者に使わない。
+- **括弧の曖昧さの判定は 1 か所**: `paren-diagnostics:bracket-ambiguous-p` を
+  `lisp-edit-form`・`lisp-patch-form` の各所で共有し、規則の写しを持たない。
+- **parinfer の行末リセット**: parinfer は `#\` と `\` の保留状態を行末で捨てる
+  (スキャナと字句走査器は `#\<Newline>` を 1 文字として消費する)。`(foo #\`
+  で終わる行に閉じ括弧を付けると `#\)` になるが、再スキャンと
+  `%any-fix-outside-code-p` がその修復を却下するので提示されない。
+  安全網に依存した既知の乖離。
+- **受容したリスク(自動修復の再配置)**: インデントが意図と異なると、parinfer は
+  `)` を別の行に置き、部分フォームを親の内外に移した「読めるが意味の違う」
+  コードを書き込みうる(例: `(when x` の直後に同じインデントで続く行)。
+  §3 の互換性判断により自動適用は維持し、変更行と修復後フォームの提示、
+  `dry_run` の案内(docs/tools.md)で緩和する。
 - **セキュリティ上の注記**: `fs-write-file` のガードは `parse-top-level-forms` を
   実行するため、ファイル内の `(in-readtable ...)` が指す readtable のリーダー
   マクロが(`*read-eval*` nil で)動く。`lisp-edit-form` が既に持つ露出と同じで、

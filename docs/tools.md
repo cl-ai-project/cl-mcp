@@ -229,10 +229,22 @@ Output:
   head, a `Likely fix, inferred from indentation:` block, and the next top-level
   form hint.
 
+- `next_tool` / `fix_code` / `required_args`: for inline `code`, `lisp-edit-form`
+  (which repairs and writes a form). For a `path` whose failure is a real
+  delimiter problem, `fs-write-file` with `allow_unparseable_overwrite`, since
+  the structural tools cannot locate any form in a file that does not parse.
+  A possible false positive (an unmatched `[`/`{`) or a windowed read keeps the
+  `lisp-edit-form` hint.
+
 Notes:
 - Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file
   read that `fs-read-file` truncated at its 1 MB cap, is reported as
   `kind: too-large` rather than diagnosed from a prefix.
+- A windowed read (`offset` > 0, or `limit` that the file fills) is a prefix
+  too: `kind` and `position` are reported, but no `likely_fixes`,
+  `next_top_level_line` or diagnosis text, because a valid file's slice looks
+  unbalanced. `position.line`/`column` count from the start of the window,
+  `position.offset` from the start of the file.
 - Ignores delimiters inside strings, `;` line comments, `#| ... |#` block
   comments (nested), `#\x` character literals, `\`-escaped characters and
   `|...|` symbols.
