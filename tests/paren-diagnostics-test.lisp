@@ -142,6 +142,15 @@
       (ok (eq (lexical-state-at text 6) :string-escape) "right after the backslash")
       (ok (eq (lexical-state-at text 7) :string) "escape consumed by c"))))
 
+(deftest lexical-state-at-stops-before-a-pending-code-escape
+  (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
+    ;; characters: ( a space \ b )  -- the backslash is index 3
+    (ok (eq (lexical-state-at "(a \\b)" 4) :pending) "\\ at the limit")
+    (ok (eq (lexical-state-at "(a \\b)" 5) :code) "\\b consumed inside the range")
+    ;; characters: ( a space # \ ) )  -- the # is index 3
+    (ok (eq (lexical-state-at "(a #\\))" 4) :pending) "# at the limit")
+    (ok (eq (lexical-state-at "(a #\\))" 6) :code) "#\\) consumed inside the range")))
+
 (deftest scan-delimiters-handles-nested-block-comments
   (testing "a nested #| ... |# inside a block comment does not end it early"
     (ok (getf (scan-delimiters "(a #| outer #| inner |# ( |# b)") :ok)

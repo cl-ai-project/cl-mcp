@@ -250,7 +250,8 @@ Known limitation: |...| multiple-escape symbols are not recognised, so a
 parenthesis inside one is still reported as code."
   (let ((len (min (length text) (or end (length text))))
         (idx 0) (line 1) (col 1)
-        (in-string nil) (escape nil) (line-comment nil) (block-depth 0))
+        (in-string nil) (escape nil) (line-comment nil) (block-depth 0)
+        (pending nil))
     (loop while (< idx len)
           do (let ((ch (char text idx))
                    (next (and (< (1+ idx) (length text)) (char text (1+ idx)))))
@@ -266,6 +267,12 @@ parenthesis inside one is still reported as code."
                          (decf block-depth) (incf idx) (incf col))
                         ((and (char= ch #\#) next (char= next #\|))
                          (incf block-depth) (incf idx) (incf col))))
+                 ((and (>= (1+ idx) len) (or (char= ch #\\) (char= ch #\#)))
+                  ;; A two-character construct (\x, #\x, #|) would reach past
+                  ;; END: stop here and report the token as pending instead of
+                  ;; consuming text the caller asked us not to classify.
+                  (setf pending t)
+                  (return))
                  ((char= ch #\;) (setf line-comment t))
                  ((char= ch #\") (setf in-string t))
                  ((char= ch #\\)
@@ -293,7 +300,8 @@ parenthesis inside one is still reported as code."
                    (setf line (1+ line) col 1)
                    (incf col))
                (incf idx)))
-    (cond (line-comment :line-comment)
+    (cond (pending :pending)
+          (line-comment :line-comment)
           ((and in-string escape) :string-escape)
           (in-string :string)
           ((plusp block-depth) :block-comment)
@@ -303,7 +311,9 @@ parenthesis inside one is still reported as code."
   "Return the lexical state in effect just before position POS of TEXT, as
 scanned from its beginning: :code, :string, :string-escape (inside a string
 with a backslash pending, so the next character is not a delimiter),
-:line-comment or :block-comment.
+:line-comment, :block-comment, or :pending when the character just before
+POS starts a two-character construct (\\x, #\\x, #|) that would consume the
+character at POS.
 lisp-patch-form compares this at the end of a replacement in the original
 and patched form texts; a mismatch means new_text opened a string or comment
 that swallows the unchanged suffix, so region parenthesis counts no longer
