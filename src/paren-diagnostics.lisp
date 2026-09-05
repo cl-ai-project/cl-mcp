@@ -430,11 +430,18 @@ previous top-level form was never closed."
     nil))
 
 (defun %line-text (text line)
-  "Return the LINE-th (1-based) line of TEXT, or \"\" when out of range."
-  (let ((lines (split-string text :separator '(#\Newline))))
-    (if (<= 1 line (length lines))
-        (nth (1- line) lines)
-        "")))
+  "Return the LINE-th (1-based) line of TEXT, or \"\" when out of range.
+A bounded scan for the line's newlines, so naming one line of a large text
+does not split the whole of it."
+  (let ((start 0))
+    (loop repeat (1- line)
+          do (let ((nl (position #\Newline text :start start)))
+               (if nl
+                   (setf start (1+ nl))
+                   (return-from %line-text ""))))
+    (if (< line 1)
+        ""
+        (subseq text start (or (position #\Newline text :start start) (length text))))))
 
 (defun %form-head (text line)
   "Return the trimmed first 40 characters of LINE in TEXT, for naming a form."
@@ -649,13 +656,15 @@ reindentation cannot flood the guidance."
 Only failure plists are rendered: when DIAGNOSIS is balanced (:ok true) this
 returns NIL, because there is nothing to explain.
 TARGET is the subject of the first sentence: \"code\", \"content\", \"new_text\",
-or a file path. The likely-fix block is included only when parinfer produced
-one; otherwise a repair-failed sentence is printed instead.
+or a file path. The text is a finding sentence per kind, followed -- unless
+FALSE-POSITIVE -- by the instruction for that kind (remove, replace, close),
+then the likely-fix block when parinfer produced one or a repair-failed
+sentence when it did not, then the next-top-level hint.
 FALSE-POSITIVE, when true, means a caller with better evidence (the editing
 tools' reader accepted the text) has judged the verdict a false positive of
-the standard-syntax scan: the finding is still described, but no instruction
-to change anything -- no likely-fix block, no \"Replace it with\", no
-next-top-level hint -- is attached to it."
+the standard-syntax scan: the finding is still described, but nothing that
+tells the caller to change anything is attached to it. That is enforced in
+one place, below, rather than per kind."
   (when (getf diagnosis :ok)
     (return-from format-delimiter-diagnosis nil))
   (let ((kind (getf diagnosis :kind))
@@ -667,20 +676,20 @@ next-top-level hint -- is attached to it."
         (failed (getf diagnosis :repair-failed))
         (next-line (getf diagnosis :next-top-level-line)))
     (with-output-to-string (s)
+      ;; The finding.
       (cond
         ((string= kind "unclosed")
          (format s "Unbalanced parentheses in ~A: unclosed (form starting at line ~D: ~S)."
                  target (getf diagnosis :unclosed-form-line)
                  (getf diagnosis :unclosed-form-head)))
         ((string= kind "extra-close")
-         (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D.~%~
-                    Either remove that ~S or check for a form opened earlier that was never closed."
-                 target found line column found))
+         (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D."
+                 target found line column))
         ((and (string= kind "mismatch") (equal expected ")"))
          (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
                     \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be ~
-                    auto-repaired.~:[~%Replace it with ~S.~;~*~]"
-                 target expected found line column false-positive expected))
+                    auto-repaired."
+                 target expected found line column))
         ((string= kind "mismatch")
          ;; EXPECTED is "]" or "}": the opener was a bracket or brace, which in
          ;; Common Lisp may legitimately be part of a symbol name.  Advising a
@@ -692,16 +701,28 @@ next-top-level hint -- is attached to it."
                  (if (equal expected "]") "[" "{")))
         ((string= kind "unclosed-block-comment")
          (format s "Unterminated block comment in ~A: the #| opened at line ~D, ~
-                    column ~D was never closed.~:[ Close it with |#.~;~]"
-                 target line column false-positive))
+                    column ~D was never closed."
+                 target line column))
         ((string= kind "unclosed-string")
          (format s "Unterminated string in ~A: the \" opened at line ~D, ~
-                    column ~D was never closed.~:[ Close it with \".~;~]"
-                 target line column false-positive))
+                    column ~D was never closed."
+                 target line column))
         (t
          (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
                  target kind line column)))
+      ;; What to do about it: nothing, when the verdict is a false positive.
       (unless false-positive
+        (cond
+          ((string= kind "extra-close")
+           (format s "~%Either remove that ~S or check for a form opened earlier ~
+                      that was never closed."
+                   found))
+          ((and (string= kind "mismatch") (equal expected ")"))
+           (format s "~%Replace it with ~S." expected))
+          ((string= kind "unclosed-block-comment")
+           (format s " Close it with |#."))
+          ((string= kind "unclosed-string")
+           (format s " Close it with \".")))
         (cond
           (fixes
            (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))

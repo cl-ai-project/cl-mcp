@@ -55,6 +55,7 @@
            #:file-unparseable-cause
            #:file-unparseable-readtable
            #:file-unparseable-recoverable-p
+           #:file-unparseable-editable-prefix-p
            #:file-unparseable-message))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
@@ -369,18 +370,29 @@ text points at the readtable parameter instead."
                    (format-delimiter-diagnosis diagnosis :target path))))
     (cond
       ((file-unparseable-recoverable-p condition)
-       (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
-                    lisp-patch-form cannot locate any form in it.~%~
-                    Run lisp-check-parens with path=~S to see the full diagnosis, ~
-                    then read the file with fs-read-file, apply the change~
-                    ~:[ described above~; shown under \"Likely fix\"~]~
-                    ~@[ to the form starting at line ~D~], and ~
-                    write the whole file back with fs-write-file, passing ~
-                    allow_unparseable_overwrite=true (it refuses to overwrite an ~
-                    existing Lisp file otherwise). If the file uses custom reader ~
-                    syntax that the default reader cannot parse, pass the readtable ~
-                    parameter to lisp-edit-form instead of overwriting."
-               head path (not (null (getf diagnosis :likely-fixes))) line))
+       ;; fs-write-file takes only a project-relative path, so that is the
+       ;; form the instruction gives; the absolute one stays in the head.
+       (let ((relative (ignore-errors
+                        (namestring
+                         (enough-pathname (pathname path)
+                                          (ensure-directory-pathname
+                                           (truename *project-root*)))))))
+         (format nil "~A~%The file itself does not parse~:[, so lisp-edit-form and ~
+                      lisp-patch-form cannot locate any form in it~; past its ~
+                      broken form: the forms before it can still be edited with ~
+                      lisp-edit-form, but this one is in the broken tail~].~%~
+                      Run lisp-check-parens with path=~S to see the full diagnosis, ~
+                      then read the file with fs-read-file, apply the change~
+                      ~:[ described above~; shown under \"Likely fix\"~]~
+                      ~@[ to the form starting at line ~D~], and ~
+                      write the whole file back with fs-write-file (path=~S, ~
+                      allow_unparseable_overwrite=true; it refuses to overwrite an ~
+                      existing Lisp file otherwise). If the file uses custom reader ~
+                      syntax that the default reader cannot parse, pass the readtable ~
+                      parameter to lisp-edit-form instead of overwriting."
+                 head (file-unparseable-editable-prefix-p condition) path
+                 (not (null (getf diagnosis :likely-fixes))) line
+                 (or relative path))))
       (readtable
        (format nil "~A~%No standard-syntax diagnosis is offered under a custom ~
                     readtable (a reader macro may consume raw parentheses). Run ~
@@ -416,7 +428,9 @@ text points at the readtable parameter instead."
    (readtable :initarg :readtable :initform nil
               :reader file-unparseable-readtable)
    (recoverable :initarg :recoverable :initform nil
-                :reader file-unparseable-recoverable-p))
+                :reader file-unparseable-recoverable-p)
+   (editable-prefix :initarg :editable-prefix :initform nil
+                    :reader file-unparseable-editable-prefix-p))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -424,7 +438,11 @@ parenthesis) that no readtable can fix; only then does fs-write-file permit
 overwriting the file, and only then does the message advertise that path.
 READTABLE is the designator the caller supplied, if any: under a custom
 readtable no standard-syntax verdict is attached (DIAGNOSIS is then a plain
-balanced plist and RECOVERABLE is NIL), and the message says so."))
+balanced plist and RECOVERABLE is NIL), and the message says so.
+EDITABLE-PREFIX is T when the parse still returned the forms before the
+breakage (the lenient CL-reader pass after an IN-READTABLE switch does), so
+those forms remain editable and the message must not claim that no form can
+be located."))
 
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
@@ -457,14 +475,17 @@ Returns eight values:
                   cannot prove the file is broken). Split the file or edit it ~
                   outside cl-mcp."
                  (namestring abs) file-length (length original)))
-        (flet ((unparseable (cause)
+        (flet ((unparseable (cause &optional editable-prefix)
                  ;; Under a caller-supplied readtable the standard delimiter
                  ;; scan is not evidence (a reader macro may consume raw
                  ;; parentheses), so no scan-based diagnosis or "recoverable"
                  ;; verdict is attached; the message explains the situation.
+                 ;; EDITABLE-PREFIX: the lenient pass returned forms before
+                 ;; the breakage, which lisp-edit-form can still address.
                  (error 'file-unparseable-error
                         :path (namestring abs)
                         :readtable readtable
+                        :editable-prefix editable-prefix
                         :diagnosis (if readtable
                                        (list :ok t)
                                        (diagnose-delimiters original))
@@ -480,7 +501,7 @@ Returns eight values:
             (let ((target (%find-target nodes form-type-str form-name)))
               (unless target
                 (when swallowed
-                  (unparseable swallowed))
+                  (unparseable swallowed (and nodes t)))
                 (error "Form ~A ~A not found in ~A" form-type form-name
                        (namestring abs)))
               (let ((target-snippet (subseq original
@@ -499,33 +520,33 @@ characters as data -- is not evidence, since the tools' readtable parameter
 may make the file editable, so the overwrite guard must stay in place.
 The second value says why: :DELIMITER (the primary value is T), :PARSED (the
 file parses cleanly, so a scan verdict against it is a false positive),
-:READER-LEVEL (it fails, but not on a delimiter), or :TRUNCATED.
+:READER-LEVEL (it fails, but not on a delimiter), or :TRUNCATED. The third
+value is T when the failing parse still returned forms (the lenient
+CL-reader pass after an IN-READTABLE switch keeps the forms before the
+breakage), so those forms remain editable with lisp-edit-form and the
+guidance must not claim that no form can be located.
 TEXT, when supplied by the caller (fs-write-file has already read the file),
 avoids a second read; otherwise the file is read here, and a read truncated
 at the fs read cap returns NIL because a cut-off prefix of a valid file
 would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
 permits overwriting only files that are broken this way, and called directly
-by lisp-check-parens so its next-step hint rests on the same verdict. (On the
-lenient CL-reader pass -- after an IN-READTABLE switch or under a readtable
-argument -- a file whose breakage lies after the target form is still
-partially editable by lisp-edit-form, which only reports it when the target
-is not found; the guard classifies such a file by the whole-file parse.)"
+by lisp-check-parens so its next-step hint rests on the same verdict."
   (multiple-value-bind (source truncated)
       (if text (values text nil) (fs-read-file pn))
     (if truncated
-        (values nil :truncated)
+        (values nil :truncated nil)
         (handler-case
             (multiple-value-bind (nodes swallowed)
                 (parse-top-level-forms source :source-path pn)
-              (declare (ignore nodes))
-              (cond ((null swallowed) (values nil :parsed))
-                    ((%delimiter-failure-p swallowed) (values t :delimiter))
-                    (t (values nil :reader-level))))
+              (cond ((null swallowed) (values nil :parsed nil))
+                    ((%delimiter-failure-p swallowed)
+                     (values t :delimiter (and nodes t)))
+                    (t (values nil :reader-level (and nodes t)))))
           (error (e)
             (if (%delimiter-failure-p e)
-                (values t :delimiter)
-                (values nil :reader-level)))))))
+                (values t :delimiter nil)
+                (values nil :reader-level nil)))))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.

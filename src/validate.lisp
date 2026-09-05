@@ -60,16 +60,25 @@ When a custom readtable is active, the standard CL reader would produce
 false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
 
+(defun %project-root-truename ()
+  "Return the project root as a resolved directory pathname, or NIL when it is
+unset or does not exist. Both sides of a containment test must be resolved:
+FS-RESOLVE-READ-PATH returns a truename, and a project root that is itself a
+symlink (macOS /tmp, a git worktree) would otherwise never contain it."
+  (let ((root cl-mcp/src/project-root:*project-root*))
+    (and root
+         (ignore-errors
+          (uiop:ensure-directory-pathname
+           (truename (uiop:ensure-directory-pathname root)))))))
+
 (defun %under-project-root-p (path)
   "Return T when PATH resolves to a file under the project root, i.e. one that
 fs-write-file could rewrite. A file elsewhere on the read allow-list (another
 ASDF system's source) can be checked but not overwritten, so it must not be
 sent to the overwrite path."
-  (let ((root cl-mcp/src/project-root:*project-root*))
+  (let ((root (%project-root-truename)))
     (and root
-         (ignore-errors
-          (uiop:subpathp (fs-resolve-read-path path)
-                         (uiop:ensure-directory-pathname root)))
+         (ignore-errors (uiop:subpathp (fs-resolve-read-path path) root))
          t)))
 
 (defun %truncate-message (condition)
@@ -248,12 +257,35 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
              ;; never on the scan alone, and never for a window. It is
              ;; computed before any text, because a file that parser accepts
              ;; must not receive a likely fix or an instruction at all.
-             (multiple-value-bind (overwritable verdict)
+             (multiple-value-bind (overwritable verdict editable-prefix)
                  (and path (not partial)
                       (ignore-errors
                        (%file-unparseable-by-edit-tools-p
                         (fs-resolve-read-path path) text)))
-               (let ((false-positive (eq verdict :parsed)))
+               (let ((false-positive (eq verdict :parsed))
+                     (overwrite-hint (and overwritable (%under-project-root-p path))))
+                 ;; The summary's next-step sentence, built here where the
+                 ;; parser's verdict and the project root are known: the
+                 ;; path is given relative to the root because that is the
+                 ;; only form fs-write-file accepts, and a file whose forms
+                 ;; before the breakage were parsed is not called unlocatable.
+                 (when overwrite-hint
+                   (setf (gethash "guidance_text" h)
+                         (format nil ". The file does not parse~:[, so lisp-edit-form ~
+                                      and lisp-patch-form cannot locate any form in ~
+                                      it~; past its broken form (the forms before it ~
+                                      can still be edited with lisp-edit-form; the ~
+                                      broken tail needs the overwrite path)~]: read ~
+                                      it with fs-read-file, apply the fix below, and ~
+                                      write it back with fs-write-file (path=~S, ~
+                                      allow_unparseable_overwrite=true). If the file ~
+                                      uses custom reader syntax the default reader ~
+                                      cannot parse, pass the readtable parameter to ~
+                                      lisp-edit-form instead of overwriting."
+                                 editable-prefix
+                                 (namestring
+                                  (uiop:enough-pathname (fs-resolve-read-path path)
+                                                        (%project-root-truename))))))
                  (cond
                    (partial
                     ;; A slice of the file: say what was seen, never how to
@@ -295,11 +327,8 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                         (setf (gethash "next_top_level_line" h) next-top-level-line)))))
                  ;; fs-write-file only writes under the project root, so the
                  ;; overwrite hint is promised only for a file it could write.
-                 (%maybe-add-lisp-edit-guidance
-                  h kind
-                  :overwritable (and overwritable
-                                     (%under-project-root-p path)
-                                     t)))))
+                 (%maybe-add-lisp-edit-guidance h kind
+                                                :overwritable (and overwrite-hint t)))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil
@@ -394,22 +423,12 @@ sent to the fs-write-file overwrite path."
                                     "~A~:[~A at line ~D, column ~D~;~*~*~*~]~A~@[~%~A~]"
                                     label (string= kind "too-large") ef line col
                                     (cond
-                                      ((equal next-tool "fs-write-file")
-                                       ;; The file does not parse, so the
-                                       ;; structural tools cannot find a
-                                       ;; form in it: name the overwrite path
-                                       ;; rather than sending the caller into
-                                       ;; a loop with lisp-edit-form.
-                                       (format nil ". The file does not parse, so ~
-                                        lisp-edit-form and lisp-patch-form cannot ~
-                                        locate any form in it: read it with ~
-                                        fs-read-file, apply the fix below, and ~
-                                        write it back with fs-write-file passing ~
-                                        allow_unparseable_overwrite=true. If the ~
-                                        file uses custom reader syntax the default ~
-                                        reader cannot parse, pass the readtable ~
-                                        parameter to lisp-edit-form instead of ~
-                                        overwriting."))
+                                      ;; The overwrite path, worded by
+                                      ;; LISP-CHECK-PARENS where the parser's
+                                      ;; verdict and the relative path are
+                                      ;; known, rather than sending the caller
+                                      ;; into a loop with lisp-edit-form.
+                                      ((gethash "guidance_text" check-result))
                                       (next-tool
                                        ". Use lisp-edit-form for existing Lisp files.")
                                       (t ""))

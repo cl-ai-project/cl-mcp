@@ -126,7 +126,9 @@ first, and the write is allowed only when the parse fails on a delimiter (a
 missing or stray `)`, or an unterminated string or `#|` comment) that no
 readtable could fix; a file that parses, a truncated read, or an unreadable
 file is still refused. The intended recovery loop is `lisp-check-parens` →
-`fs-read-file` → `fs-write-file` with the flag. The plain refusal (no flag)
+`fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
+project root, and the guidance the tools print gives it in that form. The
+plain refusal (no flag)
 carries `allow_unparseable_overwrite_available: true` in its error data so a
 client can discover the opt-in.
 

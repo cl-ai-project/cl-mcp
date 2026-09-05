@@ -178,11 +178,50 @@
                  (ok (null (guard-overwritable-p)))
                  (ok (null (gethash "likely_fixes" res)))
                  (ng (search "Replace it with" (gethash "diagnosis_text" res)))))
+             (testing "a symbol starting with ] is an extra-close look-alike with no instruction"
+               (write-text (format nil "(defun f () 1)~%~%]foo~%"))
+               (let ((res (lisp-check-parens :path (namestring abs))))
+                 (ok (string= (%kind res) "extra-close"))
+                 (ok (null (guard-overwritable-p)))
+                 (ng (search "Either remove" (gethash "diagnosis_text" res)))
+                 (ok (null (gethash "likely_fixes" res)))))
              (testing "a plain missing ) agrees in the other direction"
                (write-text (format nil "(defun f ()~%  (list 1 2~%"))
                (let ((res (lisp-check-parens :path (namestring abs))))
                  (ok (guard-overwritable-p))
                  (ok (string= (gethash "next_tool" res) "fs-write-file")))))
+        (ignore-errors (delete-file abs))))))
+
+(deftest lisp-check-parens-guidance-names-a-relative-path-and-the-editable-prefix
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (abs (merge-pathnames "tests/tmp/check-parens-guidance-path.lisp" root))
+         (cl-mcp/src/project-root:*project-root* root))
+    (ensure-directories-exist abs)
+    (flet ((write-text (text)
+             (with-open-file (out abs :direction :output :if-exists :supersede)
+               (write-string text out))))
+      (unwind-protect
+           (progn
+             (testing "the overwrite guidance gives fs-write-file a project-relative path"
+               (write-text (format nil "(defun f ()~%  (list 1 2~%"))
+               (let* ((res (lisp-check-parens :path (namestring abs)))
+                      (guidance (gethash "guidance_text" res)))
+                 (ok (string= (gethash "next_tool" res) "fs-write-file"))
+                 (ok (search "path=\"tests/tmp/check-parens-guidance-path.lisp\"" guidance)
+                     "relative to the project root, as fs-write-file requires")
+                 (ok (search "cannot locate any form in it" guidance))))
+             (testing "after an in-readtable switch the forms before the breakage stay editable"
+               (if (find-package "NAMED-READTABLES")
+                   (progn
+                     (write-text (format nil "(named-readtables:in-readtable :standard)~%~%~
+                                              (defun early ()~%  1)~%~%~
+                                              (defun late ()~%  (list 1 2~%"))
+                     (let* ((res (lisp-check-parens :path (namestring abs)))
+                            (guidance (gethash "guidance_text" res)))
+                       (ok (string= (gethash "next_tool" res) "fs-write-file"))
+                       (ok (search "forms before it can still be edited" guidance))
+                       (ng (search "cannot locate any form" guidance))))
+                   (rove:skip "named-readtables not available"))))
         (ignore-errors (delete-file abs))))))
 
 (deftest lisp-check-parens-limit-equal-to-a-multibyte-file-is-not-a-window

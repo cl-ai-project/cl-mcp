@@ -230,6 +230,26 @@
       (ng (getf d :repair-failed))
       (ok (search "Likely fix" msg)))))
 
+(deftest false-positive-rendering-attaches-no-instruction
+  (testing "every kind describes the finding but tells the caller to change nothing"
+    (flet ((rendered (text)
+             (format-delimiter-diagnosis (diagnose-delimiters text) :false-positive t)))
+      (let ((extra (rendered "(a))"))
+            (typo (rendered (format nil "(defun f (x)~%  (let ((y 1]~%    (+ x y)))")))
+            (comment (rendered "(a #| b"))
+            (string (rendered "(a \"b"))
+            (unclosed (rendered +let-binding-unclosed+)))
+        (ok (search "extra \")\"" extra))
+        (ng (search "Either remove" extra))
+        (ok (search "found \"]\"" typo))
+        (ng (search "Replace it with" typo))
+        (ng (search "Close it with" comment))
+        (ng (search "Close it with" string))
+        (ok (search "unclosed (form starting at line 1" unclosed))
+        (ng (search "Likely fix" unclosed))
+        (ng (search "Next top-level form" unclosed))
+        (ng (search "fix the delimiters by hand" unclosed))))))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3

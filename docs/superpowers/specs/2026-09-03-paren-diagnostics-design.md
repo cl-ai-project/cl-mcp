@@ -594,6 +594,22 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
 - **`fs-read-file` の第 4 値**: 読み取りバッファの直後に入力が残っているかを
   返す。`limit` 付きの読み取りが窓かどうかを、文字数とオクテット数の比較なしに
   判定できる。
+- **指示文は 1 か所で抑止**: `format-delimiter-diagnosis` は「所見」と「指示」
+  (remove / Replace it with / Close it with / Likely fix / 次のトップレベル)を
+  分け、指示はまとめて `(unless false-positive ...)` で出す。種類ごとの分岐に
+  抑止を書くと `extra-close` のように漏れる。
+- **回復手順のパスは相対**: `fs-write-file` はプロジェクトルート相対のパスしか
+  受けないので、`file-unparseable-error` と `lisp-check-parens` の回復手順は
+  ルート相対のパスを `path=` として明示する。
+- **ルート判定は truename 同士**: `%under-project-root-p` はファイル側だけでなく
+  プロジェクトルート側も `truename` に解決して比較する(macOS の `/tmp` や
+  git worktree などルートがシンボリックリンクの場合に案内が消えないため)。
+- **編集可能な前半がある場合の文面**: `in-readtable` 切り替え後の寛容な
+  CL リーダー経路では破損箇所より前のフォームが返るので、その場合の案内は
+  「どのフォームも見つけられない」ではなく「破損箇所より前のフォームは
+  `lisp-edit-form` で編集でき、壊れた末尾だけ上書き経路が必要」とする
+  (`%file-unparseable-by-edit-tools-p` の第 3 値、`file-unparseable-error` の
+  `editable-prefix`)。
 - **`file-unparseable-error` の非回復分岐**: スキャンが区切り記号の問題を見つけて
   いてもリーダーが別の理由で止まった場合、診断とリーダーの苦情の両方を示し、
   「区切り記号の問題ではない」と診断を否定する文は使わない。
