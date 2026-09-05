@@ -148,14 +148,25 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
 
 (defun %diagnosed-reason (form-text fallback)
   "Return the patch failure reason for FORM-TEXT. When the delimiter scan
-finds the breakage, the shared diagnosis is used; otherwise FALLBACK."
-  (let ((diagnosis (diagnose-delimiters form-text)))
-    (if (getf diagnosis :ok)
-        fallback
-        (format nil "patch operation produced invalid Lisp. ~A ~
-                     Line numbers are within the patched form. ~
-                     No changes were written to disk."
-                (format-delimiter-diagnosis diagnosis :target "the patched form")))))
+finds the breakage, the shared diagnosis is used; otherwise FALLBACK. A
+mismatch whose expected delimiter is ] or } is ambiguous (those characters
+may be part of a symbol name in standard syntax), so the reader's own
+failure in FALLBACK is kept alongside the diagnosis instead of discarded."
+  (let* ((diagnosis (diagnose-delimiters form-text))
+         (ambiguous (member (getf diagnosis :expected) '("]" "}") :test #'equal)))
+    (cond
+      ((getf diagnosis :ok) fallback)
+      (ambiguous
+       (format nil "patch operation produced invalid Lisp. ~A ~
+                    Line numbers are within the patched form. ~
+                    The reader itself reported: ~A"
+               (format-delimiter-diagnosis diagnosis :target "the patched form")
+               fallback))
+      (t
+       (format nil "patch operation produced invalid Lisp. ~A ~
+                    Line numbers are within the patched form. ~
+                    No changes were written to disk."
+               (format-delimiter-diagnosis diagnosis :target "the patched form"))))))
 
 (defun %validate-form-parseable (form-text &key readtable-designator
                                              package-name source-path

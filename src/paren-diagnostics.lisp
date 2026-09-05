@@ -238,11 +238,14 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
 ;; a "(" or ")" inside such a symbol name is treated as code and reaches
 ;; FUNCTION like any other delimiter.
 
-(defun %map-code-characters (text function &key end)
+(defun %map-code-characters (text function &key end state-fn)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
 outside strings, line comments, block comments, character literals and
 single-escaped characters (a \\ outside a string makes the next character
 part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
+When STATE-FN is given it is called with (IDX STATE) for every position the
+scan visits, STATE being the lexical state in effect just before IDX; this
+lets a caller classify many positions in one pass instead of rescanning.
 Scanning stops at position END (default: the end of TEXT) and returns two
 values: the lexical state reached there (:code, :string, :string-escape,
 :line-comment, :block-comment or :pending) and the block-comment nesting
@@ -256,68 +259,73 @@ parenthesis inside one is still reported as code."
         (idx 0) (line 1) (col 1)
         (in-string nil) (escape nil) (line-comment nil) (block-depth 0)
         (pending nil))
-    (loop while (< idx len)
-          do (let* ((ch (char text idx))
-                    (last-p (>= (1+ idx) len))
-                    (next (and (not last-p) (char text (1+ idx)))))
-               (cond
-                 (line-comment
-                  (when (char= ch #\Newline) (setf line-comment nil)))
-                 (in-string
-                  (cond (escape (setf escape nil))
-                        ((char= ch #\\) (setf escape t))
-                        ((char= ch #\") (setf in-string nil))))
-                 ((plusp block-depth)
-                  (cond ((and last-p (or (char= ch #\|) (char= ch #\#)))
-                         ;; |# or a nested #| would need the character at END.
-                         (setf pending t)
-                         (return))
-                        ((and (char= ch #\|) next (char= next #\#))
-                         (decf block-depth) (incf idx) (incf col))
-                        ((and (char= ch #\#) next (char= next #\|))
-                         (incf block-depth) (incf idx) (incf col))))
-                 ((and last-p (find ch "\\#'`,@"))
-                  ;; A two-character construct or a reader prefix would reach
-                  ;; past END: stop here and report the token as pending
-                  ;; instead of consulting text the caller asked us not to.
-                  (setf pending t)
-                  (return))
-                 ((char= ch #\;) (setf line-comment t))
-                 ((char= ch #\") (setf in-string t))
-                 ((char= ch #\\)
-                  ;; Single escape outside a string: skip the escaped character.
-                  (incf idx)
-                  (if (char= next #\Newline)
-                      (setf line (1+ line) col 0)
-                      (incf col)))
-                 ((and (char= ch #\#) (char= next #\|))
-                  (incf block-depth) (incf idx) (incf col))
-                 ((and (char= ch #\#) (char= next #\\))
-                  ;; #\x or #\Name: skip the backslash and the literal itself,
-                  ;; but never past END -- a literal cut off by the scan limit
-                  ;; is reported as pending, like a lone \ or # would be.
-                  (when (>= (+ idx 2) len)
+    (flet ((state ()
+             (cond (pending :pending)
+                   (line-comment :line-comment)
+                   ((and in-string escape) :string-escape)
+                   (in-string :string)
+                   ((plusp block-depth) :block-comment)
+                   (t :code))))
+      (loop while (< idx len)
+            do (let* ((ch (char text idx))
+                      (last-p (>= (1+ idx) len))
+                      (next (and (not last-p) (char text (1+ idx)))))
+                 (when state-fn
+                   (funcall state-fn idx (state)))
+                 (cond
+                   (line-comment
+                    (when (char= ch #\Newline) (setf line-comment nil)))
+                   (in-string
+                    (cond (escape (setf escape nil))
+                          ((char= ch #\\) (setf escape t))
+                          ((char= ch #\") (setf in-string nil))))
+                   ((plusp block-depth)
+                    (cond ((and last-p (or (char= ch #\|) (char= ch #\#)))
+                           ;; |# or a nested #| would need the character at END.
+                           (setf pending t)
+                           (return))
+                          ((and (char= ch #\|) next (char= next #\#))
+                           (decf block-depth) (incf idx) (incf col))
+                          ((and (char= ch #\#) next (char= next #\|))
+                           (incf block-depth) (incf idx) (incf col))))
+                   ((and last-p (find ch "\\#'`,@"))
+                    ;; A two-character construct or a reader prefix would reach
+                    ;; past END: stop here and report the token as pending
+                    ;; instead of consulting text the caller asked us not to.
                     (setf pending t)
                     (return))
-                  (let ((skip 2))
-                    (when (alpha-char-p (char text (+ idx 2)))
-                      (loop for k from (+ idx 3) below len
-                            while (alpha-char-p (char text k))
-                            do (incf skip)))
-                    (incf idx skip)
-                    (incf col skip)))
-                 (t (funcall function ch idx line col)))
-               (if (char= ch #\Newline)
-                   (setf line (1+ line) col 1)
-                   (incf col))
-               (incf idx)))
-    (values (cond (pending :pending)
-                  (line-comment :line-comment)
-                  ((and in-string escape) :string-escape)
-                  (in-string :string)
-                  ((plusp block-depth) :block-comment)
-                  (t :code))
-            block-depth)))
+                   ((char= ch #\;) (setf line-comment t))
+                   ((char= ch #\") (setf in-string t))
+                   ((char= ch #\\)
+                    ;; Single escape outside a string: skip the escaped character.
+                    (incf idx)
+                    (if (char= next #\Newline)
+                        (setf line (1+ line) col 0)
+                        (incf col)))
+                   ((and (char= ch #\#) (char= next #\|))
+                    (incf block-depth) (incf idx) (incf col))
+                   ((and (char= ch #\#) (char= next #\\))
+                    ;; #\x or #\Name: skip the backslash and the literal itself,
+                    ;; but never past END -- a literal cut off by the scan limit
+                    ;; is reported as pending, like a lone \ or # would be.
+                    (when (>= (+ idx 2) len)
+                      (setf pending t)
+                      (return))
+                    (let ((skip 2))
+                      (when (alpha-char-p (char text (+ idx 2)))
+                        (loop for k from (+ idx 3) below len
+                              while (alpha-char-p (char text k))
+                              do (incf skip)))
+                      (incf idx skip)
+                      (incf col skip)))
+                   (t (funcall function ch idx line col)))
+                 (if (char= ch #\Newline)
+                     (setf line (1+ line) col 1)
+                     (incf col))
+                 (incf idx)))
+      (when state-fn
+        (funcall state-fn len (state)))
+      (values (state) block-depth))))
 
 (defun lexical-state-at (text pos)
   "Return the lexical state in effect just before position POS of TEXT, as
@@ -367,33 +375,59 @@ previous top-level form was never closed."
         (subseq trimmed 0 40)
         trimmed)))
 
-(defun %line-end-outside-code-p (text line)
-  "Return T when the end of the 1-based LINE of TEXT lies inside a string or a
-comment. Parinfer appends its closing parens at line ends, so a change on
-such a line landed in non-code text and must not be offered as a fix."
-  (let ((pos 0))
-    (loop repeat (1- line)
-          do (let ((nl (position #\Newline text :start pos)))
-               (if nl
-                   (setf pos (1+ nl))
-                   (return-from %line-end-outside-code-p nil))))
-    (let ((end (or (position #\Newline text :start pos) (length text))))
-      (not (member (lexical-state-at text end) '(:code :pending))))))
+(defun %code-state-mask (text)
+  "Return a simple-vector of length (1+ (length TEXT)) whose element I is the
+lexical state in effect just before position I (:code, :string,
+:string-escape, :line-comment, :block-comment, :pending), computed in one
+pass. Positions the scan skips as parts of a token (the character behind a
+\\, the body of a #\\x literal) are marked :token, which counts as non-code.
+The final element is the state at the end of TEXT."
+  (let ((mask (make-array (1+ (length text)) :initial-element :token)))
+    (%map-code-characters text
+                          (lambda (ch idx line col)
+                            (declare (ignore ch idx line col))
+                            nil)
+                          :state-fn (lambda (idx state) (setf (svref mask idx) state)))
+    mask))
+
+(defun %any-fix-outside-code-p (text repaired fixes)
+  "Return T when any of FIXES (from REPAIR-LINE-DIFFERENCES on TEXT and
+REPAIRED) changes a position that is not code in TEXT: inside a string or
+a comment, or within a token. Parinfer is not comment-aware, so such a
+change would be ignored by the reader and must not be offered as a fix.
+The change position is the first differing character of the line (a removed
+\")\" ) or the end of the line (an appended one). Linear in the size of TEXT:
+the lexical states come from one %CODE-STATE-MASK pass and the lines from
+one split each."
+  (when fixes
+    (let ((mask (%code-state-mask text))
+          (orig-lines (coerce (split-string text :separator '(#\Newline)) 'vector))
+          (rep-lines (coerce (split-string repaired :separator '(#\Newline)) 'vector))
+          (line-starts (make-array (1+ (count #\Newline text)) :fill-pointer 0)))
+      (vector-push 0 line-starts)
+      (loop for i from 0 below (length text)
+            when (char= (char text i) #\Newline)
+              do (vector-push (1+ i) line-starts))
+      (loop for fix in fixes
+            for line = (getf fix :line)
+            for orig = (aref orig-lines (1- line))
+            for rep = (aref rep-lines (1- line))
+            for offset = (or (mismatch orig rep) (length orig))
+            for pos = (min (+ (aref line-starts (1- line)) offset) (length text))
+            unless (member (svref mask pos) '(:code :pending))
+              do (return t)))))
 
 (defun %likely-fixes (text)
   "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
 FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
 when the repaired text is still unbalanced per SCAN-DELIMITERS, which also
-covers a ] or } closing a paren, or when parinfer changed a line whose end
-lies inside a string or a comment: parinfer is not comment-aware, so a
-closing paren it appends inside a #| |# comment would be ignored by the
-reader, and offering it as a fix would mislead. FIXES is NIL in either case.
+covers a ] or } closing a paren, or when parinfer changed text that is not
+code (see %ANY-FIX-OUTSIDE-CODE-P). FIXES is NIL in either case.
 Balanced [...] or {...} pairs, as used by some reader macros, are accepted."
   (let ((repaired (apply-indent-mode text)))
     (if (getf (scan-delimiters repaired) :ok)
         (let ((fixes (repair-line-differences text repaired)))
-          (if (some (lambda (fix) (%line-end-outside-code-p text (getf fix :line)))
-                    fixes)
+          (if (%any-fix-outside-code-p text repaired fixes)
               (values nil t)
               (values fixes nil)))
         (values nil t))))
@@ -436,28 +470,59 @@ likely_fixes payload."
         (concatenate 'string (subseq line 0 limit) "...")
         line)))
 
+(defun %paren-edit-counts (orig rep)
+  "Return (VALUES added removed) when REP is ORIG with some \")\" characters
+deleted and/or \")\" characters appended, which is parinfer's edit model:
+ADDED is the number appended, REMOVED the number deleted. Returns NIL NIL
+when the lines differ in any other way (whitespace, a rewrapped token), so
+the caller can fall back to a plain count difference."
+  (let ((i 0) (j 0) (removed 0)
+        (n (length orig)) (m (length rep)))
+    (loop while (and (< i n) (< j m))
+          do (cond ((char= (char orig i) (char rep j)) (incf i) (incf j))
+                   ((char= (char orig i) #\)) (incf removed) (incf i))
+                   (t (return-from %paren-edit-counts (values nil nil)))))
+    (loop while (< i n)
+          do (if (char= (char orig i) #\))
+                 (progn (incf removed) (incf i))
+                 (return-from %paren-edit-counts (values nil nil))))
+    (let ((added 0))
+      (loop while (< j m)
+            do (if (char= (char rep j) #\))
+                   (progn (incf added) (incf j))
+                   (return-from %paren-edit-counts (values nil nil))))
+      (values added removed))))
+
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
-Return a list of (:line n :original str :repaired str :delta d) for every
-line that changed, where D is the number of \")\" added (negative if removed).
-A trailing #\\Return is stripped from both sides before comparing, so CRLF
-input does not leak a carriage return into the guidance, and lines whose D
-would be 0 (whitespace-only changes) are skipped because they would render as
-a meaningless \"add 0\" entry. D is computed on the full lines, but the stored
-:original and :repaired are bounded by %BOUND-LINE so a pathological
-single-line input cannot inflate the response.
+Return a list of (:line n :original str :repaired str :delta d :added a
+:removed r) for every line that changed, where A is the number of \")\"
+parinfer appended, R the number it removed, and D = A - R. A line whose net
+D is 0 is still reported when it really changed (\")(a\" -> \"(a)\"); only
+differences with no parenthesis edits at all (whitespace, a trailing
+carriage return) are skipped. A trailing #\\Return is stripped from both
+sides before comparing. The stored :original and :repaired are bounded by
+%BOUND-LINE so a pathological single-line input cannot inflate the response.
 Both texts must have the same number of lines, which parinfer guarantees."
   (loop for raw-orig in (split-string original :separator '(#\Newline))
         for raw-rep in (split-string repaired :separator '(#\Newline))
         for line from 1
         for orig = (%strip-trailing-cr raw-orig)
         for rep = (%strip-trailing-cr raw-rep)
-        for delta = (- (count #\) rep) (count #\) orig))
-        unless (or (string= orig rep) (zerop delta))
+        for (added removed) = (multiple-value-list (%paren-edit-counts orig rep))
+        for delta = (if added
+                        (- added removed)
+                        (- (count #\) rep) (count #\) orig)))
+        unless (or (string= orig rep)
+                   (if added
+                       (zerop (+ added removed))
+                       (zerop delta)))
           collect (list :line line
                         :original (%bound-line orig)
                         :repaired (%bound-line rep)
-                        :delta delta)))
+                        :delta delta
+                        :added (or added (max delta 0))
+                        :removed (or removed (max (- delta) 0)))))
 
 (defparameter *repair-lines-limit* 10
   "Maximum number of likely-fix entries rendered by FORMAT-REPAIR-LINES and
@@ -476,11 +541,18 @@ reindentation cannot flood the guidance."
     (with-output-to-string (s)
       (dolist (fix shown)
         (let ((delta (getf fix :delta)))
-          (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
-                  (getf fix :line)
-                  (getf fix :original)
-                  (if (minusp delta) "remove" "add")
-                  (abs delta))))
+          (if (zerop delta)
+              ;; One ) removed and one appended (\")(a\" -> \"(a)\"): the net
+              ;; count says nothing useful, so show the resulting line.
+              (format s "~%  line ~D: ~S  ->  ~S"
+                      (getf fix :line)
+                      (getf fix :original)
+                      (getf fix :repaired))
+              (format s "~%  line ~D: ~S  ->  ~A ~D \")\""
+                      (getf fix :line)
+                      (getf fix :original)
+                      (if (minusp delta) "remove" "add")
+                      (abs delta)))))
       (when (> total limit)
         (format s "~%  ... and ~D more changed lines" (- total limit))))))
 

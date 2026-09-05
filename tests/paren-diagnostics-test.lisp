@@ -206,6 +206,20 @@
     (let ((diff (repair-line-differences "(a))" "(a)")))
       (ok (= (getf (first diff) :delta) -1)))))
 
+(deftest repair-line-differences-keeps-zero-net-changes
+  (testing "a line that lost one ) and gained one is still reported, with both counts"
+    (let ((diff (repair-line-differences ")(a" "(a)")))
+      (ok (= (length diff) 1))
+      (ok (= (getf (first diff) :delta) 0))
+      (ok (= (getf (first diff) :added) 1))
+      (ok (= (getf (first diff) :removed) 1))))
+  (testing "a whitespace-only difference is still skipped"
+    (ok (null (repair-line-differences "(a)" "(a) "))))
+  (testing "such a fix is rendered as a replacement, and diagnosis offers it"
+    (let ((d (diagnose-delimiters ")(a")))
+      (ok (= (length (getf d :likely-fixes)) 1))
+      (ok (search "->  \"(a)\"" (format-repair-lines (getf d :likely-fixes)))))))
+
 (deftest repair-line-differences-bounds-long-lines
   (testing "a very long changed line is truncated in the stored fix, delta still exact"
     (let* ((filler (make-string 500 :initial-element #\x))
@@ -307,6 +321,13 @@
     (let ((d (diagnose-delimiters (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)"))))
       (ok (string= (getf d :kind) "unclosed"))
       (ok (getf d :repair-failed) "parinfer touched comment text, so the repair is not trusted")
+      (ng (getf d :likely-fixes)))))
+
+(deftest diagnose-rejects-repairs-inside-single-line-block-comments
+  (testing "removing a ) inside a one-line #| ) |# is not a fix even if the line ends in code"
+    (let ((d (diagnose-delimiters (format nil "#| ) |#~%(defun f ()~%  x"))))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ok (getf d :repair-failed) "parinfer edited comment text")
       (ng (getf d :likely-fixes)))))
 
 (deftest diagnose-ok-has-no-extra-keys

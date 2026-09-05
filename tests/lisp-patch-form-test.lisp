@@ -858,6 +858,26 @@ running as root), THUNK is skipped instead."
           (ok (search "No changes were written to disk." err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-ambiguous-bracket-keeps-reader-error
+  (testing "a [ in a symbol plus a real reader error reports both, not only the hedge"
+    (with-temp-file "tests/tmp/patch-ambiguous-bracket.lisp"
+        (format nil "(defun target ()~%  1)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "1"
+                               :new-text "foo[ #?")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (search "false positive" err-msg) "the bracket diagnosis is hedged")
+          (ok (search "The reader itself reported" err-msg) "the reader error is kept")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth
   (testing "boundaries inside block comments at different nesting depths do not match"
     (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"
