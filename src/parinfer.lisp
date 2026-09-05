@@ -10,9 +10,15 @@
 (defstruct (state (:constructor %make-state))
   (stack nil :type list)
   (in-string nil :type boolean)
+  ;; Inside a |...| multiple-escape symbol: its parentheses are symbol text.
+  (in-symbol nil :type boolean)
   (escape nil :type boolean)
   (sharp-seen nil :type boolean)
-  (char-literal nil :type boolean))
+  (char-literal nil :type boolean)
+  ;; Block comments: nesting depth, and whether the previous character was a
+  ;; | (so |# can be recognised) -- bar-seen is per-line like sharp-seen.
+  (block-depth 0 :type fixnum)
+  (bar-seen nil :type boolean))
 
 
 (defun %count-leading-spaces (line)
@@ -43,12 +49,30 @@
   processed-lines)
 
 (defun %process-line-characters (line state)
-  "Process characters in LINE tracking parens, strings, comments, and char literals.
-Handles #\\( and #\\) character literals so they are not counted as real parens."
+  "Process characters in LINE tracking parens, strings, comments, |...| symbols
+and char literals. Handles #\\( and #\\) character literals so they are not
+counted as real parens, treats the inside of a |...| multiple-escape symbol
+as symbol text, and skips #| ... |# block comments (nested) so that a paren
+inside one is neither counted nor \"repaired\"."
   (let ((output (make-string-output-stream)))
     (loop for ch across line
           for col from 0
           do (cond
+               ;; Inside a #| ... |# block comment: only track its end (and
+               ;; nested openers); nothing here is code.
+               ((plusp (state-block-depth state))
+                (write-char ch output)
+                (cond ((and (state-sharp-seen state) (char= ch #\|))
+                       (incf (state-block-depth state))
+                       (setf (state-sharp-seen state) nil
+                             (state-bar-seen state) nil))
+                      ((and (state-bar-seen state) (char= ch #\#))
+                       (decf (state-block-depth state))
+                       (setf (state-sharp-seen state) nil
+                             (state-bar-seen state) nil))
+                      (t
+                       (setf (state-sharp-seen state) (char= ch #\#)
+                             (state-bar-seen state) (char= ch #\|)))))
                ;; Skip the character after #\ (it's a char literal, not a paren)
                ((state-char-literal state)
                 (write-char ch output)
@@ -58,7 +82,12 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
                 (write-char ch output)
                 (setf (state-sharp-seen state) nil)
                 (setf (state-char-literal state) t))
-               ;; Previous char was # but next is not \: reset flag and
+               ;; Previous char was # : #| opens a block comment.
+               ((and (state-sharp-seen state) (char= ch #\|))
+                (write-char ch output)
+                (setf (state-sharp-seen state) nil)
+                (incf (state-block-depth state)))
+               ;; Previous char was # but next is not \ or |: reset flag and
                ;; fall through to normal processing (e.g. #( vector literals
                ;; must still push onto the paren stack).
                ((state-sharp-seen state)
@@ -82,6 +111,12 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
                       (write-char ch output))
                      (t nil)))
                   (t (write-char ch output))))
+               ;; Inside a |...| symbol: \ escapes, | ends, all else is text.
+               ((state-in-symbol state)
+                (write-char ch output)
+                (cond ((state-escape state) (setf (state-escape state) nil))
+                      ((char= ch #\\) (setf (state-escape state) t))
+                      ((char= ch #\|) (setf (state-in-symbol state) nil))))
                ;; Escape in string
                ((state-escape state)
                 (write-char ch output)
@@ -94,6 +129,10 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
                ((char= ch #\")
                 (write-char ch output)
                 (setf (state-in-string state) (not (state-in-string state))))
+               ;; Multiple-escape symbol start (outside string)
+               ((and (not (state-in-string state)) (char= ch #\|))
+                (write-char ch output)
+                (setf (state-in-symbol state) t))
                ;; # outside string: set flag for next char
                ((and (not (state-in-string state)) (char= ch #\#))
                 (write-char ch output)
@@ -118,6 +157,7 @@ Handles #\\( and #\\) character literals so they are not counted as real parens.
     ;; Reset per-line transient flags
     (setf (state-escape state) nil
           (state-sharp-seen state) nil
+          (state-bar-seen state) nil
           (state-char-literal state) nil)
     (get-output-stream-string output)))
 

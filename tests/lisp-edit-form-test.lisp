@@ -1501,6 +1501,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "1 extra closing delimiter dropped by parinfer" warning))
           (ng (search "content repaired by parinfer" warning)))))))
 
+(deftest lisp-edit-form-repair-ignores-parens-in-multiple-escape
+  (testing "a ( inside a |...| symbol is not counted, so the repair adds exactly one )"
+    (with-temp-file "tests/tmp/edit-form-multiple-escape.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target ()~%  (list '|a(b| 1)"))
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "(list '|a(b| 1))" (fs-read-file path))
+              "one ) was added after the form, the symbol untouched"))))))
+
 (deftest lisp-edit-form-warning-added-wording
   (testing "missing closing parens are reported as added"
     (with-temp-file "tests/tmp/edit-form-added.lisp"
@@ -1558,6 +1574,47 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                   "parinfer still closes the form under the custom readtable")
               (ok (search "foo]" (fs-read-file path))
                   "foo] was accepted as the readtable's business"))))
+        (skip "named-readtables not available"))))
+
+(deftest lisp-edit-form-readtable-file-failure-gives-no-scan-verdict
+  (testing "a file that fails under the caller's readtable gets no standard-syntax advice"
+    ;; #?[...] reads raw text through ]; the ( inside is data. Line 3 is
+    ;; genuinely missing a ), but the standard scanner would blame the ].
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-raw-bracket :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n)
+             (declare (ignore c n))
+             (read-char s)
+             (coerce (loop for ch = (read-char s nil nil)
+                           until (or (null ch) (char= ch #\]))
+                           collect ch)
+                     'string))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-readtable-file-failure.lisp"
+                   (format nil "(defun a () #?[(])~%(defun b ()~%  (list 1)~%")
+                 (lambda (path)
+                   (let ((err nil))
+                     (handler-case
+                         (lisp-edit-form :file-path path
+                                         :form-type "defun"
+                                         :form-name "b"
+                                         :operation "replace"
+                                         :readtable :cl-mcp-test-raw-bracket
+                                         :content "(defun b () 2)")
+                       (file-unparseable-error (e)
+                         (setf err (princ-to-string e))))
+                     (ok err "the missing ) on line 3 still makes the file unparseable")
+                     (ok (null (search "Replace it with" err))
+                         "no standard-syntax bracket advice under a custom readtable")
+                     (ok (null (search "Likely fix" err)))
+                     (ok (search "cl-mcp-test-raw-bracket" err)
+                         "the message names the readtable that was tried"))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-raw-bracket)))
         (skip "named-readtables not available"))))
 
 (deftest lisp-edit-form-accepts-balanced-braces-with-missing-paren

@@ -161,64 +161,54 @@ because fs cannot import that parser without a dependency cycle. When NIL,
 a standard-reader fallback is used.")
 
 (defun %lisp-file-unparseable-p (pn)
-  "Return T when the Lisp source at PN is broken in a way no readtable can
-fix, so that overwriting it is the only repair path. Delegates to
-*LISP-FILE-UNPARSEABLE-HOOK* when one is installed (the edit tools' own
-parser, which handles named-readtable declarations). Otherwise falls back to
-the standard reader with *READ-EVAL* NIL and counts only delimiter failures:
-a missing \")\" surfaces as END-OF-FILE and an extra one as the reader error
-\"unmatched close parenthesis\". Any other reader error (an unknown dispatch
-macro such as #?, a missing package) is not proof that the file is broken,
-since a readtable or package may make it readable, so the guard stays. Files
-that activate a named readtable are reported as parseable for the same
-reason, and so is a read truncated at *FS-READ-MAX-BYTES*."
+  "Return T when the structural editing tools cannot parse the Lisp source at
+PN in a way no readtable can fix, so that overwriting it is the only repair
+path. The verdict comes from *LISP-FILE-UNPARSEABLE-HOOK*, installed by
+cl-mcp/src/lisp-edit-form-core at load time: the edit tools' own parser,
+which handles named-readtable declarations and classifies failures by
+condition type. Without a hook (a partial image that loaded fs alone) the
+answer is NIL, i.e. the overwrite guard always holds -- there is no
+second, weaker definition of \"unparseable\" to drift from the tools'.
+A read truncated at *FS-READ-MAX-BYTES* is reported as parseable, since a
+cut-off prefix proves nothing."
   (multiple-value-bind (text truncated) (%read-file-string pn nil nil)
+    (declare (ignore text))
     (and (not truncated)
-         (if *lisp-file-unparseable-hook*
-             (and (funcall *lisp-file-unparseable-hook* pn) t)
-             (and (not (search "in-readtable" text))
-                  (with-input-from-string (stream text)
-                    (handler-case
-                        (let ((*read-eval* nil)
-                              (*readtable* (copy-readtable nil)))
-                          (loop (when (eq :eof (read stream nil :eof))
-                                  (return nil))))
-                      (end-of-file () t)
-                      (reader-error (e)
-                        (and (not (typep e 'package-error))
-                             (search "unmatched close parenthesis"
-                                     (princ-to-string e))
-                             t))
-                      (error () nil))))))))
+         *lisp-file-unparseable-hook*
+         (funcall *lisp-file-unparseable-hook* pn)
+         t)))
 
 (defun %existing-lisp-overwrite-error (id path allow-unparseable)
   "Return a structured RPC error for a forbidden Lisp overwrite, or NIL.
 New Lisp source file creation is always allowed. An existing .lisp/.asd file
-may be overwritten only when it does not parse (a missing or stray
-parenthesis, per %LISP-FILE-UNPARSEABLE-P) AND the caller passed
-ALLOW-UNPARSEABLE, i.e. explicitly judged that the breakage is real rather
-than custom reader syntax the structural tools could handle with a readtable.
-No heuristic can tell those two apart without knowing the readtable, so the
-decision is the caller's; the guard only makes sure a file that does parse
-is never rewritten wholesale."
+may be overwritten only when the caller passed ALLOW-UNPARSEABLE, i.e.
+explicitly judged that the breakage is real rather than custom reader syntax
+the structural tools could handle with a readtable, AND the file does not
+parse (a missing or stray parenthesis, per %LISP-FILE-UNPARSEABLE-P). The
+parse is attempted only when the caller opted in: without the flag the
+answer is a refusal either way, so the common case pays nothing.
+No heuristic can tell real breakage from custom syntax without knowing the
+readtable, so the decision is the caller's; the guard only makes sure a
+file that does parse is never rewritten wholesale."
   (let ((pn (ensure-write-path path)))
     (when (and (probe-file pn)
                (%lisp-source-pathname-p pn))
-      (let ((unparseable (%lisp-file-unparseable-p pn)))
-        (unless (and unparseable allow-unparseable)
-          (if unparseable
+      (let ((unparseable (and allow-unparseable (%lisp-file-unparseable-p pn))))
+        (unless unparseable
+          (if allow-unparseable
               (rpc-error id -32602
-                         (format nil "Cannot overwrite existing .lisp/.asd with fs-write-file. ~
-This file does not parse (missing or stray parenthesis), so lisp-edit-form cannot ~
-locate its forms either. If the file uses no custom reader syntax, call fs-write-file ~
-again with allow_unparseable_overwrite=true to rewrite it; if it does, pass the ~
-readtable parameter to lisp-edit-form instead.")
-                         (make-ht "code" "existing_lisp_unparseable"
+                         (format nil "Cannot overwrite existing .lisp/.asd with fs-write-file: ~
+the file parses, so allow_unparseable_overwrite does not apply; use lisp-edit-form ~
+(with the readtable parameter if the file uses custom reader syntax).")
+                         (make-ht "code" "existing_lisp_overwrite_forbidden"
                                   "path" path
-                                  "next_tool" "fs-write-file"
+                                  "next_tool" "lisp-edit-form"
                                   "required_args"
-                                  (vector "path" "content" "allow_unparseable_overwrite")
+                                  (vector "file_path" "form_type" "form_name"
+                                          "operation" "content")
                                   "new_file_creation_allowed" t))
+              ;; The plain refusal keeps its historical wording; the opt-in
+              ;; is advertised through the data field.
               (rpc-error id -32602
                          (format nil "Cannot overwrite existing .lisp/.asd with ~
 fs-write-file; use lisp-edit-form.")
@@ -228,7 +218,8 @@ fs-write-file; use lisp-edit-form.")
                                   "required_args"
                                   (vector "file_path" "form_type" "form_name"
                                           "operation" "content")
-                                  "new_file_creation_allowed" t))))))))
+                                  "new_file_creation_allowed" t
+                                  "allow_unparseable_overwrite_available" t))))))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."

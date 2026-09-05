@@ -896,6 +896,25 @@ running as root), THUNK is skipped instead."
           (ok (search "The reader itself reported" err-msg) "the reader error is kept")
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-depth-reason-ignores-parens-in-multiple-escape
+  (testing "a ( inside a |...| symbol does not manufacture a net-parenthesis message"
+    (with-temp-file "tests/tmp/patch-multiple-escape.lisp"
+        (format nil "(defun target ()~%  (list 1))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(list 1)"
+                               :new-text "(list '|a(b| #?)")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the #? dispatch is invalid, so the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "new_text is balanced; the ( is symbol text")
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth
   (testing "boundaries inside block comments at different nesting depths do not match"
     (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"

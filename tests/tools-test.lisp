@@ -255,8 +255,11 @@
                   (format nil "(defun a ()~%  (list 1)~%")
                   "\";; clobbered\"" 97)
           (ok err "refused")
-          (ok (string= (gethash "code" (gethash "data" err)) "existing_lisp_unparseable"))
-          (ok (search "allow_unparseable_overwrite" (gethash "message" err)))
+          ;; Without the opt-in the file is not even parsed: the refusal is
+          ;; the plain one, but its data advertises the opt-in.
+          (ok (string= (gethash "code" (gethash "data" err))
+                       "existing_lisp_overwrite_forbidden"))
+          (ok (eql (gethash "allow_unparseable_overwrite_available" (gethash "data" err)) t))
           (ok (string= after (format nil "(defun a ()~%  (list 1)~%")) "file untouched"))))
     (testing "the opt-in never overrides the guard for a file that parses"
       (with-test-project-root

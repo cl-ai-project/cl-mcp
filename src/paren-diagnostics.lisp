@@ -65,6 +65,8 @@
   (col 1 :type fixnum)
   (stack '() :type list)
   (in-string nil :type boolean)
+  ;; Inside a |...| multiple-escape symbol: delimiters there are symbol text.
+  (in-multi-escape nil :type boolean)
   (escape nil :type boolean)
   (line-comment nil :type boolean)
   (block-depth 0 :type fixnum)
@@ -107,6 +109,10 @@ indicating how many additional characters past CH were consumed."
    ;; so \( and \) are not delimiters. An escaped newline is left to the
    ;; normal path so the line counter still advances over it.
    ((and (char= ch #\\) next (char/= next #\Newline)) (values nil 1))
+   ;; Multiple escape: everything up to the matching | is symbol text. A
+   ;; block-comment opener never reaches here as |, since #| is recognised
+   ;; at its # below, and |# only occurs inside a block comment.
+   ((char= ch #\|) (setf (scan-state-in-multi-escape state) t) (values nil nil))
    ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
    ;; delimiter characters like #\( are not treated as open-parens.
    ((and (char= ch #\#) next (char= next #\\))
@@ -147,9 +153,18 @@ indicating how many additional characters past CH were consumed."
     (t
      (incf (scan-state-col state)))))
 
-;; Known limitation: |...| multiple-escape symbols are not recognised here, so
-;; a "(" or ")" inside such a symbol name is counted as code and can produce a
-;; spurious imbalance report.
+(defun %scan-handle-multi-escape (state ch)
+  "Handle a character inside a |...| multiple-escape symbol: a \\ escapes the
+next character (so \\| does not end the symbol), an unescaped | ends it,
+and everything else -- parentheses included -- is symbol text."
+  (cond
+    ((scan-state-escape state)
+     (setf (scan-state-escape state) nil))
+    ((char= ch #\\)
+     (setf (scan-state-escape state) t))
+    ((char= ch #\|)
+     (setf (scan-state-in-multi-escape state) nil))))
+
 (defun scan-delimiters (text &key (base-offset 0))
   "Return a plist describing balance of delimiters in TEXT.
 Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column.
@@ -168,6 +183,8 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                (%scan-handle-line-comment state ch))
               ((scan-state-in-string state)
                (%scan-handle-string state ch))
+              ((scan-state-in-multi-escape state)
+               (%scan-handle-multi-escape state ch))
               ((plusp (scan-state-block-depth state))
                (when (%scan-handle-block-comment state ch next)
                  (incf idx)
@@ -211,7 +228,7 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
     (list :ok t)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Stubs (replaced in Tasks 2 and 3)
+;;; Diagnosis and repair hints
 ;;; ---------------------------------------------------------------------------
 
 (defun diagnose-delimiters (text &key (base-offset 0))
@@ -240,30 +257,30 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
 
 (defun %map-code-characters (text function &key end state-fn)
   "Call FUNCTION with (CH IDX LINE COL) for every character of TEXT that is
-outside strings, line comments, block comments, character literals and
+outside strings, line comments, block comments, character literals,
 single-escaped characters (a \\ outside a string makes the next character
-part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
+part of a symbol, so \\) is not a delimiter) and |...| multiple-escape
+symbols (whose parentheses are symbol text). LINE and COL are 1-based.
 When STATE-FN is given it is called with (IDX STATE) for every position the
 scan visits, STATE being the lexical state in effect just before IDX; this
 lets a caller classify many positions in one pass instead of rescanning.
 Scanning stops at position END (default: the end of TEXT) and returns two
 values: the lexical state reached there (:code, :string, :string-escape,
-:line-comment, :block-comment or :pending) and the block-comment nesting
-depth at that point. Nothing at or past END is ever consulted, so the state
-at END depends only on the text before it: a construct that would need the
-character at END (\\x, #\\x, #|, |#, or a reader prefix such as ' ` , @ #
-that needs a following object) is reported as :pending instead.
-Known limitation: |...| multiple-escape symbols are not recognised, so a
-parenthesis inside one is still reported as code."
+:symbol, :line-comment, :block-comment or :pending) and the block-comment
+nesting depth at that point. Nothing at or past END is ever consulted, so
+the state at END depends only on the text before it: a construct that would
+need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
+' ` , @ # that needs a following object) is reported as :pending instead."
   (let ((len (min (length text) (or end (length text))))
         (idx 0) (line 1) (col 1)
-        (in-string nil) (escape nil) (line-comment nil) (block-depth 0)
-        (pending nil))
+        (in-string nil) (in-symbol nil) (escape nil) (line-comment nil)
+        (block-depth 0) (pending nil))
     (flet ((state ()
              (cond (pending :pending)
                    (line-comment :line-comment)
                    ((and in-string escape) :string-escape)
                    (in-string :string)
+                   (in-symbol :symbol)
                    ((plusp block-depth) :block-comment)
                    (t :code))))
       (loop while (< idx len)
@@ -279,6 +296,12 @@ parenthesis inside one is still reported as code."
                     (cond (escape (setf escape nil))
                           ((char= ch #\\) (setf escape t))
                           ((char= ch #\") (setf in-string nil))))
+                   (in-symbol
+                    ;; |...|: \ escapes the next character, an unescaped |
+                    ;; ends the symbol, everything else is symbol text.
+                    (cond (escape (setf escape nil))
+                          ((char= ch #\\) (setf escape t))
+                          ((char= ch #\|) (setf in-symbol nil))))
                    ((plusp block-depth)
                     (cond ((and last-p (or (char= ch #\|) (char= ch #\#)))
                            ;; |# or a nested #| would need the character at END.
@@ -318,6 +341,9 @@ parenthesis inside one is still reported as code."
                               do (incf skip)))
                       (incf idx skip)
                       (incf col skip)))
+                   ((char= ch #\|)
+                    ;; Multiple escape (checked after #| above).
+                    (setf in-symbol t))
                    (t (funcall function ch idx line col)))
                  (if (char= ch #\Newline)
                      (setf line (1+ line) col 1)
@@ -331,6 +357,7 @@ parenthesis inside one is still reported as code."
   "Return the lexical state in effect just before position POS of TEXT, as
 scanned from its beginning: :code, :string, :string-escape (inside a string
 with a backslash pending, so the next character is not a delimiter),
+:symbol (inside a |...| multiple-escape symbol),
 :line-comment, :block-comment, or :pending when the character just before
 POS starts a two-character construct (\\x, #\\x, #|) that would consume the
 character at POS. The second value is the block-comment nesting depth, so

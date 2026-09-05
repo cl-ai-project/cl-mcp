@@ -101,6 +101,21 @@
       (ok (= opens 1))
       (ok (= closes 1)))))
 
+(deftest multiple-escaped-symbols-are-not-code
+  (testing "parentheses inside |...| are symbol text in both walkers"
+    (ok (getf (scan-delimiters "(list '|a(b| 1)") :ok)
+        "scanner does not count the ( inside the symbol")
+    (multiple-value-bind (opens closes) (count-delimiter-depth "(list '|a(b| #?)")
+      (ok (= opens 1))
+      (ok (= closes 1)))
+    (ok (eq (lexical-state-at "(a |b(" 6) :symbol) "state inside |...| is :symbol"))
+  (testing "a \\| inside |...| does not end the symbol"
+    (ok (getf (scan-delimiters "(list '|a\\|(b| 1)") :ok)))
+  (testing "an unterminated |...| makes the diagnosis a repair failure, not a bogus fix"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list '|a(b 1)"))))
+      (ok (not (getf d :ok)))
+      (ng (getf d :likely-fixes)))))
+
 (deftest escaped-newline-keeps-line-numbers
   (testing "a \\ before a physical newline still advances the scanner's line counter"
     (let ((res (scan-delimiters (format nil "(foo a\\~%b))"))))
@@ -316,26 +331,30 @@
       (ok (getf d :repair-failed))
       (ng (getf d :likely-fixes)))))
 
-(deftest diagnose-rejects-repairs-inside-block-comments
-  (testing "a paren parinfer appends inside a #| |# comment is not offered as a fix"
-    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)"))))
+(deftest diagnose-repairs-around-block-comments
+  (testing "a ( inside a multi-line #| |# comment is not code: the fix lands after the form"
+    (let* ((d (diagnose-delimiters (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)")))
+           (fixes (getf d :likely-fixes)))
       (ok (string= (getf d :kind) "unclosed"))
-      (ok (getf d :repair-failed) "parinfer touched comment text, so the repair is not trusted")
-      (ng (getf d :likely-fixes)))))
-
-(deftest diagnose-rejects-repairs-inside-single-line-block-comments
-  (testing "removing a ) inside a one-line #| ) |# is not a fix even if the line ends in code"
-    (let ((d (diagnose-delimiters (format nil "#| ) |#~%(defun f ()~%  x"))))
+      (ng (getf d :repair-failed))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 4) "the defun is closed after (bar 1), not in the comment")
+      (ok (= (getf (first fixes) :delta) 1))))
+  (testing "a ) inside a one-line #| ) |# is left alone"
+    (let* ((d (diagnose-delimiters (format nil "#| ) |#~%(defun f ()~%  x")))
+           (fixes (getf d :likely-fixes)))
       (ok (string= (getf d :kind) "unclosed"))
-      (ok (getf d :repair-failed) "parinfer edited comment text")
-      (ng (getf d :likely-fixes)))))
-
-(deftest diagnose-checks-every-removed-paren
-  (testing "a line where the first removal is code but a later one is in a comment is rejected"
-    (let ((d (diagnose-delimiters "(foo)) #| note ) |#")))
+      (ng (getf d :repair-failed))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :line) 3))))
+  (testing "only the real extra ) is removed, not the one in the comment"
+    (let* ((d (diagnose-delimiters "(foo)) #| note ) |#"))
+           (fixes (getf d :likely-fixes)))
       (ok (string= (getf d :kind) "extra-close"))
-      (ok (getf d :repair-failed) "the second removed ) lives inside the block comment")
-      (ng (getf d :likely-fixes)))))
+      (ng (getf d :repair-failed))
+      (ok (= (length fixes) 1))
+      (ok (= (getf (first fixes) :removed) 1))
+      (ok (string= (getf (first fixes) :repaired) "(foo) #| note ) |#")))))
 
 (deftest diagnose-ok-has-no-extra-keys
   (testing "balanced text returns the plain scan plist"

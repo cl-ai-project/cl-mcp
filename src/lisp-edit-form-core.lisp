@@ -50,6 +50,8 @@
            #:file-unparseable-path
            #:file-unparseable-diagnosis
            #:file-unparseable-cause
+           #:file-unparseable-readtable
+           #:file-unparseable-recoverable-p
            #:file-unparseable-message))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
@@ -305,47 +307,67 @@ When the failure is recoverable (a delimiter problem no readtable can fix),
 the text opens with the shared delimiter diagnosis, or the reader error when
 the scan has nothing to add, and ends with an executable recovery path:
 fs-read-file, hand-apply the fix, fs-write-file (which permits overwriting
-such a file). Otherwise the failure is reader-level (custom reader syntax, a
-disabled #. form); the file keeps its overwrite protection, so the text
-points at the readtable parameter instead."
+such a file). When the caller supplied a readtable, no standard-syntax
+verdict exists: the text names the readtable and says how the overwrite
+guard will decide. Otherwise the failure is reader-level (custom reader
+syntax, a disabled #. form); the file keeps its overwrite protection, so the
+text points at the readtable parameter instead."
   (let* ((path (file-unparseable-path condition))
          (diagnosis (file-unparseable-diagnosis condition))
+         (readtable (file-unparseable-readtable condition))
          (scan-ok (getf diagnosis :ok))
          (line (getf diagnosis :unclosed-form-line))
          (head (if scan-ok
-                   (format nil "Cannot parse ~A: ~A" path (file-unparseable-cause condition))
+                   (format nil "Cannot parse ~A~@[ under readtable ~(~S~)~]: ~A"
+                           path readtable (file-unparseable-cause condition))
                    (format-delimiter-diagnosis diagnosis :target path))))
-    (if (file-unparseable-recoverable-p condition)
-        (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
-                     lisp-patch-form cannot locate any form in it.~%~
-                     Run lisp-check-parens with path=~S to see the full diagnosis, ~
-                     then read the file with fs-read-file, apply the change~
-                     ~:[ described above~; shown under \"Likely fix\"~]~
-                     ~@[ to the form starting at line ~D~], and ~
-                     write the whole file back with fs-write-file, passing ~
-                     allow_unparseable_overwrite=true (it refuses to overwrite an ~
-                     existing Lisp file otherwise). If the file uses custom reader ~
-                     syntax that the default reader cannot parse, pass the readtable ~
-                     parameter to lisp-edit-form instead of overwriting."
-                head path (not (null (getf diagnosis :likely-fixes))) line)
-        (format nil "~A~%This is a reader-level failure, not a missing or stray ~
-                     parenthesis, so it may depend on a readtable: if the file uses ~
-                     custom reader macros, pass the readtable parameter (a ~
-                     named-readtable designator) to lisp-edit-form / lisp-patch-form. ~
-                     fs-write-file keeps refusing to overwrite it."
-                head))))
+    (cond
+      ((file-unparseable-recoverable-p condition)
+       (format nil "~A~%The file itself does not parse, so lisp-edit-form and ~
+                    lisp-patch-form cannot locate any form in it.~%~
+                    Run lisp-check-parens with path=~S to see the full diagnosis, ~
+                    then read the file with fs-read-file, apply the change~
+                    ~:[ described above~; shown under \"Likely fix\"~]~
+                    ~@[ to the form starting at line ~D~], and ~
+                    write the whole file back with fs-write-file, passing ~
+                    allow_unparseable_overwrite=true (it refuses to overwrite an ~
+                    existing Lisp file otherwise). If the file uses custom reader ~
+                    syntax that the default reader cannot parse, pass the readtable ~
+                    parameter to lisp-edit-form instead of overwriting."
+               head path (not (null (getf diagnosis :likely-fixes))) line))
+      (readtable
+       (format nil "~A~%No standard-syntax diagnosis is offered under a custom ~
+                    readtable (a reader macro may consume raw parentheses). Run ~
+                    lisp-check-parens with path=~S: if it reports a missing or stray ~
+                    parenthesis and the file uses no custom syntax at that point, ~
+                    fs-write-file with allow_unparseable_overwrite=true can rewrite ~
+                    it (that guard judges the file with the default reader); ~
+                    otherwise fix the custom syntax the reader complained about."
+               head path))
+      (t
+       (format nil "~A~%This is a reader-level failure, not a missing or stray ~
+                    parenthesis, so it may depend on a readtable: if the file uses ~
+                    custom reader macros, pass the readtable parameter (a ~
+                    named-readtable designator) to lisp-edit-form / lisp-patch-form. ~
+                    fs-write-file keeps refusing to overwrite it."
+               head)))))
 
 (define-condition file-unparseable-error (error)
   ((path :initarg :path :reader file-unparseable-path)
    (diagnosis :initarg :diagnosis :reader file-unparseable-diagnosis)
    (cause :initarg :cause :reader file-unparseable-cause)
+   (readtable :initarg :readtable :initform nil
+              :reader file-unparseable-readtable)
    (recoverable :initarg :recoverable :initform nil
                 :reader file-unparseable-recoverable-p))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
 parenthesis) that no readtable can fix; only then does fs-write-file permit
-overwriting the file, and only then does the message advertise that path."))
+overwriting the file, and only then does the message advertise that path.
+READTABLE is the designator the caller supplied, if any: under a custom
+readtable no standard-syntax verdict is attached (DIAGNOSIS is then a plain
+balanced plist and RECOVERABLE is NIL), and the message says so."))
 
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
@@ -374,10 +396,18 @@ Returns eight values:
                   lisp-edit-form and lisp-patch-form cannot edit files this large"
                  (namestring abs) file-length (length original)))
         (flet ((unparseable (cause)
+                 ;; Under a caller-supplied readtable the standard delimiter
+                 ;; scan is not evidence (a reader macro may consume raw
+                 ;; parentheses), so no scan-based diagnosis or "recoverable"
+                 ;; verdict is attached; the message explains the situation.
                  (error 'file-unparseable-error
                         :path (namestring abs)
-                        :diagnosis (diagnose-delimiters original)
-                        :recoverable (%delimiter-failure-p cause)
+                        :readtable readtable
+                        :diagnosis (if readtable
+                                       (list :ok t)
+                                       (diagnose-delimiters original))
+                        :recoverable (and (null readtable)
+                                          (%delimiter-failure-p cause))
                         :cause (sanitize-error-message (princ-to-string cause)))))
           (multiple-value-bind (nodes swallowed)
               (handler-case

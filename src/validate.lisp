@@ -115,12 +115,17 @@ syntax error in the file itself."
               :column  nil)))))
 
 (defun %fix->hash (fix)
-  "Convert one (:line :original :repaired :delta) plist into a string-keyed hash."
+  "Convert one (:line :original :repaired :delta :added :removed) plist into a
+string-keyed hash. ADDED and REMOVED are the gross edit counts; DELTA is
+their difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a
+no-op by a client reading only delta."
   (let ((h (make-hash-table :test #'equal)))
     (setf (gethash "line" h) (getf fix :line)
           (gethash "original" h) (getf fix :original)
           (gethash "repaired" h) (getf fix :repaired)
-          (gethash "delta" h) (getf fix :delta))
+          (gethash "delta" h) (getf fix :delta)
+          (gethash "added" h) (getf fix :added 0)
+          (gethash "removed" h) (getf fix :removed 0))
     h))
 
 (defun lisp-check-parens (&key path code offset limit)
@@ -189,7 +194,9 @@ MCP payload)."
                        (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
                  (when (> total kept)
                    (setf (gethash "likely_fixes_omitted" h) (- total kept))))
-               (when next-top-level-line
+               ;; Only meaningful for an unclosed form, which is the only kind
+               ;; whose guidance text explains the number.
+               (when (and next-top-level-line (string= kind "unclosed"))
                  (setf (gethash "next_top_level_line" h) next-top-level-line)))
              (%maybe-add-lisp-edit-guidance h kind))
             (reader-info
