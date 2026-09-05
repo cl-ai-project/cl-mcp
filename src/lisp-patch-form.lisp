@@ -63,8 +63,10 @@ A net difference in code guarantees the form will not parse, but the caller
 still uses this message only when the patched form actually fails to parse."
   (let ((old-end (+ match-pos (length old-text)))
         (new-end (+ match-pos (length new-text))))
-    (unless (eq (lexical-state-at form-text old-end)
-                (lexical-state-at modified-form new-end))
+    ;; Both values matter: the state keyword and, for block comments, the
+    ;; nesting depth -- one open #| more or less reclassifies the suffix.
+    (unless (equal (multiple-value-list (lexical-state-at form-text old-end))
+                   (multiple-value-list (lexical-state-at modified-form new-end)))
       (return-from %check-depth-balance nil))
     (multiple-value-bind (old-open old-close)
         (count-delimiter-depth form-text :start match-pos :end old-end)

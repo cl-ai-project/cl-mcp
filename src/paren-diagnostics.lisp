@@ -243,9 +243,10 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
 outside strings, line comments, block comments, character literals and
 single-escaped characters (a \\ outside a string makes the next character
 part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
-Scanning stops at position END (default: the end of TEXT) and the lexical
-state reached there is returned: :code, :string, :line-comment or
-:block-comment.
+Scanning stops at position END (default: the end of TEXT) and returns two
+values: the lexical state reached there (:code, :string, :string-escape,
+:line-comment, :block-comment or :pending) and the block-comment nesting
+depth at that point.
 Known limitation: |...| multiple-escape symbols are not recognised, so a
 parenthesis inside one is still reported as code."
   (let ((len (min (length text) (or end (length text))))
@@ -303,12 +304,13 @@ parenthesis inside one is still reported as code."
                    (setf line (1+ line) col 1)
                    (incf col))
                (incf idx)))
-    (cond (pending :pending)
-          (line-comment :line-comment)
-          ((and in-string escape) :string-escape)
-          (in-string :string)
-          ((plusp block-depth) :block-comment)
-          (t :code))))
+    (values (cond (pending :pending)
+                  (line-comment :line-comment)
+                  ((and in-string escape) :string-escape)
+                  (in-string :string)
+                  ((plusp block-depth) :block-comment)
+                  (t :code))
+            block-depth)))
 
 (defun lexical-state-at (text pos)
   "Return the lexical state in effect just before position POS of TEXT, as
@@ -316,7 +318,8 @@ scanned from its beginning: :code, :string, :string-escape (inside a string
 with a backslash pending, so the next character is not a delimiter),
 :line-comment, :block-comment, or :pending when the character just before
 POS starts a two-character construct (\\x, #\\x, #|) that would consume the
-character at POS.
+character at POS. The second value is the block-comment nesting depth, so
+two :block-comment states at different depths can be told apart.
 lisp-patch-form compares this at the end of a replacement in the original
 and patched form texts; a mismatch means new_text opened a string or comment
 that swallows the unchanged suffix, so region parenthesis counts no longer

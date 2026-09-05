@@ -114,8 +114,11 @@ report, not a successfully skipped comment."
                 (null (get-macro-character ch readtable)))
            (read-char stream))
           ((and line-comment-p (eql ch #\;))
-           (loop for c = (read-char stream nil :eof)
-                 until (or (eq c :eof) (char= c #\Newline))))
+           ;; Consume up to, not including, the terminating newline: if the
+           ;; readtable makes Newline a macro character, READ must see it.
+           (loop for c = (peek-char nil stream nil :eof)
+                 until (or (eq c :eof) (char= c #\Newline))
+                 do (read-char stream)))
           ((and block-comment-p (eql ch #\#))
            (read-char stream)
            (if (eql (peek-char nil stream nil :eof) #\|)

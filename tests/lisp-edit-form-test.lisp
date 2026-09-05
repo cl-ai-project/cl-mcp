@@ -1240,7 +1240,9 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (set-macro-character #\Newline (lambda (s c) (declare (ignore s c)) :nl) nil rt)
             (unwind-protect
                  (with-temp-file "tests/tmp/edit-form-newline-readtable.lisp"
-                     (format nil "(in-readtable :cl-mcp-test-newline-macro)~%(defun a () 1)~%")
+                     ;; The newline ending the ; comment must reach the macro too.
+                     (format nil "(in-readtable :cl-mcp-test-newline-macro)~%~
+                                  (defun a () 1) ; trailing comment~%")
                    (lambda (path)
                      (let* ((nodes (cl-mcp/src/cst:parse-top-level-forms
                                     (fs-read-file path) :source-path (pathname path)))

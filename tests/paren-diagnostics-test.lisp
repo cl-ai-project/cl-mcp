@@ -160,6 +160,19 @@
       (ok (= opens 1) "the #\\ did not swallow anything")
       (ok (= closes 0)))))
 
+(deftest lexical-state-at-reports-block-comment-depth
+  (testing "the second value is the block-comment nesting depth"
+    (let ((text "(a #| x #| y |# z |# b)"))
+      (multiple-value-bind (state depth) (lexical-state-at text 6)
+        (ok (eq state :block-comment))
+        (ok (= depth 1)))
+      (multiple-value-bind (state depth) (lexical-state-at text 11)
+        (ok (eq state :block-comment))
+        (ok (= depth 2)))
+      (multiple-value-bind (state depth) (lexical-state-at text (length text))
+        (ok (eq state :code))
+        (ok (= depth 0))))))
+
 (deftest scan-delimiters-handles-nested-block-comments
   (testing "a nested #| ... |# inside a block comment does not end it early"
     (ok (getf (scan-delimiters "(a #| outer #| inner |# ( |# b)") :ok)
