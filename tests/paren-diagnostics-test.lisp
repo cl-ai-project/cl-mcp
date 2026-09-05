@@ -289,10 +289,11 @@
     (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list '~%"))))
       (ok (eq (getf d :repair-failed) :outside-code))
       (ng (getf d :likely-fixes))))
-  (testing "the same for a backquote, comma, at-sign, escape and sharp"
+  (testing "the same for a backquote, comma, escape and a token-starting sharp"
     ;; A trailing \ escapes the newline for the scanner, so its repair is
     ;; rejected as :unbalanced rather than :outside-code; either way no fix.
-    (dolist (ch '("`" "," "@" "\\" "#"))
+    ;; A lone @ is a symbol, so (list @) reads and is not in this list.
+    (dolist (ch '("`" "," "\\" "#"))
       (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list ~A~%" ch))))
         (ok (getf d :repair-failed) ch)
         (ng (getf d :likely-fixes) ch))))
@@ -300,6 +301,29 @@
     (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list 'a~%"))))
       (ng (getf d :repair-failed))
       (ok (= (getf (first (getf d :likely-fixes)) :delta) 2)))))
+
+(deftest opener-caveat-names-the-bracket-not-the-closer
+  (testing "a mismatch carries the opener's position, and the caveat uses it"
+    (let* ((d (diagnose-delimiters (format nil "(defun f ()~%  (list [a b)")))
+           (msg (format-delimiter-diagnosis d)))
+      (ok (string= (getf d :kind) "mismatch"))
+      (ok (= (getf d :column) 13) "the closer's column")
+      (ok (= (getf d :opener-line) 2))
+      (ok (= (getf d :opener-column) 9) "the [ itself")
+      (ok (search "If the \"[\" at line 2, column 9 was meant as \"(\"" msg))
+      (ng (search "at line 2, column 13 was meant" msg))))
+  (testing "a symbol ending in @ or # at the end of a line still gets its fix"
+    (dolist (text (list (format nil "(defun f (x)~%  (list x bar@~%")
+                        (format nil "(defun f (x)~%  (list x bar#~%")))
+      (let ((d (diagnose-delimiters text)))
+        (ng (getf d :repair-failed) text)
+        (ok (= (getf (first (getf d :likely-fixes)) :delta) 2) text))))
+  (testing "but ,@ and a # that starts a token are still refused"
+    (dolist (text (list (format nil "(defun f (x)~%  (list ,@~%")
+                        (format nil "(defun f (x)~%  (list #~%")))
+      (let ((d (diagnose-delimiters text)))
+        (ok (getf d :repair-failed) text)
+        (ng (getf d :likely-fixes) text)))))
 
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"

@@ -24,8 +24,7 @@
            #:opener-ambiguous-p
            #:format-bracket-warning
            #:format-overwrite-recovery
-           #:format-relocation-note
-           #:relocating-fix-lines))
+           #:format-relocation-note))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
 
@@ -43,6 +42,12 @@
   (cons (list ch line col (+ base-offset idx)) stack))
 
 (defun %scan-parens-pop-open (stack line col base-offset ch idx)
+  "Pop the opener CH closes off STACK, or describe the failure: an
+\"extra-close\" when nothing is open, a \"mismatch\" when the innermost opener
+takes a different closer. A mismatch reports the closer's position as
+:line/:column/:offset and the opener's as :opener-line/:opener-column/
+:opener-offset, so a message about the opener (an unclosed [ that may be a
+symbol character) can point at the bracket itself."
   (if (null stack)
       (values stack
               (list :ok nil
@@ -53,7 +58,6 @@
                     :line line
                     :column col))
       (destructuring-bind (top-ch top-line top-col top-off) (car stack)
-        (declare (ignore top-line top-col top-off))
         (let ((expected (%closing top-ch)))
           (if (char= expected ch)
               (values (cdr stack) nil)
@@ -64,7 +68,10 @@
                             :found (string ch)
                             :offset (+ base-offset idx)
                             :line line
-                            :column col)))))))
+                            :column col
+                            :opener-line top-line
+                            :opener-column top-col
+                            :opener-offset top-off)))))))
 
 (defstruct scan-state
   (line 1 :type fixnum)
@@ -509,8 +516,23 @@ character. Linear in the size of TEXT: the lexical states come from one
                  ;; that :code, but (list ')) does not read.
                  (or (not (eq (svref mask pos) :code))
                      (and (plusp pos)
-                          (find (char text (1- pos)) "\\#'`,@")
-                          (eq (svref mask (1- pos)) :code))))))
+                          (eq (svref mask (1- pos)) :code)
+                          (let ((prev (char text (1- pos)))
+                                (before (and (> pos 1) (char text (- pos 2)))))
+                            (case prev
+                              ;; Always a prefix: nothing can follow them but
+                              ;; an object.
+                              ((#\' #\` #\, #\\) t)
+                              ;; @ is a constituent (bar@ is a symbol) except
+                              ;; as the second half of ,@.
+                              (#\@ (eql before #\,))
+                              ;; # is non-terminating (bar# is a symbol) and
+                              ;; starts a dispatch only at a token start.
+                              (#\# (or (null before)
+                                       (member before '(#\Space #\Tab #\Newline
+                                                        #\Return #\( #\' #\` #\,
+                                                        #\" #\;))))
+                              (t nil))))))))
         (loop for fix in fixes
               for line = (getf fix :line)
               ;; Compared without a trailing #\Return, exactly as
@@ -845,9 +867,13 @@ one place, below, rather than per kind."
            ;; The actionable-looking part must not outrank the caveat: for an
            ;; unclosed bracket, say what the fix assumes right after it.
            (when opener-ambiguous
-             (format s "~%If the ~A at line ~D, column ~D was meant as \"(\", this fix is ~
+             ;; The bracket's own position: for a mismatch the scan reports
+             ;; the closer at :line/:column and the opener separately.
+             (format s "~%If the ~S at line ~D, column ~D was meant as \"(\", this fix is ~
                         wrong: replace it and check again."
-                     opener line column)))
+                     opener
+                     (or (getf diagnosis :opener-line) line)
+                     (or (getf diagnosis :opener-column) column))))
           ((and (eq failed :outside-code) (not ambiguous))
            ;; The repair may well read, but it would change text that is not
            ;; code, so it is withheld rather than offered.

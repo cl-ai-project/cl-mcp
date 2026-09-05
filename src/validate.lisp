@@ -313,6 +313,15 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                  ;; path is given relative to the root because that is the
                  ;; only form fs-write-file accepts, and a file whose forms
                  ;; before the breakage were parsed is not called unlocatable.
+                 ;; A delimiter-broken file outside the project root: neither
+                 ;; the structural tools nor fs-write-file can help, and the
+                 ;; old "Use lisp-edit-form" sentence would only loop.
+                 (when (and overwritable (not overwrite-hint))
+                   (setf (gethash "guidance_text" h)
+                         (format nil ". The file does not parse, and it is outside the ~
+                                      project root, so fs-write-file cannot rewrite it ~
+                                      and lisp-edit-form cannot locate any form in it; ~
+                                      fix it outside cl-mcp.")))
                  (when overwrite-hint
                    (setf (gethash "guidance_text" h)
                          (format nil ". The file does not parse~:[, so lisp-edit-form ~
