@@ -230,11 +230,14 @@ Output:
   form hint.
 
 - `next_tool` / `fix_code` / `required_args`: for inline `code`, `lisp-edit-form`
-  (which repairs and writes a form). For a `path` whose failure is a real
-  delimiter problem, `fs-write-file` with `allow_unparseable_overwrite`, since
-  the structural tools cannot locate any form in a file that does not parse.
-  A possible false positive (an unmatched `[`/`{`) or a windowed read keeps the
-  `lisp-edit-form` hint.
+  (which repairs and writes a form). For a `path` that the edit tools' own
+  parser (the same verdict `fs-write-file`'s guard uses) finds to fail on a
+  delimiter no readtable can fix, `fs-write-file` with
+  `allow_unparseable_overwrite`, since the structural tools cannot locate any
+  form in such a file. A file that parses (a symbol such as `a[b`), one that
+  fails for a reader-level reason (`#.`, an unknown `#?`), or a windowed read
+  keeps the `lisp-edit-form` hint, so the hint never promises an overwrite the
+  guard would refuse.
 
 Notes:
 - Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file

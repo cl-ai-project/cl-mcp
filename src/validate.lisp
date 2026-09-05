@@ -3,12 +3,13 @@
 (defpackage #:cl-mcp/src/validate
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
-                #:fs-read-file)
+                #:*lisp-file-unparseable-hook*
+                #:fs-read-file
+                #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis
-                #:bracket-ambiguous-p)
+                #:format-delimiter-diagnosis)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -24,20 +25,21 @@
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
 
-(defun %maybe-add-lisp-edit-guidance (result kind &key from-file ambiguous partial)
+(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable)
   "Attach machine-readable remediation hints for broken Lisp delimiters.
-For code passed inline the next step is lisp-edit-form, which repairs and
-writes a form. For a file (FROM-FILE) that really fails on a delimiter the
-structural tools cannot locate any form, so the next step is the overwrite
-path: fs-read-file, apply the fix, fs-write-file with
-allow_unparseable_overwrite. Two cases keep the lisp-edit-form hint even for
-a file: an AMBIGUOUS verdict (an unmatched [ or { that may be a symbol
-character, so the file may well parse) and a PARTIAL read (a window or a
-truncated prefix, which proves nothing about the whole file)."
+The default next step is lisp-edit-form, which repairs and writes a form.
+When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
+same verdict fs-write-file's guard uses) to fail on a delimiter no readtable
+can fix -- the structural tools cannot locate any form in it, so the next
+step is the overwrite path: fs-read-file, apply the fix, fs-write-file with
+allow_unparseable_overwrite. Keying this on the parser rather than on the
+scan keeps the three tools' verdicts consistent: a file that parses (a
+symbol such as a[b), fails for a reader-level reason (#., #?), or was only
+read in part never receives an instruction the guard would then refuse."
   (when (member kind '("extra-close" "mismatch" "unclosed"
                        "unclosed-string" "unclosed-block-comment")
                 :test #'string=)
-    (if (and from-file (not ambiguous) (not partial))
+    (if overwritable
         (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
               (gethash "next_tool" result) "fs-write-file"
               (gethash "required_args" result)
@@ -171,18 +173,25 @@ MCP payload)."
   (when (and limit (< limit 0))
     (error "limit must be non-negative"))
   (let* ((truncated nil)
+         (file-length nil)
          (text (or code
-                   (multiple-value-bind (slice truncated-p)
+                   (multiple-value-bind (slice truncated-p length)
                        (fs-read-file path :offset offset :limit limit)
-                     (setf truncated truncated-p)
+                     (setf truncated truncated-p
+                           file-length length)
                      slice)))
          (base-off (or offset 0))
-         ;; A window into a file (an offset, or a limit the file filled) is a
-         ;; prefix like a truncated read: a slice of a valid file looks
-         ;; unbalanced, so no repair hint may be built from it.
+         ;; A window into a file (an offset, or a limit the file filled with
+         ;; input still remaining) is a prefix like a truncated read: a slice
+         ;; of a valid file looks unbalanced, so no repair hint may be built
+         ;; from it. FILE-LENGTH counts octets, so a limit equal to the whole
+         ;; file is recognised as a full read for single-byte text.
          (partial (and path
                        (or (plusp base-off)
-                           (and limit (= (length text) limit))))))
+                           (and limit
+                                (= (length text) limit)
+                                (or (null file-length)
+                                    (< (+ base-off (length text)) file-length)))))))
     ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
     ;; describe text the file does not end with, so it is reported as too
     ;; large rather than diagnosed.
@@ -240,10 +249,17 @@ MCP payload)."
                   ;; kind whose guidance text explains the number.
                   (when (and next-top-level-line (string= kind "unclosed"))
                     (setf (gethash "next_top_level_line" h) next-top-level-line)))))
-             (%maybe-add-lisp-edit-guidance h kind
-                                            :from-file (and path t)
-                                            :ambiguous (bracket-ambiguous-p diagnosis)
-                                            :partial partial))
+             ;; The overwrite hint is promised only on the verdict the
+             ;; fs-write-file guard itself will give (the edit tools' parser,
+             ;; via the hook), never on the scan alone, and never for a window.
+             (%maybe-add-lisp-edit-guidance
+              h kind
+              :overwritable (and path (not partial)
+                                 *lisp-file-unparseable-hook*
+                                 (ignore-errors
+                                  (funcall *lisp-file-unparseable-hook*
+                                           (fs-resolve-read-path path) text))
+                                 t)))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil
@@ -338,14 +354,18 @@ exempt from reader checking to avoid false positives."
                                        ;; form in it: name the overwrite path
                                        ;; rather than sending the caller into
                                        ;; a loop with lisp-edit-form.
-                                       (format nil " The file does not parse, so ~
+                                       (format nil ". The file does not parse, so ~
                                         lisp-edit-form and lisp-patch-form cannot ~
                                         locate any form in it: read it with ~
                                         fs-read-file, apply the fix below, and ~
                                         write it back with fs-write-file passing ~
-                                        allow_unparseable_overwrite=true."))
+                                        allow_unparseable_overwrite=true. If the ~
+                                        file uses custom reader syntax the default ~
+                                        reader cannot parse, pass the readtable ~
+                                        parameter to lisp-edit-form instead of ~
+                                        overwriting."))
                                       (next-tool
-                                       " Use lisp-edit-form for existing Lisp files.")
+                                       ". Use lisp-edit-form for existing Lisp files.")
                                       (t ""))
                                     (gethash "diagnosis_text" check-result))))))))
           (let* ((kind     (gethash "kind" check-result))

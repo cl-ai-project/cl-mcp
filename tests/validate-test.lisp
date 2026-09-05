@@ -134,6 +134,41 @@
                (ok (string= (gethash "next_tool" res) "lisp-edit-form")))))
       (ignore-errors (delete-file abs)))))
 
+(deftest lisp-check-parens-guidance-agrees-with-the-overwrite-guard
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (abs (merge-pathnames "tests/tmp/check-parens-guard-agreement.lisp" root))
+         (cl-mcp/src/project-root:*project-root* root))
+    (ensure-directories-exist abs)
+    (flet ((write-text (text)
+             (with-open-file (out abs :direction :output :if-exists :supersede)
+               (write-string text out)))
+           (guard-overwritable-p ()
+             (cl-mcp/src/fs::%lisp-file-unparseable-p abs)))
+      (unwind-protect
+           (progn
+             (testing "a reader-level failure plus a missing ) is not sent to the overwrite path"
+               ;; #. is disabled, so the edit tools' parser fails before the
+               ;; missing ); the guard refuses, and so must the hint.
+               (write-text (format nil "(defvar *x* #.(+ 1 2))~%~%(defun f ()~%  (list 1 2~%"))
+               (let ((res (lisp-check-parens :path (namestring abs))))
+                 (ok (string= (%kind res) "unclosed"))
+                 (ok (null (guard-overwritable-p)) "the guard would refuse")
+                 (ok (string= (gethash "next_tool" res) "lisp-edit-form")
+                     "so the hint does not promise the overwrite")))
+             (testing "a token the scanner mis-lexes as a block comment is not sent there either"
+               ;; foo#|bar| is one symbol to the reader; the file parses.
+               (write-text (format nil "(list foo#|bar|)~%"))
+               (let ((res (lisp-check-parens :path (namestring abs))))
+                 (ok (string= (%kind res) "unclosed-block-comment"))
+                 (ok (null (guard-overwritable-p)))
+                 (ok (string= (gethash "next_tool" res) "lisp-edit-form"))))
+             (testing "a plain missing ) agrees in the other direction"
+               (write-text (format nil "(defun f ()~%  (list 1 2~%"))
+               (let ((res (lisp-check-parens :path (namestring abs))))
+                 (ok (guard-overwritable-p))
+                 (ok (string= (gethash "next_tool" res) "fs-write-file")))))
+        (ignore-errors (delete-file abs))))))
+
 (deftest lisp-check-parens-eof-reader-error-has-position
   (testing "incomplete dispatch #X gives reader-error with non-nil position"
     ;; M1: end-of-file from incomplete #, should NOT report offset 0 / line nil

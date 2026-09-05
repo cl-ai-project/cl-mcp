@@ -212,8 +212,10 @@ file that does parse is never rewritten wholesale."
           (if allow-unparseable
               (rpc-error id -32602
                          (format nil "Cannot overwrite existing .lisp/.asd with fs-write-file: ~
-the file parses, so allow_unparseable_overwrite does not apply; use lisp-edit-form ~
-(with the readtable parameter if the file uses custom reader syntax).")
+the file does not fail on a missing or stray parenthesis (it parses, or fails for ~
+a reader-level reason such as an unknown reader macro), so allow_unparseable_overwrite ~
+does not apply; use lisp-edit-form (with the readtable parameter if the file uses ~
+custom reader syntax).")
                          (make-ht "code" "existing_lisp_overwrite_forbidden"
                                   "path" path
                                   "next_tool" "lisp-edit-form"

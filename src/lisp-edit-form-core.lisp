@@ -390,12 +390,23 @@ text points at the readtable parameter instead."
                     otherwise fix the custom syntax the reader complained about."
                head path))
       (t
-       (format nil "~A~%This is a reader-level failure, not a missing or stray ~
-                    parenthesis, so it may depend on a readtable: if the file uses ~
-                    custom reader macros, pass the readtable parameter (a ~
-                    named-readtable designator) to lisp-edit-form / lisp-patch-form. ~
-                    fs-write-file keeps refusing to overwrite it."
-               head)))))
+       ;; The reader stopped on something other than a delimiter. When the
+       ;; scan also found a delimiter problem, both are shown: the reader's
+       ;; complaint is what blocks parsing, and the diagnosis above may be a
+       ;; second, real problem or an artifact of custom syntax.
+       (format nil "~A~@[~%The reader itself reported: ~A.~]~%~
+                    ~:[This~;That reader-level failure~] is not a missing or ~
+                    stray parenthesis, so the overwrite path does not apply and ~
+                    fs-write-file keeps refusing to overwrite the file. It may ~
+                    depend on a readtable: if the file uses custom reader macros, ~
+                    pass the readtable parameter (a named-readtable designator) to ~
+                    lisp-edit-form / lisp-patch-form~:[.~; -- the delimiter ~
+                    diagnosis above comes from the standard-syntax scan and may ~
+                    then turn out to be right, or to be that syntax.~]"
+               head
+               (and (not scan-ok) (file-unparseable-cause condition))
+               (not scan-ok)
+               (not scan-ok))))))
 
 (define-condition file-unparseable-error (error)
   ((path :initarg :path :reader file-unparseable-path)
@@ -495,12 +506,12 @@ CL-reader pass -- after an IN-READTABLE switch or under a readtable
 argument -- a file whose breakage lies after the target form is still
 partially editable by lisp-edit-form, which only reports it when the target
 is not found; the guard classifies such a file by the whole-file parse.)"
-  (multiple-value-bind (text truncated)
+  (multiple-value-bind (source truncated)
       (if text (values text nil) (fs-read-file pn))
     (and (not truncated)
          (handler-case
              (multiple-value-bind (nodes swallowed)
-                 (parse-top-level-forms text :source-path pn)
+                 (parse-top-level-forms source :source-path pn)
                (declare (ignore nodes))
                (and swallowed (%delimiter-failure-p swallowed) t))
            (error (e) (%delimiter-failure-p e))))))
