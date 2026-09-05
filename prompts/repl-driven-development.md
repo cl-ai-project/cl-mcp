@@ -224,7 +224,18 @@ Call `fs-set-project-root` with your working directory, or set `MCP_PROJECT_ROOT
 - Repeated crashes: circuit breaker trips after 3 crashes in 5 minutes; check server logs
 
 ### Parenthesis Mismatch
-Use `lisp-check-parens` to find exact position (line, column). Fix with `lisp-edit-form`.
+Use `lisp-check-parens` to find the position (line, column). When indentation is
+consistent it also prints `Likely fix, inferred from indentation:` with the exact
+line to change, and names the next top-level form when a form swallowed the rest of
+the file. Fix with `lisp-edit-form`.
+
+If the **file itself** no longer parses, `lisp-edit-form` and `lisp-patch-form` cannot
+locate any form in it. Recover with `fs-read-file`, apply the likely fix by hand, and
+write the whole file back with `fs-write-file` with `allow_unparseable_overwrite: true`
+(its `path` must be relative to the project root; the error message prints that path)
+(it refuses to overwrite an existing `.lisp` file otherwise, and the flag never applies
+to a file that parses). If the file only looks broken because it uses custom reader
+syntax such as `#?"..."`, pass the `readtable` parameter to `lisp-edit-form` instead.
 
 ### lisp-macroexpand returns "NOT EXPANDED" or a package error
 - The macro must be **defined in the worker image**, not just present on disk. Run

@@ -139,3 +139,82 @@
       ;; Without fix, #\) would prematurely close (list and drop the real close.
       (ok (equal output input)
           "Balanced input with #\\) should be unchanged"))))
+
+(deftest indent-mode-escapes-symbols-and-block-comments
+  (testing "a single-escaped paren is symbol text, not a delimiter"
+    (let ((input (format nil "(defun f ()~%  (list 'a\\(b)")))
+      (ok (equal (apply-indent-mode input) (format nil "(defun f ()~%  (list 'a\\(b))"))
+          "one ) is added for the unclosed defun; the \\( is left alone")))
+  (testing "parens inside |...| are symbol text"
+    (let ((input "(list '|a(b| 1)"))
+      (ok (equal (apply-indent-mode input) input))))
+  (testing "parens inside a #| ... |# block comment are neither counted nor repaired"
+    (let ((input (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1)")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  #| (~%  |#~%  (bar 1))"))
+          "the defun is closed after (bar 1); the comment is untouched")))
+  (testing "a nested block comment does not end at the inner |#"
+    (let ((input "(a #| x #| y |# ( |# b)"))
+      (ok (equal (apply-indent-mode input) input)))))
+
+(deftest indent-mode-closes-on-the-last-code-line
+  (testing "closers go on the last code line, not on the trailing empty line"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%")))
+      (ok (equal (apply-indent-mode input) (format nil "(defun f ()~%  (list 1))~%")))))
+  (testing "a balanced text ending in a newline keeps exactly one newline"
+    (let ((input (format nil "(a)~%")))
+      (ok (equal (apply-indent-mode input) input))))
+  (testing "blank and comment-only lines at the end are skipped"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%;; tail~%~%")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%;; tail~%~%")))))
+  (testing "a dedent after a comment line closes the code line before the comment"
+    (let ((input (format nil "(defun f ()~%  (let ((y 1)~%  ;; about foo~%  (foo))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((y 1)))~%  ;; about foo~%  (foo))")))))
+  (testing "CRLF: the closer goes before the carriage return, and blank CRLF lines are blank"
+    (let* ((crlf (format nil "~C~%" #\Return))
+           (input (format nil "(defun f (x)~A  (let ((y 1)~A~A    (+ x y)))" crlf crlf crlf)))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f (x)~A  (let ((y 1))~A~A    (+ x y)))"
+                         crlf crlf crlf))))))
+
+(deftest indent-mode-ignores-indentation-of-non-code-lines
+  (testing "a column-0 block comment inside a form is not a dedent"
+    (let ((input (format nil "(defun f (x)~%  (foo x~%#|~%  (old-impl x)~%|#~%  (bar x))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f (x)~%  (foo x)~%#|~%  (old-impl x)~%|#~%  (bar x))"))
+          "only the ) missing after (foo x is added; (bar x) stays inside the defun")))
+  (testing "a string continuation line at column 0 is not a dedent"
+    (let ((input (format nil "(defun f ()~%  \"doc~%continued\"~%  (list 1")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  \"doc~%continued\"~%  (list 1))")))))
+  (testing "closers never land on a line inside a block comment or a string"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%#| trailing~%note |#")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%#| trailing~%note |#"))))))
+
+(deftest indent-mode-closes-on-code-after-a-comment-closer
+  (testing "a line that ends a block comment and then holds code receives the closers"
+    (let ((input (format nil "(defun f ()~%  (let ((x 1))~%    (foo~%#|~%c~%|# (bar)")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((x 1))~%    (foo~%#|~%c~%|# (bar))))"))
+          "(bar) stays inside foo; nothing is appended to the (foo line"))))
+
+(deftest indent-mode-closes-before-a-trailing-comment
+  (testing "closers go before a trailing ; comment on the last code line"
+    (let ((input (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2) ; double it")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2))) ; double it")))))
+  (testing "a dedent closer also goes before the previous line's comment"
+    ;; (foo at indent 4 closes the binding list on line 2; (bar at indent 2
+    ;; closes the let, and that closer goes before "; note".
+    (let ((input (format nil "(defun f ()~%  (let ((x 1)~%    (foo) ; note~%  (bar))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((x 1))~%    (foo)) ; note~%  (bar))")))))
+  (testing "a comment-only line is still never a target"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%  ;; tail")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%  ;; tail"))))))

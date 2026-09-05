@@ -72,3 +72,26 @@
                         nodes)))
       (ok (= 1 (length expr-nodes))
           (format nil "Expected 1 expr node, got ~A" (length expr-nodes))))))
+
+(deftest parse-top-level-forms-classifies-stray-close-paren
+  (testing "a stray ) on the Eclector path is a stray-right-parenthesis"
+    (ok (handler-case (progn (parse-top-level-forms "(a) )") nil)
+          (cl-mcp/src/cst::stray-right-parenthesis () t)
+          (error () nil))))
+  (testing "a stray ) after an in-readtable switch is classified the same way"
+    (if (find-package "NAMED-READTABLES")
+        (multiple-value-bind (nodes swallowed)
+            (parse-top-level-forms
+             (format nil "(named-readtables:in-readtable :standard)~%(a) )"))
+          (ok (= 2 (count :expr nodes :key #'cst-node-kind))
+              "the forms before the stray ) are still returned")
+          (ok (typep swallowed 'cl-mcp/src/cst::stray-right-parenthesis)
+              "the swallowed error is the classified condition"))
+        (rove:skip "named-readtables not available")))
+  (testing "a macro that reads a balanced list and then fails keeps its own error"
+    ;; #S(...) consumes "(no-such-struct-xyz)" and signals afterwards: the text
+    ;; before that ) does not read as nothing, so it is not a stray ).
+    (ok (handler-case (progn (parse-top-level-forms "(a) #S(no-such-struct-xyz)") nil)
+          (cl-mcp/src/cst::stray-right-parenthesis () nil)
+          (end-of-file () nil)
+          (error () t)))))

@@ -20,6 +20,12 @@
            #:cst-node-start-line
            #:cst-node-end-line
            #:parse-top-level-forms
+           #:unterminated-source
+           #:stray-right-parenthesis
+           #:*standard-readtable*
+           ;; Exported for lisp-edit-form's content check, which reads with
+           ;; the CL reader and needs the same structural stray-) evidence.
+           #:%skip-whitespace-and-comments
            ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
            ;; the same question this file answers while parsing: which
            ;; IN-PACKAGE is in effect at a given point in the file.
@@ -38,6 +44,11 @@
 
 (declaim (type (simple-array fixnum (*)) *line-table*))
 (defvar *line-table* (make-array 1 :element-type 'fixnum :initial-element 1))
+
+(defvar *standard-readtable* (copy-readtable nil)
+  "A pristine standard readtable, the reference that a file's active readtable
+is compared against (by macro function) to decide whether ; #| ) and
+whitespace still mean what the structural checks assume. Never modified.")
 
 (defun %build-line-table (text)
   "Return a vector mapping character offsets in TEXT to 1-based line numbers."
@@ -87,26 +98,144 @@ or the readtable is not found."
         (when (and find-fn (fboundp find-fn))
           (funcall find-fn designator))))))
 
-(defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
-  "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
-Returns the complete list of nodes (including previously collected NODES)."
+(defun %skip-whitespace-and-comments (stream readtable)
+  "Advance STREAM past whitespace, line comments and (nested) block comments,
+so the next character is the start of a form, a stray delimiter, or end of
+input. Only comment syntax that READTABLE still defines the standard way is
+skipped: when READTABLE redefines ; or #| (compared by macro function against
+a standard readtable) the scan stops there and leaves the character to READ.
+A lone # that does not open a block comment is left in place.
+Returns NIL normally, or an UNTERMINATED-SOURCE condition when input ended
+inside a block comment: that is a delimiter-class failure the caller must
+report, not a successfully skipped comment."
+  (let* ((standard *standard-readtable*)
+         (line-comment-p (eq (get-macro-character #\; readtable)
+                             (get-macro-character #\; standard)))
+         (block-comment-p (eq (ignore-errors (get-dispatch-macro-character #\# #\| readtable))
+                              (get-dispatch-macro-character #\# #\| standard))))
+    (loop
+      (let ((ch (peek-char nil stream nil :eof)))
+        (cond
+          ((and (characterp ch)
+                (member ch '(#\Space #\Tab #\Newline #\Return #\Page))
+                ;; A readtable may turn a whitespace character into a macro
+                ;; character (indentation-sensitive readers); then READ owns it.
+                (null (get-macro-character ch readtable)))
+           (read-char stream))
+          ((and line-comment-p (eql ch #\;))
+           ;; Consume up to, not including, the terminating newline: if the
+           ;; readtable makes Newline a macro character, READ must see it.
+           (loop for c = (peek-char nil stream nil :eof)
+                 until (or (eq c :eof) (char= c #\Newline))
+                 do (read-char stream)))
+          ((and block-comment-p (eql ch #\#))
+           (read-char stream)
+           (if (eql (peek-char nil stream nil :eof) #\|)
+               (progn
+                 (read-char stream)
+                 ;; Nested block comment: track depth until the matching |#.
+                 (let ((depth 1))
+                   (loop for c = (read-char stream nil :eof)
+                         until (eq c :eof)
+                         do (cond
+                              ((and (char= c #\|)
+                                    (eql (peek-char nil stream nil :eof) #\#))
+                               (read-char stream)
+                               (when (zerop (decf depth)) (return)))
+                              ((and (char= c #\#)
+                                    (eql (peek-char nil stream nil :eof) #\|))
+                               (read-char stream)
+                               (incf depth))))
+                   (when (plusp depth)
+                     (return (make-condition
+                              'unterminated-source
+                              :stream stream
+                              :message (format nil "Reader error: end of input inside a #| ~
+block comment (~D level~:P still open). Close it with |#." depth))))))
+               (progn (unread-char #\# stream) (return nil))))
+          (t (return nil)))))))
+
+(defun %classify-cl-read-error (condition stream text start-pos standard-close-p)
+  "Return CONDITION, or a STRAY-RIGHT-PARENTHESIS when READ failed on an
+unmatched \")\" while STANDARD-CLOSE-P (\")\" still terminates lists in the
+active readtable). This catches a stray \")\" that the structural pre-check
+could not see because a whitespace-like reader macro returning no values
+consumed the text before it within the same READ call. The evidence uses the
+active readtable itself, not standard syntax: the text READ consumed since
+START-POS must end in \")\", and everything before that \")\" must read as no
+object at all under *READTABLE* (only whitespace and value-less macros).
+A macro such as #S(...) that reads a balanced list and then signals stops
+right after \")\" too, but the text before that \")\" does not read cleanly
+to its end, so it keeps its own error. End-of-file conditions are left
+alone: they already classify as delimiter failures."
+  (let ((pos (file-position stream)))
+    (flet ((nothing-before-close-p ()
+             (handler-case
+                 (with-input-from-string (s text :start start-pos :end (1- pos))
+                   (loop (when (eq (read s nil :eof) :eof) (return t))))
+               (error () nil))))
+      (if (and standard-close-p
+               (not (typep condition 'end-of-file))
+               (integerp pos)
+               (< start-pos pos (1+ (length text)))
+               (char= (char text (1- pos)) #\))
+               (nothing-before-close-p))
+          (make-condition
+           'stray-right-parenthesis
+           :stream stream
+           :message (format nil "Unmatched closing parenthesis character ). ~
+Remove the extra \")\" (lisp-check-parens reports its line and column)."))
+          condition))))
+
+(defun %read-remaining-with-cl-reader (stream nodes custom-readtable text)
+  "Read remaining forms from STREAM (a string stream over TEXT) using the
+standard CL reader with CUSTOM-READTABLE.
+Returns two values: the complete list of nodes (including previously collected
+NODES) and the read error that stopped reading early, or NIL when the stream
+was consumed to its end. A \")\" met where a form should start is reported as
+STRAY-RIGHT-PARENTHESIS without consulting the implementation's reader, so the
+classification does not depend on any implementation's error wording; a
+\")\" that READ itself trips over (behind a whitespace-like macro) is
+recognised structurally by %CLASSIFY-CL-READ-ERROR.
+Reading stays lenient so a partially broken file can still be displayed, but
+callers that need to know the file is unparseable (lisp-edit-form, the
+fs-write-file overwrite guard) inspect the second value."
   (let ((*readtable* custom-readtable)
-        (*read-eval* nil))
+        (*read-eval* nil)
+        ;; The structural stray-")" check below assumes ")" still terminates
+        ;; lists. A readtable that redefines ")" (constituent, or another
+        ;; macro) must interpret it itself, so the check is skipped for it.
+        (standard-close-p (eq (get-macro-character #\) custom-readtable)
+                              (get-macro-character #\) *standard-readtable*))))
     (loop
       (let ((start-pos (file-position stream)))
-        ;; Skip whitespace
-        (loop for ch = (peek-char nil stream nil :eof)
-              while (and (characterp ch)
-                         (member ch '(#\Space #\Tab #\Newline #\Return)))
-              do (read-char stream))
+        ;; Skip whitespace and comments, so a stray ")" behind a comment is
+        ;; still seen by the structural check below. An unterminated block
+        ;; comment is reported instead of being mistaken for a clean EOF.
+        (let ((comment-error (%skip-whitespace-and-comments stream custom-readtable)))
+          (when comment-error
+            (return (values (nreverse nodes) comment-error))))
         (setf start-pos (file-position stream))
+        (when (and standard-close-p
+                   (eql (peek-char nil stream nil :eof) #\)))
+          (return (values (nreverse nodes)
+                          (make-condition
+                           'stray-right-parenthesis
+                           :stream stream
+                           :message (format nil "Unmatched closing parenthesis ~
+character ). Remove the extra \")\" (lisp-check-parens reports its line and column).")))))
         (let ((form (handler-case (read stream nil :eof)
                       (error (e)
-                        ;; On read error, return what we have so far
-                        (declare (ignore e))
-                        (return (nreverse nodes))))))
+                        ;; On read error, return what we have so far and
+                        ;; report the error as the second value, normalised
+                        ;; to STRAY-RIGHT-PARENTHESIS when READ tripped over
+                        ;; a ")" that the structural check could not see.
+                        (return (values (nreverse nodes)
+                                        (%classify-cl-read-error
+                                         e stream text start-pos
+                                         standard-close-p)))))))
           (when (eq form :eof)
-            (return (nreverse nodes)))
+            (return (values (nreverse nodes) nil)))
           (let* ((end-pos (file-position stream))
                  (node (make-cst-node :kind :expr
                                       :value form
@@ -197,6 +326,22 @@ Returns the complete list of nodes (including previously collected NODES)."
                      :start-line (%pos->line start)
                      :end-line (%pos->line end)))))
 
+(define-condition unterminated-source (end-of-file)
+  ((message :initarg :message :reader unterminated-source-message))
+  (:report (lambda (c s) (write-string (unterminated-source-message c) s)))
+  (:documentation "Signaled when the reader hit end of input inside a form.
+Carries the same explanatory message as other reader errors but stays a
+subtype of END-OF-FILE, so callers that treat a premature end of input
+specially (lisp-read-file's unbalanced-parentheses hint) keep working."))
+
+(define-condition stray-right-parenthesis (reader-error)
+  ((message :initarg :message :reader stray-right-parenthesis-message))
+  (:report (lambda (c s) (write-string (stray-right-parenthesis-message c) s)))
+  (:documentation "Signaled when the reader met a \")\" with no open form.
+Like UNTERMINATED-SOURCE this keeps the failure identifiable as a delimiter
+problem, which no readtable can fix, so the fs-write-file overwrite guard can
+tell it apart from reader-macro failures that a readtable might resolve."))
+
 (defun %parse-top-level-forms-core (text readtable)
   "Parse TEXT into CST nodes assuming *PACKAGE* and *LINE-TABLE* are already bound."
   (if readtable
@@ -205,7 +350,7 @@ Returns the complete list of nodes (including previously collected NODES)."
             (call-with-lenient-packages
              (lambda ()
                (with-input-from-string (stream text)
-                 (%read-remaining-with-cl-reader stream nil custom-rt))))
+                 (%read-remaining-with-cl-reader stream nil custom-rt text))))
             (error "Readtable ~S not found." readtable)))
       (let ((*readtable* (copy-readtable))
             (*read-eval* nil)
@@ -238,27 +383,51 @@ Returns the complete list of nodes (including previously collected NODES)."
                              (when custom-rt
                                (return
                                  (%read-remaining-with-cl-reader
-                                  stream nodes custom-rt)))))))))))
+                                  stream nodes custom-rt text)))))))))))
             (reader-error (e)
               (let ((msg (format nil "~A" e)))
-                (if (search "READ-EVAL" msg)
-                    (error
-                     "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
+                (cond
+                  ((search "READ-EVAL" msg)
+                   (error
+                    "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
 If you need to parse files containing #., consider removing or replacing the #. forms, ~
 or use a separate evaluation step."
-                     e)
-                    (error
-                     "Reader error: ~A~%~%If this file uses custom reader macros (e.g., cl-interpol's #?), ~
-specify the 'readtable' parameter with the named-readtable designator ~
-(e.g., readtable: \"interpol-syntax\")."
-                     e)))))))))
+                    e))
+                  ((typep e 'eclector.reader:invalid-context-for-right-parenthesis)
+                   ;; A ")" with no open form: a delimiter failure no
+                   ;; readtable can fix, kept identifiable for the overwrite
+                   ;; guard in lisp-edit-form-core.
+                   (error 'stray-right-parenthesis
+                          :stream stream
+                          :message (format nil "Reader error: ~A~%~%Remove the extra \")\" ~
+(lisp-check-parens reports its line and column)."
+                                           e)))
+                  ((typep e 'end-of-file)
+                   ;; Keep the END-OF-FILE type: lisp-read-file turns it into
+                   ;; an unbalanced-parentheses hint.
+                   (error 'unterminated-source
+                          :stream stream
+                          :message (format nil "Reader error: ~A~%~%If this file uses custom ~
+reader macros (e.g., cl-interpol's #?), specify the 'readtable' parameter with the ~
+named-readtable designator (e.g., readtable: \"interpol-syntax\")."
+                                           e)))
+                  (t
+                   (error
+                    "Reader error: ~A~%~%If this file uses custom reader macros ~
+(e.g., cl-interpol's #?), specify the 'readtable' parameter with the ~
+named-readtable designator (e.g., readtable: \"interpol-syntax\")."
+                    e))))))))))
 
 (defun parse-top-level-forms (text &key readtable source-path initial-package)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
 stub packages that are cleaned up after parsing.
 When an IN-PACKAGE form is encountered, *PACKAGE* is updated so that
-package-local-nicknames activate for subsequent forms."
+package-local-nicknames activate for subsequent forms.
+Returns a second value: the read error that stopped the lenient CL-reader
+pass early (after an IN-READTABLE switch or when READTABLE is given), or NIL.
+In that mode a malformed later form does not signal; the nodes read so far
+are returned and the error is reported here instead."
   (let ((*line-table* (%build-line-table text))
         (*package* *package*))
     (cond

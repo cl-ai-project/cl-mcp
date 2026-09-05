@@ -34,7 +34,8 @@
                 #:with-proxy-dispatch)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%locate-target-form
-                #:%parse-readtable-designator)
+                #:%parse-readtable-designator
+                #:file-unparseable-error)
   (:import-from #:cl-mcp/src/cst
                 #:cst-node-kind
                 #:cst-node-value
@@ -554,6 +555,11 @@ every call, up to ~D" *max-sub-form-matches*))
                                  :max-output-length max_output_length)))
    (arg-validation-error (e)
      (tool-error id (validation-message e)
+                 :protocol-version (protocol-version state)))
+   ;; A broken file's recovery guidance is multi-line and long; the generic
+   ;; clause below would fold and truncate it, as in lisp-edit-form.
+   (file-unparseable-error (e)
+     (tool-error id (sanitize-for-json (princ-to-string e))
                  :protocol-version (protocol-version state)))
    (error (e)
      (let ((msg (sanitize-for-json
