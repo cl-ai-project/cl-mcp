@@ -22,7 +22,8 @@
                 #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis)
+                #:format-delimiter-diagnosis
+                #:format-overwrite-recovery)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
@@ -400,17 +401,13 @@ text points at the readtable parameter instead."
                       broken form: the forms before it can still be edited with ~
                       lisp-edit-form, but this one is in the broken tail~].~%~
                       Run lisp-check-parens with path=~S to see the full diagnosis, ~
-                      then read the file with fs-read-file, apply the change~
-                      ~:[ described above~; shown under \"Likely fix\"~]~
-                      ~@[ to the form starting at line ~D~], and ~
-                      write the whole file back with fs-write-file (path=~S, ~
-                      allow_unparseable_overwrite=true; it refuses to overwrite an ~
-                      existing Lisp file otherwise). If the file uses custom reader ~
-                      syntax that the default reader cannot parse, pass the readtable ~
-                      parameter to lisp-edit-form instead of overwriting."
+                      then ~A"
                  head (file-unparseable-editable-prefix-p condition) path
-                 (not (null (getf diagnosis :likely-fixes))) line
-                 (or relative path))))
+                 (format-overwrite-recovery (or relative path)
+                                            :have-fix (not (null (getf diagnosis
+                                                                       :likely-fixes)))
+                                            :where "above"
+                                            :form-line line))))
       (readtable
        (format nil "~A~%No standard-syntax diagnosis is offered under a custom ~
                     readtable (a reader macro may consume raw parentheses). Run ~

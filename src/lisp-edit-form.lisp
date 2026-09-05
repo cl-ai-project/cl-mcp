@@ -25,9 +25,8 @@
                 #:format-repair-lines
                 #:format-bracket-warning
                 #:opener-ambiguous-p
-                #:relocating-fix-lines
-                #:scan-delimiters
-                #:*repair-lines-limit*)
+                #:format-relocation-note
+                #:scan-delimiters)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -81,15 +80,26 @@
   (:report (lambda (c s) (write-string (content-unrepairable-message c) s)))
   (:documentation "Signaled when CONTENT is unbalanced and parinfer cannot make it readable."))
 
-(defun %repair-warning (fixes)
+(defun %repair-warning (fixes &optional repaired nonstandard-rt)
   "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string,
 or NIL when there are none. Added and dropped closing delimiters are summed
 from each fix's gross :added and :removed counts (not the net :delta, which
 hides a relocation such as \")(defun f () 1\" -> \"(defun f () 1)\") and
-reported separately; the count is never negative."
+reported separately; the count is never negative. When REPAIRED (the
+repaired content) still opens a [ or { that never closes, the warning adds
+that the ) fixes are wrong if that bracket was meant as ( -- a standard-syntax
+verdict, so not under a readtable that changes the syntax (NONSTANDARD-RT)."
   (when fixes
-    (let ((added (loop for fix in fixes sum (getf fix :added 0)))
-          (dropped (loop for fix in fixes sum (getf fix :removed 0))))
+    (let* ((added (loop for fix in fixes sum (getf fix :added 0)))
+           (dropped (loop for fix in fixes sum (getf fix :removed 0)))
+           (opener-scan (and repaired (not nonstandard-rt) (scan-delimiters repaired)))
+           (opener-note
+             (and opener-scan (opener-ambiguous-p opener-scan)
+                  (format nil "the ~A at line ~D, column ~D was treated as a symbol ~
+                               character; if you meant \"(\", the \")\" added are wrong: ~
+                               replace it and edit again"
+                          (if (equal (getf opener-scan :expected) "]") "[" "{")
+                          (getf opener-scan :line) (getf opener-scan :column)))))
       (format nil "~{~A~^; ~}"
               (remove nil
                       (list (when (plusp added)
@@ -98,7 +108,8 @@ reported separately; the count is never negative."
                             (when (plusp dropped)
                               (format nil "~D extra closing delimiter~:P dropped by ~
                                            parinfer"
-                                      dropped))))))))
+                                      dropped))
+                            opener-note))))))
 
 (defun %bracket-warning (text nonstandard-rt)
   "Return the shared bracket warning (FORMAT-BRACKET-WARNING) for TEXT, or
@@ -306,7 +317,9 @@ comments near a target form."
                      (log-event :info "lisp.edit.form" "auto-repair" "success"
                                 "original-error" (princ-to-string err))
                      (let ((fixes (repair-line-differences content repaired)))
-                       (values repaired-result (%repair-warning fixes) fixes
+                       (values repaired-result
+                               (%repair-warning fixes repaired-result nonstandard-rt)
+                               fixes
                                (%bracket-warning repaired-result nonstandard-rt))))
                     ((and (typep err 'multiple-top-level-forms-error)
                           (typep repaired-err 'multiple-top-level-forms-error))
@@ -471,38 +484,21 @@ dry-run summary show the edited form instead of the whole updated file.
   "Return the text appended to a success summary when parinfer repaired the
 content, or NIL when WARNING is NIL. Lists the changed lines and, when
 INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
-When a closer was inserted on a line whose next code line sits at the same
-indentation (RELOCATING-FIX-LINES: the shape of a body that was meant to
-stay inside the form), the summary says the lines below have left it. When
-the repaired content still opens a [ or { that never closes, the summary
-says the ) fixes are wrong if that bracket was meant as (."
+The relocation note (FORMAT-RELOCATION-NOTE: a closer inserted on a line
+whose next code line sits at the same indentation) is the one
+lisp-check-parens prints, so the two tools describe the same repair in the
+same words. The bracket-opener reminder is part of WARNING, built by
+%REPAIR-WARNING where the readtable is known."
   (when warning
-    (let* ((relocations (relocating-fix-lines fixes repaired-form))
-           ;; Bounded like the changed-lines list, so a wholesale
-           ;; reindentation cannot flood the note either.
-           (shown (if (> (length relocations) *repair-lines-limit*)
-                      (subseq relocations 0 *repair-lines-limit*)
-                      relocations))
-           (more (- (length relocations) (length shown)))
-           (opener-scan (scan-delimiters repaired-form)))
-      (with-output-to-string (s)
-        (format s "~%WARNING: ~A" warning)
-        (when fixes
-          (format s "~%Changed lines:~A" (format-repair-lines fixes)))
-        (when relocations
-          (format s "~%NOTE: parinfer closed a form on line~P ~{~D~^, ~}~[~:;, and ~:*~D ~
-                     more~], so the lines below ~:[it~;them~] are no longer inside that ~
-                     form; verify the nesting (indentation decides where a form ends)."
-                  (length relocations) shown more (cdr relocations)))
-        (when (opener-ambiguous-p opener-scan)
-          (format s "~%NOTE: the ~A at line ~D, column ~D was treated as a symbol ~
-                     character; if you meant ~S, the ~S added above are wrong: ~
-                     replace it and edit again."
-                  (if (equal (getf opener-scan :expected) "]") "[" "{")
-                  (getf opener-scan :line) (getf opener-scan :column)
-                  "(" ")"))
-        (when include-form
-          (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form)))))))
+    (with-output-to-string (s)
+      (format s "~%WARNING: ~A" warning)
+      (when fixes
+        (format s "~%Changed lines:~A" (format-repair-lines fixes)))
+      (let ((note (format-relocation-note fixes repaired-form)))
+        (when note
+          (format s "~%~A" note)))
+      (when include-form
+        (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form))))))
 
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run

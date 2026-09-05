@@ -220,7 +220,7 @@ Output:
   `unclosed-block-comment` the position is the opening `"` or `#|`.
 - for paren failures (`extra-close`, `mismatch`, `unclosed`): `likely_fixes`, a
   vector of `{line, original, repaired, delta, added, removed, column,
-  removed_columns, before_comment, truncated}` inferred by parinfer from
+  removed_columns, before_comment, truncated, crlf}` inferred by parinfer from
   indentation (at most 10 entries; the rest are counted in
   `likely_fixes_omitted`). `column` is the 1-based column of the first change
   (where an insertion goes), `removed_columns` the columns of the `)` a

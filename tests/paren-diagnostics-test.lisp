@@ -282,6 +282,25 @@
                   (getf d :likely-fixes) (getf d :repaired))
                  '(2))))))
 
+(deftest no-fix-after-a-reader-prefix-at-end-of-line
+  (testing "a ) cannot follow a lone ' at the end of a line, so no fix is offered"
+    ;; (list ')) does not read; the walker calls the position :code, but the
+    ;; character before it is a reader prefix.
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list '~%"))))
+      (ok (eq (getf d :repair-failed) :outside-code))
+      (ng (getf d :likely-fixes))))
+  (testing "the same for a backquote, comma, at-sign, escape and sharp"
+    ;; A trailing \ escapes the newline for the scanner, so its repair is
+    ;; rejected as :unbalanced rather than :outside-code; either way no fix.
+    (dolist (ch '("`" "," "@" "\\" "#"))
+      (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list ~A~%" ch))))
+        (ok (getf d :repair-failed) ch)
+        (ng (getf d :likely-fixes) ch))))
+  (testing "a prefix that is not the last character of the line is fine"
+    (let ((d (diagnose-delimiters (format nil "(defun f ()~%  (list 'a~%"))))
+      (ng (getf d :repair-failed))
+      (ok (= (getf (first (getf d :likely-fixes)) :delta) 2)))))
+
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"
     ;; The string's closing quote never comes, so parinfer's closer would land
@@ -326,6 +345,8 @@
         (ng (search "Either remove" extra))
         (ok (search "found \"]\"" typo))
         (ng (search "Replace it with" typo))
+        (ng (search "cannot be auto-repaired" typo)
+            "no claim that there is something to repair")
         (ng (search "Close it with" comment))
         (ng (search "Close it with" string))
         (ok (search "unclosed (form starting at line 1" unclosed))

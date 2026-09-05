@@ -1606,7 +1606,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                     '((:line 2 :original "  (when x" :repaired "  (when x)"
                        :delta 1 :added 1 :removed 0))
                     (format nil "(defun t1 (x)~%  (when x)~%  (g x)~%  (h x))"))))
-      (ok (search "NOTE: parinfer closed a form on line 2" summary))
+      (ok (search "NOTE: the fix on line 2 closes a form there" summary))
       (ok (search "no longer inside that form" summary))))
   (testing "a closer before a trailing comment line is not a relocation either"
     (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary

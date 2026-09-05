@@ -23,6 +23,8 @@
            #:bracket-ambiguous-p
            #:opener-ambiguous-p
            #:format-bracket-warning
+           #:format-overwrite-recovery
+           #:format-relocation-note
            #:relocating-fix-lines))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
@@ -501,8 +503,14 @@ character. Linear in the size of TEXT: the lexical states come from one
       (flet ((outside-code-p (line offset)
                (let ((pos (min (+ (aref line-starts (1- line)) offset) (length text))))
                  ;; :pending (a # or \ cut off at the end of TEXT) is not a
-                 ;; place a ) can follow either: (a #) does not read.
-                 (not (eq (svref mask pos) :code)))))
+                 ;; place a ) can follow either: (a #) does not read. Nor is
+                 ;; the spot right after a reader prefix or escape that ends
+                 ;; a line mid-text ((list ' then a newline): the walker calls
+                 ;; that :code, but (list ')) does not read.
+                 (or (not (eq (svref mask pos) :code))
+                     (and (plusp pos)
+                          (find (char text (1- pos)) "\\#'`,@")
+                          (eq (svref mask (1- pos)) :code))))))
         (loop for fix in fixes
               for line = (getf fix :line)
               ;; Compared without a trailing #\Return, exactly as
@@ -786,9 +794,9 @@ one place, below, rather than per kind."
          (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D."
                  target found line column))
         ((and (string= kind "mismatch") (equal expected ")"))
-         (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
-                    \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be ~
-                    auto-repaired."
+         ;; The "cannot be auto-repaired" sentence is an instruction's premise,
+         ;; so it lives with the instruction below, not in the finding.
+         (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D."
                  target expected found line column))
         ((string= kind "mismatch")
          ;; EXPECTED is "]" or "}": the opener was a bracket or brace, which in
@@ -817,7 +825,9 @@ one place, below, rather than per kind."
                       that was never closed."
                    found))
           ((and (string= kind "mismatch") (equal expected ")"))
-           (format s "~%Replace it with ~S." expected))
+           (format s "~%\"]\" and \"}\" are ordinary symbol characters in Common Lisp and ~
+                      cannot be auto-repaired. Replace it with ~S."
+                   expected))
           ((string= kind "unclosed-block-comment")
            (format s " Close it with |#."))
           ((string= kind "unclosed-string")
@@ -829,20 +839,9 @@ one place, below, rather than per kind."
            ;; indentation has probably cut that body off: say so, as
            ;; lisp-edit-form's summary does.
            (let* ((repaired (getf diagnosis :repaired))
-                  (relocations (and repaired (relocating-fix-lines fixes repaired)))
-                  ;; Bounded like the fix list itself, so a wholesale
-                  ;; reindentation cannot flood the note either.
-                  (shown (if (> (length relocations) *repair-lines-limit*)
-                             (subseq relocations 0 *repair-lines-limit*)
-                             relocations))
-                  (more (- (length relocations) (length shown))))
-             (when relocations
-               (format s "~%NOTE: the fix~:[~;es~] on line~:[~;s~] ~{~D~^, ~}~[~:;, and ~:*~D ~
-                          more~] close~:[s~;~] a form there, so the lines below ~:[it~;them~] ~
-                          are no longer inside that form; verify the nesting ~
-                          (indentation decides where a form ends)."
-                       (cdr relocations) (cdr relocations) shown more
-                       (cdr relocations) (cdr relocations))))
+                  (note (and repaired (format-relocation-note fixes repaired))))
+             (when note
+               (format s "~%~A" note)))
            ;; The actionable-looking part must not outrank the caveat: for an
            ;; unclosed bracket, say what the fix assumes right after it.
            (when opener-ambiguous
@@ -907,6 +906,43 @@ symbol character with no ) typo behind it."
                  target (getf scan :found) (getf scan :expected)
                  (getf scan :line) (getf scan :column) (getf scan :found)))))
 
+(defun format-overwrite-recovery (relative-path &key have-fix (where "below") form-line)
+  "Return the recovery steps for a file that fails on a delimiter no readtable
+can fix, worded once for both lisp-check-parens and file-unparseable-error:
+read it with fs-read-file, apply the fix (HAVE-FIX: the one shown under
+\"Likely fix\"; otherwise the change described WHERE -- \"below\" or
+\"above\" -- optionally to the form starting at FORM-LINE), and write it
+back with fs-write-file. RELATIVE-PATH is the project-relative path that
+fs-write-file requires. Ends with the custom-reader-syntax caveat."
+  (format nil "read it with fs-read-file, apply the ~:[change described ~A~;fix shown under ~
+               \"Likely fix\"~*~]~@[ to the form starting at line ~D~], and write the ~
+               whole file back with fs-write-file (path=~S, ~
+               allow_unparseable_overwrite=true; it refuses to overwrite an existing ~
+               Lisp file otherwise). If the file uses custom reader syntax that the ~
+               default reader cannot parse, pass the readtable parameter to ~
+               lisp-edit-form instead of overwriting."
+          have-fix where form-line relative-path))
+
+(defun format-relocation-note (fixes text)
+  "Return the NOTE sentence for those FIXES (from REPAIR-LINE-DIFFERENCES over
+TEXT, parinfer's output) that RELOCATING-FIX-LINES judges to have closed a
+form above a body that continues at the same indentation, or NIL when there
+is none. At most *REPAIR-LINES-LIMIT* lines are listed and the rest counted,
+so a wholesale reindentation cannot flood the note. One wording, used by
+lisp-check-parens' diagnosis and lisp-edit-form's summary alike."
+  (let ((relocations (relocating-fix-lines fixes text)))
+    (when relocations
+      (let* ((shown (if (> (length relocations) *repair-lines-limit*)
+                        (subseq relocations 0 *repair-lines-limit*)
+                        relocations))
+             (more (- (length relocations) (length shown)))
+             (several (cdr relocations)))
+        (format nil "NOTE: the fix~:[~;es~] on line~:[~;s~] ~{~D~^, ~}~[~:;, and ~:*~D ~
+                     more~] close~:[s~;~] a form there, so the lines below ~:[it~;them~] ~
+                     are no longer inside that form; verify the nesting (indentation ~
+                     decides where a form ends)."
+                several several shown more several several)))))
+
 (defun relocating-fix-lines (fixes text)
   "Return the 1-based lines of those FIXES (from REPAIR-LINE-DIFFERENCES over
 TEXT) that added closers on a line whose next code line sits at the same
@@ -920,11 +956,13 @@ line."
   (let* ((lines (coerce (split-string text :separator '(#\Newline)) 'vector))
          (count (length lines)))
     (flet ((indent (i)
-             ;; Visual width, a tab counting as 8 columns, so a tab-indented
-             ;; body is compared by what an editor shows.
+             ;; The same measure parinfer uses to decide where a closer goes
+             ;; (%count-leading-spaces: every leading space or tab is one
+             ;; column), so the note reasons about the geometry that produced
+             ;; the repair, not a different one.
              (loop for ch across (aref lines i)
                    while (member ch '(#\Space #\Tab))
-                   sum (if (char= ch #\Tab) 8 1)))
+                   count ch))
            (code-line-p (i)
              (let ((trimmed (string-trim '(#\Space #\Tab #\Return) (aref lines i))))
                (and (plusp (length trimmed)) (char/= (char trimmed 0) #\;)))))

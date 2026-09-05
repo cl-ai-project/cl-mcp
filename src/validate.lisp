@@ -13,7 +13,8 @@
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis)
+                #:format-delimiter-diagnosis
+                #:format-overwrite-recovery)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -318,24 +319,14 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                                       and lisp-patch-form cannot locate any form in ~
                                       it~; past its broken form (the forms before it ~
                                       can still be edited with lisp-edit-form; the ~
-                                      broken tail needs the overwrite path)~]: read ~
-                                      it with fs-read-file, apply the ~:[change ~
-                                      described below~;fix shown under \"Likely ~
-                                      fix\"~], and write it back with fs-write-file ~
-                                      (path=~S, ~
-                                      allow_unparseable_overwrite=true). If the file ~
-                                      uses custom reader syntax the default reader ~
-                                      cannot parse, pass the readtable parameter to ~
-                                      lisp-edit-form instead of overwriting."
+                                      broken tail needs the overwrite path)~]: ~A"
                                  editable-prefix
-                                 (and likely-fixes
-                                      (not (member kind '("unclosed-block-comment"
-                                                          "unclosed-string")
-                                                   :test #'string=))
-                                      t)
-                                 (namestring
-                                  (uiop:enough-pathname (fs-resolve-read-path path)
-                                                        (%project-root-truename))))))
+                                 (format-overwrite-recovery
+                                  (namestring
+                                   (uiop:enough-pathname (fs-resolve-read-path path)
+                                                         (%project-root-truename)))
+                                  :have-fix (and likely-fixes t)
+                                  :where "below"))))
                  (cond
                    (partial
                     ;; A slice of the file: say what was seen, never how to
