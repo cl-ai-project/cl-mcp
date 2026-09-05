@@ -21,7 +21,10 @@
   (bar-seen nil :type boolean)
   ;; Whether the line being processed held any code (a token or delimiter
   ;; outside strings and comments); reset per line.
-  (code-seen nil :type boolean))
+  (code-seen nil :type boolean)
+  ;; Column of the ; that starts a trailing line comment on the line being
+  ;; processed, or NIL; closers must go before it, not after the comment.
+  (comment-col nil :type (or null fixnum)))
 
 (defun %count-leading-spaces (line)
   (loop for ch across line
@@ -56,24 +59,31 @@ column-0 #| inside a function must not dedent the function shut."
              (incf pending))
     pending))
 
-(defun %append-closes-to-previous (processed-lines code-flags count)
-  "Append COUNT closing parens to the most recent code line in PROCESSED-LINES
-(newest first). CODE-FLAGS parallels it and says which lines were code when
-processed: not blank, not a comment, not starting inside a string or a block
-comment. Those other lines are skipped so the closers land on the line that
-ends the form, not on an empty line or inside a comment or string; when no
-line was code the newest line is used. A trailing #\\Return stays after the
-inserted closers, so CRLF text remains CRLF."
+(defun %append-closes-to-previous (processed-lines target-flags count)
+  "Insert COUNT closing parens into the most recent target line of
+PROCESSED-LINES (newest first). TARGET-FLAGS parallels it: NIL for a line
+that may not receive closers (blank, comment-only, or ending inside a string
+or block comment), T for a code line that takes them at its end, or the
+integer column of a trailing ; comment, before which they go (after the
+code's trailing spaces). When no line is a target the newest line is used. A
+trailing #\\Return stays after the inserted closers, so CRLF text remains
+CRLF."
   (when (and (plusp count) processed-lines)
-    (let* ((cell (nthcdr (or (position t code-flags) 0) processed-lines))
+    (let* ((index (or (position-if #'identity target-flags) 0))
+           (cell (nthcdr index processed-lines))
+           (flag (nth index target-flags))
            (line (car cell))
-           (cr-p (and (plusp (length line))
-                      (char= (char line (1- (length line))) #\Return)))
-           (body (if cr-p (subseq line 0 (1- (length line))) line)))
+           (closes (make-string count :initial-element #\))))
       (setf (car cell)
-            (concatenate 'string body
-                         (make-string count :initial-element #\))
-                         (if cr-p (string #\Return) "")))))
+            (if (integerp flag)
+                (let ((code (string-right-trim '(#\Space #\Tab)
+                                               (subseq line 0 flag))))
+                  (concatenate 'string code closes (subseq line (length code))))
+                (let* ((cr-p (and (plusp (length line))
+                                  (char= (char line (1- (length line))) #\Return)))
+                       (body (if cr-p (subseq line 0 (1- (length line))) line)))
+                  (concatenate 'string body closes
+                               (if cr-p (string #\Return) "")))))))
   processed-lines)
 
 (defun %process-line-characters (line state)
@@ -81,121 +91,127 @@ inserted closers, so CRLF text remains CRLF."
 and char literals. Handles #\\( and #\\) character literals so they are not
 counted as real parens, treats the inside of a |...| multiple-escape symbol
 as symbol text, and skips #| ... |# block comments (nested) so that a paren
-inside one is neither counted nor \"repaired\"."
+inside one is neither counted nor \"repaired\". Records in STATE whether the
+line held code (CODE-SEEN) and where a trailing ; comment starts
+(COMMENT-COL), for the closer placement in APPLY-INDENT-MODE."
   (let ((output (make-string-output-stream)))
-    (setf (state-code-seen state) nil)
-    (loop for ch across line
-          for col from 0
-          do (when (and (zerop (state-block-depth state))
-                        (not (state-in-string state))
-                        (not (state-in-symbol state))
-                        (not (member ch '(#\Space #\Tab #\Return #\;))))
-               ;; A token or delimiter outside strings and comments: the
-               ;; line holds code, so closers may be appended to it.
-               (setf (state-code-seen state) t))
-             (cond
-               ;; Inside a #| ... |# block comment: only track its end (and
-               ;; nested openers); nothing here is code.
-               ((plusp (state-block-depth state))
-                (write-char ch output)
-                (cond ((and (state-sharp-seen state) (char= ch #\|))
-                       (incf (state-block-depth state))
-                       (setf (state-sharp-seen state) nil
-                             (state-bar-seen state) nil))
-                      ((and (state-bar-seen state) (char= ch #\#))
-                       (decf (state-block-depth state))
-                       (setf (state-sharp-seen state) nil
-                             (state-bar-seen state) nil))
-                      (t
-                       (setf (state-sharp-seen state) (char= ch #\#)
-                             (state-bar-seen state) (char= ch #\|)))))
-               ;; Skip the character after #\ (it's a char literal, not a paren)
-               ((state-char-literal state)
-                (write-char ch output)
-                (setf (state-char-literal state) nil))
-               ;; Previous char was # outside string: check for \
-               ((and (state-sharp-seen state) (char= ch #\\))
-                (write-char ch output)
-                (setf (state-sharp-seen state) nil)
-                (setf (state-char-literal state) t))
-               ;; Previous char was # : #| opens a block comment.
-               ((and (state-sharp-seen state) (char= ch #\|))
-                (write-char ch output)
-                (setf (state-sharp-seen state) nil)
-                (incf (state-block-depth state)))
-               ;; Previous char was # but next is not \ or |: reset flag and
-               ;; fall through to normal processing (e.g. #( vector literals
-               ;; must still push onto the paren stack).
-               ((state-sharp-seen state)
-                (setf (state-sharp-seen state) nil)
-                ;; Re-process this character through normal branches
-                (cond
-                  ((char= ch #\")
-                   (write-char ch output)
-                   (setf (state-in-string state) (not (state-in-string state))))
-                  ((char= ch #\;)
-                   (loop for i from col below (length line)
-                         do (write-char (char line i) output))
-                   (return))
-                  ((char= ch #\()
-                   (write-char ch output)
-                   (push (1+ col) (state-stack state)))
-                  ((char= ch #\))
-                   (cond
-                     ((state-stack state)
-                      (pop (state-stack state))
-                      (write-char ch output))
-                     (t nil)))
-                  (t (write-char ch output))))
-               ;; Inside a |...| symbol: \ escapes, | ends, all else is text.
-               ((state-in-symbol state)
-                (write-char ch output)
-                (cond ((state-escape state) (setf (state-escape state) nil))
-                      ((char= ch #\\) (setf (state-escape state) t))
-                      ((char= ch #\|) (setf (state-in-symbol state) nil))))
-               ;; Escape in string
-               ((state-escape state)
-                (write-char ch output)
-                (setf (state-escape state) nil))
-               ;; Backslash in string
-               ((and (state-in-string state) (char= ch #\\))
-                (write-char ch output)
-                (setf (state-escape state) t))
-               ;; String delimiter
-               ((char= ch #\")
-                (write-char ch output)
-                (setf (state-in-string state) (not (state-in-string state))))
-               ;; Single escape outside a string: the next character is part
-               ;; of a symbol (so \( and \) are not parens); reuse the string
-               ;; escape flag, which the branch above consumes.
-               ((and (not (state-in-string state)) (char= ch #\\))
-                (write-char ch output)
-                (setf (state-escape state) t))
-               ;; Multiple-escape symbol start (outside string)
-               ((and (not (state-in-string state)) (char= ch #\|))
-                (write-char ch output)
-                (setf (state-in-symbol state) t))
-               ;; # outside string: set flag for next char
-               ((and (not (state-in-string state)) (char= ch #\#))
-                (write-char ch output)
-                (setf (state-sharp-seen state) t))
-               ;; Comment
-               ((and (not (state-in-string state)) (char= ch #\;))
-                (loop for i from col below (length line)
-                      do (write-char (char line i) output))
-                (return))
-               ;; Open paren (outside string)
-               ((and (not (state-in-string state)) (char= ch #\())
-                (write-char ch output)
-                (push (1+ col) (state-stack state)))
-               ;; Close paren (outside string)
-               ((and (not (state-in-string state)) (char= ch #\)))
-                (cond
-                  ((state-stack state)
-                   (pop (state-stack state))
-                   (write-char ch output))
-                  (t nil)))
-               (t (write-char ch output))))
+    (setf (state-code-seen state) nil
+          (state-comment-col state) nil)
+    (flet ((finish-with-comment (col)
+             ;; The rest of the line is comment text, copied verbatim.
+             (setf (state-comment-col state) col)
+             (loop for i from col below (length line)
+                   do (write-char (char line i) output))))
+      (loop for ch across line
+            for col from 0
+            do (when (and (zerop (state-block-depth state))
+                          (not (state-in-string state))
+                          (not (state-in-symbol state))
+                          (not (member ch '(#\Space #\Tab #\Return #\;))))
+                 ;; A token or delimiter outside strings and comments: the
+                 ;; line holds code, so closers may be appended to it.
+                 (setf (state-code-seen state) t))
+               (cond
+                 ;; Inside a #| ... |# block comment: only track its end (and
+                 ;; nested openers); nothing here is code.
+                 ((plusp (state-block-depth state))
+                  (write-char ch output)
+                  (cond ((and (state-sharp-seen state) (char= ch #\|))
+                         (incf (state-block-depth state))
+                         (setf (state-sharp-seen state) nil
+                               (state-bar-seen state) nil))
+                        ((and (state-bar-seen state) (char= ch #\#))
+                         (decf (state-block-depth state))
+                         (setf (state-sharp-seen state) nil
+                               (state-bar-seen state) nil))
+                        (t
+                         (setf (state-sharp-seen state) (char= ch #\#)
+                               (state-bar-seen state) (char= ch #\|)))))
+                 ;; Skip the character after #\ (it's a char literal, not a paren)
+                 ((state-char-literal state)
+                  (write-char ch output)
+                  (setf (state-char-literal state) nil))
+                 ;; Previous char was # outside string: check for \
+                 ((and (state-sharp-seen state) (char= ch #\\))
+                  (write-char ch output)
+                  (setf (state-sharp-seen state) nil)
+                  (setf (state-char-literal state) t))
+                 ;; Previous char was # : #| opens a block comment.
+                 ((and (state-sharp-seen state) (char= ch #\|))
+                  (write-char ch output)
+                  (setf (state-sharp-seen state) nil)
+                  (incf (state-block-depth state)))
+                 ;; Previous char was # but next is not \ or |: reset flag and
+                 ;; fall through to normal processing (e.g. #( vector literals
+                 ;; must still push onto the paren stack).
+                 ((state-sharp-seen state)
+                  (setf (state-sharp-seen state) nil)
+                  ;; Re-process this character through normal branches
+                  (cond
+                    ((char= ch #\")
+                     (write-char ch output)
+                     (setf (state-in-string state) (not (state-in-string state))))
+                    ((char= ch #\;)
+                     (finish-with-comment col)
+                     (return))
+                    ((char= ch #\()
+                     (write-char ch output)
+                     (push (1+ col) (state-stack state)))
+                    ((char= ch #\))
+                     (cond
+                       ((state-stack state)
+                        (pop (state-stack state))
+                        (write-char ch output))
+                       (t nil)))
+                    (t (write-char ch output))))
+                 ;; Inside a |...| symbol: \ escapes, | ends, all else is text.
+                 ((state-in-symbol state)
+                  (write-char ch output)
+                  (cond ((state-escape state) (setf (state-escape state) nil))
+                        ((char= ch #\\) (setf (state-escape state) t))
+                        ((char= ch #\|) (setf (state-in-symbol state) nil))))
+                 ;; Escape in string
+                 ((state-escape state)
+                  (write-char ch output)
+                  (setf (state-escape state) nil))
+                 ;; Backslash in string
+                 ((and (state-in-string state) (char= ch #\\))
+                  (write-char ch output)
+                  (setf (state-escape state) t))
+                 ;; String delimiter
+                 ((char= ch #\")
+                  (write-char ch output)
+                  (setf (state-in-string state) (not (state-in-string state))))
+                 ;; Single escape outside a string: the next character is part
+                 ;; of a symbol (so \( and \) are not parens); reuse the string
+                 ;; escape flag, which the branch above consumes.
+                 ((and (not (state-in-string state)) (char= ch #\\))
+                  (write-char ch output)
+                  (setf (state-escape state) t))
+                 ;; Multiple-escape symbol start (outside string)
+                 ((and (not (state-in-string state)) (char= ch #\|))
+                  (write-char ch output)
+                  (setf (state-in-symbol state) t))
+                 ;; # outside string: set flag for next char
+                 ((and (not (state-in-string state)) (char= ch #\#))
+                  (write-char ch output)
+                  (setf (state-sharp-seen state) t))
+                 ;; Comment
+                 ((and (not (state-in-string state)) (char= ch #\;))
+                  (finish-with-comment col)
+                  (return))
+                 ;; Open paren (outside string)
+                 ((and (not (state-in-string state)) (char= ch #\())
+                  (write-char ch output)
+                  (push (1+ col) (state-stack state)))
+                 ;; Close paren (outside string)
+                 ((and (not (state-in-string state)) (char= ch #\)))
+                  (cond
+                    ((state-stack state)
+                     (pop (state-stack state))
+                     (write-char ch output))
+                    (t nil)))
+                 (t (write-char ch output)))))
     ;; Reset per-line transient flags
     (setf (state-escape state) nil
           (state-sharp-seen state) nil
@@ -211,8 +227,9 @@ keep non-code out of it: a line that is blank, holds only a ; comment, opens
 a #| block comment, or starts inside a string or block comment does not
 trigger a dedent (its indentation says nothing about the forms open around
 it); and closers are appended only to a line that holds code and ends
-outside strings and comments, so a line such as `|# (bar)' receives them
-while a comment or string line never does."
+outside strings and block comments, so a line such as `|# (bar)' receives
+them while a comment-only or string line never does; on a code line that
+ends in a ; comment they go before the comment."
   (let ((ends-with-newline (and (plusp (length text))
                                 (char= (char text (1- (length text))) #\Newline)))
         ;; split-string yields a trailing "" for text ending in a newline;
@@ -234,11 +251,20 @@ while a comment or string line never does."
         (when dedent-line-p
           (let ((pending (%dedent-closes state indent)))
             (%append-closes-to-previous processed-lines target-flags pending)))
-        (push (%process-line-characters line state) processed-lines)
-        (push (and (state-code-seen state)
-                   (not (state-in-string state))
-                   (zerop (state-block-depth state)))
-              target-flags)))
+        (let ((processed (%process-line-characters line state)))
+          (push processed processed-lines)
+          (push (cond ((not (and (state-code-seen state)
+                                 (not (state-in-string state))
+                                 (zerop (state-block-depth state))))
+                       nil)
+                      ;; A trailing ; comment: closers go before it. Its text
+                      ;; was copied verbatim, so it starts that many
+                      ;; characters from the end of the processed line.
+                      ((state-comment-col state)
+                       (- (length processed)
+                          (- (length line) (state-comment-col state))))
+                      (t t))
+                target-flags))))
 
     ;; close any remaining open parens at EOF
     (%append-closes-to-previous processed-lines target-flags

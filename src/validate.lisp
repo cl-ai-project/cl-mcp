@@ -165,16 +165,12 @@ MCP payload)."
     ;; describe text the file does not end with, so it is reported as too
     ;; large rather than diagnosed.
     (when (or truncated (> (length text) *check-parens-max-bytes*))
+      ;; No "position": nothing was scanned, so line 1 would be noise.
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "ok" h) nil
               (gethash "kind" h) "too-large"
               (gethash "expected" h) nil
               (gethash "found" h) nil)
-        (let ((pos (make-hash-table :test #'equal)))
-          (setf (gethash "offset" pos) base-off
-                (gethash "line" pos) 1
-                (gethash "column" pos) 1)
-          (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
     (let ((diagnosis (diagnose-delimiters text :base-offset base-off))
           (reader-info (%try-reader-check text base-off)))

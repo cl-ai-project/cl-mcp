@@ -478,7 +478,9 @@ character. Linear in the size of TEXT: the lexical states come from one
               do (vector-push (1+ i) line-starts))
       (flet ((outside-code-p (line offset)
                (let ((pos (min (+ (aref line-starts (1- line)) offset) (length text))))
-                 (not (member (svref mask pos) '(:code :pending))))))
+                 ;; :pending (a # or \ cut off at the end of TEXT) is not a
+                 ;; place a ) can follow either: (a #) does not read.
+                 (not (eq (svref mask pos) :code)))))
         (loop for fix in fixes
               for line = (getf fix :line)
               ;; Compared without a trailing #\Return, exactly as
@@ -694,9 +696,9 @@ one; otherwise a repair-failed sentence is printed instead."
       (cond
         (fixes
          (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
-        ;; A possible false positive (an unclosed [ or {) must not be followed
-        ;; by a flat instruction to fix delimiters that may be fine.
-        ((and failed (not (member expected '("]" "}") :test #'equal)))
+        ;; A mismatch already carries its own instruction (or a false-positive
+        ;; caveat); a second, flat "fix by hand" sentence would only add noise.
+        ((and failed (not (string= kind "mismatch")))
          (format s "~%Automatic repair could not produce a readable form; ~
                     fix the delimiters by hand.")))
       (when (and next-line (string= kind "unclosed"))

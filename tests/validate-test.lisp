@@ -70,7 +70,9 @@
       (let ((res (lisp-check-parens :code "abcd")))
         (ok (null (%ok? res)))
         (ok (not (eq (%ok? res) :false)))
-        (ok (string= (%kind res) "too-large"))))))
+        (ok (string= (%kind res) "too-large"))
+        (ok (null (gethash "position" res))
+            "nothing was scanned, so no position is reported")))))
 
 (deftest lisp-check-parens-truncated-read-is-too-large
   (testing "a file read cut at the fs cap is reported too-large, not diagnosed from its prefix"

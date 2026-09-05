@@ -200,3 +200,21 @@
       (ok (equal (apply-indent-mode input)
                  (format nil "(defun f ()~%  (let ((x 1))~%    (foo~%#|~%c~%|# (bar))))"))
           "(bar) stays inside foo; nothing is appended to the (foo line"))))
+
+(deftest indent-mode-closes-before-a-trailing-comment
+  (testing "closers go before a trailing ; comment on the last code line"
+    (let ((input (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2) ; double it")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2))) ; double it")))))
+  (testing "a dedent closer also goes before the previous line's comment"
+    ;; (foo at indent 4 closes the binding list on line 2; (bar at indent 2
+    ;; closes the let, and that closer goes before "; note".
+    (let ((input (format nil "(defun f ()~%  (let ((x 1)~%    (foo) ; note~%  (bar))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((x 1))~%    (foo)) ; note~%  (bar))")))))
+  (testing "a comment-only line is still never a target"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%  ;; tail")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%  ;; tail"))))))

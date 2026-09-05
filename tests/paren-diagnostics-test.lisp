@@ -190,6 +190,22 @@
       (ng (find 6 fixes :key (lambda (f) (getf f :line)))
           "(bar x) is not rewritten out of the function"))))
 
+(deftest likely-fix-survives-a-trailing-comment
+  (testing "the line that needs the ) is still named when it ends in a ; comment"
+    (let* ((text (format nil "(defun compute (a b)~%  (let ((s (+ a b)))~%    ~
+                              (* s 2) ; double it"))
+           (d (diagnose-delimiters text))
+           (fix (first (getf d :likely-fixes))))
+      (ng (getf d :repair-failed))
+      (ok (= (length (getf d :likely-fixes)) 1))
+      (ok (= (getf fix :line) 3))
+      (ok (= (getf fix :delta) 2))
+      (ok (string= (getf fix :repaired) "    (* s 2))) ; double it"))))
+  (testing "a # cut off at the end of the text gets no fix: (a #) does not read"
+    (let ((d (diagnose-delimiters "(a #")))
+      (ok (getf d :repair-failed))
+      (ng (getf d :likely-fixes)))))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3
@@ -471,7 +487,8 @@
       (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." text))
       (ok (search "\"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be auto-repaired." text))
       (ok (search "Replace it with \")\"." text))
-      (ok (search "Automatic repair could not produce a readable form; fix the delimiters by hand." text))
+      (ng (search "fix the delimiters by hand." text)
+          "the specific instruction stands alone; no generic sentence follows it")
       (ng (search "Likely fix" text)))))
 
 (deftest format-diagnosis-unclosed-block-comment

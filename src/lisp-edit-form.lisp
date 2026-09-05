@@ -205,10 +205,15 @@ comments near a target form."
                                                       text :start pos)
                                      len)))
                           (when (< rest-start len)
-                            (if (rest-parses-as-complete-forms-p text rest-start)
-                                (error 'multiple-top-level-forms-error)
-                                (error
-                                 "content has trailing malformed characters after the first form"))))
+                            (cond
+                              ;; A trailing comment after the form is part
+                              ;; of the content, not malformed text.
+                              ((comment-only-p (subseq text rest-start)) nil)
+                              ((rest-parses-as-complete-forms-p text rest-start)
+                               (error 'multiple-top-level-forms-error))
+                              (t
+                               (error "content has trailing malformed characters ~
+                                       after the first form")))))
                         text))
                     :source-path source-path)
                  (error (e)

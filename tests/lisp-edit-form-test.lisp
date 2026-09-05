@@ -1581,6 +1581,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                         :content (format nil "(defun target (x)~%  (foo [bar x"))
         (ok (search "(foo [bar x))" (fs-read-file path)))))))
 
+(deftest lisp-edit-form-repairs-content-ending-in-a-comment
+  (testing "a missing ) on a line with a trailing comment is repaired before the comment"
+    (with-temp-file "tests/tmp/edit-form-trailing-comment-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (list x) ; done"))
+          (declare (ignore updated))
+          (ok (search "closing delimiter" warning))
+          (ok (search "(list x)) ; done" (fs-read-file path))
+              "the ) is inserted before the comment, so the form reads"))))))
+
 (deftest lisp-edit-form-refusal-hides-reader-internals
   (testing "the reader error kept in a refusal carries no SBCL stream object"
     (with-temp-file "tests/tmp/edit-form-refusal-sanitized.lisp"

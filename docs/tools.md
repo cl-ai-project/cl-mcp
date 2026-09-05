@@ -214,9 +214,9 @@ Output:
 - `ok` (boolean)
 - when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` |
   `unclosed-block-comment` | `unclosed-string` | `reader-error` | `too-large`),
-  `expected`, `found`, and `position` (`offset`, `line`, `column`); for an
-  `unclosed-string` or `unclosed-block-comment` the position is the opening
-  `"` or `#|`.
+  `expected`, `found`, and `position` (`offset`, `line`, `column`; absent for
+  `too-large`, where nothing was scanned); for an `unclosed-string` or
+  `unclosed-block-comment` the position is the opening `"` or `#|`.
 - for paren failures (`extra-close`, `mismatch`, `unclosed`): `likely_fixes`, a
   vector of `{line, original, repaired, delta, added, removed}` inferred by
   parinfer from indentation (at most 10 entries; the rest are counted in

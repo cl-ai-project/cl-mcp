@@ -149,10 +149,12 @@ clean string suitable for JSON-RPC error responses."
   msg)
 
 (defun sanitize-condition-text (condition)
-  "Return CONDITION's report text fit for a client. An END-OF-FILE is described
-as \"unexpected end of input\": its own report names the stream object, which
-SANITIZE-ERROR-MESSAGE would strip down to a dangling \"end of file on\".
-Anything else goes through SANITIZE-ERROR-MESSAGE."
-  (if (typep condition 'end-of-file)
+  "Return CONDITION's report text fit for a client. The implementation's own
+END-OF-FILE (its exact type, not a subtype) is described as \"unexpected end
+of input\": its report names the stream object, which SANITIZE-ERROR-MESSAGE
+would strip down to a dangling \"end of file on\". A subtype with a report
+of its own (cst's UNTERMINATED-SOURCE, which says what is still open) keeps
+that text, and anything else goes through SANITIZE-ERROR-MESSAGE."
+  (if (eq (type-of condition) 'end-of-file)
       "unexpected end of input"
       (sanitize-error-message (princ-to-string condition))))

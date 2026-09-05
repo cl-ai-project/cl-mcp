@@ -16,7 +16,8 @@
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
-                #:stray-right-parenthesis)
+                #:stray-right-parenthesis
+                #:*standard-readtable*)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/paren-diagnostics
@@ -143,10 +144,6 @@ editor-hints.named-readtables package."
         (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
           (when (and find-fn (fboundp find-fn))
             (funcall find-fn designator)))))))
-
-(defvar *standard-readtable* (copy-readtable nil)
-  "A pristine standard readtable, the reference %STANDARD-SYNTAX-READTABLE-P
-compares a caller's readtable against. Never modified.")
 
 (defun %standard-syntax-readtable-p (rt)
   "Return T when readtable RT reads exactly like the standard one: the same
@@ -421,8 +418,10 @@ balanced plist and RECOVERABLE is NIL), and the message says so."))
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR, carrying a delimiter diagnosis, when the file
 cannot be parsed at all, or when the target form is not found and the lenient
-CL-reader pass (after an IN-READTABLE switch) stopped early on a read error;
-forms before such a breakage remain editable. A file larger than the fs read
+CL-reader pass (after an IN-READTABLE switch, or under a READTABLE argument)
+stopped early on a read error; on that lenient pass the forms before the
+breakage remain editable, whereas the Eclector pass yields no forms at all
+from a file that does not parse. A file larger than the fs read
 cap is reported as such instead, because its truncated prefix would only
 yield a misleading delimiter diagnosis.
 Returns eight values:
@@ -491,10 +490,11 @@ avoids a second read; otherwise the file is read here, and a read truncated
 at the fs read cap returns NIL because a cut-off prefix of a valid file
 would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
-permits overwriting only files that are broken this way. (A file whose
-breakage lies after the target form is still partially editable by
-lisp-edit-form, which only reports it when the target is not found; the
-guard classifies such a file by the whole-file parse.)"
+permits overwriting only files that are broken this way. (On the lenient
+CL-reader pass -- after an IN-READTABLE switch or under a readtable
+argument -- a file whose breakage lies after the target form is still
+partially editable by lisp-edit-form, which only reports it when the target
+is not found; the guard classifies such a file by the whole-file parse.)"
   (multiple-value-bind (text truncated)
       (if text (values text nil) (fs-read-file pn))
     (and (not truncated)
