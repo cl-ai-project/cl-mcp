@@ -280,10 +280,21 @@ exempt from reader checking to avoid false positives."
                                   line col (or message "unknown"))
                           (let ((ef (if (and expected found)
                                         (format nil " (expected ~A, found ~A)" expected found)
-                                        "")))
+                                        ""))
+                                ;; The headline must not call an open string
+                                ;; or comment a parenthesis problem, since
+                                ;; the diagnosis below it says otherwise.
+                                (label (cond ((string= kind "unclosed-string")
+                                              "Unterminated string")
+                                             ((string= kind "unclosed-block-comment")
+                                              "Unterminated block comment")
+                                             ((string= kind "too-large")
+                                              "Input too large to check")
+                                             (t (format nil "Unbalanced parentheses: ~A"
+                                                        kind)))))
                             (format nil
-                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A~@[~%~A~]"
-                                    kind ef line col
+                                    "~A~A at line ~D, column ~D~A~@[~%~A~]"
+                                    label ef line col
                                     (if next-tool
                                         " Use lisp-edit-form for existing Lisp files."
                                         "")

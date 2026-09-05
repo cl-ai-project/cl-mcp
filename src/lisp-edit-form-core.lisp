@@ -42,6 +42,7 @@
            #:%strip-name-prefix
            #:%find-target
            #:%resolve-named-readtable
+           #:%nonstandard-readtable-p
            #:%parse-readtable-designator
            #:%detect-readtable-before-node
            #:%whitespace-char-p
@@ -142,6 +143,45 @@ editor-hints.named-readtables package."
         (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
           (when (and find-fn (fboundp find-fn))
             (funcall find-fn designator)))))))
+
+(defun %standard-syntax-readtable-p (rt)
+  "Return T when readtable RT reads exactly like the standard one: the same
+readtable case, the same macro function and terminating status for every
+character below 128, and the same dispatch function for every # sub-character
+below 128. A readtable that merely copies :standard (or the :standard
+designator itself) reads standard syntax and must not switch off the
+standard-syntax delimiter diagnostics.
+A dispatching macro character's own function is a fresh closure in every
+readtable copy (SBCL), so for a character that dispatches in both readtables
+the comparison is made on its sub-characters instead."
+  (let ((std (copy-readtable nil)))
+    (flet ((dispatching-p (table ch)
+             (and (ignore-errors (progn (get-dispatch-macro-character ch #\a table) t))
+                  t)))
+      (and (eq (readtable-case rt) (readtable-case std))
+           (loop for code from 0 below 128
+                 for ch = (code-char code)
+                 always (or (and (dispatching-p rt ch) (dispatching-p std ch))
+                            (multiple-value-bind (fn non-terminating)
+                                (get-macro-character ch rt)
+                              (multiple-value-bind (std-fn std-nt)
+                                  (get-macro-character ch std)
+                                (and (eq fn std-fn)
+                                     (eq (not non-terminating) (not std-nt)))))))
+           (loop for code from 0 below 128
+                 for ch = (code-char code)
+                 always (eq (ignore-errors (get-dispatch-macro-character #\# ch rt))
+                            (ignore-errors (get-dispatch-macro-character #\# ch std))))))))
+
+(defun %nonstandard-readtable-p (designator)
+  "Return T when DESIGNATOR resolves (via named-readtables) to a readtable
+whose syntax differs from the standard one, so the standard-syntax delimiter
+diagnostics (the ] refusal, bracket advice, lisp-patch-form's depth message)
+must not be used. NIL for no designator, for one that does not resolve (the
+tools then read with the standard readtable anyway), and for a readtable that
+is standard in all but name."
+  (let ((rt (and designator (%resolve-named-readtable designator))))
+    (and rt (not (%standard-syntax-readtable-p rt)) t)))
 
 (defun %parse-readtable-designator (readtable-string)
   "Parse a readtable string from MCP tool args into a symbol designator.
@@ -393,7 +433,7 @@ Returns eight values:
       (multiple-value-bind (original truncated file-length)
           (fs-read-file abs)
         (when truncated
-          (error "~A exceeds the read limit (~@[~D characters, ~]only ~D read); ~
+          (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
                   lisp-edit-form and lisp-patch-form cannot edit files this large, ~
                   and fs-write-file will not overwrite it either (a truncated read ~
                   cannot prove the file is broken). Split the file or edit it ~

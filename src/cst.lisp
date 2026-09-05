@@ -41,6 +41,11 @@
 (declaim (type (simple-array fixnum (*)) *line-table*))
 (defvar *line-table* (make-array 1 :element-type 'fixnum :initial-element 1))
 
+(defvar *standard-readtable* (copy-readtable nil)
+  "A pristine standard readtable, the reference that a file's active readtable
+is compared against (by macro function) to decide whether ; #| ) and
+whitespace still mean what the structural checks assume. Never modified.")
+
 (defun %build-line-table (text)
   "Return a vector mapping character offsets in TEXT to 1-based line numbers."
   (let* ((len (length text))
@@ -99,7 +104,7 @@ A lone # that does not open a block comment is left in place.
 Returns NIL normally, or an UNTERMINATED-SOURCE condition when input ended
 inside a block comment: that is a delimiter-class failure the caller must
 report, not a successfully skipped comment."
-  (let* ((standard (copy-readtable nil))
+  (let* ((standard *standard-readtable*)
          (line-comment-p (eq (get-macro-character #\; readtable)
                              (get-macro-character #\; standard)))
          (block-comment-p (eq (ignore-errors (get-dispatch-macro-character #\# #\| readtable))
@@ -197,7 +202,7 @@ fs-write-file overwrite guard) inspect the second value."
         ;; lists. A readtable that redefines ")" (constituent, or another
         ;; macro) must interpret it itself, so the check is skipped for it.
         (standard-close-p (eq (get-macro-character #\) custom-readtable)
-                              (get-macro-character #\) (copy-readtable nil)))))
+                              (get-macro-character #\) *standard-readtable*))))
     (loop
       (let ((start-pos (file-position stream)))
         ;; Skip whitespace and comments, so a stray ")" behind a comment is

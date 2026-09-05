@@ -178,6 +178,18 @@
                 (when (char= ch #\() (push line seen))))
         (ok (equal (reverse seen) '(1 3)) "walker: the two ( are on lines 1 and 3")))))
 
+(deftest block-comment-at-column-zero-does-not-evict-code
+  (testing "a #| line at column 0 inside a form does not make parinfer close everything"
+    (let* ((text (format nil "(defun f (x)~%  (foo x~%#|~%  (old-impl x)~%|#~%  (bar x))"))
+           (d (diagnose-delimiters text))
+           (fixes (getf d :likely-fixes)))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ok (= (length fixes) 1) "exactly one line changes")
+      (ok (= (getf (first fixes) :line) 2))
+      (ok (= (getf (first fixes) :delta) 1) "add the one ) missing after (foo x")
+      (ng (find 6 fixes :key (lambda (f) (getf f :line)))
+          "(bar x) is not rewritten out of the function"))))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3

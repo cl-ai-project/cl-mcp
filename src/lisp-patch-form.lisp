@@ -24,6 +24,7 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message
+                #:sanitize-condition-text
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
@@ -35,6 +36,7 @@
                 #:scan-delimiters)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
+                #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
                 #:%detect-readtable-before-node
                 #:%whitespace-char-p
@@ -204,7 +206,9 @@ the reader's own failure is reported."
                custom-rt
                (copy-readtable nil))))
     (flet ((diagnosed (fallback)
-             (if readtable-designator
+             ;; A readtable that is standard in all but name keeps the
+             ;; standard diagnosis; only a syntax change withholds it.
+             (if (%nonstandard-readtable-p readtable-designator)
                  fallback
                  (%diagnosed-reason form-text fallback))))
       (handler-case
@@ -240,8 +244,7 @@ the reader's own failure is reported."
                                       ;; Sanitized here, where the reader's
                                       ;; text is embedded, so the diagnosis
                                       ;; around it keeps its line breaks.
-                                      (sanitize-error-message
-                                       (princ-to-string e)))))))))))
+                                      (sanitize-condition-text e))))))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
@@ -287,7 +290,7 @@ to use for parsing the file."
              ;; A ] or } typed for ) changes the net count too, but "add 1 )"
              ;; would then write code that reads (as a symbol ending in ]);
              ;; let the bracket diagnosis speak instead.
-             (depth-reason (and (null readtable-designator)
+             (depth-reason (and (not (%nonstandard-readtable-p readtable-designator))
                                 (not (%bracket-mismatch-p modified-form))
                                 (%check-depth-balance form-text modified-form
                                                       match-pos old-text new-text))))

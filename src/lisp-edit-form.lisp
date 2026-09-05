@@ -28,6 +28,7 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message
+                #:sanitize-condition-text
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
@@ -35,6 +36,7 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
+                #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form
@@ -145,7 +147,11 @@ it with a `;; removed' comment marker, and `insert_*' to place bare
 comments near a target form."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
-         (*readtable* (if custom-rt custom-rt (copy-readtable nil))))
+         (*readtable* (if custom-rt custom-rt (copy-readtable nil)))
+         ;; Standard-syntax verdicts are withheld only for a readtable that
+         ;; really changes the syntax; :standard (or a plain copy of it) must
+         ;; not become a loophole around the ] refusal.
+         (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
     (labels ((whitespace-char-p (ch)
                (member ch '(#\Space #\Tab #\Newline #\Return)))
              (comment-only-p (text)
@@ -218,7 +224,7 @@ comments near a target form."
               ;; trustworthy (a reader macro may consume raw parentheses as
               ;; data), so its verdicts are not used to refuse or explain;
               ;; only the reader's own outcome counts then.
-              (when (and (null custom-rt)
+              (when (and (not nonstandard-rt)
                          (not (getf diagnosis :ok))
                          (getf diagnosis :repair-failed))
                 ;; Keep the reader's own error too: for an ambiguous [ or ]
@@ -229,9 +235,12 @@ comments near a target form."
                        :message (format nil "~A (reader: ~A)"
                                         (format-delimiter-diagnosis diagnosis
                                                                     :target "content")
-                                        (sanitize-error-message
-                                         (princ-to-string err)))))
-              (let ((repaired (apply-indent-mode content)))
+                                        (sanitize-condition-text err))))
+              ;; Parinfer already ran inside DIAGNOSE-DELIMITERS when the
+              ;; scan found a delimiter problem; reuse its output. Only a
+              ;; balanced text that still fails to read runs it here.
+              (let ((repaired (or (getf diagnosis :repaired)
+                                  (apply-indent-mode content))))
                 (multiple-value-bind (repaired-result repaired-err)
                     (try-parse repaired)
                   (cond
@@ -243,7 +252,7 @@ comments near a target form."
                     ((and (typep err 'multiple-top-level-forms-error)
                           (typep repaired-err 'multiple-top-level-forms-error))
                      (error err))
-                    ((and (null custom-rt) (not (getf diagnosis :ok)))
+                    ((and (not nonstandard-rt) (not (getf diagnosis :ok)))
                      ;; Keep the reader error too: a paren problem often hides
                      ;; a second, unrelated read error that the user still
                      ;; needs.
@@ -251,8 +260,7 @@ comments near a target form."
                             :message (format nil "~A (repair also failed: ~A)"
                                              (format-delimiter-diagnosis
                                               diagnosis :target "content")
-                                             (sanitize-error-message
-                                              (princ-to-string repaired-err)))))
+                                             (sanitize-condition-text repaired-err))))
                     (t
                      (error "content parse error: ~A (repair also failed: ~A)"
                             err repaired-err)))))))))))

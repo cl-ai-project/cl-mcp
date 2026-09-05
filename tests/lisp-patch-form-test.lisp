@@ -816,12 +816,42 @@ running as root), THUNK is skipped instead."
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-patch-form-depth-reason-suppressed-under-custom-readtable
-  (testing "with an in-readtable declaration in effect, no net-parenthesis message is offered"
-    (with-temp-file "tests/tmp/patch-custom-readtable-depth.lisp"
+  (testing "with an in-readtable declaration that changes the syntax, no net-parenthesis message"
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-patch-depth-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/patch-custom-readtable-depth.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-patch-depth-syntax)~%~
+                                (defun target (x)~%  (print x))~%")
+                 (lambda (path)
+                   (let ((before (fs-read-file path))
+                         (err-msg nil))
+                     (handler-case
+                         (lisp-patch-form :file-path path
+                                          :form-type "defun"
+                                          :form-name "target"
+                                          :old-text "(print x)"
+                                          :new-text "(print x")
+                       (error (e) (setf err-msg (princ-to-string e))))
+                     (ok err-msg "the patch must still fail")
+                     (ok (null (search "fewer \")\"" err-msg))
+                         "standard lexical rules are not trusted under a custom readtable")
+                     (ok (search "No changes were written to disk." err-msg))
+                     (ok (string= before (fs-read-file path))))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-patch-depth-syntax)))
+        (rove:skip "named-readtables not available")))
+  (testing "an in-readtable :standard declaration keeps the net-parenthesis message"
+    (with-temp-file "tests/tmp/patch-standard-readtable-depth.lisp"
         (format nil "(in-readtable :standard)~%(defun target (x)~%  (print x))~%")
       (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
+        (let ((err-msg nil))
           (handler-case
               (lisp-patch-form :file-path path
                                :form-type "defun"
@@ -829,34 +859,45 @@ running as root), THUNK is skipped instead."
                                :old-text "(print x)"
                                :new-text "(print x")
             (error (e) (setf err-msg (princ-to-string e))))
-          (ok err-msg "the patch must still fail")
-          (ok (null (search "fewer \")\"" err-msg))
-              "standard lexical rules are not trusted under a custom readtable")
-          (ok (search "No changes were written to disk." err-msg))
-          (ok (string= before (fs-read-file path))))))))
+          (ok (and err-msg (search "fewer \")\"" err-msg))
+              ":standard reads standard syntax, so the depth message applies"))))))
 
 (deftest lisp-patch-form-diagnosis-suppressed-under-custom-readtable
-  (testing "with an in-readtable declaration, a parse failure keeps the reader's own message"
-    (with-temp-file "tests/tmp/patch-custom-readtable-diagnosis.lisp"
-        (format nil "(in-readtable :standard)~%(defun target ()~%  1)~%")
-      (lambda (path)
-        (let ((before (fs-read-file path))
-              (err-msg nil))
-          (handler-case
-              ;; #. is disabled, so the reader fails; the standard delimiter
-              ;; scan must not replace that with a bracket diagnosis.
-              (lisp-patch-form :file-path path
-                               :form-type "defun"
-                               :form-name "target"
-                               :old-text "1"
-                               :new-text "#.(+ 1 1) [(]")
-            (error (e) (setf err-msg (princ-to-string e))))
-          (ok err-msg "the patch must fail")
-          (ok (search "invalid Lisp" err-msg))
-          (ok (null (search "Unbalanced parentheses" err-msg))
-              "no standard-syntax diagnosis under a custom readtable")
-          (ok (search "No changes were written to disk." err-msg))
-          (ok (string= before (fs-read-file path))))))))
+  (testing "with an in-readtable that changes the syntax, a parse failure keeps the reader's message"
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-patch-diag-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/patch-custom-readtable-diagnosis.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-patch-diag-syntax)~%~
+                                (defun target ()~%  1)~%")
+                 (lambda (path)
+                   (let ((before (fs-read-file path))
+                         (err-msg nil))
+                     (handler-case
+                         ;; #. is disabled, so the reader fails; the standard
+                         ;; delimiter scan must not replace that with a
+                         ;; bracket diagnosis.
+                         (lisp-patch-form :file-path path
+                                          :form-type "defun"
+                                          :form-name "target"
+                                          :old-text "1"
+                                          :new-text "#.(+ 1 1) [(]")
+                       (error (e) (setf err-msg (princ-to-string e))))
+                     (ok err-msg "the patch must fail")
+                     (ok (search "invalid Lisp" err-msg))
+                     (ok (null (search "Unbalanced parentheses" err-msg))
+                         "no standard-syntax diagnosis under a custom readtable")
+                     (ok (search "No changes were written to disk." err-msg))
+                     (ok (string= before (fs-read-file path))))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-patch-diag-syntax)))
+        (rove:skip "named-readtables not available"))))
 
 (deftest lisp-patch-form-ambiguous-bracket-keeps-reader-error
   (testing "a [ in a symbol plus a real reader error reports both, not only the hedge"

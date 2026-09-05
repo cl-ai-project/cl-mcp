@@ -34,6 +34,15 @@ at indentation 0 that would close every open form."
     (or (string= trimmed "")
         (char= (char trimmed 0) #\;))))
 
+(defun %block-comment-opener-line-p (line)
+  "Return T when LINE's first non-blank characters open a #| block comment.
+Such a line is not code: its column says nothing about the open forms, so a
+column-0 #| inside a function must not dedent the function shut."
+  (let ((trimmed (string-left-trim '(#\Space #\Tab) line)))
+    (and (>= (length trimmed) 2)
+         (char= (char trimmed 0) #\#)
+         (char= (char trimmed 1) #\|))))
+
 (defun %dedent-closes (state indent)
   "Return number of close parens needed when indentation decreases."
   (let ((pending 0))
@@ -43,15 +52,16 @@ at indentation 0 that would close every open form."
              (incf pending))
     pending))
 
-(defun %append-closes-to-previous (processed-lines count)
+(defun %append-closes-to-previous (processed-lines code-flags count)
   "Append COUNT closing parens to the most recent code line in PROCESSED-LINES
-(newest first). Blank and comment-only lines are skipped so the closers land
-on the line that ends the form, not on an empty line or inside a comment;
-when every line is blank or a comment the newest line is used. A trailing
-#\\Return stays after the inserted closers, so CRLF text remains CRLF."
+(newest first). CODE-FLAGS parallels it and says which lines were code when
+processed: not blank, not a comment, not starting inside a string or a block
+comment. Those other lines are skipped so the closers land on the line that
+ends the form, not on an empty line or inside a comment or string; when no
+line was code the newest line is used. A trailing #\\Return stays after the
+inserted closers, so CRLF text remains CRLF."
   (when (and (plusp count) processed-lines)
-    (let* ((cell (or (member-if-not #'%line-empty-or-comment-p processed-lines)
-                     processed-lines))
+    (let* ((cell (nthcdr (or (position t code-flags) 0) processed-lines))
            (line (car cell))
            (cr-p (and (plusp (length line))
                       (char= (char line (1- (length line))) #\Return)))
@@ -181,14 +191,19 @@ inside one is neither counted nor \"repaired\"."
           (state-char-literal state) nil)
     (get-output-stream-string output)))
 
-(defun %append-remaining-closes (state processed-lines)
+(defun %append-remaining-closes (state processed-lines code-flags)
   "Close every form still open at the end of the input, on the last code line."
-  (%append-closes-to-previous processed-lines (length (state-stack state))))
+  (%append-closes-to-previous processed-lines code-flags
+                              (length (state-stack state))))
 
 (defun apply-indent-mode (text)
   "Apply a minimal Parinfer-like indent mode to TEXT.
 Closes open forms when indentation decreases, drops excessive closing parens,
-and ignores parentheses inside strings or comments."
+and ignores parentheses inside strings or comments. Only code lines take
+part: a line that is blank, holds only a ; comment, opens a #| block comment,
+or starts inside a string or block comment neither triggers a dedent (its
+indentation says nothing about the forms open around it) nor receives the
+closers."
   (let ((ends-with-newline (and (plusp (length text))
                                 (char= (char text (1- (length text))) #\Newline)))
         ;; split-string yields a trailing "" for text ending in a newline;
@@ -199,17 +214,22 @@ and ignores parentheses inside strings or comments."
                      (butlast parts)
                      parts)))
         (state (%make-state))
-        (processed-lines '()))
+        (processed-lines '())
+        (code-flags '()))
     (dolist (line lines)
       (let ((indent (%count-leading-spaces line))
-            (is-code-line (not (%line-empty-or-comment-p line))))
+            (is-code-line (and (not (state-in-string state))
+                               (zerop (state-block-depth state))
+                               (not (%line-empty-or-comment-p line))
+                               (not (%block-comment-opener-line-p line)))))
         (when is-code-line
           (let ((pending (%dedent-closes state indent)))
-            (%append-closes-to-previous processed-lines pending)))
-        (push (%process-line-characters line state) processed-lines)))
+            (%append-closes-to-previous processed-lines code-flags pending)))
+        (push (%process-line-characters line state) processed-lines)
+        (push is-code-line code-flags)))
 
     ;; close any remaining open parens at EOF
-    (%append-remaining-closes state processed-lines)
+    (%append-remaining-closes state processed-lines code-flags)
 
     ;; Format output, preserving whether input ended with newline
     (let ((result (format nil "~{~A~^~%~}" (nreverse processed-lines))))

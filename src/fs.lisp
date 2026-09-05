@@ -73,7 +73,13 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
            (buf (make-string capped))
            (count (read-sequence buf in :end capped))
            (text (subseq buf 0 count))
-           (truncated (and raw-len (> effective capped))))
+           ;; FILE-LENGTH counts octets even on a character stream, so a
+           ;; multibyte file can look bigger than the cap and still fit in
+           ;; it: report truncation only when the buffer filled and input
+           ;; really remains.
+           (truncated (and raw-len (> effective capped)
+                           (= count capped)
+                           (not (eq (peek-char nil in nil :eof) :eof)))))
       (values text truncated raw-len))))
 
 (defun fs-resolve-read-path (path)

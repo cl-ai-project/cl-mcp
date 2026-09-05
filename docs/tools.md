@@ -219,7 +219,7 @@ Output:
   vector of `{line, original, repaired, delta, added, removed}` inferred by
   parinfer from indentation (at most 10 entries; the rest are counted in
   `likely_fixes_omitted`; `original`/`repaired` are cut to 120 characters and
-  are then descriptive, not text to write back). Absent when no repair could be
+  are then descriptive, not text to write back). Empty when no repair could be
   inferred.
 - for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
   seen while the form was still open, when there is one.
@@ -256,6 +256,18 @@ Operations:
 - **replace**: Replace the entire matched form with `content`
 - **insert_before**: Insert `content` as a new form before the matched form
 - **insert_after**: Insert `content` as a new form after the matched form
+
+Auto-repair: when `content` does not read, missing `)` are inferred from
+**indentation** (parinfer indent mode) and the repaired form is written. The
+inference can place a `)` on the wrong line when the indentation is not what
+you meant, moving a sub-form in or out of its parent while still producing
+readable code. The response therefore shows the changed lines and the repaired
+form; check them, and use `dry_run: true` when the content is non-trivial. A
+`]` or `}` left where `)` was meant, and any leftover the repair cannot make
+readable, is refused with the same line-level diagnosis as `lisp-check-parens`
+and nothing is written. A `readtable` argument (or an `in-readtable` earlier in
+the file) that actually changes the syntax switches these standard-syntax
+verdicts off and leaves the verdict to the reader.
 
 Output:
 - `path`, `operation`, `form_type`, `form_name`

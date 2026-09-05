@@ -178,3 +178,18 @@
       (ok (equal (apply-indent-mode input)
                  (format nil "(defun f (x)~A  (let ((y 1))~A~A    (+ x y)))"
                          crlf crlf crlf))))))
+
+(deftest indent-mode-ignores-indentation-of-non-code-lines
+  (testing "a column-0 block comment inside a form is not a dedent"
+    (let ((input (format nil "(defun f (x)~%  (foo x~%#|~%  (old-impl x)~%|#~%  (bar x))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f (x)~%  (foo x)~%#|~%  (old-impl x)~%|#~%  (bar x))"))
+          "only the ) missing after (foo x is added; (bar x) stays inside the defun")))
+  (testing "a string continuation line at column 0 is not a dedent"
+    (let ((input (format nil "(defun f ()~%  \"doc~%continued\"~%  (list 1")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  \"doc~%continued\"~%  (list 1))")))))
+  (testing "closers never land on a line inside a block comment or a string"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%#| trailing~%note |#")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%#| trailing~%note |#"))))))

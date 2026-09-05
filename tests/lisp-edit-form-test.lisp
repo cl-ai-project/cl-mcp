@@ -1609,25 +1609,54 @@ Used to prove that a dry-run summary does not grow with the size of the file."
         (skip "named-readtables not available"))))
 
 (deftest lisp-edit-form-custom-readtable-skips-delimiter-verdicts
-  (testing "with a readtable given, the standard scan neither refuses nor explains"
+  (testing "under a readtable that changes the syntax, the scan neither refuses nor explains"
     ;; Under a custom readtable ] may be meaningful, so the ] refusal that
     ;; applies to plain content is not applied; the reader decides.
     (if (%try-load "named-readtables")
-        (with-temp-file "tests/tmp/edit-form-custom-readtable-bracket.lisp"
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-bracket-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-custom-readtable-bracket.lisp"
+                   (format nil "(defun target () :old)~%")
+                 (lambda (path)
+                   (multiple-value-bind (updated warning)
+                       (lisp-edit-form :file-path path
+                                       :form-type "defun"
+                                       :form-name "target"
+                                       :operation "replace"
+                                       :readtable :cl-mcp-test-bracket-syntax
+                                       :content (format nil "(defun target ()~%  foo]"))
+                     (declare (ignore updated))
+                     (ok (search "closing delimiter" warning)
+                         "parinfer still closes the form under the custom readtable")
+                     (ok (search "foo]" (fs-read-file path))
+                         "foo] was accepted as the readtable's business"))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-bracket-syntax)))
+        (skip "named-readtables not available")))
+  (testing "readtable :standard is not a loophole: foo] is still refused"
+    (if (%try-load "named-readtables")
+        (with-temp-file "tests/tmp/edit-form-standard-readtable-bracket.lisp"
             (format nil "(defun target () :old)~%")
           (lambda (path)
-            (multiple-value-bind (updated warning)
-                (lisp-edit-form :file-path path
-                                :form-type "defun"
-                                :form-name "target"
-                                :operation "replace"
-                                :readtable :standard
-                                :content (format nil "(defun target ()~%  foo]"))
-              (declare (ignore updated))
-              (ok (search "closing delimiter" warning)
-                  "parinfer still closes the form under the custom readtable")
-              (ok (search "foo]" (fs-read-file path))
-                  "foo] was accepted as the readtable's business"))))
+            (let ((before (fs-read-file path))
+                  (err nil))
+              (handler-case
+                  (lisp-edit-form :file-path path
+                                  :form-type "defun"
+                                  :form-name "target"
+                                  :operation "replace"
+                                  :readtable :standard
+                                  :content (format nil "(defun target ()~%  foo]"))
+                (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+                  (setf err (princ-to-string e))))
+              (ok err "content-unrepairable-error under :standard")
+              (ok (search "Replace it with \")\"." err))
+              (ok (string= before (fs-read-file path)) "file untouched"))))
         (skip "named-readtables not available"))))
 
 (deftest lisp-edit-form-readtable-file-failure-gives-no-scan-verdict

@@ -495,3 +495,27 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   (不正な UTF-8 など)は「パース可能」扱いで拒否し、内部エラーにはしない。
 - **`[`/`{` の偽陽性時の文面**: `expected` が `]`/`}` の mismatch では、偽陽性の
   注意書きの後に「手で直せ」という断定文を続けない。
+- **読み取り切り詰めフラグの定義**: `file-length` は文字ストリームでもオクテット数を
+  返すので、マルチバイトのファイルは 1 MiB を超えて見えても全文が読める。
+  `truncated` は「バッファが満杯になり、かつ入力が残っている」場合にだけ真とし、
+  有効なファイルの編集や `lisp-check-parens` が誤って拒否されないようにする。
+- **parinfer と行の種類**: 文字列やブロックコメントの内側で始まる行、`#|` で
+  始まる行は「コード行」ではない。そのインデントでデデントの閉じ括弧を出さず
+  (列 0 の `#|` が関数全体を閉じてしまわないため)、閉じ括弧の着地先としても
+  飛ばす。行ごとの判定は処理時に記録し、走査後に文面から推測し直さない。
+- **`:standard` は抜け道にしない**: 標準構文の診断を止めるのは、指定された
+  readtable が **実際に構文を変えている**場合だけ(128 未満の全文字のマクロ関数と
+  `#` のサブ文字のディスパッチ関数を標準 readtable と比較する
+  `%standard-syntax-readtable-p`)。`:standard` や `:merge '(:standard)` だけの
+  readtable では `]` 拒否も深さメッセージも従来どおり働く。`lisp-edit-form` と
+  `lisp-patch-form` は同じ述語 `%nonstandard-readtable-p` を使う。
+- **リーダーエラー文の埋め込み**: `end-of-file` はストリームオブジェクトを含む
+  報告文になり、sanitize すると「end of file on」で途切れるので、埋め込み時は
+  「unexpected end of input」に言い換える(`sanitize-condition-text`)。
+- **`lisp-check-parens` 要約の見出し**: `unclosed-string` /
+  `unclosed-block-comment` / `too-large` では「Unbalanced parentheses: …」ではなく
+  種類に応じた見出しにし、続く診断文と矛盾させない。
+- **セキュリティ上の注記**: `fs-write-file` のガードは `parse-top-level-forms` を
+  実行するため、ファイル内の `(in-readtable ...)` が指す readtable のリーダー
+  マクロが(`*read-eval*` nil で)動く。`lisp-edit-form` が既に持つ露出と同じで、
+  かつ opt-in フラグ付きの呼び出しに限られる。

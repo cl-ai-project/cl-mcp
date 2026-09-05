@@ -260,9 +260,12 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
 
 (defun diagnose-delimiters (text &key (base-offset 0))
   "Scan TEXT like SCAN-DELIMITERS and, when it is unbalanced, add repair hints:
-:likely-fixes (parinfer line diff), :repair-failed, :next-top-level-line,
-and for kind \"unclosed\" also :unclosed-form-line and :unclosed-form-head.
-A balanced TEXT or an unclosed block comment returns the plain scan plist."
+:likely-fixes (parinfer line diff), :repair-failed, :repaired (parinfer's
+output, so a caller that goes on to try it need not run parinfer again),
+:next-top-level-line for kind \"unclosed\" (the only kind whose guidance
+explains it), and for that kind also :unclosed-form-line and
+:unclosed-form-head. A balanced TEXT, an unclosed block comment or an
+unclosed string returns the plain scan plist."
   (let* ((scan (scan-delimiters text :base-offset base-offset))
          (kind (getf scan :kind)))
     (if (or (getf scan :ok)
@@ -271,14 +274,15 @@ A balanced TEXT or an unclosed block comment returns the plain scan plist."
             (string= kind "unclosed-block-comment")
             (string= kind "unclosed-string"))
         scan
-        (multiple-value-bind (fixes failed) (%likely-fixes text)
+        (multiple-value-bind (fixes failed repaired) (%likely-fixes text)
           (append scan
                   (list :likely-fixes fixes
                         :repair-failed failed
-                        :next-top-level-line (%next-top-level-line text))
+                        :repaired repaired)
                   (when (string= kind "unclosed")
                     (let ((line (getf scan :line)))
-                      (list :unclosed-form-line line
+                      (list :next-top-level-line (%next-top-level-line text)
+                            :unclosed-form-line line
                             :unclosed-form-head (%form-head text line)))))))))
 
 (defun %map-code-characters (text function &key end state-fn)
@@ -292,7 +296,8 @@ scan visits, STATE being the lexical state in effect just before IDX; this
 lets a caller classify many positions in one pass instead of rescanning.
 Scanning stops at position END (default: the end of TEXT) and returns two
 values: the lexical state reached there (:code, :string, :string-escape,
-:symbol, :line-comment, :block-comment or :pending) and the block-comment
+:symbol, :symbol-escape, :line-comment, :block-comment or :pending) and the
+block-comment
 nesting depth at that point. Nothing at or past END is ever consulted, so
 the state at END depends only on the text before it: a construct that would
 need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
@@ -473,8 +478,11 @@ character. Linear in the size of TEXT: the lexical states come from one
                  (not (member (svref mask pos) '(:code :pending))))))
         (loop for fix in fixes
               for line = (getf fix :line)
-              for orig = (aref orig-lines (1- line))
-              for rep = (aref rep-lines (1- line))
+              ;; Compared without a trailing #\Return, exactly as
+              ;; REPAIR-LINE-DIFFERENCES does, so CRLF lines still get the
+              ;; precise per-position check rather than the coarse fallback.
+              for orig = (%strip-trailing-cr (aref orig-lines (1- line)))
+              for rep = (%strip-trailing-cr (aref rep-lines (1- line)))
               do (multiple-value-bind (added removed positions)
                      (%paren-edit-counts orig rep)
                    (declare (ignore removed))
@@ -486,19 +494,21 @@ character. Linear in the size of TEXT: the lexical states come from one
                      (return t))))))))
 
 (defun %likely-fixes (text)
-  "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
+  "Run parinfer on TEXT and return (VALUES fixes repair-failed-p repaired).
 FIXES is the line diff from REPAIR-LINE-DIFFERENCES. REPAIR-FAILED-P is T
 when the repaired text is still unbalanced per SCAN-DELIMITERS, which also
 covers a ] or } closing a paren, or when parinfer changed text that is not
-code (see %ANY-FIX-OUTSIDE-CODE-P). FIXES is NIL in either case.
+code (see %ANY-FIX-OUTSIDE-CODE-P). FIXES is NIL in either case. REPAIRED is
+parinfer's output either way, so a caller that goes on to try it does not
+run parinfer a second time.
 Balanced [...] or {...} pairs, as used by some reader macros, are accepted."
   (let ((repaired (apply-indent-mode text)))
     (if (getf (scan-delimiters repaired) :ok)
         (let ((fixes (repair-line-differences text repaired)))
           (if (%any-fix-outside-code-p text repaired fixes)
-              (values nil t)
-              (values fixes nil)))
-        (values nil t))))
+              (values nil t repaired)
+              (values fixes nil repaired)))
+        (values nil t repaired))))
 
 (defun count-delimiter-depth (text &key (start 0) end)
   "Return two values: the number of \"(\" and the number of \")\" in TEXT

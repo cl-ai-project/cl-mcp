@@ -5,7 +5,8 @@
   (:import-from #:cl-ppcre
                 #:regex-replace-all)
   (:export #:sanitize-for-json
-           #:sanitize-error-message))
+           #:sanitize-error-message
+           #:sanitize-condition-text))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -146,3 +147,12 @@ clean string suitable for JSON-RPC error responses."
   (when (> (length msg) 500)
     (setf msg (concatenate 'string (subseq msg 0 497) "...")))
   msg)
+
+(defun sanitize-condition-text (condition)
+  "Return CONDITION's report text fit for a client. An END-OF-FILE is described
+as \"unexpected end of input\": its own report names the stream object, which
+SANITIZE-ERROR-MESSAGE would strip down to a dangling \"end of file on\".
+Anything else goes through SANITIZE-ERROR-MESSAGE."
+  (if (typep condition 'end-of-file)
+      "unexpected end of input"
+      (sanitize-error-message (princ-to-string condition))))
