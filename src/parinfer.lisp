@@ -27,7 +27,10 @@
         count 1))
 
 (defun %line-empty-or-comment-p (line)
-  (let ((trimmed (string-left-trim '(#\Space #\Tab) line)))
+  "Return T when LINE is blank or holds only a ; comment. A trailing #\\Return
+(CRLF input) is ignored, so a blank CRLF line is not mistaken for a code line
+at indentation 0 that would close every open form."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Return) line)))
     (or (string= trimmed "")
         (char= (char trimmed 0) #\;))))
 
@@ -41,11 +44,22 @@
     pending))
 
 (defun %append-closes-to-previous (processed-lines count)
+  "Append COUNT closing parens to the most recent code line in PROCESSED-LINES
+(newest first). Blank and comment-only lines are skipped so the closers land
+on the line that ends the form, not on an empty line or inside a comment;
+when every line is blank or a comment the newest line is used. A trailing
+#\\Return stays after the inserted closers, so CRLF text remains CRLF."
   (when (and (plusp count) processed-lines)
-    (setf (first processed-lines)
-          (format nil "~A~A"
-                  (first processed-lines)
-                  (make-string count :initial-element #\)))))
+    (let* ((cell (or (member-if-not #'%line-empty-or-comment-p processed-lines)
+                     processed-lines))
+           (line (car cell))
+           (cr-p (and (plusp (length line))
+                      (char= (char line (1- (length line))) #\Return)))
+           (body (if cr-p (subseq line 0 (1- (length line))) line)))
+      (setf (car cell)
+            (concatenate 'string body
+                         (make-string count :initial-element #\))
+                         (if cr-p (string #\Return) "")))))
   processed-lines)
 
 (defun %process-line-characters (line state)
@@ -168,13 +182,8 @@ inside one is neither counted nor \"repaired\"."
     (get-output-stream-string output)))
 
 (defun %append-remaining-closes (state processed-lines)
-  (let ((remaining (length (state-stack state))))
-    (when (and (plusp remaining) processed-lines)
-      (setf (first processed-lines)
-            (format nil "~A~A"
-                    (first processed-lines)
-                    (make-string remaining :initial-element #\))))))
-  processed-lines)
+  "Close every form still open at the end of the input, on the last code line."
+  (%append-closes-to-previous processed-lines (length (state-stack state))))
 
 (defun apply-indent-mode (text)
   "Apply a minimal Parinfer-like indent mode to TEXT.
@@ -182,7 +191,13 @@ Closes open forms when indentation decreases, drops excessive closing parens,
 and ignores parentheses inside strings or comments."
   (let ((ends-with-newline (and (plusp (length text))
                                 (char= (char text (1- (length text))) #\Newline)))
-        (lines (uiop:split-string text :separator '(#\Newline)))
+        ;; split-string yields a trailing "" for text ending in a newline;
+        ;; drop it so closers land on the last real line and the newline is
+        ;; restored below exactly once.
+        (lines (let ((parts (uiop:split-string text :separator '(#\Newline))))
+                 (if (and (cdr parts) (string= (car (last parts)) ""))
+                     (butlast parts)
+                     parts)))
         (state (%make-state))
         (processed-lines '()))
     (dolist (line lines)

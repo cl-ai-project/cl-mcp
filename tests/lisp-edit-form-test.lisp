@@ -1554,6 +1554,60 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Replace it with \")\"." err))
           (ok (string= before (fs-read-file path)) "file untouched"))))))
 
+(deftest lisp-edit-form-refusal-hides-reader-internals
+  (testing "the reader error kept in a refusal carries no SBCL stream object"
+    (with-temp-file "tests/tmp/edit-form-refusal-sanitized.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (let ((y 1]~%~
+                                                    (+ x y)))"))
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal content-unrepairable-error")
+          (ok (search "(reader: " err) "the reader's own error is still appended")
+          (ok (null (search "#<" err)) "no #<...> object representation leaks")
+          (ok (search "Replace it with \")\"." err)
+              "the multi-line diagnosis itself is untouched"))))))
+
+(deftest lisp-edit-form-content-honours-in-readtable-in-file
+  (testing "content is validated under the readtable the file switched to"
+    ;; #?[...] reads raw text through ]; without the file's readtable the
+    ;; content would fail on #? and the scan would then blame the ].
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-file-raw-bracket :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n)
+             (declare (ignore c n))
+             (read-char s)
+             (coerce (loop for ch = (read-char s nil nil)
+                           until (or (null ch) (char= ch #\]))
+                           collect ch)
+                     'string))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-in-readtable-content.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-file-raw-bracket)~%(defun b () 1)~%")
+                 (lambda (path)
+                   (lisp-edit-form :file-path path
+                                   :form-type "defun"
+                                   :form-name "b"
+                                   :operation "replace"
+                                   :content "(defun b () #?[(])")
+                   (ok (search "(defun b () #?[(])" (fs-read-file path))
+                       "the content was accepted as written under the file's readtable")))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-file-raw-bracket)))
+        (skip "named-readtables not available"))))
+
 (deftest lisp-edit-form-custom-readtable-skips-delimiter-verdicts
   (testing "with a readtable given, the standard scan neither refuses nor explains"
     ;; Under a custom readtable ] may be meaningful, so the ] refusal that

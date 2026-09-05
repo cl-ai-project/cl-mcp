@@ -116,8 +116,17 @@ Write text to a file under the project root (directories auto-created).
 Input:
 - `path` (string, required): **must be relative** to the project root
 - `content` (string, required)
+- `allow_unparseable_overwrite` (boolean, optional): permit overwriting an
+  existing `.lisp`/`.asd` file that the structural tools cannot parse.
 
-Policy: writes outside the project root are rejected.
+Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
+file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
+`lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
+first, and the write is allowed only when the parse fails on a delimiter (a
+missing or stray `)`, or an unterminated string or `#|` comment) that no
+readtable could fix; a file that parses, a truncated read, or an unreadable
+file is still refused. The intended recovery loop is `lisp-check-parens` →
+`fs-read-file` → `fs-write-file` with the flag.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -201,11 +210,32 @@ Input:
 
 Output:
 - `ok` (boolean)
-- when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` | `too-large`), `expected`, `found`, and `position` (`offset`, `line`, `column`).
+- when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` |
+  `unclosed-block-comment` | `unclosed-string` | `reader-error` | `too-large`),
+  `expected`, `found`, and `position` (`offset`, `line`, `column`); for an
+  `unclosed-string` or `unclosed-block-comment` the position is the opening
+  `"` or `#|`.
+- for paren failures (`extra-close`, `mismatch`, `unclosed`): `likely_fixes`, a
+  vector of `{line, original, repaired, delta, added, removed}` inferred by
+  parinfer from indentation (at most 10 entries; the rest are counted in
+  `likely_fixes_omitted`; `original`/`repaired` are cut to 120 characters and
+  are then descriptive, not text to write back). Absent when no repair could be
+  inferred.
+- for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
+  seen while the form was still open, when there is one.
+- The summary text repeats the diagnosis in prose: the unclosed form's line and
+  head, a `Likely fix, inferred from indentation:` block, and the next top-level
+  form hint.
 
 Notes:
-- Uses the same read allow-list and 2 MB cap as `fs-read-file`.
-- Ignores delimiters inside strings, `;` line comments, and `#| ... |#` block comments.
+- Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file
+  read that `fs-read-file` truncated at its 1 MB cap, is reported as
+  `kind: too-large` rather than diagnosed from a prefix.
+- Ignores delimiters inside strings, `;` line comments, `#| ... |#` block
+  comments (nested), `#\x` character literals, `\`-escaped characters and
+  `|...|` symbols.
+- `[`/`{` are still tracked as delimiters, so a symbol such as `a[b` produces a
+  `mismatch` that the text flags as a possible false positive.
 
 ## `lisp-edit-form`
 Perform structure-aware edits to a top-level form using Eclector CST parsing while

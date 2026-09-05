@@ -156,3 +156,25 @@
   (testing "a nested block comment does not end at the inner |#"
     (let ((input "(a #| x #| y |# ( |# b)"))
       (ok (equal (apply-indent-mode input) input)))))
+
+(deftest indent-mode-closes-on-the-last-code-line
+  (testing "closers go on the last code line, not on the trailing empty line"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%")))
+      (ok (equal (apply-indent-mode input) (format nil "(defun f ()~%  (list 1))~%")))))
+  (testing "a balanced text ending in a newline keeps exactly one newline"
+    (let ((input (format nil "(a)~%")))
+      (ok (equal (apply-indent-mode input) input))))
+  (testing "blank and comment-only lines at the end are skipped"
+    (let ((input (format nil "(defun f ()~%  (list 1)~%;; tail~%~%")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (list 1))~%;; tail~%~%")))))
+  (testing "a dedent after a comment line closes the code line before the comment"
+    (let ((input (format nil "(defun f ()~%  (let ((y 1)~%  ;; about foo~%  (foo))")))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f ()~%  (let ((y 1)))~%  ;; about foo~%  (foo))")))))
+  (testing "CRLF: the closer goes before the carriage return, and blank CRLF lines are blank"
+    (let* ((crlf (format nil "~C~%" #\Return))
+           (input (format nil "(defun f (x)~A  (let ((y 1)~A~A    (+ x y)))" crlf crlf crlf)))
+      (ok (equal (apply-indent-mode input)
+                 (format nil "(defun f (x)~A  (let ((y 1))~A~A    (+ x y)))"
+                         crlf crlf crlf))))))

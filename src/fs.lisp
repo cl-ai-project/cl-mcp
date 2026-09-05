@@ -171,8 +171,12 @@ condition type. Without a hook (a partial image that loaded fs alone) the
 answer is NIL, i.e. the overwrite guard always holds -- there is no
 second, weaker definition of \"unparseable\" to drift from the tools'.
 A read truncated at *FS-READ-MAX-BYTES* is reported as parseable, since a
-cut-off prefix proves nothing."
-  (multiple-value-bind (text truncated) (%read-file-string pn nil nil)
+cut-off prefix proves nothing, and so is a file that cannot be decoded at
+all (invalid UTF-8, say): failing closed keeps the guard in place instead of
+turning the write into an internal error."
+  (multiple-value-bind (text truncated)
+      (handler-case (%read-file-string pn nil nil)
+        (error () (values "" t)))
     (and (not truncated)
          *lisp-file-unparseable-hook*
          (funcall *lisp-file-unparseable-hook* pn text)

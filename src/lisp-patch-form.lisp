@@ -237,7 +237,11 @@ the reader's own failure is reported."
                               (format nil "patch operation produced invalid Lisp: ~A. ~
                                            The form could not be parsed after replacement. ~
                                            No changes were written to disk."
-                                      e)))))))))
+                                      ;; Sanitized here, where the reader's
+                                      ;; text is embedded, so the diagnosis
+                                      ;; around it keeps its line breaks.
+                                      (sanitize-error-message
+                                       (princ-to-string e)))))))))))
 
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
@@ -406,10 +410,13 @@ is used instead of Eclector, which means comments are NOT preserved."))
         (tool-error id
                     (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))
+      ;; Not passed through SANITIZE-ERROR-MESSAGE: that would fold the
+      ;; multi-line "Likely fix" block into one line and cut the message at
+      ;; 500 characters, losing "No changes were written to disk". The reader
+      ;; text embedded by %VALIDATE-FORM-PARSEABLE is sanitized at its source.
       (patch-operation-error (e)
         (tool-error id
-                    (sanitize-for-json
-                     (sanitize-error-message (format nil "~A" e)))
+                    (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))
       ;; Re-signal so DEFINE-TOOL's own ARG-VALIDATION-ERROR clause formats it;
       ;; otherwise the generic clause below would swallow genuine argument

@@ -206,8 +206,14 @@ Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :col
                    (return-from scan-delimiters err))
                  (when consumed
                    (let ((n (if (integerp consumed) consumed 1)))
-                     (incf idx n)
-                     (incf (scan-state-col state) n))))))
+                     ;; #\<Newline> is the one skipped construct that spans
+                     ;; a line: keep the line counter honest over it.
+                     (if (find #\Newline text :start (1+ idx)
+                                              :end (min len (+ idx n 1)))
+                         (setf (scan-state-line state) (1+ (scan-state-line state))
+                               (scan-state-col state) 0)
+                         (incf (scan-state-col state) n))
+                     (incf idx n))))))
             (%scan-advance-position state ch)
             (incf idx))
     (when (scan-state-in-string state)
@@ -355,13 +361,17 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                     (when (>= (+ idx 2) len)
                       (setf pending t)
                       (return))
-                    (let ((skip 2))
-                      (when (alpha-char-p (char text (+ idx 2)))
-                        (loop for k from (+ idx 3) below len
-                              while (alpha-char-p (char text k))
-                              do (incf skip)))
-                      (incf idx skip)
-                      (incf col skip)))
+                    (if (char= (char text (+ idx 2)) #\Newline)
+                        ;; #\<Newline>: the literal itself ends the line.
+                        (progn (incf idx 2)
+                               (setf line (1+ line) col 0))
+                        (let ((skip 2))
+                          (when (alpha-char-p (char text (+ idx 2)))
+                            (loop for k from (+ idx 3) below len
+                                  while (alpha-char-p (char text k))
+                                  do (incf skip)))
+                          (incf idx skip)
+                          (incf col skip))))
                    ((char= ch #\|)
                     ;; Multiple escape (checked after #| above).
                     (setf in-symbol t))
@@ -378,8 +388,8 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
   "Return the lexical state in effect just before position POS of TEXT, as
 scanned from its beginning: :code, :string, :string-escape (inside a string
 with a backslash pending, so the next character is not a delimiter),
-:symbol (inside a |...| multiple-escape symbol),
-:line-comment, :block-comment, or :pending when the character just before
+:symbol (inside a |...| multiple-escape symbol), :symbol-escape (inside one
+with a backslash pending), :line-comment, :block-comment, or :pending when the character just before
 POS starts a two-character construct (\\x, #\\x, #|) that would consume the
 character at POS. The second value is the block-comment nesting depth, so
 two :block-comment states at different depths can be told apart.
@@ -426,7 +436,8 @@ previous top-level form was never closed."
 (defun %code-state-mask (text)
   "Return a simple-vector of length (1+ (length TEXT)) whose element I is the
 lexical state in effect just before position I (:code, :string,
-:string-escape, :line-comment, :block-comment, :pending), computed in one
+:string-escape, :symbol, :symbol-escape, :line-comment, :block-comment,
+:pending), computed in one
 pass. Positions the scan skips as parts of a token (the character behind a
 \\, the body of a #\\x literal) are marked :token, which counts as non-code.
 The final element is the state at the end of TEXT."
@@ -670,7 +681,9 @@ one; otherwise a repair-failed sentence is printed instead."
       (cond
         (fixes
          (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
-        (failed
+        ;; A possible false positive (an unclosed [ or {) must not be followed
+        ;; by a flat instruction to fix delimiters that may be fine.
+        ((and failed (not (member expected '("]" "}") :test #'equal)))
          (format s "~%Automatic repair could not produce a readable form; ~
                     fix the delimiters by hand.")))
       (when (and next-line (string= kind "unclosed"))

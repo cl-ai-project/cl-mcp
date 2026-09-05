@@ -362,7 +362,8 @@
                            'string
                            "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"tools/call\","
                            "\"params\":{\"name\":\"fs-write-file\","
-                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\"}}}")
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                           "\"allow_unparseable_overwrite\":true}}}")
                           tmp-path)))
         (with-open-file (out abs-path :direction :output :if-exists :supersede)
           (write-string initial out))
@@ -1550,6 +1551,37 @@
                    "lisp-patch-form with #: prefix form_name should succeed")
                (ok (eql t (gethash "would_change" result))
                    "dry_run result should indicate the patch would change the form"))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-patch-form-keeps-diagnosis-layout
+  (testing "a failing patch reaches the client with its line breaks and its closing sentence"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-patch-diagnosis-layout.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(defun target (x)~%  (let ((y 1))~%    (+ x y)))~%")))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((req (format nil
+                            (concatenate
+                             'string
+                             "{\"jsonrpc\":\"2.0\",\"id\":5021,\"method\":\"tools/call\","
+                             "\"params\":{\"name\":\"lisp-patch-form\","
+                             "\"arguments\":{\"file_path\":\"~A\","
+                             "\"form_type\":\"defun\","
+                             "\"form_name\":\"target\","
+                             "\"old_text\":\"(let ((y 1))\","
+                             "\"new_text\":\"(let ((y 1)\"}}}") tmp-path))
+                    (resp (%pjl req))
+                    (obj (yason:parse resp))
+                    (msg (%tool-call-message obj)))
+               (ok (%tool-call-failed-p obj) "the patch must be refused")
+               (ok (search "fewer \")\"" msg) "the depth message is there")
+               (ok (search "No changes were written to disk" msg)
+                   "the closing sentence survives")
+               (ok (null (search "#<" msg)) "no SBCL object representation")
+               (ok (string= (uiop:read-file-string abs-path) initial) "file untouched"))
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-lisp-edit-form-empty-form-name-after-prefix

@@ -164,6 +164,20 @@
     (ok (eq (lexical-state-at "(f |a\\" 6) :symbol-escape) "right after it")
     (ok (eq (lexical-state-at "(f |a\\|b" 7) :symbol) "\\| consumed, still in the symbol")))
 
+(deftest newline-character-literal-keeps-line-numbers
+  (testing "a #\\<Newline> literal advances the line counter in both walkers"
+    ;; line 1: (a #\<newline>   line 2: )   line 3: (b   -- (b is unclosed on line 3
+    (let ((text (format nil "(a #\\~%)~%(b~%")))
+      (let ((res (scan-delimiters text)))
+        (ok (string= (getf res :kind) "unclosed"))
+        (ok (= (getf res :line) 3) "scanner: the unclosed ( is on line 3"))
+      (let ((seen nil))
+        (cl-mcp/src/paren-diagnostics::%map-code-characters
+         text (lambda (ch idx line col)
+                (declare (ignore idx col))
+                (when (char= ch #\() (push line seen))))
+        (ok (equal (reverse seen) '(1 3)) "walker: the two ( are on lines 1 and 3")))))
+
 (deftest lexical-state-at-stops-before-a-pending-code-escape
   (testing "a \\ or # at the scan limit is reported as pending, not consumed past END"
     ;; characters: ( a space \ b )  -- the backslash is index 3
@@ -258,15 +272,24 @@
 
 (deftest repair-line-differences-strips-carriage-returns
   (testing "CRLF input does not leak a #\\Return into :original or :repaired"
-    (let ((diff (repair-line-differences
-                 (format nil "(a~C~%  (b~C~%  c)" #\Return #\Return)
-                 (format nil "(a~C~%  (b)~C~%  c)" #\Return #\Return))))
+    (let* ((original (format nil "(a~C~%  (b~C~%  c)" #\Return #\Return))
+           ;; The real pipeline: parinfer's own output, not a hand-built pair.
+           (repaired (cl-mcp/src/parinfer:apply-indent-mode original))
+           (diff (repair-line-differences original repaired)))
       (ok (= (length diff) 1))
       (ok (= (getf (first diff) :line) 2))
       (ok (string= (getf (first diff) :original) "  (b"))
       (ok (string= (getf (first diff) :repaired) "  (b)"))
       (ng (find #\Return (getf (first diff) :original)))
-      (ng (find #\Return (getf (first diff) :repaired))))))
+      (ng (find #\Return (getf (first diff) :repaired)))))
+  (testing "a CRLF file with a trailing newline gets its likely fix on the code line"
+    (let* ((text (format nil "(defun f (x)~C~%  (let ((y 1)~C~%    (+ x y)))~C~%"
+                         #\Return #\Return #\Return))
+           (d (diagnose-delimiters text))
+           (fix (first (getf d :likely-fixes))))
+      (ok (= (length (getf d :likely-fixes)) 1))
+      (ok (= (getf fix :line) 2))
+      (ok (string= (getf fix :repaired) "  (let ((y 1))")))))
 
 (deftest repair-line-differences-skips-zero-delta-lines
   (testing "a whitespace-only difference yields no entry"

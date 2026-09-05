@@ -151,9 +151,17 @@ MCP payload)."
     (error "offset must be non-negative"))
   (when (and limit (< limit 0))
     (error "limit must be non-negative"))
-  (let ((text (or code (fs-read-file path :offset offset :limit limit)))
-        (base-off (or offset 0)))
-    (when (> (length text) *check-parens-max-bytes*)
+  (let* ((truncated nil)
+         (text (or code
+                   (multiple-value-bind (slice truncated-p)
+                       (fs-read-file path :offset offset :limit limit)
+                     (setf truncated truncated-p)
+                     slice)))
+         (base-off (or offset 0)))
+    ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
+    ;; describe text the file does not end with, so it is reported as too
+    ;; large rather than diagnosed.
+    (when (or truncated (> (length text) *check-parens-max-bytes*))
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "ok" h) nil
               (gethash "kind" h) "too-large"

@@ -290,13 +290,14 @@ before TARGET's start position."
             (setf result (second value))))))))
 
 (defun %delimiter-failure-p (condition)
-  "Return T when CONDITION is a parse failure the default reader attributes to
-delimiters: a missing \")\" (END-OF-FILE, including cst's UNTERMINATED-SOURCE)
-or a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises itself on
-both its parsing paths). Every other reader failure -- an unknown dispatch
-macro such as #?, a disabled #. -- is not counted. Even a delimiter failure
-is not proof that the file is broken (a reader macro supplied through the
-readtable parameter could consume the offending characters), which is why
+  "Return T when CONDITION says the default reader ran out of input
+(END-OF-FILE, including cst's UNTERMINATED-SOURCE: a missing \")\", but also
+an unterminated string or #| comment, since \" and #| are macro characters
+too) or met a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises
+itself on both its parsing paths). Every other reader failure -- an unknown
+dispatch macro such as #?, a disabled #. -- is not counted. Even a delimiter
+failure is not proof that the file is broken (a reader macro supplied through
+the readtable parameter could consume the offending characters), which is why
 fs-write-file additionally requires the caller to opt in before overwriting."
   (or (typep condition 'end-of-file)
       (typep condition 'stray-right-parenthesis)))

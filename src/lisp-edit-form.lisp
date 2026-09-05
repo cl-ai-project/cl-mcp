@@ -38,6 +38,7 @@
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form
+                #:%detect-readtable-before-node
                 #:file-unparseable-error)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
@@ -212,8 +213,7 @@ comments near a target form."
           (try-parse content)
         (if result
             (values result nil nil)
-            (let ((diagnosis (diagnose-delimiters content))
-                  (repaired (apply-indent-mode content)))
+            (let ((diagnosis (diagnose-delimiters content)))
               ;; Under a custom readtable the standard delimiter scan is not
               ;; trustworthy (a reader macro may consume raw parentheses as
               ;; data), so its verdicts are not used to refuse or explain;
@@ -224,33 +224,38 @@ comments near a target form."
                 ;; Keep the reader's own error too: for an ambiguous [ or ]
                 ;; the scan may be a false positive, and the reader error
                 ;; (an unknown #? macro, say) is then the actionable part.
+                ;; Sanitized so no SBCL stream object reaches the client.
                 (error 'content-unrepairable-error
                        :message (format nil "~A (reader: ~A)"
                                         (format-delimiter-diagnosis diagnosis
                                                                     :target "content")
-                                        err)))
-              (multiple-value-bind (repaired-result repaired-err)
-                  (try-parse repaired)
-                (cond
-                  (repaired-result
-                   (log-event :info "lisp.edit.form" "auto-repair" "success"
-                              "original-error" (princ-to-string err))
-                   (let ((fixes (repair-line-differences content repaired)))
-                     (values repaired-result (%repair-warning fixes) fixes)))
-                  ((and (typep err 'multiple-top-level-forms-error)
-                        (typep repaired-err 'multiple-top-level-forms-error))
-                   (error err))
-                  ((and (null custom-rt) (not (getf diagnosis :ok)))
-                   ;; Keep the reader error too: a paren problem often hides a
-                   ;; second, unrelated read error that the user still needs.
-                   (error 'content-unrepairable-error
-                          :message (format nil "~A (repair also failed: ~A)"
-                                           (format-delimiter-diagnosis
-                                            diagnosis :target "content")
-                                           repaired-err)))
-                  (t
-                   (error "content parse error: ~A (repair also failed: ~A)"
-                          err repaired-err))))))))))
+                                        (sanitize-error-message
+                                         (princ-to-string err)))))
+              (let ((repaired (apply-indent-mode content)))
+                (multiple-value-bind (repaired-result repaired-err)
+                    (try-parse repaired)
+                  (cond
+                    (repaired-result
+                     (log-event :info "lisp.edit.form" "auto-repair" "success"
+                                "original-error" (princ-to-string err))
+                     (let ((fixes (repair-line-differences content repaired)))
+                       (values repaired-result (%repair-warning fixes) fixes)))
+                    ((and (typep err 'multiple-top-level-forms-error)
+                          (typep repaired-err 'multiple-top-level-forms-error))
+                     (error err))
+                    ((and (null custom-rt) (not (getf diagnosis :ok)))
+                     ;; Keep the reader error too: a paren problem often hides
+                     ;; a second, unrelated read error that the user still
+                     ;; needs.
+                     (error 'content-unrepairable-error
+                            :message (format nil "~A (repair also failed: ~A)"
+                                             (format-delimiter-diagnosis
+                                              diagnosis :target "content")
+                                             (sanitize-error-message
+                                              (princ-to-string repaired-err)))))
+                    (t
+                     (error "content parse error: ~A (repair also failed: ~A)"
+                            err repaired-err)))))))))))
 
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
@@ -435,7 +440,7 @@ line diff or NIL, and the validated content that was spliced in."
     (multiple-value-bind
         (abs rel original nodes target target-snippet _ file-package-name)
         (%locate-target-form file-path form-type form-name readtable)
-      (declare (ignore nodes _))
+      (declare (ignore _))
       (if (eq op-key :delete)
           ;; Delete path: no content validation needed
           (let* ((updated
@@ -462,9 +467,14 @@ line diff or NIL, and the validated content that was spliced in."
               (values updated nil t))
              (t (values updated nil nil))))
           ;; Non-delete path: validate and repair content
+          ;; Content is validated under the readtable in effect at the target:
+          ;; the caller's argument, or an (in-readtable ...) earlier in the
+          ;; file, as lisp-patch-form does.
           (multiple-value-bind (validated-content parinfer-warning repair-fixes)
-              (%validate-and-repair-content content readtable file-package-name
-                                            abs)
+              (%validate-and-repair-content
+               content
+               (or readtable (%detect-readtable-before-node nodes target))
+               file-package-name abs)
             (let* ((updated
                     (%apply-operation original target op-key validated-content
                                       normalize-blank-lines))

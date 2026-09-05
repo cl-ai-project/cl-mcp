@@ -72,6 +72,22 @@
         (ok (not (eq (%ok? res) :false)))
         (ok (string= (%kind res) "too-large"))))))
 
+(deftest lisp-check-parens-truncated-read-is-too-large
+  (testing "a file read cut at the fs cap is reported too-large, not diagnosed from its prefix"
+    (let* ((root (asdf:system-source-directory :cl-mcp))
+           (abs (merge-pathnames "tests/tmp/check-parens-truncated.lisp" root))
+           (cl-mcp/src/project-root:*project-root* root))
+      (ensure-directories-exist abs)
+      (with-open-file (out abs :direction :output :if-exists :supersede)
+        (write-string (format nil "(defun f ()~%  (list 1 2 3 4 5 6 7 8 9))~%") out))
+      (unwind-protect
+           (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+             (let ((res (lisp-check-parens :path (namestring abs))))
+               (ok (null (%ok? res)))
+               (ok (string= (%kind res) "too-large")
+                   "the 16-character prefix is unbalanced but must not be diagnosed")))
+        (ignore-errors (delete-file abs))))))
+
 (deftest lisp-check-parens-eof-reader-error-has-position
   (testing "incomplete dispatch #X gives reader-error with non-nil position"
     ;; M1: end-of-file from incomplete #, should NOT report offset 0 / line nil
