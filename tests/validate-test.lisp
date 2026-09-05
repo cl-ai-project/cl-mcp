@@ -44,14 +44,23 @@
       (ok (string= (gethash "found" res) ")")))))
 
 (deftest lisp-check-parens-mismatch-includes-guidance
-  (testing "mismatch result includes lisp-edit-form guidance"
-    (let* ((res (lisp-check-parens :code "( [ ) ]"))
+  (testing "a mismatch the reader rejects includes lisp-edit-form guidance"
+    (let* ((res (lisp-check-parens :code "(defun f () (list 1]"))
            (required (gethash "required_args" res)))
+      (ok (string= (%kind res) "mismatch"))
       (ok (string= (gethash "fix_code" res) "use_lisp_edit_form"))
       (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
       (ok (vectorp required))
       (ok (= (length required) 5))
-      (ok (string= (aref required 0) "file_path")))))
+      (ok (string= (aref required 0) "file_path"))))
+  (testing "a mismatch on code the reader accepts names no fix"
+    ;; ( [ ) ] reads as a list holding the symbol [ followed by the symbol ].
+    (let ((res (lisp-check-parens :code "( [ ) ]")))
+      (ok (eq (gethash "false_positive" res) t))
+      (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
+      (ok (null (gethash "fix_code" res)))
+      (ok (null (gethash "required_args" res))))))
+
 (deftest lisp-check-parens-unclosed
   (testing "unclosed opener at end"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2)")))
@@ -242,6 +251,9 @@
       (ok (string= (%kind res) "mismatch"))
       (ok (eq (gethash "false_positive" res) t))
       (ok (null (gethash "likely_fixes" res)))
+      (ok (null (gethash "fix_code" res)) "no fix is named for input that needs none")
+      (ok (null (gethash "required_args" res)))
+      (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
       (ng (search "Replace it with" (gethash "diagnosis_text" res)))
       (ok (zerop (search "The editing tools' reader parses" (gethash "diagnosis_text" res))))))
   (testing "a symbol with #| inside is not told to close a comment"

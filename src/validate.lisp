@@ -29,7 +29,7 @@
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
 
-(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable)
+(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable false-positive)
   "Attach machine-readable remediation hints for broken Lisp delimiters.
 The default next step is lisp-edit-form, which repairs and writes a form.
 When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
@@ -39,19 +39,26 @@ step is the overwrite path: fs-read-file, apply the fix, fs-write-file with
 allow_unparseable_overwrite. Keying this on the parser rather than on the
 scan keeps the three tools' verdicts consistent: a file that parses (a
 symbol such as a[b), fails for a reader-level reason (#., #?), or was only
-read in part never receives an instruction the guard would then refuse."
+read in part never receives an instruction the guard would then refuse.
+When FALSE-POSITIVE -- that parser accepts the input -- only next_tool is
+set (lisp-edit-form can still edit the file); no fix_code or required_args,
+since they would name a fix for input that needs none."
   (when (member kind '("extra-close" "mismatch" "unclosed"
                        "unclosed-string" "unclosed-block-comment")
                 :test #'string=)
-    (if overwritable
-        (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
-              (gethash "next_tool" result) "fs-write-file"
-              (gethash "required_args" result)
-              (vector "path" "content" "allow_unparseable_overwrite"))
-        (setf (gethash "fix_code" result) "use_lisp_edit_form"
-              (gethash "next_tool" result) "lisp-edit-form"
-              (gethash "required_args" result)
-              (vector "file_path" "form_type" "form_name" "operation" "content"))))
+    (cond
+      (overwritable
+       (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
+             (gethash "next_tool" result) "fs-write-file"
+             (gethash "required_args" result)
+             (vector "path" "content" "allow_unparseable_overwrite")))
+      (false-positive
+       (setf (gethash "next_tool" result) "lisp-edit-form"))
+      (t
+       (setf (gethash "fix_code" result) "use_lisp_edit_form"
+             (gethash "next_tool" result) "lisp-edit-form"
+             (gethash "required_args" result)
+             (vector "file_path" "form_type" "form_name" "operation" "content")))))
   result)
 
 (defun %custom-readtable-p (text)
@@ -182,9 +189,11 @@ difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a no-op
 by a client reading only delta. COLUMN is the 1-based column of the first
 change, REMOVED_COLUMNS the columns of the \")\" a removal drops (so a
 client can tell which one on a line holding several), BEFORE_COMMENT says
-the change goes before a trailing ; comment, and TRUNCATED says
+the change goes before a trailing ; comment, TRUNCATED says
 ORIGINAL/REPAIRED were cut to 120 characters and so are descriptive, not
-text to write back."
+text to write back, and CRLF says the line ends in CRLF (ORIGINAL/REPAIRED
+are shown without the carriage return, so REPAIRED is not the line to write
+back either)."
   (let ((h (make-hash-table :test #'equal)))
     (setf (gethash "line" h) (getf fix :line)
           (gethash "original" h) (getf fix :original)
@@ -195,7 +204,8 @@ text to write back."
           (gethash "column" h) (getf fix :column)
           (gethash "removed_columns" h) (coerce (getf fix :removed-columns) 'vector)
           (gethash "before_comment" h) (if (getf fix :before-comment) t nil)
-          (gethash "truncated" h) (if (getf fix :truncated) t nil))
+          (gethash "truncated" h) (if (getf fix :truncated) t nil)
+          (gethash "crlf" h) (if (getf fix :crlf) t nil))
     h))
 
 (defun lisp-check-parens (&key path code offset limit)
@@ -309,13 +319,20 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                                       it~; past its broken form (the forms before it ~
                                       can still be edited with lisp-edit-form; the ~
                                       broken tail needs the overwrite path)~]: read ~
-                                      it with fs-read-file, apply the fix below, and ~
-                                      write it back with fs-write-file (path=~S, ~
+                                      it with fs-read-file, apply the ~:[change ~
+                                      described below~;fix shown under \"Likely ~
+                                      fix\"~], and write it back with fs-write-file ~
+                                      (path=~S, ~
                                       allow_unparseable_overwrite=true). If the file ~
                                       uses custom reader syntax the default reader ~
                                       cannot parse, pass the readtable parameter to ~
                                       lisp-edit-form instead of overwriting."
                                  editable-prefix
+                                 (and likely-fixes
+                                      (not (member kind '("unclosed-block-comment"
+                                                          "unclosed-string")
+                                                   :test #'string=))
+                                      t)
                                  (namestring
                                   (uiop:enough-pathname (fs-resolve-read-path path)
                                                         (%project-root-truename))))))
@@ -371,7 +388,8 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                  ;; fs-write-file only writes under the project root, so the
                  ;; overwrite hint is promised only for a file it could write.
                  (%maybe-add-lisp-edit-guidance h kind
-                                                :overwritable (and overwrite-hint t)))))
+                                                :overwritable (and overwrite-hint t)
+                                                :false-positive false-positive))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil

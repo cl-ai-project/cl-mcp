@@ -260,6 +260,28 @@
            (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
       (ok (search "NOTE: the fix on line 2 closes a form" msg)))))
 
+(deftest relocation-note-is-bounded-and-tab-aware
+  (testing "the note lists at most *repair-lines-limit* lines and counts the rest"
+    (let* ((text (with-output-to-string (s)
+                   (format s "(defun f (x)~%")
+                   (loop for i from 1 to 30 do (format s "  (when a~D~%" i))))
+           (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
+      (ok (search "NOTE: the fixes on lines 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 19 more" msg))
+      (ng (search "12, 13" msg) "elided lines are not listed")))
+  (testing "a tab-indented body deeper than its form is a dedent, not a relocation"
+    ;; A tab is eight columns: the body of (when x sits deeper by indentation,
+    ;; so parinfer keeps it inside and nothing moved.
+    (let* ((text (format nil "(defun f (x)~%  (when x~%~C(g x))" #\Tab))
+           (d (diagnose-delimiters text)))
+      (ok (null (cl-mcp/src/paren-diagnostics::relocating-fix-lines
+                 (getf d :likely-fixes) (getf d :repaired))))))
+  (testing "a body at the same visual depth via tabs is a relocation"
+    (let* ((text (format nil "(defun f (x)~%~C(when x~%~C(g x))" #\Tab #\Tab))
+           (d (diagnose-delimiters text)))
+      (ok (equal (cl-mcp/src/paren-diagnostics::relocating-fix-lines
+                  (getf d :likely-fixes) (getf d :repaired))
+                 '(2))))))
+
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"
     ;; The string's closing quote never comes, so parinfer's closer would land

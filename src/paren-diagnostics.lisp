@@ -23,7 +23,6 @@
            #:bracket-ambiguous-p
            #:opener-ambiguous-p
            #:format-bracket-warning
-           #:last-code-line
            #:relocating-fix-lines))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
@@ -830,13 +829,19 @@ one place, below, rather than per kind."
            ;; indentation has probably cut that body off: say so, as
            ;; lisp-edit-form's summary does.
            (let* ((repaired (getf diagnosis :repaired))
-                  (relocations (and repaired (relocating-fix-lines fixes repaired))))
+                  (relocations (and repaired (relocating-fix-lines fixes repaired)))
+                  ;; Bounded like the fix list itself, so a wholesale
+                  ;; reindentation cannot flood the note either.
+                  (shown (if (> (length relocations) *repair-lines-limit*)
+                             (subseq relocations 0 *repair-lines-limit*)
+                             relocations))
+                  (more (- (length relocations) (length shown))))
              (when relocations
-               (format s "~%NOTE: the fix~:[~;es~] on line~:[~;s~] ~{~D~^, ~} close~:[s~;~] ~
-                          a form there, so the lines below ~:[it~;them~] are no longer ~
-                          inside that form; verify the nesting (indentation decides ~
-                          where a form ends)."
-                       (cdr relocations) (cdr relocations) relocations
+               (format s "~%NOTE: the fix~:[~;es~] on line~:[~;s~] ~{~D~^, ~}~[~:;, and ~:*~D ~
+                          more~] close~:[s~;~] a form there, so the lines below ~:[it~;them~] ~
+                          are no longer inside that form; verify the nesting ~
+                          (indentation decides where a form ends)."
+                       (cdr relocations) (cdr relocations) shown more
                        (cdr relocations) (cdr relocations))))
            ;; The actionable-looking part must not outrank the caveat: for an
            ;; unclosed bracket, say what the fix assumes right after it.
@@ -902,19 +907,6 @@ symbol character with no ) typo behind it."
                  target (getf scan :found) (getf scan :expected)
                  (getf scan :line) (getf scan :column) (getf scan :found)))))
 
-(defun last-code-line (text)
-  "Return the 1-based line of the last line of TEXT that holds a code
-character (outside strings and comments, not whitespace), or 1 when there is
-none. Parinfer places its closers on that line, so a closer inserted on an
-earlier line has relocated the lines between them."
-  (let ((last 1))
-    (%map-code-characters text
-                          (lambda (ch idx line col)
-                            (declare (ignore idx col))
-                            (unless (member ch '(#\Space #\Tab #\Newline #\Return))
-                              (setf last line))))
-    last))
-
 (defun relocating-fix-lines (fixes text)
   "Return the 1-based lines of those FIXES (from REPAIR-LINE-DIFFERENCES over
 TEXT) that added closers on a line whose next code line sits at the same
@@ -927,9 +919,12 @@ Blank and comment-only lines are skipped when looking for the next code
 line."
   (let* ((lines (coerce (split-string text :separator '(#\Newline)) 'vector))
          (count (length lines)))
-    (flet ((indent (i) (or (position-if-not (lambda (ch) (member ch '(#\Space #\Tab)))
-                                            (aref lines i))
-                           (length (aref lines i))))
+    (flet ((indent (i)
+             ;; Visual width, a tab counting as 8 columns, so a tab-indented
+             ;; body is compared by what an editor shows.
+             (loop for ch across (aref lines i)
+                   while (member ch '(#\Space #\Tab))
+                   sum (if (char= ch #\Tab) 8 1)))
            (code-line-p (i)
              (let ((trimmed (string-trim '(#\Space #\Tab #\Return) (aref lines i))))
                (and (plusp (length trimmed)) (char/= (char trimmed 0) #\;)))))

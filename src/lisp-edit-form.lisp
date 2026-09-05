@@ -26,7 +26,8 @@
                 #:format-bracket-warning
                 #:opener-ambiguous-p
                 #:relocating-fix-lines
-                #:scan-delimiters)
+                #:scan-delimiters
+                #:*repair-lines-limit*)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -152,9 +153,9 @@ blank line. For EOF boundary use a single newline."
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns three values: the validated
-(possibly repaired) content, a parinfer warning string or NIL, and the
-repair line diff or NIL.
+using parinfer:apply-indent-mode. Returns four values: the validated
+(possibly repaired) content, a parinfer warning string or NIL, the repair
+line diff or NIL, and a bracket warning (FORMAT-BRACKET-WARNING) or NIL.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -476,17 +477,23 @@ stay inside the form), the summary says the lines below have left it. When
 the repaired content still opens a [ or { that never closes, the summary
 says the ) fixes are wrong if that bracket was meant as (."
   (when warning
-    (let ((relocations (relocating-fix-lines fixes repaired-form))
-          (opener-scan (scan-delimiters repaired-form)))
+    (let* ((relocations (relocating-fix-lines fixes repaired-form))
+           ;; Bounded like the changed-lines list, so a wholesale
+           ;; reindentation cannot flood the note either.
+           (shown (if (> (length relocations) *repair-lines-limit*)
+                      (subseq relocations 0 *repair-lines-limit*)
+                      relocations))
+           (more (- (length relocations) (length shown)))
+           (opener-scan (scan-delimiters repaired-form)))
       (with-output-to-string (s)
         (format s "~%WARNING: ~A" warning)
         (when fixes
           (format s "~%Changed lines:~A" (format-repair-lines fixes)))
         (when relocations
-          (format s "~%NOTE: parinfer closed a form on line~P ~{~D~^, ~}, so the lines ~
-                     below ~:[it~;them~] are no longer inside that form; verify the ~
-                     nesting (indentation decides where a form ends)."
-                  (length relocations) relocations (cdr relocations)))
+          (format s "~%NOTE: parinfer closed a form on line~P ~{~D~^, ~}~[~:;, and ~:*~D ~
+                     more~], so the lines below ~:[it~;them~] are no longer inside that ~
+                     form; verify the nesting (indentation decides where a form ends)."
+                  (length relocations) shown more (cdr relocations)))
         (when (opener-ambiguous-p opener-scan)
           (format s "~%NOTE: the ~A at line ~D, column ~D was treated as a symbol ~
                      character; if you meant ~S, the ~S added above are wrong: ~

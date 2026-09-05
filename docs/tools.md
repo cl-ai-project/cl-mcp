@@ -225,9 +225,11 @@ Output:
   `likely_fixes_omitted`). `column` is the 1-based column of the first change
   (where an insertion goes), `removed_columns` the columns of the `)` a
   removal drops, `before_comment` says the change goes before a trailing `;`
-  comment, and `truncated` says `original`/`repaired` were cut to 120
-  characters and are then descriptive, not text to write back. Empty when no
-  repair could be inferred.
+  comment, `truncated` says `original`/`repaired` were cut to 120
+  characters and are then descriptive, not text to write back, and `crlf`
+  says the line ends in CRLF (`original`/`repaired` are shown without the
+  carriage return, so `repaired` is not the line to write back either). Empty
+  when no repair could be inferred.
 - for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
   seen while the form was still open, when there is one.
 - `false_positive` (`true`, present only then): the editing tools' reader
