@@ -1551,7 +1551,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (setf err (princ-to-string e))))
           (ok err "should signal content-unrepairable-error")
           (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." err))
-          (ok (search "Replace it with \")\"." err))
+          (ok (search "replace it with \")\"." err))
           (ok (string= before (fs-read-file path)) "file untouched"))))))
 
 (deftest lisp-edit-form-repairs-content-with-bracket-symbols
@@ -1574,12 +1574,19 @@ Used to prove that a dry-run summary does not grow with the size of the file."
     (with-temp-file "tests/tmp/edit-form-bracket-opener-repair.lisp"
         (format nil "(defun target () :old)~%")
       (lambda (path)
-        (lisp-edit-form :file-path path
-                        :form-type "defun"
-                        :form-name "target"
-                        :operation "replace"
-                        :content (format nil "(defun target (x)~%  (foo [bar x"))
-        (ok (search "(foo [bar x))" (fs-read-file path)))))))
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (foo [bar x"))
+          (declare (ignore updated))
+          (ok (search "(foo [bar x))" (fs-read-file path)))
+          (ok (search (format nil "2 closing delimiters added by parinfer. If the \"[\" at ~
+                                   line 2, column 8 was meant as \"(\", the \")\" added ~
+                                   are wrong: replace it and edit again.")
+                      warning)
+              "the warning ends with the shared opener caveat, naming the ["))))))
 
 (deftest lisp-edit-form-repairs-content-ending-in-a-comment
   (testing "a missing ) on a line with a trailing comment is repaired before the comment"
@@ -1641,7 +1648,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok err "should signal content-unrepairable-error")
           (ok (search "(reader: " err) "the reader's own error is still appended")
           (ok (null (search "#<" err)) "no #<...> object representation leaks")
-          (ok (search "Replace it with \")\"." err)
+          (ok (search "replace it with \")\"." err)
               "the multi-line diagnosis itself is untouched"))))))
 
 (deftest lisp-edit-form-refusal-does-not-instruct-when-the-reader-failed-elsewhere
@@ -1826,7 +1833,7 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                 (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
                   (setf err (princ-to-string e))))
               (ok err "content-unrepairable-error under :standard")
-              (ok (search "Replace it with \")\"." err))
+              (ok (search "replace it with \")\"." err))
               (ok (string= before (fs-read-file path)) "file untouched"))))
         (skip "named-readtables not available"))))
 

@@ -23,6 +23,7 @@
            #:bracket-ambiguous-p
            #:opener-ambiguous-p
            #:format-opener-caveat
+           #:next-top-level-hint-line
            #:format-bracket-warning
            #:format-overwrite-recovery
            #:format-relocation-note))
@@ -318,8 +319,9 @@ unclosed string returns the plain scan plist."
 placed right after it would not read: a quote, backquote, comma or single
 escape always; an @ only as the second half of ,@ (a lone @ is a symbol
 constituent, so bar@ is a symbol); a # only when it starts a token (BEFORE,
-the preceding character, is NIL at the start of the text or whitespace, an
-open paren, a prefix or a string quote), since # is non-terminating and
+the preceding character, is NIL at the start of the text, or whitespace, a
+paren, a prefix or a string quote -- the terminating characters, ) among
+them, since (g x)# starts a dispatch too), since # is non-terminating and
 bar# is a symbol. The one rule behind both %MAP-CODE-CHARACTERS' :pending
 state at END and %ANY-FIX-OUTSIDE-CODE-P's rejection of a closer after a
 prefix at the end of a line."
@@ -327,8 +329,9 @@ prefix at the end of a line."
     ((#\' #\` #\, #\\) t)
     (#\@ (eql before #\,))
     (#\# (or (null before)
-             (member before '(#\Space #\Tab #\Newline #\Return #\( #\' #\` #\, #\"))
-             nil))
+             (and (member before '(#\Space #\Tab #\Newline #\Return
+                                   #\( #\) #\' #\` #\, #\"))
+                  t)))
     (t nil)))
 
 (defun %map-code-characters (text function &key end state-fn)
@@ -548,7 +551,11 @@ character. Linear in the size of TEXT: the lexical states come from one
               ;; REPAIR-LINE-DIFFERENCES does, so CRLF lines still get the
               ;; precise per-position check rather than the coarse fallback.
               for orig = (%strip-trailing-cr (aref orig-lines (1- line)))
-              for rep = (%strip-trailing-cr (aref rep-lines (1- line)))
+              ;; REPAIRED may have fewer lines (emptied to ""); see
+              ;; REPAIR-LINE-DIFFERENCES.
+              for rep = (%strip-trailing-cr (if (< (1- line) (length rep-lines))
+                                                (aref rep-lines (1- line))
+                                                ""))
               do (multiple-value-bind (added removed positions)
                      (%paren-edit-counts orig rep)
                    (declare (ignore removed))
@@ -667,11 +674,16 @@ that :original/:repaired were cut by %BOUND-LINE and so are not text to
 write back. A line whose net D is 0 is still reported when it really changed
 (\")(a\" -> \"(a)\"); only differences with no parenthesis edits at all
 (whitespace, a trailing carriage return) are skipped. A trailing #\\Return is
-stripped from both sides before comparing. Both texts must have the same
-number of lines, which parinfer guarantees."
-  (loop for raw-orig in (split-string original :separator '(#\Newline))
-        for raw-rep in (split-string repaired :separator '(#\Newline))
-        for line from 1
+stripped from both sides before comparing. Parinfer keeps the line count,
+with one exception: a text it empties entirely (\")\" -> \"\") splits to no
+lines at all, so the shorter side is padded with empty lines and the removal
+is still reported."
+  (loop with orig-lines = (coerce (split-string original :separator '(#\Newline)) 'vector)
+        with rep-lines = (coerce (split-string repaired :separator '(#\Newline)) 'vector)
+        with count = (max (length orig-lines) (length rep-lines))
+        for line from 1 to count
+        for raw-orig = (if (< (1- line) (length orig-lines)) (aref orig-lines (1- line)) "")
+        for raw-rep = (if (< (1- line) (length rep-lines)) (aref rep-lines (1- line)) "")
         for orig = (%strip-trailing-cr raw-orig)
         for rep = (%strip-trailing-cr raw-rep)
         for (added removed removed-positions)
@@ -806,7 +818,7 @@ one place, below, rather than per kind."
          (found (getf diagnosis :found))
          (fixes (getf diagnosis :likely-fixes))
          (failed (getf diagnosis :repair-failed))
-         (next-line (getf diagnosis :next-top-level-line))
+         (next-line (next-top-level-hint-line diagnosis))
          (ambiguous (bracket-ambiguous-p diagnosis))
          (opener-ambiguous (opener-ambiguous-p diagnosis))
          (opener (if (equal expected "]") "[" "{")))
@@ -860,8 +872,11 @@ one place, below, rather than per kind."
                       that was never closed."
                    found))
           ((and (string= kind "mismatch") (equal expected ")"))
+           ;; The same hedge as the other bracket verdicts: applied to a
+           ;; symbol such as a], "replace it" would only rename the symbol.
            (format s "~%\"]\" and \"}\" are ordinary symbol characters in Common Lisp and ~
-                      cannot be auto-repaired. Replace it with ~S."
+                      cannot be auto-repaired. If it is not part of a symbol name, ~
+                      replace it with ~S."
                    expected))
           ((string= kind "unclosed-block-comment")
            (format s " Close it with |#."))
@@ -891,12 +906,9 @@ one place, below, rather than per kind."
           ((and failed (not ambiguous))
            (format s "~%Automatic repair could not produce a readable form; ~
                       fix the delimiters by hand.")))
-        (when (and next-line
-                   (string= kind "unclosed")
-                   ;; A fix on or after that line would contradict the hint
-                   ;; (the closer belongs before it), so one of the two must
-                   ;; go, and the fix is the one the caller can apply.
-                   (notany (lambda (fix) (>= (getf fix :line) next-line)) fixes))
+        ;; NEXT-TOP-LEVEL-HINT-LINE also withdraws the hint when a fix lands
+        ;; on or after that line, for the sentence and the payload alike.
+        (when next-line
           ;; A column-0 "(" while a form is open is a strong hint, not proof
           ;; (an unindented continuation line looks the same), so name the
           ;; evidence and hedge. An unclosed [ or { is not asked for as ]: it
@@ -928,6 +940,22 @@ BRACKET-AMBIGUOUS-P together with this one."
   (and (not (getf diagnosis :ok))
        (member (getf diagnosis :expected) '("]" "}") :test #'equal)
        t))
+
+(defun next-top-level-hint-line (diagnosis)
+  "Return the line the next-top-level hint may name for DIAGNOSIS (from
+DIAGNOSE-DELIMITERS), or NIL when the hint does not apply: the kind is not
+\"unclosed\", no column-1 \"(\" was seen while a form was open, or one of the
+likely fixes lands on or after that line -- the fix says the closer goes
+there, the hint says it goes before, and the fix is the one the caller can
+apply, so the hint yields. One rule for the rendered sentence and for
+lisp-check-parens' next_top_level_line field, so the payload never carries a
+hint the text withdrew."
+  (let ((next-line (getf diagnosis :next-top-level-line)))
+    (and next-line
+         (equal (getf diagnosis :kind) "unclosed")
+         (notany (lambda (fix) (>= (getf fix :line) next-line))
+                 (getf diagnosis :likely-fixes))
+         next-line)))
 
 (defun format-opener-caveat (diagnosis &key (action "check"))
   "Return the reminder that the ) fixes drawn from DIAGNOSIS (a scan for which

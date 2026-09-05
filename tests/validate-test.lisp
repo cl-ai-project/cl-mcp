@@ -181,6 +181,20 @@
                    "the fix itself is still described")))
         (ignore-errors (delete-file abs))))))
 
+(deftest lisp-check-parens-next-top-level-line-follows-the-text
+  (testing "the field is set exactly when the text prints the hint"
+    (let ((res (lisp-check-parens
+                :code (format nil "(defun a ()~%  (list 1)~%~%(defun b () 2)~%"))))
+      (ok (eql (gethash "next_top_level_line" res) 4))
+      (ok (search "Next top-level form probably begins at line 4"
+                  (gethash "diagnosis_text" res)))))
+  (testing "a likely fix on or after the column-1 line withdraws the field with the sentence"
+    (let ((res (lisp-check-parens :code (format nil "(defun f ()~%(list 1~%  2~%"))))
+      (ok (string= (%kind res) "unclosed"))
+      (ok (plusp (length (gethash "likely_fixes" res))))
+      (ng (gethash "next_top_level_line" res) "no line the fixes contradict")
+      (ng (search "Next top-level form" (gethash "diagnosis_text" res))))))
+
 (deftest lisp-check-parens-guidance-agrees-with-the-overwrite-guard
   (let* ((root (asdf:system-source-directory :cl-mcp))
          (abs (merge-pathnames "tests/tmp/check-parens-guard-agreement.lisp" root))

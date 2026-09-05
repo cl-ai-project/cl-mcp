@@ -14,7 +14,8 @@
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
-                #:format-overwrite-recovery)
+                #:format-overwrite-recovery
+                #:next-top-level-hint-line)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -276,7 +277,7 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
            (reader-info (and (getf diagnosis :ok) (%try-reader-check text base-off))))
       (destructuring-bind (&key ok kind expected found
                                 (offset base-off) (line 1) (column 1)
-                                likely-fixes next-top-level-line
+                                likely-fixes
                            &allow-other-keys)
           diagnosis
         (let ((h (make-hash-table :test #'equal)))
@@ -385,10 +386,13 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                               (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
                         (when (> total kept)
                           (setf (gethash "likely_fixes_omitted" h) (- total kept))))
-                      ;; Only meaningful for an unclosed form, which is the
-                      ;; only kind whose guidance text explains the number.
-                      (when (and next-top-level-line (string= kind "unclosed"))
-                        (setf (gethash "next_top_level_line" h) next-top-level-line)))))
+                      ;; Only when the text prints the hint too (an unclosed
+                      ;; form, and no likely fix on or after that line), so
+                      ;; the payload never pairs the line with a fix that
+                      ;; contradicts it.
+                      (let ((hint-line (next-top-level-hint-line diagnosis)))
+                        (when hint-line
+                          (setf (gethash "next_top_level_line" h) hint-line))))))
                  ;; fs-write-file only writes under the project root, so the
                  ;; overwrite hint is promised only for a file it could write;
                  ;; a delimiter-broken file it cannot write gets no next_tool

@@ -231,7 +231,9 @@ Output:
   carriage return, so `repaired` is not the line to write back either). Empty
   when no repair could be inferred.
 - for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
-  seen while the form was still open, when there is one.
+  seen while the form was still open, when there is one and no likely fix
+  lands on or after it (the field is set exactly when the summary prints the
+  next top-level form hint).
 - `false_positive` (`true`, present only then): the editing tools' reader
   accepts the input (a `path` or inline `code`), so the scan's finding is most
   likely a false positive (`a]`, `foo#|bar|`, a reader macro); no

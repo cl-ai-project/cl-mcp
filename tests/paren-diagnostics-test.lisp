@@ -335,7 +335,8 @@
         (ng (getf d :repair-failed) tail)
         (ok (getf d :likely-fixes) tail))))
   (testing "a real prefix at the very end of the text still gets no fix"
-    (dolist (tail '(",@" "'" " #"))
+    ;; ) terminates a token, so (g x)# starts a dispatch as much as " #" does.
+    (dolist (tail '(",@" "'" " #" ")#"))
       (let ((d (diagnose-delimiters (format nil "(defun target (x) (list x ~A" tail))))
         (ok (eq (getf d :repair-failed) :outside-code) tail)))))
 
@@ -363,6 +364,19 @@
     (let ((msg (format-delimiter-diagnosis (diagnose-delimiters "(list a) b)"))))
       (ok (search "extra \")\" at line 1, column 11" msg))
       (ng (search "part of a symbol name" msg)))))
+
+(deftest repair-that-empties-the-text-still-lists-its-fix
+  (testing "parinfer collapsing the whole text to nothing is one removal, not no fixes"
+    ;; (split-string "") is NIL, so a naive line-by-line zip would see no
+    ;; lines at all and drop the one fix there is.
+    (let* ((d (diagnose-delimiters ")"))
+           (fix (first (getf d :likely-fixes))))
+      (ok (string= (getf d :kind) "extra-close"))
+      (ok (equal (getf d :repaired) ""))
+      (ok fix "the removal is reported")
+      (ok (= (getf fix :line) 1))
+      (ok (= (getf fix :removed 0) 1))
+      (ok (search "remove 1 \")\"" (format-delimiter-diagnosis d))))))
 
 (deftest next-top-level-hint-names-its-evidence-and-yields-to-the-fix
   (testing "the hint says what it saw"
@@ -719,7 +733,8 @@
     (let ((text (format-delimiter-diagnosis (diagnose-delimiters +stray-bracket+) :target "content")))
       (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." text))
       (ok (search "\"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be auto-repaired." text))
-      (ok (search "Replace it with \")\"." text))
+      (ok (search "If it is not part of a symbol name, replace it with \")\"." text)
+          "the instruction carries the same hedge as the other bracket verdicts")
       (ng (search "fix the delimiters by hand." text)
           "the specific instruction stands alone; no generic sentence follows it")
       (ng (search "Likely fix" text)))))

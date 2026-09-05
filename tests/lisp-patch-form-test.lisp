@@ -974,7 +974,7 @@ running as root), THUNK is skipped instead."
           (ok (null (search "fewer \")\"" err-msg))
               "no net-count instruction that would write (list 1 2])")
           (ok (search "found \"]\"" err-msg) "the ] is named")
-          (ok (search "Replace it with \")\"" err-msg))
+          (ok (search "replace it with \")\"" err-msg))
           (ok (search "The reader itself reported: unexpected end of input" err-msg)
               "the reader's own words are kept for the ambiguous bracket")
           (ok (null (search "invalid Lisp" err-msg
