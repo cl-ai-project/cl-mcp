@@ -23,8 +23,10 @@
                 #:format-delimiter-diagnosis
                 #:repair-line-differences
                 #:format-repair-lines
-                #:last-code-line
-                #:format-bracket-warning)
+                #:format-bracket-warning
+                #:opener-ambiguous-p
+                #:relocating-fix-lines
+                #:scan-delimiters)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -275,8 +277,7 @@ comments near a target form."
                          (not (getf diagnosis :ok))
                          (getf diagnosis :repair-failed)
                          (or (eq (getf diagnosis :repair-failed) :outside-code)
-                             (not (member (getf diagnosis :expected) '("]" "}")
-                                          :test #'equal))))
+                             (not (opener-ambiguous-p diagnosis))))
                 ;; Keep the reader's own error too: for an ambiguous [ or ]
                 ;; the scan may be a false positive, and the reader error
                 ;; (an unknown #? macro, say) is then the actionable part.
@@ -469,16 +470,14 @@ dry-run summary show the edited form instead of the whole updated file.
   "Return the text appended to a success summary when parinfer repaired the
 content, or NIL when WARNING is NIL. Lists the changed lines and, when
 INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
-When a closer was inserted on a line before the last code line of
-REPAIRED-FORM (a mid-form insertion rather than an append at the end), the
-lines below it have left the form it closed: the summary says so, because
-the changed-lines list alone does not make that visible."
+When a closer was inserted on a line whose next code line sits at the same
+indentation (RELOCATING-FIX-LINES: the shape of a body that was meant to
+stay inside the form), the summary says the lines below have left it. When
+the repaired content still opens a [ or { that never closes, the summary
+says the ) fixes are wrong if that bracket was meant as (."
   (when warning
-    (let* ((last-line (last-code-line repaired-form))
-           (relocations (loop for fix in fixes
-                              when (and (plusp (getf fix :added 0))
-                                        (< (getf fix :line) last-line))
-                                collect (getf fix :line))))
+    (let ((relocations (relocating-fix-lines fixes repaired-form))
+          (opener-scan (scan-delimiters repaired-form)))
       (with-output-to-string (s)
         (format s "~%WARNING: ~A" warning)
         (when fixes
@@ -488,6 +487,13 @@ the changed-lines list alone does not make that visible."
                      below ~:[it~;them~] are no longer inside that form; verify the ~
                      nesting (indentation decides where a form ends)."
                   (length relocations) relocations (cdr relocations)))
+        (when (opener-ambiguous-p opener-scan)
+          (format s "~%NOTE: the ~A at line ~D, column ~D was treated as a symbol ~
+                     character; if you meant ~S, the ~S added above are wrong: ~
+                     replace it and edit again."
+                  (if (equal (getf opener-scan :expected) "]") "[" "{")
+                  (getf opener-scan :line) (getf opener-scan :column)
+                  "(" ")"))
         (when include-form
           (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form)))))))
 

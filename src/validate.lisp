@@ -180,9 +180,11 @@ syntax error in the file itself."
 hash. ADDED and REMOVED are the gross edit counts; DELTA is their
 difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a no-op
 by a client reading only delta. COLUMN is the 1-based column of the first
-change, BEFORE_COMMENT says the change goes before a trailing ; comment, and
-TRUNCATED says ORIGINAL/REPAIRED were cut to 120 characters and so are
-descriptive, not text to write back."
+change, REMOVED_COLUMNS the columns of the \")\" a removal drops (so a
+client can tell which one on a line holding several), BEFORE_COMMENT says
+the change goes before a trailing ; comment, and TRUNCATED says
+ORIGINAL/REPAIRED were cut to 120 characters and so are descriptive, not
+text to write back."
   (let ((h (make-hash-table :test #'equal)))
     (setf (gethash "line" h) (getf fix :line)
           (gethash "original" h) (getf fix :original)
@@ -191,6 +193,7 @@ descriptive, not text to write back."
           (gethash "added" h) (getf fix :added 0)
           (gethash "removed" h) (getf fix :removed 0)
           (gethash "column" h) (getf fix :column)
+          (gethash "removed_columns" h) (coerce (getf fix :removed-columns) 'vector)
           (gethash "before_comment" h) (if (getf fix :before-comment) t nil)
           (gethash "truncated" h) (if (getf fix :truncated) t nil))
     h))
@@ -204,10 +207,11 @@ either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error)
 plus a \"position\" hash with \"line\", \"column\", \"offset\" (absent for
 \"too-large\", where nothing was scanned).
 Delimiter failures also carry \"likely_fixes\" (vector of line/original/
-repaired/delta/added/removed hashes inferred by parinfer, capped at
-*REPAIR-LINES-LIMIT* entries with the rest counted in
-\"likely_fixes_omitted\"; \"original\" and \"repaired\" are cut to 120
-characters plus \"...\" and are then descriptive, not text to write back),
+repaired/delta/added/removed/column/removed_columns/before_comment/truncated
+hashes inferred by parinfer, capped at *REPAIR-LINES-LIMIT* entries with the
+rest counted in \"likely_fixes_omitted\"; \"original\" and \"repaired\" are
+cut to 120 characters plus \"...\" and are then descriptive, not text to
+write back, which \"truncated\" flags),
 \"next_top_level_line\" when a later top-level form was swallowed, and
 \"diagnosis_text\" (the guidance the MCP summary appends; not part of the
 MCP payload).
@@ -337,16 +341,17 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                                        reader macro from an in-readtable consumes ~
                                        that text); no repair is suggested~:[~;, and ~
                                        lisp-edit-form can still edit the file~].~%~]~
-                                       ~A~:[~;~%The editing tools' reader also fails ~
-                                       on this file, but not on a delimiter (a ~
-                                       reader macro or #.), so the overwrite path ~
-                                       does not apply; lisp-edit-form will report ~
-                                       the reader's complaint.~]"
+                                       ~:[~;The editing tools' reader also fails on ~
+                                       this file, but not on a delimiter (a reader ~
+                                       macro or #.), so the overwrite path does not ~
+                                       apply and the fix below alone will not make ~
+                                       it parse; lisp-edit-form will report the ~
+                                       reader's complaint.~%~]~A"
                                   false-positive (and path t) (and path t)
+                                  (eq verdict :reader-level)
                                   (format-delimiter-diagnosis
                                    diagnosis :target (or path "code")
-                                             :false-positive false-positive)
-                                  (eq verdict :reader-level)))
+                                             :false-positive false-positive)))
                     ;; Parinfer fixes exist only for paren problems, not for
                     ;; an open #| comment or string, and never for a file the
                     ;; reader accepts.
@@ -447,7 +452,16 @@ sent to the fs-write-file overwrite path."
                                 ;; The headline must not call an open string
                                 ;; or comment a parenthesis problem, since
                                 ;; the diagnosis below it says otherwise.
-                                (label (cond ((string= kind "unclosed-string")
+                                (label (cond ((gethash "false_positive" check-result)
+                                              ;; The headline must not assert
+                                              ;; breakage the paragraph below
+                                              ;; it retracts.
+                                              (format nil "Likely false positive (the ~
+                                               editing tools' reader accepts this ~
+                                               ~:[snippet~;file~]): the standard-syntax ~
+                                               scan reports ~A"
+                                                      path kind))
+                                             ((string= kind "unclosed-string")
                                               "Unterminated string")
                                              ((string= kind "unclosed-block-comment")
                                               "Unterminated block comment")
@@ -481,7 +495,10 @@ sent to the fs-write-file overwrite path."
                                       ;; known, rather than sending the caller
                                       ;; into a loop with lisp-edit-form.
                                       ((gethash "guidance_text" check-result))
-                                      (next-tool
+                                      ;; No edit instruction on a verdict the
+                                      ;; reader has just called a false positive.
+                                      ((and next-tool
+                                            (not (gethash "false_positive" check-result)))
                                        ". Use lisp-edit-form for existing Lisp files.")
                                       (t ""))
                                     (gethash "diagnosis_text" check-result))))))))

@@ -219,11 +219,15 @@ Output:
   `too-large`, where nothing was scanned); for an `unclosed-string` or
   `unclosed-block-comment` the position is the opening `"` or `#|`.
 - for paren failures (`extra-close`, `mismatch`, `unclosed`): `likely_fixes`, a
-  vector of `{line, original, repaired, delta, added, removed}` inferred by
-  parinfer from indentation (at most 10 entries; the rest are counted in
-  `likely_fixes_omitted`; `original`/`repaired` are cut to 120 characters and
-  are then descriptive, not text to write back). Empty when no repair could be
-  inferred.
+  vector of `{line, original, repaired, delta, added, removed, column,
+  removed_columns, before_comment, truncated}` inferred by parinfer from
+  indentation (at most 10 entries; the rest are counted in
+  `likely_fixes_omitted`). `column` is the 1-based column of the first change
+  (where an insertion goes), `removed_columns` the columns of the `)` a
+  removal drops, `before_comment` says the change goes before a trailing `;`
+  comment, and `truncated` says `original`/`repaired` were cut to 120
+  characters and are then descriptive, not text to write back. Empty when no
+  repair could be inferred.
 - for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
   seen while the form was still open, when there is one.
 - `false_positive` (`true`, present only then): the editing tools' reader
@@ -237,6 +241,12 @@ Output:
   pure removal, `insert N ")" at column C (before the trailing ; comment)` when
   they go before a comment, and otherwise the resulting line; a line cut at the
   120-character bound is described by position, never offered as text to write.
+  When a fix closes a form whose next code line sits at the same indentation
+  (the shape of a body that was meant to stay inside it), a NOTE says the
+  lines below have left that form; when the fix rests on an unclosed `[`/`{`,
+  a reminder says the `)` fixes are wrong if that bracket was meant as `(`.
+  A verdict the editing reader contradicts is headlined as a likely false
+  positive, with no edit instruction.
 
 - `next_tool` / `fix_code` / `required_args`: for inline `code`, `lisp-edit-form`
   (which repairs and writes a form). For a `path` that the edit tools' own

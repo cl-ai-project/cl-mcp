@@ -255,6 +255,19 @@
       (ok (vectorp (gethash "likely_fixes" res)))
       (ok (search "Likely fix" (gethash "diagnosis_text" res))))))
 
+(deftest lisp-check-parens-false-positive-headline-does-not-assert-breakage
+  (testing "the summary's first line calls a reader-accepted snippet a likely false positive"
+    (let* ((state (cl-mcp/src/state:make-state))
+           (args (cl-mcp/src/tools/helpers:make-ht "code" "(list a] 1)"))
+           (response (cl-mcp/src/validate::lisp-check-parens-handler state "cp-fp" args))
+           (result-obj (gethash "result" response))
+           (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+      (ok (zerop (search "Likely false positive (the editing tools' reader accepts this snippet)"
+                         text)))
+      (ng (search "Unbalanced parentheses:" text))
+      (ng (search "Use lisp-edit-form for existing Lisp files" text))
+      (ok (eq (gethash "false_positive" result-obj) t)))))
+
 (deftest lisp-check-parens-limit-equal-to-a-multibyte-file-is-not-a-window
   (testing "a limit equal to the character count reads the whole file, octets notwithstanding"
     (let* ((root (asdf:system-source-directory :cl-mcp))

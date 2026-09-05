@@ -536,7 +536,8 @@
 (deftest format-repair-lines-wording
   (testing "add/remove wording and quoting"
     (let ((text (format-repair-lines
-                 (list (list :line 2 :original "  (let ((y 1)" :repaired "  (let ((y 1))" :delta 1)
+                 (list (list :line 2 :original "  (let ((y 1)" :repaired "  (let ((y 1))"
+                             :delta 1 :append-only t)
                        (list :line 9 :original "  x))" :repaired "  x)" :delta -1)))))
       (ok (search (format nil "~%  line 2: \"  (let ((y 1)\"  ->  add 1 \")\"") text))
       (ok (search (format nil "~%  line 9: \"  x))\"  ->  remove 1 \")\"") text))))
@@ -546,7 +547,8 @@
 (deftest format-repair-lines-caps-at-ten-entries
   (testing "12 fixes render 10 lines plus a remainder sentence"
     (let* ((fixes (loop for n from 1 to 12
-                        collect (list :line n :original "x" :repaired "x)" :delta 1)))
+                        collect (list :line n :original "x" :repaired "x)" :delta 1
+                                      :append-only t)))
            (text (format-repair-lines fixes)))
       (ok (search (format nil "~%  line 10: ") text))
       (ng (search (format nil "~%  line 11: ") text))
@@ -554,7 +556,8 @@
       (ok (search (format nil "~%  ... and 2 more changed lines") text))))
   (testing "exactly 10 fixes render in full with no remainder sentence"
     (let* ((fixes (loop for n from 1 to 10
-                        collect (list :line n :original "x" :repaired "x)" :delta 1)))
+                        collect (list :line n :original "x" :repaired "x)" :delta 1
+                                      :append-only t)))
            (text (format-repair-lines fixes)))
       (ok (search (format nil "~%  line 10: ") text))
       (ng (search "more changed lines" text)))))
