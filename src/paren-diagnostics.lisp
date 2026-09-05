@@ -943,11 +943,13 @@ BRACKET-AMBIGUOUS-P together with this one."
 
 (defun next-top-level-hint-line (diagnosis)
   "Return the line the next-top-level hint may name for DIAGNOSIS (from
-DIAGNOSE-DELIMITERS), or NIL when the hint does not apply: the kind is not
-\"unclosed\", no column-1 \"(\" was seen while a form was open, or one of the
-likely fixes lands on or after that line -- the fix says the closer goes
-there, the hint says it goes before, and the fix is the one the caller can
-apply, so the hint yields. One rule for the rendered sentence and for
+DIAGNOSE-DELIMITERS), or NIL when the hint does not apply: no column-1 \"(\"
+was seen while a form was open, or one of the likely fixes lands on or
+after that line -- the fix says the closer goes there, the hint says it goes
+before, and the fix is the one the caller can apply, so the hint yields.
+(DIAGNOSE-DELIMITERS records the line only for the \"unclosed\" kind; the
+kind test here just keeps a hand-built plist honest.) One rule for the
+rendered sentence and for
 lisp-check-parens' next_top_level_line field, so the payload never carries a
 hint the text withdrew."
   (let ((next-line (getf diagnosis :next-top-level-line)))
