@@ -146,6 +146,29 @@ block comment (~D level~:P still open). Close it with |#." depth))))))
                (progn (unread-char #\# stream) (return nil))))
           (t (return nil)))))))
 
+(defun %classify-cl-read-error (condition stream standard-close-p)
+  "Return CONDITION, or a STRAY-RIGHT-PARENTHESIS when READ failed right after
+consuming a \")\" while STANDARD-CLOSE-P (\")\" still terminates lists in the
+active readtable). This catches a stray \")\" that the structural pre-check
+could not see because a whitespace-like reader macro returning no values
+consumed the text before it within the same READ call. End-of-file
+conditions are left alone: an unterminated string may end in \")\" too, and
+they already classify as delimiter failures."
+  (let ((pos (file-position stream)))
+    (if (and standard-close-p
+             (not (typep condition 'end-of-file))
+             (integerp pos)
+             (plusp pos)
+             (progn (file-position stream (1- pos))
+                    (prog1 (eql (read-char stream nil nil) #\))
+                      (file-position stream pos))))
+        (make-condition
+         'stray-right-parenthesis
+         :stream stream
+         :message (format nil "Unmatched closing parenthesis character ). ~
+Remove the extra \")\" (lisp-check-parens reports its line and column)."))
+        condition)))
+
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable)
   "Read remaining forms from STREAM using standard CL reader with CUSTOM-READTABLE.
 Returns two values: the complete list of nodes (including previously collected
@@ -183,8 +206,14 @@ character ). Remove the extra \")\" (lisp-check-parens reports its line and colu
         (let ((form (handler-case (read stream nil :eof)
                       (error (e)
                         ;; On read error, return what we have so far and
-                        ;; report the error as the second value.
-                        (return (values (nreverse nodes) e))))))
+                        ;; report the error as the second value, normalised
+                        ;; to STRAY-RIGHT-PARENTHESIS when READ tripped over
+                        ;; a ")" that the structural check could not see
+                        ;; (a whitespace-like macro returning no values
+                        ;; consumed the text before it inside the same READ).
+                        (return (values (nreverse nodes)
+                                        (%classify-cl-read-error
+                                         e stream standard-close-p)))))))
           (when (eq form :eof)
             (return (values (nreverse nodes) nil)))
           (let* ((end-pos (file-position stream))

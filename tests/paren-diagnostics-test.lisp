@@ -173,6 +173,17 @@
         (ok (eq state :code))
         (ok (= depth 0))))))
 
+(deftest lexical-state-at-never-consults-text-past-end
+  (testing "a | or # at the limit inside a block comment is pending"
+    ;; characters: ( a space # | x | #  -- the closing | is index 6
+    (ok (eq (lexical-state-at "(a #|x|#" 7) :pending))
+    (ok (eq (lexical-state-at "(a #|x|#" 8) :code) "|# consumed inside the range"))
+  (testing "a reader prefix at the limit is pending"
+    (ok (eq (lexical-state-at "(a '" 4) :pending) "quote")
+    (ok (eq (lexical-state-at "(a `" 4) :pending) "backquote")
+    (ok (eq (lexical-state-at "(a ,@" 5) :pending) "unquote-splicing")
+    (ok (eq (lexical-state-at "(a 'b)" 5) :code) "prefix consumed inside the range")))
+
 (deftest scan-delimiters-handles-nested-block-comments
   (testing "a nested #| ... |# inside a block comment does not end it early"
     (ok (getf (scan-delimiters "(a #| outer #| inner |# ( |# b)") :ok)

@@ -1256,6 +1256,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                            "the newline after the switch was read by the macro"))))
               (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
                        :cl-mcp-test-newline-macro))))
+        (testing "a stray ) reached through a zero-value Newline macro is still classified"
+          ;; Newline reads as nothing, so READ itself runs into the ) and the
+          ;; structural peek never sees it; the native error is normalised.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-newline-void :merge '(:standard))))
+            (set-macro-character #\Newline (lambda (s c) (declare (ignore s c)) (values))
+                                 nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-newline-void-stray.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-newline-void)~%(defun a () 1)~%)~%")
+                   (lambda (path)
+                     (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                          (pathname path))
+                         "the stray ) behind the void macro counts as a delimiter failure")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-newline-void))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")

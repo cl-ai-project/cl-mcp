@@ -857,6 +857,33 @@ running as root), THUNK is skipped instead."
           (ok (search "No changes were written to disk." err-msg))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-depth-reason-pending-constructs-at-boundary
+  (flet ((patch-error (relative initial old new)
+           (with-temp-file relative initial
+             (lambda (path)
+               (let ((before (fs-read-file path))
+                     (err-msg nil))
+                 (handler-case
+                     (lisp-patch-form :file-path path
+                                      :form-type "defun"
+                                      :form-name "target"
+                                      :old-text old
+                                      :new-text new)
+                   (error (e) (setf err-msg (princ-to-string e))))
+                 (ok err-msg "the patch must fail")
+                 (ok (null (search "fewer \")\"" err-msg))
+                     "no manufactured net-parenthesis message")
+                 (ok (search "No changes were written to disk." err-msg))
+                 (ok (string= before (fs-read-file path))))))))
+    (testing "new_text ending with | inside a block comment whose |# needs the suffix"
+      (patch-error "tests/tmp/patch-boundary-block-close.lisp"
+                   (format nil "(defun target ()~%  foo #\\))~%")
+                   "foo " "(#|x|"))
+    (testing "new_text ending with a quote prefix that needs a following form"
+      (patch-error "tests/tmp/patch-boundary-quote.lisp"
+                   (format nil "(defun target ()~%  foo)~%")
+                   "foo" "('"))))
+
 (deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
   (testing "parens inside strings and #\\( do not trip the depth check"
     (with-temp-file "tests/tmp/patch-depth-strings.lisp"

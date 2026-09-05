@@ -246,7 +246,10 @@ part of a symbol, so \\) is not a delimiter). LINE and COL are 1-based.
 Scanning stops at position END (default: the end of TEXT) and returns two
 values: the lexical state reached there (:code, :string, :string-escape,
 :line-comment, :block-comment or :pending) and the block-comment nesting
-depth at that point.
+depth at that point. Nothing at or past END is ever consulted, so the state
+at END depends only on the text before it: a construct that would need the
+character at END (\\x, #\\x, #|, |#, or a reader prefix such as ' ` , @ #
+that needs a following object) is reported as :pending instead.
 Known limitation: |...| multiple-escape symbols are not recognised, so a
 parenthesis inside one is still reported as code."
   (let ((len (min (length text) (or end (length text))))
@@ -254,8 +257,9 @@ parenthesis inside one is still reported as code."
         (in-string nil) (escape nil) (line-comment nil) (block-depth 0)
         (pending nil))
     (loop while (< idx len)
-          do (let ((ch (char text idx))
-                   (next (and (< (1+ idx) (length text)) (char text (1+ idx)))))
+          do (let* ((ch (char text idx))
+                    (last-p (>= (1+ idx) len))
+                    (next (and (not last-p) (char text (1+ idx)))))
                (cond
                  (line-comment
                   (when (char= ch #\Newline) (setf line-comment nil)))
@@ -264,28 +268,31 @@ parenthesis inside one is still reported as code."
                         ((char= ch #\\) (setf escape t))
                         ((char= ch #\") (setf in-string nil))))
                  ((plusp block-depth)
-                  (cond ((and (char= ch #\|) next (char= next #\#))
+                  (cond ((and last-p (or (char= ch #\|) (char= ch #\#)))
+                         ;; |# or a nested #| would need the character at END.
+                         (setf pending t)
+                         (return))
+                        ((and (char= ch #\|) next (char= next #\#))
                          (decf block-depth) (incf idx) (incf col))
                         ((and (char= ch #\#) next (char= next #\|))
                          (incf block-depth) (incf idx) (incf col))))
-                 ((and (>= (1+ idx) len) (or (char= ch #\\) (char= ch #\#)))
-                  ;; A two-character construct (\x, #\x, #|) would reach past
-                  ;; END: stop here and report the token as pending instead of
-                  ;; consuming text the caller asked us not to classify.
+                 ((and last-p (find ch "\\#'`,@"))
+                  ;; A two-character construct or a reader prefix would reach
+                  ;; past END: stop here and report the token as pending
+                  ;; instead of consulting text the caller asked us not to.
                   (setf pending t)
                   (return))
                  ((char= ch #\;) (setf line-comment t))
                  ((char= ch #\") (setf in-string t))
                  ((char= ch #\\)
                   ;; Single escape outside a string: skip the escaped character.
-                  (when next
-                    (incf idx)
-                    (if (char= next #\Newline)
-                        (setf line (1+ line) col 0)
-                        (incf col))))
-                 ((and (char= ch #\#) next (char= next #\|))
+                  (incf idx)
+                  (if (char= next #\Newline)
+                      (setf line (1+ line) col 0)
+                      (incf col)))
+                 ((and (char= ch #\#) (char= next #\|))
                   (incf block-depth) (incf idx) (incf col))
-                 ((and (char= ch #\#) next (char= next #\\))
+                 ((and (char= ch #\#) (char= next #\\))
                   ;; #\x or #\Name: skip the backslash and the literal itself,
                   ;; but never past END -- a literal cut off by the scan limit
                   ;; is reported as pending, like a lone \ or # would be.
