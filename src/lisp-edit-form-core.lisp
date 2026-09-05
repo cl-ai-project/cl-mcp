@@ -327,7 +327,7 @@ points at the readtable parameter instead."
                      existing Lisp file otherwise). If the file uses custom reader ~
                      syntax that the default reader cannot parse, pass the readtable ~
                      parameter to lisp-edit-form instead of overwriting."
-                head path (not scan-ok) line)
+                head path (not (null (getf diagnosis :likely-fixes))) line)
         (format nil "~A~%This is a reader-level failure, not a missing or stray ~
                      parenthesis, so it may depend on a readtable: if the file uses ~
                      custom reader macros, pass the readtable parameter (a ~

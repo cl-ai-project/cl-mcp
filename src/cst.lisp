@@ -108,7 +108,10 @@ report, not a successfully skipped comment."
       (let ((ch (peek-char nil stream nil :eof)))
         (cond
           ((and (characterp ch)
-                (member ch '(#\Space #\Tab #\Newline #\Return #\Page)))
+                (member ch '(#\Space #\Tab #\Newline #\Return #\Page))
+                ;; A readtable may turn a whitespace character into a macro
+                ;; character (indentation-sensitive readers); then READ owns it.
+                (null (get-macro-character ch readtable)))
            (read-char stream))
           ((and line-comment-p (eql ch #\;))
            (loop for c = (read-char stream nil :eof)

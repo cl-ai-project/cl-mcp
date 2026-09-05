@@ -344,6 +344,15 @@
       (ok (search "Automatic repair could not produce a readable form; fix the delimiters by hand." text))
       (ng (search "Likely fix" text)))))
 
+(deftest format-diagnosis-unclosed-block-comment
+  (testing "an open block comment names its position and the closing token"
+    (let ((text (format-delimiter-diagnosis
+                 (diagnose-delimiters (format nil "(foo)~%  #| open"))
+                 :target "code")))
+      (ok (search "Unterminated block comment in code: the #| opened at line 2, column 3" text))
+      (ok (search "Close it with |#." text))
+      (ng (search "Likely fix" text)))))
+
 (deftest format-diagnosis-mismatch-bracket-opener
   (testing "a [ opener does not get a \"replace it\" instruction"
     (let ((text (format-delimiter-diagnosis (diagnose-delimiters "(list [a b)"))))

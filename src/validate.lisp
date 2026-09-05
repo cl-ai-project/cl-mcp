@@ -178,13 +178,15 @@ MCP payload)."
                      (gethash "line" pos) line
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
+             ;; Every delimiter failure gets guidance text; parinfer fixes
+             ;; exist only for paren problems, not for an open #| comment.
+             (setf (gethash "diagnosis_text" h)
+                   (format-delimiter-diagnosis diagnosis :target (or path "code")))
              (unless (string= kind "unclosed-block-comment")
                (let* ((total (length likely-fixes))
                       (kept (min total *repair-lines-limit*)))
                  (setf (gethash "likely_fixes" h)
-                       (map 'vector #'%fix->hash (subseq likely-fixes 0 kept))
-                       (gethash "diagnosis_text" h)
-                       (format-delimiter-diagnosis diagnosis :target (or path "code")))
+                       (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
                  (when (> total kept)
                    (setf (gethash "likely_fixes_omitted" h) (- total kept))))
                (when next-top-level-line

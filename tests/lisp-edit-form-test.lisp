@@ -1119,6 +1119,27 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search "overwriting is allowed" err))
               "must not promise an overwrite that the guard will refuse"))))))
 
+(deftest file-unparseable-message-for-open-block-comment
+  (testing "a file ending inside #| gets closing guidance, not a reference to a likely fix"
+    (with-temp-file "tests/tmp/edit-form-open-block-comment.lisp"
+        (format nil "(defun target () 1)~%#| never closed~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "nonexistent"
+                              :operation "replace"
+                              :content "(defun nonexistent () 1)")
+            (file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "the open comment makes the file unparseable")
+          (ok (search "Close it with |#" err))
+          (ok (search "apply the change described above" err))
+          (ok (null (search "Likely fix" err)) "no likely fix exists for a comment problem")
+          (ok (search "allow_unparseable_overwrite=true" err)
+              "an open comment is a delimiter failure, so the recovery path applies"))))))
+
 (deftest file-unparseable-after-in-readtable-switch
   ;; After (in-readtable ...) the CST parser reads with the standard CL reader
   ;; and swallows read errors, returning the nodes it has. That path only
@@ -1212,6 +1233,27 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                          "the form behind the redefined ; was located and replaced")))
               (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
                        :cl-mcp-test-semicolon-reads))))
+        (testing "a readtable that makes Newline a macro character keeps its forms"
+          ;; Each newline reads as the keyword :nl, so it must reach READ.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-newline-macro :merge '(:standard))))
+            (set-macro-character #\Newline (lambda (s c) (declare (ignore s c)) :nl) nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-newline-readtable.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-newline-macro)~%(defun a () 1)~%")
+                   (lambda (path)
+                     (let* ((nodes (cl-mcp/src/cst:parse-top-level-forms
+                                    (fs-read-file path) :source-path (pathname path)))
+                            (newline-forms (count :nl nodes
+                                                  :key #'cl-mcp/src/cst:cst-node-value)))
+                       ;; The newline right after the in-readtable form is
+                       ;; consumed by Eclector's READ before the switch; the
+                       ;; one after the defun reaches the CL-reader pass and
+                       ;; must be handed to the macro (0 would mean discarded).
+                       (ok (= newline-forms 1)
+                           "the newline after the switch was read by the macro"))))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-newline-macro))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")

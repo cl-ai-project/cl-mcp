@@ -493,6 +493,10 @@ one; otherwise a repair-failed sentence is printed instead."
                     part of a symbol name this diagnosis is a false positive."
                  target expected found line column
                  (if (equal expected "]") "[" "{")))
+        ((string= kind "unclosed-block-comment")
+         (format s "Unterminated block comment in ~A: the #| opened at line ~D, ~
+                    column ~D was never closed. Close it with |#."
+                 target line column))
         (t
          (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
                  target kind line column)))

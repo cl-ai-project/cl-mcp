@@ -133,6 +133,20 @@
       (ok (string= (%kind res) "unclosed-block-comment")
           "kind should be unclosed-block-comment"))))
 
+(deftest lisp-check-parens-unclosed-block-comment-guidance
+  (testing "an open #| gets its own guidance and no parinfer fixes"
+    (let ((res (lisp-check-parens :code (format nil "(foo)~%#| open"))))
+      (ok (string= (%kind res) "unclosed-block-comment"))
+      (ok (search "Close it with |#" (gethash "diagnosis_text" res)))
+      (ok (null (gethash "likely_fixes" res)) "no likely_fixes for a comment problem")))
+  (testing "the MCP summary carries that guidance"
+    (let* ((state (cl-mcp/src/state:make-state))
+           (args (cl-mcp/src/tools/helpers:make-ht "code" (format nil "(foo)~%#| open")))
+           (response (cl-mcp/src/validate::lisp-check-parens-handler state "cp-bc" args))
+           (text (gethash "text" (aref (gethash "content" (gethash "result" response)) 0))))
+      (ok (search "Unterminated block comment" text))
+      (ok (null (search "Likely fix" text))))))
+
 (deftest lisp-check-parens-reader-error-message-truncated
   (testing "reader error message is truncated to 200 chars max"
     ;; Build an input with a long filler that could be echoed in the error message.
