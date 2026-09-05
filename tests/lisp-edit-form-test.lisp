@@ -1727,6 +1727,25 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok changed)
           (ng bracket-warning))))))
 
+(deftest lisp-edit-form-refuses-a-repair-after-an-unfinished-token
+  (testing "content ending in a lone reader prefix is refused with the reason, not written"
+    (with-temp-file "tests/tmp/edit-form-unfinished-token.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () (list @")
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "the only repair would follow an unfinished token, so it is not written")
+          (ok (search "unfinished token" err))
+          (ok (string= before (fs-read-file path))))))))
+
 (deftest lisp-edit-form-content-honours-in-readtable-in-file
   (testing "content is validated under the readtable the file switched to"
     ;; #?[...] reads raw text through ]; without the file's readtable the

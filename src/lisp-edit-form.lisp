@@ -24,7 +24,7 @@
                 #:repair-line-differences
                 #:format-repair-lines
                 #:last-code-line
-                #:scan-delimiters)
+                #:format-bracket-warning)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -98,22 +98,11 @@ reported separately; the count is never negative."
                                       dropped))))))))
 
 (defun %bracket-warning (text nonstandard-rt)
-  "Return a warning string when TEXT reads but its delimiter scan stops at a
-] or } where ) was expected: in standard syntax that character is part of a
-symbol, so a ) typo survives silently. Written as asked -- the caller may
-mean it -- but flagged, the same rule lisp-patch-form applies. NIL under a
-readtable that changes the syntax (NONSTANDARD-RT), where the scan is not
-evidence, and NIL when nothing is found."
+  "Return the shared bracket warning (FORMAT-BRACKET-WARNING) for TEXT, or
+NIL under a readtable that changes the syntax (NONSTANDARD-RT), where the
+scan is not evidence."
   (unless nonstandard-rt
-    (let ((scan (scan-delimiters text)))
-      (and (equal (getf scan :kind) "mismatch")
-           (member (getf scan :found) '("]" "}") :test #'equal)
-           (format nil "the content reads, but its delimiter scan finds ~S where ~S ~
-                        was expected (line ~D, column ~D within the content); in ~
-                        standard syntax that ~S is part of a symbol name, so check ~
-                        that it is what you meant."
-                   (getf scan :found) (getf scan :expected)
-                   (getf scan :line) (getf scan :column) (getf scan :found))))))
+    (format-bracket-warning text :target "the content")))
 
 (defun %ensure-blank-separation (prefix between)
   "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.

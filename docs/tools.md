@@ -314,6 +314,10 @@ Output:
 - `path`, `operation`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
+- `bracket_warning` (string, optional): the content reads, but its delimiter
+  scan found a `]` or `}` where `)` was expected (a symbol character in
+  standard syntax, so a `)` typo survives); the edit is applied and the
+  summary repeats the warning. Also present in dry-run output.
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):

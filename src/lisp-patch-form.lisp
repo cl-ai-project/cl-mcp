@@ -34,7 +34,8 @@
                 #:format-delimiter-diagnosis
                 #:lexical-state-at
                 #:scan-delimiters
-                #:bracket-ambiguous-p)
+                #:bracket-ambiguous-p
+                #:format-bracket-warning)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
@@ -332,17 +333,8 @@ silently accepts as part of a symbol), so the caller can check it."
         (let ((bracket-warning
                 (and would-change
                      (not nonstandard-rt)
-                     (let ((scan (scan-delimiters modified-form)))
-                       (and (equal (getf scan :kind) "mismatch")
-                            (member (getf scan :found) '("]" "}") :test #'equal)
-                            (format nil "the patched form reads, but its delimiter ~
-                                         scan finds ~S where ~S was expected (line ~D, ~
-                                         column ~D within the form); in standard ~
-                                         syntax that ~S is part of a symbol name, so ~
-                                         check that it is what you meant."
-                                    (getf scan :found) (getf scan :expected)
-                                    (getf scan :line) (getf scan :column)
-                                    (getf scan :found)))))))
+                     (format-bracket-warning modified-form
+                                             :target "the patched form"))))
           (log-event :debug "lisp.patch.form"
                      "path" (namestring abs)
                      "form_type" form-type

@@ -21,6 +21,7 @@
            #:format-repair-lines
            #:format-delimiter-diagnosis
            #:bracket-ambiguous-p
+           #:format-bracket-warning
            #:last-code-line))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
@@ -516,10 +517,15 @@ or :OUTSIDE-CODE when parinfer changed text that is not code (see
 %ANY-FIX-OUTSIDE-CODE-P) -- a repair that may well read but must not be
 offered. FIXES is NIL in either failure. REPAIRED is parinfer's output
 either way, so a caller that goes on to try it does not run parinfer a
-second time. Balanced [...] or {...} pairs, as used by some reader macros,
-are accepted."
-  (let ((repaired (apply-indent-mode text)))
-    (if (getf (scan-delimiters repaired) :ok)
+second time. A rescan whose only remaining complaint is an unmatched [ or {
+opener (EXPECTED \"]\" or \"}\") does not fail the repair: that opener may be
+a symbol character, parinfer's \")\" fixes are what lisp-edit-form writes
+for such content, and the finding is reported as a possible false positive.
+Balanced [...] or {...} pairs, as used by some reader macros, are accepted."
+  (let* ((repaired (apply-indent-mode text))
+         (rescan (scan-delimiters repaired)))
+    (if (or (getf rescan :ok)
+            (member (getf rescan :expected) '("]" "}") :test #'equal))
         (let ((fixes (repair-line-differences text repaired)))
           (if (%any-fix-outside-code-p text repaired fixes)
               (values nil :outside-code repaired)
@@ -591,25 +597,28 @@ caller can fall back to a plain count difference."
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.
 Return a list of (:line n :original str :repaired str :delta d :added a
-:removed r :append-only p :column c :before-comment b :truncated t) for
-every line that changed, where A is the number of \")\" parinfer appended, R
-the number it removed, D = A - R, P is T only when the repaired line is the
-original with closers appended at its very end (the one shape a reader can
-apply from \"add N )\" alone), C is the 1-based column of the first
-character that differs (where an insertion goes), B is T when the rest of
-the original line from that column is a ; comment, and the truncated flag
-says that :original/:repaired were cut by %BOUND-LINE and so are not text
-to write back. A line whose net D is 0 is still reported when it really
-changed (\")(a\" -> \"(a)\"); only differences with no parenthesis edits at
-all (whitespace, a trailing carriage return) are skipped. A trailing
-#\\Return is stripped from both sides before comparing. Both texts must have
-the same number of lines, which parinfer guarantees."
+:removed r :append-only p :column c :removed-columns cs :before-comment b
+:truncated t) for every line that changed, where A is the number of \")\"
+parinfer appended, R the number it removed, D = A - R, P is T only when the
+repaired line is the original with closers appended at its very end (the
+one shape a reader can apply from \"add N )\" alone; never for a CRLF line,
+whose closers go before the #\\Return), C is the 1-based column of the first
+character that differs (where an insertion goes), CS the 1-based columns of
+the removed \")\" when the edit is a pure removal, B is T when the rest of
+the original line from column C is a ; comment, and the truncated flag says
+that :original/:repaired were cut by %BOUND-LINE and so are not text to
+write back. A line whose net D is 0 is still reported when it really changed
+(\")(a\" -> \"(a)\"); only differences with no parenthesis edits at all
+(whitespace, a trailing carriage return) are skipped. A trailing #\\Return is
+stripped from both sides before comparing. Both texts must have the same
+number of lines, which parinfer guarantees."
   (loop for raw-orig in (split-string original :separator '(#\Newline))
         for raw-rep in (split-string repaired :separator '(#\Newline))
         for line from 1
         for orig = (%strip-trailing-cr raw-orig)
         for rep = (%strip-trailing-cr raw-rep)
-        for (added removed) = (multiple-value-list (%paren-edit-counts orig rep))
+        for (added removed removed-positions)
+          = (multiple-value-list (%paren-edit-counts orig rep))
         for delta = (if added
                         (- added removed)
                         (- (count #\) rep) (count #\) orig)))
@@ -629,6 +638,7 @@ the same number of lines, which parinfer guarantees."
                           :added (or added (max delta 0))
                           :removed (or removed (max (- delta) 0))
                           :append-only (and added (plusp added) (zerop removed)
+                                            (not (find #\Return raw-orig))
                                             (string= rep
                                                      (concatenate
                                                       'string orig
@@ -636,11 +646,13 @@ the same number of lines, which parinfer guarantees."
                                                        added :initial-element #\))))
                                             t)
                           :column (and first-diff (1+ first-diff))
+                          :removed-columns (mapcar #'1+ removed-positions)
                           :before-comment (and rest (plusp (length rest))
                                                (char= (char rest 0) #\;)
                                                t)
-                          :truncated (or (string/= (%bound-line orig) orig)
-                                         (string/= (%bound-line rep) rep))))))
+                          :truncated (and (or (string/= (%bound-line orig) orig)
+                                              (string/= (%bound-line rep) rep))
+                                          t)))))
 
 (defparameter *repair-lines-limit* 10
   "Maximum number of likely-fix entries rendered by FORMAT-REPAIR-LINES and
@@ -651,10 +663,10 @@ so a response stays bounded however many lines parinfer changed.")
   "Render FIXES (from REPAIR-LINE-DIFFERENCES) as indented lines, each
 preceded by a newline, in a form that can be applied verbatim:
   - a pure end-of-line append: \"  line 2: \\\"  (let ((y 1)\\\"  ->  add 1 \\\")\\\"\";
-  - a pure removal: \"remove N \\\")\\\"\";
-  - an insertion elsewhere (before a trailing ; comment): \"insert N \\\")\\\" at
-    column C (before the trailing ; comment)\", plus the resulting line when
-    it is short enough to be shown whole;
+  - a pure removal: \"remove N \\\")\\\" at column C\" (every removed column named);
+  - an insertion elsewhere (before a trailing ; comment, or on a CRLF line):
+    \"insert N \\\")\\\" at column C (before the trailing ; comment)\", plus the
+    resulting line when it is short enough to be shown whole;
   - anything else (a relocation): the resulting line when it is whole,
     otherwise the counts and the column of the first change.
 A line cut by %BOUND-LINE is never presented as text to write back, and no
@@ -676,18 +688,21 @@ reindentation cannot flood the guidance."
               (removed (getf fix :removed 0))
               (append-only (getf fix :append-only :unknown))
               (column (getf fix :column))
+              (removed-columns (getf fix :removed-columns))
               (truncated (getf fix :truncated)))
           (cond
             ((and (plusp delta) append-only)
              (format s "~%  line ~D: ~S  ->  add ~D \")\"" line original delta))
             ((and (minusp delta) (zerop added))
-             (format s "~%  line ~D: ~S  ->  remove ~D \")\"" line original (- delta)))
+             (format s "~%  line ~D: ~S  ->  remove ~D \")\"~@[ at column~P ~{~D~^, ~}~]"
+                     line original (- delta)
+                     (and removed-columns (length removed-columns)) removed-columns))
             ((and (plusp delta) (zerop removed) column)
              (format s "~%  line ~D: ~S  ->  insert ~D \")\" at column ~D~
                         ~:[~; (before the trailing ; comment)~]~:[, giving ~S~;~*~]"
                      line original delta column (getf fix :before-comment)
                      truncated repaired))
-            ((or (not truncated) (null column))
+            ((not truncated)
              ;; A relocation (")(a" -> "(a)"): the net count says nothing
              ;; useful, so show the resulting line.
              (format s "~%  line ~D: ~S  ->  ~S" line original repaired))
@@ -706,7 +721,11 @@ TARGET is the subject of the first sentence: \"code\", \"content\", \"new_text\"
 or a file path. The text is a finding sentence per kind, followed -- unless
 FALSE-POSITIVE -- by the instruction for that kind (remove, replace, close),
 then the likely-fix block when parinfer produced one or a repair-failed
-sentence when it did not, then the next-top-level hint.
+sentence when it did not, a note when a fix closes a form above the last
+code line (the lines below it leave that form), then the next-top-level
+hint. A verdict that rests on a bracket (BRACKET-AMBIGUOUS-P: an unclosed [
+or {, or a ] or } found where ) was expected) is described with its caveat
+and never called unrepairable, since the bracket may be a symbol character.
 FALSE-POSITIVE, when true, means a caller with better evidence (the editing
 tools' reader accepted the text) has judged the verdict a false positive of
 the standard-syntax scan: the finding is still described, but nothing that
@@ -714,21 +733,28 @@ tells the caller to change anything is attached to it. That is enforced in
 one place, below, rather than per kind."
   (when (getf diagnosis :ok)
     (return-from format-delimiter-diagnosis nil))
-  (let ((kind (getf diagnosis :kind))
-        (line (getf diagnosis :line))
-        (column (getf diagnosis :column))
-        (expected (getf diagnosis :expected))
-        (found (getf diagnosis :found))
-        (fixes (getf diagnosis :likely-fixes))
-        (failed (getf diagnosis :repair-failed))
-        (next-line (getf diagnosis :next-top-level-line)))
+  (let* ((kind (getf diagnosis :kind))
+         (line (getf diagnosis :line))
+         (column (getf diagnosis :column))
+         (expected (getf diagnosis :expected))
+         (found (getf diagnosis :found))
+         (fixes (getf diagnosis :likely-fixes))
+         (failed (getf diagnosis :repair-failed))
+         (next-line (getf diagnosis :next-top-level-line))
+         (ambiguous (bracket-ambiguous-p diagnosis))
+         (opener-ambiguous (member expected '("]" "}") :test #'equal))
+         (opener (if (equal expected "]") "[" "{")))
     (with-output-to-string (s)
       ;; The finding.
       (cond
         ((string= kind "unclosed")
-         (format s "Unbalanced parentheses in ~A: unclosed (form starting at line ~D: ~S)."
+         (format s "Unbalanced parentheses in ~A: unclosed (form starting at line ~D: ~S).~
+                    ~:[~;~%The ~S opened at line ~D, column ~D is being treated as an ~
+                    opening delimiter; if it is part of a symbol name this diagnosis ~
+                    is a false positive.~]"
                  target (getf diagnosis :unclosed-form-line)
-                 (getf diagnosis :unclosed-form-head)))
+                 (getf diagnosis :unclosed-form-head)
+                 opener-ambiguous opener line column))
         ((string= kind "extra-close")
          (format s "Unbalanced parentheses in ~A: extra ~S at line ~D, column ~D."
                  target found line column))
@@ -744,8 +770,7 @@ one place, below, rather than per kind."
          (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
                     The ~S opened earlier is being treated as an opening delimiter; if it is ~
                     part of a symbol name this diagnosis is a false positive."
-                 target expected found line column
-                 (if (equal expected "]") "[" "{")))
+                 target expected found line column opener))
         ((string= kind "unclosed-block-comment")
          (format s "Unterminated block comment in ~A: the #| opened at line ~D, ~
                     column ~D was never closed."
@@ -772,22 +797,41 @@ one place, below, rather than per kind."
            (format s " Close it with \".")))
         (cond
           (fixes
-           (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
-          ((and (eq failed :outside-code) (not (string= kind "mismatch")))
-           ;; The repair may well read, but it would change text inside a
-           ;; string or comment, so it is withheld rather than offered.
+           (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes))
+           ;; A closer placed above the last code line moves the lines below
+           ;; it out of that form: say so, as lisp-edit-form's summary does.
+           (let* ((repaired (getf diagnosis :repaired))
+                  (last (and repaired (last-code-line repaired)))
+                  (relocations (and last
+                                    (loop for fix in fixes
+                                          when (and (plusp (getf fix :added 0))
+                                                    (< (getf fix :line) last))
+                                            collect (getf fix :line)))))
+             (when relocations
+               (format s "~%NOTE: the fix~:[~;es~] on line~:[~;s~] ~{~D~^, ~} close~:[s~;~] ~
+                          a form there, so the lines below ~:[it~;them~] are no longer ~
+                          inside that form; verify the nesting (indentation decides ~
+                          where a form ends)."
+                       (cdr relocations) (cdr relocations) relocations
+                       (cdr relocations) (cdr relocations)))))
+          ((and (eq failed :outside-code) (not ambiguous))
+           ;; The repair may well read, but it would change text that is not
+           ;; code, so it is withheld rather than offered.
            (format s "~%Automatic repair would have changed text inside a string ~
-                      or comment, or in the middle of a token, so no repair is ~
-                      offered; fix the delimiters by hand."))
-          ((and failed (not (string= kind "mismatch")))
+                      or comment, or would follow an unfinished token at the end of ~
+                      the text (a lone # \\ ' ` , or @), so no repair is offered; fix ~
+                      the delimiters by hand."))
+          ((and failed (not ambiguous))
            (format s "~%Automatic repair could not produce a readable form; ~
                       fix the delimiters by hand.")))
         (when (and next-line (string= kind "unclosed"))
           ;; A column-0 "(" while a form is open is a strong hint, not proof
-          ;; (an unindented continuation line looks the same), so hedge.
+          ;; (an unindented continuation line looks the same), so hedge. An
+          ;; unclosed [ or { is not asked for as ]: it may be a symbol
+          ;; character, and the ) fixes above are what would be written.
           (format s "~%Next top-level form begins at line ~D, ~
                      so the missing ~S most likely belongs before it."
-                  next-line (or expected ")")))))))
+                  next-line (if opener-ambiguous ")" (or expected ")"))))))))
 
 (defun bracket-ambiguous-p (diagnosis)
   "Return T when DIAGNOSIS (from SCAN-DELIMITERS or DIAGNOSE-DELIMITERS) rests
@@ -800,6 +844,23 @@ gets the reader's own error alongside the diagnosis."
        (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
            (member (getf diagnosis :found) '("]" "}") :test #'equal))
        t))
+
+(defun format-bracket-warning (text &key (target "the content"))
+  "Return a warning string when TEXT reads but its delimiter scan stops at a
+] or } where ) was expected, or NIL. In standard syntax that character is
+part of a symbol, so a ) typo survives silently: the tools write TEXT as
+asked -- the caller may mean it -- but flag it. Shared by lisp-edit-form and
+lisp-patch-form so the two cannot drift; TARGET names the text in the
+sentence. Only the found side is flagged: an unmatched [ or { opener is a
+symbol character with no ) typo behind it."
+  (let ((scan (scan-delimiters text)))
+    (and (equal (getf scan :kind) "mismatch")
+         (member (getf scan :found) '("]" "}") :test #'equal)
+         (format nil "~A reads, but its delimiter scan finds ~S where ~S was expected ~
+                      (line ~D, column ~D within it); in standard syntax that ~S is ~
+                      part of a symbol name, so check that it is what you meant."
+                 target (getf scan :found) (getf scan :expected)
+                 (getf scan :line) (getf scan :column) (getf scan :found)))))
 
 (defun last-code-line (text)
   "Return the 1-based line of the last line of TEXT that holds a code

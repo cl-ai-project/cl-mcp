@@ -176,17 +176,23 @@ syntax error in the file itself."
               :column  nil)))))
 
 (defun %fix->hash (fix)
-  "Convert one (:line :original :repaired :delta :added :removed) plist into a
-string-keyed hash. ADDED and REMOVED are the gross edit counts; DELTA is
-their difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a
-no-op by a client reading only delta."
+  "Convert one fix plist from REPAIR-LINE-DIFFERENCES into a string-keyed
+hash. ADDED and REMOVED are the gross edit counts; DELTA is their
+difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a no-op
+by a client reading only delta. COLUMN is the 1-based column of the first
+change, BEFORE_COMMENT says the change goes before a trailing ; comment, and
+TRUNCATED says ORIGINAL/REPAIRED were cut to 120 characters and so are
+descriptive, not text to write back."
   (let ((h (make-hash-table :test #'equal)))
     (setf (gethash "line" h) (getf fix :line)
           (gethash "original" h) (getf fix :original)
           (gethash "repaired" h) (getf fix :repaired)
           (gethash "delta" h) (getf fix :delta)
           (gethash "added" h) (getf fix :added 0)
-          (gethash "removed" h) (getf fix :removed 0))
+          (gethash "removed" h) (getf fix :removed 0)
+          (gethash "column" h) (getf fix :column)
+          (gethash "before_comment" h) (if (getf fix :before-comment) t nil)
+          (gethash "truncated" h) (if (getf fix :truncated) t nil))
     h))
 
 (defun lisp-check-parens (&key path code offset limit)

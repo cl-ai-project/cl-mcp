@@ -237,6 +237,29 @@
       (ng (search "giving" rendered) "no resulting line for a truncated one")
       (ng (search "->  \"    (list s \\\"xxx" rendered)))))
 
+(deftest unclosed-bracket-opener-is-a-possible-false-positive-not-unrepairable
+  (testing "an unclosed [ gets parinfer's ) fixes and a caveat, not a ] instruction"
+    (let* ((text (format nil "(defun f (x)~%  (foo [bar x~%(defun g () 1)"))
+           (d (diagnose-delimiters text))
+           (msg (format-delimiter-diagnosis d)))
+      (ok (string= (getf d :kind) "unclosed"))
+      (ok (string= (getf d :expected) "]"))
+      (ng (getf d :repair-failed) "the rescan's only complaint is the [ opener")
+      (ok (= (getf (first (getf d :likely-fixes)) :delta) 2)
+          "the same two ) lisp-edit-form writes")
+      (ok (search "if it is part of a symbol name this diagnosis is a false positive" msg))
+      (ng (search "could not produce a readable form" msg))
+      (ng (search "missing \"]\"" msg) "no instruction to insert a ]")))
+  (testing "a removal names the columns of the ) it drops"
+    (let* ((d (diagnose-delimiters +trailing-extra-close+))
+           (fix (first (getf d :likely-fixes))))
+      (ok (equal (getf fix :removed-columns) '(14)))
+      (ok (search "remove 1 \")\" at column 14" (format-repair-lines (getf d :likely-fixes))))))
+  (testing "a relocating fix carries a note in the diagnosis text too"
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (g x)~%  (h x))"))
+           (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
+      (ok (search "NOTE: the fix on line 2 closes a form" msg)))))
+
 (deftest repair-failed-reason-is-named
   (testing "a repair that would edit inside a string is withheld, not called unreadable"
     ;; The string's closing quote never comes, so parinfer's closer would land
@@ -250,9 +273,16 @@
       ;; Balanced after repair: the closer goes before the comment.
       (ng (getf d :repair-failed)))
     (let ((d (diagnose-delimiters "(a (b #\\)")))
-      ;; #\) is a character literal: appending ) after it works, but a ] typo
-      ;; style unbalanced result is :unbalanced when the rescan still fails.
-      (ok (member (getf d :repair-failed) '(nil :unbalanced :outside-code))))
+      ;; #\) is a character literal: appending ) after it works.
+      (ng (getf d :repair-failed))
+      (ok (= (getf (first (getf d :likely-fixes)) :delta) 2)))
+    (let ((d (diagnose-delimiters "(a @")))
+      ;; The text ends in an unfinished token, so no ) can follow it:
+      ;; reported as :outside-code, not as unreadable.
+      (ok (eq (getf d :repair-failed) :outside-code))
+      (ok (search "unfinished token" (format-delimiter-diagnosis d))))
+    (let ((d (diagnose-delimiters (format nil "(defun f (x)~%  (let ((y 1]~%    (+ x y)))"))))
+      (ok (eq (getf d :repair-failed) :unbalanced)))
     (let* ((text (format nil "(defun f ()~%  (let ((y 1)  ; bind~%    (+ x y)))"))
            (d (diagnose-delimiters text))
            (msg (format-delimiter-diagnosis d)))
@@ -590,12 +620,13 @@
     (ok (getf (scan-delimiters (format nil "(a \"x~%y\" b)")) :ok))))
 
 (deftest format-diagnosis-names-the-expected-delimiter
-  (testing "an unclosed [ asks for ], not for )"
+  (testing "an unclosed [ is a possible symbol character: the hint asks for ), with a caveat"
     (let ((text (format-delimiter-diagnosis
                  (diagnose-delimiters (format nil "(foo [~%(bar)")))))
-      (ok (search "Next top-level form begins at line 2, so the missing \"]\"" text))
+      (ok (search "Next top-level form begins at line 2, so the missing \")\"" text))
       (ok (search "most likely belongs before it." text))
-      (ng (search "missing \")\"" text)))))
+      (ok (search "if it is part of a symbol name this diagnosis is a false positive" text))
+      (ng (search "missing \"]\"" text)))))
 
 (deftest format-diagnosis-mismatch-bracket-opener
   (testing "a [ opener does not get a \"replace it\" instruction"
