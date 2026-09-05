@@ -330,6 +330,13 @@
       (ok (getf d :repair-failed) "parinfer edited comment text")
       (ng (getf d :likely-fixes)))))
 
+(deftest diagnose-checks-every-removed-paren
+  (testing "a line where the first removal is code but a later one is in a comment is rejected"
+    (let ((d (diagnose-delimiters "(foo)) #| note ) |#")))
+      (ok (string= (getf d :kind) "extra-close"))
+      (ok (getf d :repair-failed) "the second removed ) lives inside the block comment")
+      (ng (getf d :likely-fixes)))))
+
 (deftest diagnose-ok-has-no-extra-keys
   (testing "balanced text returns the plain scan plist"
     (let ((d (diagnose-delimiters "(+ 1 2)")))

@@ -395,10 +395,11 @@ The final element is the state at the end of TEXT."
 REPAIRED) changes a position that is not code in TEXT: inside a string or
 a comment, or within a token. Parinfer is not comment-aware, so such a
 change would be ignored by the reader and must not be offered as a fix.
-The change position is the first differing character of the line (a removed
-\")\" ) or the end of the line (an appended one). Linear in the size of TEXT:
-the lexical states come from one %CODE-STATE-MASK pass and the lines from
-one split each."
+Every edit on a changed line is checked: each removed \")\" at its own
+position, and an append at the end of the line. Lines whose difference does
+not fit parinfer's edit model are checked at their first differing
+character. Linear in the size of TEXT: the lexical states come from one
+%CODE-STATE-MASK pass and the lines from one split each."
   (when fixes
     (let ((mask (%code-state-mask text))
           (orig-lines (coerce (split-string text :separator '(#\Newline)) 'vector))
@@ -408,14 +409,22 @@ one split each."
       (loop for i from 0 below (length text)
             when (char= (char text i) #\Newline)
               do (vector-push (1+ i) line-starts))
-      (loop for fix in fixes
-            for line = (getf fix :line)
-            for orig = (aref orig-lines (1- line))
-            for rep = (aref rep-lines (1- line))
-            for offset = (or (mismatch orig rep) (length orig))
-            for pos = (min (+ (aref line-starts (1- line)) offset) (length text))
-            unless (member (svref mask pos) '(:code :pending))
-              do (return t)))))
+      (flet ((outside-code-p (line offset)
+               (let ((pos (min (+ (aref line-starts (1- line)) offset) (length text))))
+                 (not (member (svref mask pos) '(:code :pending))))))
+        (loop for fix in fixes
+              for line = (getf fix :line)
+              for orig = (aref orig-lines (1- line))
+              for rep = (aref rep-lines (1- line))
+              do (multiple-value-bind (added removed positions)
+                     (%paren-edit-counts orig rep)
+                   (declare (ignore removed))
+                   (when (if added
+                             (or (some (lambda (p) (outside-code-p line p)) positions)
+                                 (and (plusp added)
+                                      (outside-code-p line (length orig))))
+                             (outside-code-p line (or (mismatch orig rep) (length orig))))
+                     (return t))))))))
 
 (defun %likely-fixes (text)
   "Run parinfer on TEXT and return (VALUES fixes repair-failed-p).
@@ -471,27 +480,28 @@ likely_fixes payload."
         line)))
 
 (defun %paren-edit-counts (orig rep)
-  "Return (VALUES added removed) when REP is ORIG with some \")\" characters
-deleted and/or \")\" characters appended, which is parinfer's edit model:
-ADDED is the number appended, REMOVED the number deleted. Returns NIL NIL
-when the lines differ in any other way (whitespace, a rewrapped token), so
-the caller can fall back to a plain count difference."
-  (let ((i 0) (j 0) (removed 0)
+  "Return (VALUES added removed removed-positions) when REP is ORIG with some
+\")\" characters deleted and/or \")\" characters appended, which is parinfer's
+edit model: ADDED is the number appended, REMOVED the number deleted, and
+REMOVED-POSITIONS their indices in ORIG (ascending). Returns NIL NIL NIL when
+the lines differ in any other way (whitespace, a rewrapped token), so the
+caller can fall back to a plain count difference."
+  (let ((i 0) (j 0) (removed '())
         (n (length orig)) (m (length rep)))
     (loop while (and (< i n) (< j m))
           do (cond ((char= (char orig i) (char rep j)) (incf i) (incf j))
-                   ((char= (char orig i) #\)) (incf removed) (incf i))
-                   (t (return-from %paren-edit-counts (values nil nil)))))
+                   ((char= (char orig i) #\)) (push i removed) (incf i))
+                   (t (return-from %paren-edit-counts (values nil nil nil)))))
     (loop while (< i n)
           do (if (char= (char orig i) #\))
-                 (progn (incf removed) (incf i))
-                 (return-from %paren-edit-counts (values nil nil))))
+                 (progn (push i removed) (incf i))
+                 (return-from %paren-edit-counts (values nil nil nil))))
     (let ((added 0))
       (loop while (< j m)
             do (if (char= (char rep j) #\))
                    (progn (incf added) (incf j))
-                   (return-from %paren-edit-counts (values nil nil))))
-      (values added removed))))
+                   (return-from %paren-edit-counts (values nil nil nil))))
+      (values added (length removed) (nreverse removed)))))
 
 (defun repair-line-differences (original repaired)
   "Compare ORIGINAL and REPAIRED (parinfer output) line by line.

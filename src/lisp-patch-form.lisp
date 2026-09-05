@@ -153,7 +153,10 @@ mismatch whose expected delimiter is ] or } is ambiguous (those characters
 may be part of a symbol name in standard syntax), so the reader's own
 failure in FALLBACK is kept alongside the diagnosis instead of discarded."
   (let* ((diagnosis (diagnose-delimiters form-text))
-         (ambiguous (member (getf diagnosis :expected) '("]" "}") :test #'equal)))
+         ;; Either side may be a bracket: an unclosed [ (expected ]) or a ]
+         ;; closing a ( (found ]) can both be a legal symbol character.
+         (ambiguous (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
+                        (member (getf diagnosis :found) '("]" "}") :test #'equal))))
     (cond
       ((getf diagnosis :ok) fallback)
       (ambiguous

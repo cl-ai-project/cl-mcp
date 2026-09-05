@@ -1283,6 +1283,29 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
                          (pathname path)))
                   "a reader error after a balanced ) is not a delimiter failure"))))
+        (testing "a stray ) behind a value-less macro that swallowed a ( is still classified"
+          ;; #[ ... ] is a custom comment that returns no values; the ( it
+          ;; contains must not make the following stray ) look balanced.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-bracket-comment :merge '(:standard))))
+            (set-dispatch-macro-character
+             #\# #\[
+             (lambda (s c n)
+               (declare (ignore c n))
+               (loop for ch = (read-char s nil nil)
+                     until (or (null ch) (char= ch #\])))
+               (values))
+             rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-bracket-comment-stray.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-bracket-comment)~%~
+                                  (defun a () 1)~%#[ignored (]~%)~%")
+                   (lambda (path)
+                     (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                          (pathname path))
+                         "the readtable itself reads nothing before the ), so it is stray")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-bracket-comment))))
         (testing "a form before the breakage can still be edited"
           (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
               (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
@@ -1461,6 +1484,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (= (length fixes) 1))
           (ok (= (getf (first fixes) :line) 3))
           (ok (= (getf (first fixes) :delta) -1)))))))
+
+(deftest lisp-edit-form-warning-counts-gross-edits
+  (testing "a relocated ) reports one added and one dropped, not a net zero"
+    (with-temp-file "tests/tmp/edit-form-relocated.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content ")(defun target () 1")
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "1 extra closing delimiter dropped by parinfer" warning))
+          (ng (search "content repaired by parinfer" warning)))))))
 
 (deftest lisp-edit-form-warning-added-wording
   (testing "missing closing parens are reported as added"

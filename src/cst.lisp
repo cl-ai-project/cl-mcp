@@ -11,8 +11,6 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
-  (:import-from #:cl-mcp/src/paren-diagnostics
-                #:count-delimiter-depth)
   (:export #:cst-node
            #:cst-node-kind
            #:cst-node-value
@@ -153,28 +151,32 @@ block comment (~D level~:P still open). Close it with |#." depth))))))
 unmatched \")\" while STANDARD-CLOSE-P (\")\" still terminates lists in the
 active readtable). This catches a stray \")\" that the structural pre-check
 could not see because a whitespace-like reader macro returning no values
-consumed the text before it within the same READ call. The evidence is
-structural, not positional: the text READ consumed since START-POS must end
-in \")\" and, counted outside strings and comments, contain no \"(\" at all.
+consumed the text before it within the same READ call. The evidence uses the
+active readtable itself, not standard syntax: the text READ consumed since
+START-POS must end in \")\", and everything before that \")\" must read as no
+object at all under *READTABLE* (only whitespace and value-less macros).
 A macro such as #S(...) that reads a balanced list and then signals stops
-right after \")\" too, but its consumed text opens a paren, so it keeps its
-own error. End-of-file conditions are left alone: they already classify as
-delimiter failures."
+right after \")\" too, but the text before that \")\" does not read cleanly
+to its end, so it keeps its own error. End-of-file conditions are left
+alone: they already classify as delimiter failures."
   (let ((pos (file-position stream)))
-    (if (and standard-close-p
-             (not (typep condition 'end-of-file))
-             (integerp pos)
-             (< start-pos pos (1+ (length text)))
-             (char= (char text (1- pos)) #\))
-             (multiple-value-bind (opens closes)
-                 (count-delimiter-depth text :start start-pos :end pos)
-               (and (zerop opens) (plusp closes))))
-        (make-condition
-         'stray-right-parenthesis
-         :stream stream
-         :message (format nil "Unmatched closing parenthesis character ). ~
+    (flet ((nothing-before-close-p ()
+             (handler-case
+                 (with-input-from-string (s text :start start-pos :end (1- pos))
+                   (loop (when (eq (read s nil :eof) :eof) (return t))))
+               (error () nil))))
+      (if (and standard-close-p
+               (not (typep condition 'end-of-file))
+               (integerp pos)
+               (< start-pos pos (1+ (length text)))
+               (char= (char text (1- pos)) #\))
+               (nothing-before-close-p))
+          (make-condition
+           'stray-right-parenthesis
+           :stream stream
+           :message (format nil "Unmatched closing parenthesis character ). ~
 Remove the extra \")\" (lisp-check-parens reports its line and column)."))
-        condition)))
+          condition))))
 
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable text)
   "Read remaining forms from STREAM (a string stream over TEXT) using the

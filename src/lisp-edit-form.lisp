@@ -70,14 +70,12 @@
 
 (defun %repair-warning (fixes)
   "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string.
-Added and dropped closing delimiters are reported separately; the count is
-never negative."
-  (let ((added (loop for fix in fixes
-                     for delta = (getf fix :delta)
-                     when (plusp delta) sum delta))
-        (dropped (loop for fix in fixes
-                       for delta = (getf fix :delta)
-                       when (minusp delta) sum (- delta))))
+Added and dropped closing delimiters are summed from each fix's gross
+:added and :removed counts (not the net :delta, which hides a relocation
+such as \")(defun f () 1\" -> \"(defun f () 1)\") and reported separately;
+the count is never negative."
+  (let ((added (loop for fix in fixes sum (getf fix :added 0)))
+        (dropped (loop for fix in fixes sum (getf fix :removed 0))))
     (format nil "~{~A~^; ~}"
             (remove nil
                     (list (when (plusp added)
