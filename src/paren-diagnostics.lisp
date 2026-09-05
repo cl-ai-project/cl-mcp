@@ -20,7 +20,8 @@
            #:repair-line-differences
            #:format-repair-lines
            #:format-delimiter-diagnosis
-           #:bracket-ambiguous-p))
+           #:bracket-ambiguous-p
+           #:last-code-line))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
 
@@ -643,13 +644,18 @@ reindentation cannot flood the guidance."
       (when (> total limit)
         (format s "~%  ... and ~D more changed lines" (- total limit))))))
 
-(defun format-delimiter-diagnosis (diagnosis &key (target "code"))
+(defun format-delimiter-diagnosis (diagnosis &key (target "code") false-positive)
   "Render DIAGNOSIS (from DIAGNOSE-DELIMITERS) as guidance text.
 Only failure plists are rendered: when DIAGNOSIS is balanced (:ok true) this
 returns NIL, because there is nothing to explain.
 TARGET is the subject of the first sentence: \"code\", \"content\", \"new_text\",
 or a file path. The likely-fix block is included only when parinfer produced
-one; otherwise a repair-failed sentence is printed instead."
+one; otherwise a repair-failed sentence is printed instead.
+FALSE-POSITIVE, when true, means a caller with better evidence (the editing
+tools' reader accepted the text) has judged the verdict a false positive of
+the standard-syntax scan: the finding is still described, but no instruction
+to change anything -- no likely-fix block, no \"Replace it with\", no
+next-top-level hint -- is attached to it."
   (when (getf diagnosis :ok)
     (return-from format-delimiter-diagnosis nil))
   (let ((kind (getf diagnosis :kind))
@@ -673,9 +679,8 @@ one; otherwise a repair-failed sentence is printed instead."
         ((and (string= kind "mismatch") (equal expected ")"))
          (format s "Unbalanced parentheses in ~A: expected ~S but found ~S at line ~D, column ~D.~%~
                     \"]\" and \"}\" are ordinary symbol characters in Common Lisp and cannot be ~
-                    auto-repaired.~%~
-                    Replace it with ~S."
-                 target expected found line column expected))
+                    auto-repaired.~:[~%Replace it with ~S.~;~*~]"
+                 target expected found line column false-positive expected))
         ((string= kind "mismatch")
          ;; EXPECTED is "]" or "}": the opener was a bracket or brace, which in
          ;; Common Lisp may legitimately be part of a symbol name.  Advising a
@@ -687,34 +692,33 @@ one; otherwise a repair-failed sentence is printed instead."
                  (if (equal expected "]") "[" "{")))
         ((string= kind "unclosed-block-comment")
          (format s "Unterminated block comment in ~A: the #| opened at line ~D, ~
-                    column ~D was never closed. Close it with |#."
-                 target line column))
+                    column ~D was never closed.~:[ Close it with |#.~;~]"
+                 target line column false-positive))
         ((string= kind "unclosed-string")
          (format s "Unterminated string in ~A: the \" opened at line ~D, ~
-                    column ~D was never closed. Close it with \"."
-                 target line column))
+                    column ~D was never closed.~:[ Close it with \".~;~]"
+                 target line column false-positive))
         (t
          (format s "Unbalanced parentheses in ~A: ~A at line ~D, column ~D."
                  target kind line column)))
-      (cond
-        (fixes
-         (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
-        ;; A mismatch already carries its own instruction (or a false-positive
-        ;; caveat); a second, flat "fix by hand" sentence would only add noise.
-        ((and (eq failed :outside-code) (not (string= kind "mismatch")))
-         ;; The repair may well read, but it would change text inside a
-         ;; string or comment, so it is withheld rather than offered.
-         (format s "~%Automatic repair would have changed text inside a string ~
-                    or comment, so no repair is offered; fix the delimiters by hand."))
-        ((and failed (not (string= kind "mismatch")))
-         (format s "~%Automatic repair could not produce a readable form; ~
-                    fix the delimiters by hand.")))
-      (when (and next-line (string= kind "unclosed"))
-        ;; A column-0 "(" while a form is open is a strong hint, not proof
-        ;; (an unindented continuation line looks the same), so hedge.
-        (format s "~%Next top-level form begins at line ~D, ~
-                   so the missing ~S most likely belongs before it."
-                next-line (or expected ")"))))))
+      (unless false-positive
+        (cond
+          (fixes
+           (format s "~%Likely fix, inferred from indentation:~A" (format-repair-lines fixes)))
+          ((and (eq failed :outside-code) (not (string= kind "mismatch")))
+           ;; The repair may well read, but it would change text inside a
+           ;; string or comment, so it is withheld rather than offered.
+           (format s "~%Automatic repair would have changed text inside a string ~
+                      or comment, so no repair is offered; fix the delimiters by hand."))
+          ((and failed (not (string= kind "mismatch")))
+           (format s "~%Automatic repair could not produce a readable form; ~
+                      fix the delimiters by hand.")))
+        (when (and next-line (string= kind "unclosed"))
+          ;; A column-0 "(" while a form is open is a strong hint, not proof
+          ;; (an unindented continuation line looks the same), so hedge.
+          (format s "~%Next top-level form begins at line ~D, ~
+                     so the missing ~S most likely belongs before it."
+                  next-line (or expected ")")))))))
 
 (defun bracket-ambiguous-p (diagnosis)
   "Return T when DIAGNOSIS (from SCAN-DELIMITERS or DIAGNOSE-DELIMITERS) rests
@@ -727,3 +731,16 @@ gets the reader's own error alongside the diagnosis."
        (or (member (getf diagnosis :expected) '("]" "}") :test #'equal)
            (member (getf diagnosis :found) '("]" "}") :test #'equal))
        t))
+
+(defun last-code-line (text)
+  "Return the 1-based line of the last line of TEXT that holds a code
+character (outside strings and comments, not whitespace), or 1 when there is
+none. Parinfer places its closers on that line, so a closer inserted on an
+earlier line has relocated the lines between them."
+  (let ((last 1))
+    (%map-code-characters text
+                          (lambda (ch idx line col)
+                            (declare (ignore idx col))
+                            (unless (member ch '(#\Space #\Tab #\Newline #\Return))
+                              (setf last line))))
+    last))

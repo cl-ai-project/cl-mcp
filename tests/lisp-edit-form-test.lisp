@@ -1608,6 +1608,13 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                     (format nil "(defun t1 (x)~%  (when x)~%  (g x)~%  (h x))"))))
       (ok (search "NOTE: parinfer closed a form on line 2" summary))
       (ok (search "no longer inside that form" summary))))
+  (testing "a closer before a trailing comment line is not a relocation either"
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (list 1 2)" :repaired "  (list 1 2))"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun f ()~%  (list 1 2))~%;; note~%"))))
+      (ng (search "NOTE:" summary) "only a comment follows; nothing moved")))
   (testing "an append on the last line is not a relocation"
     (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
                     "1 closing delimiter added by parinfer"

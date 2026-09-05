@@ -77,14 +77,17 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
            ;; multibyte file can look bigger than the cap and still fit in
            ;; it: report truncation only when the buffer filled and input
            ;; really remains.
-           ;; The peek decodes one character past the cap; if that byte is
-           ;; not decodable the file simply continues, so it is truncated.
-           (truncated (and raw-len (> effective capped)
-                           (= count capped)
+           ;; Whether input remains past what was read: the peek decodes one
+           ;; character past the buffer; if that byte is not decodable the
+           ;; file simply continues. Reported separately from TRUNCATED so a
+           ;; caller with a LIMIT can tell a window from a whole file without
+           ;; comparing characters to octets.
+           (remaining (and (= count capped)
                            (handler-case
                                (not (eq (peek-char nil in nil :eof) :eof))
-                             (error () t)))))
-      (values text truncated raw-len))))
+                             (error () t))))
+           (truncated (and raw-len (> effective capped) remaining)))
+      (values text truncated raw-len remaining))))
 
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
@@ -96,7 +99,10 @@ Signals an error when PATH is outside the allow-list."
 
 (defun fs-read-file (path &key offset limit)
   "Read text file PATH with optional OFFSET and LIMIT.
-Returns (VALUES content-string truncated-p file-length)."
+Returns (VALUES content-string truncated-p file-length remaining-p):
+TRUNCATED-P is T when the read was cut at the read cap, FILE-LENGTH is the
+file's size in octets, and REMAINING-P is T when input remains past what was
+read (so a LIMIT read can be told apart from a whole file)."
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
@@ -109,12 +115,12 @@ Returns (VALUES content-string truncated-p file-length)."
                "offset" offset
                "limit" limit
                "fd" (fd-count))
-    (multiple-value-bind (text truncated file-length)
+    (multiple-value-bind (text truncated file-length remaining)
         (%read-file-string pn offset limit)
       (log-event :debug "fs.read.close"
                  "path" (namestring pn)
                  "fd" (fd-count))
-      (values text truncated file-length))))
+      (values text truncated file-length remaining))))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.

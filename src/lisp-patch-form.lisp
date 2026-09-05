@@ -319,18 +319,22 @@ silently accepts as part of a symbol), so the caller can check it."
         ;; The form reads, but a ] or } where ) was meant reads too (as part
         ;; of a symbol). Written as asked -- the caller may mean it -- but
         ;; flagged, since silently accepting it is how such typos survive.
+        ;; Only the found side: an unmatched [ or { opener is a symbol
+        ;; character in standard syntax and carries no ) typo to flag.
         (let ((bracket-warning
                 (and would-change
                      (not nonstandard-rt)
-                     (%bracket-mismatch-p modified-form)
                      (let ((scan (scan-delimiters modified-form)))
-                       (format nil "the patched form reads, but its delimiter scan ~
-                                    finds ~S where ~S was expected (line ~D, column ~D ~
-                                    within the form); in standard syntax that ~
-                                    character is part of a symbol name, so check ~
-                                    that it is what you meant."
-                               (getf scan :found) (getf scan :expected)
-                               (getf scan :line) (getf scan :column))))))
+                       (and (equal (getf scan :kind) "mismatch")
+                            (member (getf scan :found) '("]" "}") :test #'equal)
+                            (format nil "the patched form reads, but its delimiter ~
+                                         scan finds ~S where ~S was expected (line ~D, ~
+                                         column ~D within the form); in standard ~
+                                         syntax that ~S is part of a symbol name, so ~
+                                         check that it is what you meant."
+                                    (getf scan :found) (getf scan :expected)
+                                    (getf scan :line) (getf scan :column)
+                                    (getf scan :found)))))))
           (log-event :debug "lisp.patch.form"
                      "path" (namestring abs)
                      "form_type" form-type
@@ -408,8 +412,10 @@ is used instead of Eclector, which means comments are NOT preserved."))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
                      (summary (format nil "Dry-run patch on ~A ~A in ~A (~:[no change~;would change~])~
+                                      ~@[~%WARNING: ~A~]~
                                       ~%~%--- original ---~%~A~%~%--- preview ---~%~A"
                                       form_type form_name file_path would-change
+                                      (gethash "bracket_warning" updated)
                                       original-form preview)))
                 (result id
                         (apply #'make-ht

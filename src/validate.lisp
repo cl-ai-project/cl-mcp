@@ -60,6 +60,18 @@ When a custom readtable is active, the standard CL reader would produce
 false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
 
+(defun %under-project-root-p (path)
+  "Return T when PATH resolves to a file under the project root, i.e. one that
+fs-write-file could rewrite. A file elsewhere on the read allow-list (another
+ASDF system's source) can be checked but not overwritten, so it must not be
+sent to the overwrite path."
+  (let ((root cl-mcp/src/project-root:*project-root*))
+    (and root
+         (ignore-errors
+          (uiop:subpathp (fs-resolve-read-path path)
+                         (uiop:ensure-directory-pathname root)))
+         t)))
+
 (defun %truncate-message (condition)
   "Extract CONDITION's message for the client: SBCL stream representations
 and the trailing \"Stream:\" section are removed (SANITIZE-ERROR-MESSAGE),
@@ -159,7 +171,8 @@ Also checks for reader errors (e.g. unknown dispatch characters, #. with
 *read-eval* nil) even when parentheses are balanced.
 Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
-plus a \"position\" hash with \"line\", \"column\", \"offset\".
+plus a \"position\" hash with \"line\", \"column\", \"offset\" (absent for
+\"too-large\", where nothing was scanned).
 Delimiter failures also carry \"likely_fixes\" (vector of line/original/
 repaired/delta/added/removed hashes inferred by parinfer, capped at
 *REPAIR-LINES-LIMIT* entries with the rest counted in
@@ -167,7 +180,13 @@ repaired/delta/added/removed hashes inferred by parinfer, capped at
 characters plus \"...\" and are then descriptive, not text to write back),
 \"next_top_level_line\" when a later top-level form was swallowed, and
 \"diagnosis_text\" (the guidance the MCP summary appends; not part of the
-MCP payload)."
+MCP payload).
+For a PATH that fails the scan, the file is also parsed with the editing
+tools' own reader (the verdict fs-write-file's overwrite guard uses): a file
+it accepts makes the scan a false positive, so the text says so first and no
+fix, field or instruction is attached; a file that fails on a delimiter no
+readtable can fix gets the overwrite path as its next step. A window into a
+file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -177,38 +196,35 @@ MCP payload)."
   (when (and limit (< limit 0))
     (error "limit must be non-negative"))
   (let* ((truncated nil)
-         (file-length nil)
+         (remaining nil)
          (text (or code
-                   (multiple-value-bind (slice truncated-p length)
+                   (multiple-value-bind (slice truncated-p file-length remaining-p)
                        (fs-read-file path :offset offset :limit limit)
+                     (declare (ignore file-length))
                      (setf truncated truncated-p
-                           file-length length)
+                           remaining remaining-p)
                      slice)))
          (base-off (or offset 0))
          ;; A window into a file (an offset, or a limit the file filled with
          ;; input still remaining) is a prefix like a truncated read: a slice
          ;; of a valid file looks unbalanced, so no repair hint may be built
-         ;; from it. FILE-LENGTH counts octets, so a limit equal to the whole
-         ;; file is recognised as a full read for single-byte text.
+         ;; from it.
          (partial (and path
                        (or (plusp base-off)
-                           (and limit
-                                (= (length text) limit)
-                                (or (null file-length)
-                                    (< (+ base-off (length text)) file-length)))))))
+                           (and limit (= (length text) limit) remaining)))))
     ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
     ;; describe text the file does not end with, so it is reported as too
-    ;; large rather than diagnosed.
+    ;; large rather than diagnosed. No "position": nothing was scanned.
     (when (or truncated (> (length text) *check-parens-max-bytes*))
-      ;; No "position": nothing was scanned, so line 1 would be noise.
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "ok" h) nil
               (gethash "kind" h) "too-large"
               (gethash "expected" h) nil
               (gethash "found" h) nil)
         (return-from lisp-check-parens h)))
-    (let ((diagnosis (diagnose-delimiters text :base-offset base-off))
-          (reader-info (%try-reader-check text base-off)))
+    (let* ((diagnosis (diagnose-delimiters text :base-offset base-off))
+           ;; The reader check only matters when the delimiters balance.
+           (reader-info (and (getf diagnosis :ok) (%try-reader-check text base-off))))
       (destructuring-bind (&key ok kind expected found
                                 (offset base-off) (line 1) (column 1)
                                 likely-fixes next-top-level-line
@@ -227,52 +243,63 @@ MCP payload)."
                      (gethash "line" pos) line
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
-             (cond
-               (partial
-                ;; A slice of the file: say what was seen, never how to fix it.
-                (setf (gethash "diagnosis_text" h)
-                      (format nil "Only a window of ~A was checked (offset ~D, ~D ~
-                                   characters), so this may be an artifact of the ~
-                                   window and no repair hint is offered; check the ~
-                                   whole file for one."
-                              path base-off (length text))))
-               (t
-                ;; Every delimiter failure gets guidance text; parinfer fixes
-                ;; exist only for paren problems, not for an open #| comment.
-                (setf (gethash "diagnosis_text" h)
-                      (format-delimiter-diagnosis diagnosis :target (or path "code")))
-                (unless (member kind '("unclosed-block-comment" "unclosed-string")
-                                :test #'string=)
-                  (let* ((total (length likely-fixes))
-                         (kept (min total *repair-lines-limit*)))
-                    (setf (gethash "likely_fixes" h)
-                          (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
-                    (when (> total kept)
-                      (setf (gethash "likely_fixes_omitted" h) (- total kept))))
-                  ;; Only meaningful for an unclosed form, which is the only
-                  ;; kind whose guidance text explains the number.
-                  (when (and next-top-level-line (string= kind "unclosed"))
-                    (setf (gethash "next_top_level_line" h) next-top-level-line)))))
-             ;; The next-step hint rests on the verdict the fs-write-file
-             ;; guard itself gives (the edit tools' parser), never on the
-             ;; scan alone, and never for a window. A file that parser
-             ;; accepts makes the scan's verdict a false positive (a token
-             ;; such as foo#|bar| or a[b), and the text says so.
+             ;; The next-step hint and the wording rest on the verdict the
+             ;; fs-write-file guard itself gives (the edit tools' parser),
+             ;; never on the scan alone, and never for a window. It is
+             ;; computed before any text, because a file that parser accepts
+             ;; must not receive a likely fix or an instruction at all.
              (multiple-value-bind (overwritable verdict)
                  (and path (not partial)
                       (ignore-errors
                        (%file-unparseable-by-edit-tools-p
                         (fs-resolve-read-path path) text)))
-               (when (eq verdict :parsed)
-                 (setf (gethash "diagnosis_text" h)
-                       (format nil "~A~%The editing tools' reader parses this file, ~
-                                    so this is most likely a false positive of the ~
-                                    standard-syntax scan (a token such as foo#|bar| ~
-                                    or a[b reads as one symbol); lisp-edit-form can ~
-                                    still edit it."
-                               (gethash "diagnosis_text" h))))
-               (%maybe-add-lisp-edit-guidance h kind
-                                              :overwritable (and overwritable t))))
+               (let ((false-positive (eq verdict :parsed)))
+                 (cond
+                   (partial
+                    ;; A slice of the file: say what was seen, never how to
+                    ;; fix it.
+                    (setf (gethash "diagnosis_text" h)
+                          (format nil "Only a window of ~A was checked (offset ~D, ~D ~
+                                       characters), so this may be an artifact of the ~
+                                       window and no repair hint is offered; check the ~
+                                       whole file for one."
+                                  path base-off (length text))))
+                   (t
+                    (setf (gethash "diagnosis_text" h)
+                          (format nil "~:[~;The editing tools' reader parses this file, ~
+                                       so the finding below is most likely a false ~
+                                       positive of the standard-syntax scan (a token ~
+                                       such as foo#|bar| or a[b reads as one symbol, or ~
+                                       a reader macro from the file's in-readtable ~
+                                       consumes that text); no repair is suggested, ~
+                                       and lisp-edit-form can still edit the file.~%~]~A"
+                                  false-positive
+                                  (format-delimiter-diagnosis
+                                   diagnosis :target (or path "code")
+                                             :false-positive false-positive)))
+                    ;; Parinfer fixes exist only for paren problems, not for
+                    ;; an open #| comment or string, and never for a file the
+                    ;; reader accepts.
+                    (unless (or false-positive
+                                (member kind '("unclosed-block-comment" "unclosed-string")
+                                        :test #'string=))
+                      (let* ((total (length likely-fixes))
+                             (kept (min total *repair-lines-limit*)))
+                        (setf (gethash "likely_fixes" h)
+                              (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
+                        (when (> total kept)
+                          (setf (gethash "likely_fixes_omitted" h) (- total kept))))
+                      ;; Only meaningful for an unclosed form, which is the
+                      ;; only kind whose guidance text explains the number.
+                      (when (and next-top-level-line (string= kind "unclosed"))
+                        (setf (gethash "next_top_level_line" h) next-top-level-line)))))
+                 ;; fs-write-file only writes under the project root, so the
+                 ;; overwrite hint is promised only for a file it could write.
+                 (%maybe-add-lisp-edit-guidance
+                  h kind
+                  :overwritable (and overwritable
+                                     (%under-project-root-p path)
+                                     t)))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil
@@ -301,7 +328,13 @@ Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
 when *read-eval* is nil) even when parentheses are balanced. In that case the
 result has kind: \"reader-error\" and a message field describing the error,
 instead of expected/found fields. Files using named-readtables:in-readtable are
-exempt from reader checking to avoid false positives."
+exempt from reader checking to avoid false positives.
+
+When a file fails the delimiter scan it is also parsed with the editing tools'
+reader (*read-eval* off; an in-file in-readtable is honoured, so its reader
+macros run) to pick the next step: a file that reader accepts is reported as a
+likely false positive with no fix attached, and a file broken on a delimiter is
+sent to the fs-write-file overwrite path."
   :args ((path :type :string
                :description "Absolute path inside project or registered ASDF system
 (mutually exclusive with code)")

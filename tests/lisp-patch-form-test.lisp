@@ -1017,6 +1017,19 @@ running as root), THUNK is skipped instead."
           (ok (search "(list x])" (fs-read-file path)))
           (ok (and warning (search "\"]\"" warning))
               "the warning names the bracket the scan tripped over")))))
+  (testing "an unmatched [ opener is a symbol character and carries no warning"
+    (with-temp-file "tests/tmp/patch-bracket-opener.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list a[b x)")
+          (declare (ignore updated))
+          (ok changed-p)
+          (ng warning "nothing on the found side, so nothing to flag")))))
   (testing "a clean patch carries no warning"
     (with-temp-file "tests/tmp/patch-bracket-clean.lisp"
         (format nil "(defun t1 (x)~%  (list x))~%")

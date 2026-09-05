@@ -3,7 +3,7 @@
 (defpackage #:cl-mcp/tests/validate-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:ng)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens
                 #:*check-parens-max-bytes*))
@@ -162,13 +162,47 @@
                  (ok (string= (%kind res) "unclosed-block-comment"))
                  (ok (null (guard-overwritable-p)))
                  (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
-                 (ok (search "false positive" (gethash "diagnosis_text" res))
-                     "the text says the editing tools' reader parses the file")))
+                 (let ((text (gethash "diagnosis_text" res)))
+                   (ok (zerop (search "The editing tools' reader parses this file" text))
+                       "the caveat comes first")
+                   (ng (search "Close it with" text) "no instruction to change anything")
+                   (ng (search "Likely fix" text)))
+                 (ok (null (gethash "likely_fixes" res))
+                     "no machine-readable fix for a file that parses")))
+             (testing "a parseable file with a bracket typo look-alike gets no instruction"
+               ;; a] is a symbol: the file parses, the scan says mismatch.
+               (write-text (format nil "(defun g ()~%  (list a] 1))~%"))
+               (let ((res (lisp-check-parens :path (namestring abs))))
+                 (ok (null (%ok? res)))
+                 (ok (string= (%kind res) "mismatch"))
+                 (ok (null (guard-overwritable-p)))
+                 (ok (null (gethash "likely_fixes" res)))
+                 (ng (search "Replace it with" (gethash "diagnosis_text" res)))))
              (testing "a plain missing ) agrees in the other direction"
                (write-text (format nil "(defun f ()~%  (list 1 2~%"))
                (let ((res (lisp-check-parens :path (namestring abs))))
                  (ok (guard-overwritable-p))
                  (ok (string= (gethash "next_tool" res) "fs-write-file")))))
+        (ignore-errors (delete-file abs))))))
+
+(deftest lisp-check-parens-limit-equal-to-a-multibyte-file-is-not-a-window
+  (testing "a limit equal to the character count reads the whole file, octets notwithstanding"
+    (let* ((root (asdf:system-source-directory :cl-mcp))
+           (abs (merge-pathnames "tests/tmp/check-parens-multibyte-limit.lisp" root))
+           (cl-mcp/src/project-root:*project-root* root)
+           ;; Three-byte characters in a comment: 3 lines, 30 characters, more octets.
+           (text (format nil ";; ~A~%(defun f ()~%  (list 1)~%"
+                         (make-string 6 :initial-element (code-char #x3042)))))
+      (ensure-directories-exist abs)
+      (with-open-file (out abs :direction :output :if-exists :supersede
+                               :external-format :utf-8)
+        (write-string text out))
+      (unwind-protect
+           (let ((res (lisp-check-parens :path (namestring abs) :limit (length text))))
+             (ok (null (%ok? res)))
+             (ok (vectorp (gethash "likely_fixes" res))
+                 "the whole file was read, so the fix is offered")
+             (ng (search "window" (gethash "diagnosis_text" res))))
         (ignore-errors (delete-file abs))))))
 
 (deftest lisp-check-parens-eof-reader-error-has-position

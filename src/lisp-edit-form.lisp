@@ -18,7 +18,8 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:repair-line-differences
-                #:format-repair-lines)
+                #:format-repair-lines
+                #:last-code-line)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -418,9 +419,7 @@ REPAIRED-FORM (a mid-form insertion rather than an append at the end), the
 lines below it have left the form it closed: the summary says so, because
 the changed-lines list alone does not make that visible."
   (when warning
-    (let* ((trimmed (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                       repaired-form))
-           (last-line (1+ (count #\Newline trimmed)))
+    (let* ((last-line (last-code-line repaired-form))
            (relocations (loop for fix in fixes
                               when (and (plusp (getf fix :added 0))
                                         (< (getf fix :line) last-line))
