@@ -116,8 +116,20 @@ Write text to a file under the project root (directories auto-created).
 Input:
 - `path` (string, required): **must be relative** to the project root
 - `content` (string, required)
+- `allow_unparseable_overwrite` (boolean, optional): permit overwriting an
+  existing `.lisp`/`.asd` file that the structural tools cannot parse.
 
-Policy: writes outside the project root are rejected.
+Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
+file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
+`lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
+first, and the write is allowed only when the parse fails on a delimiter (a
+missing or stray `)`, or an unterminated string or `#|` comment) that no
+readtable could fix; a file that parses, a truncated read, or an unreadable
+file is still refused. The intended recovery loop is `lisp-check-parens` →
+`fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
+project root, and the guidance the tools print gives it in that form. The
+plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
+in its error data so a client can discover the opt-in.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -201,11 +213,85 @@ Input:
 
 Output:
 - `ok` (boolean)
-- when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` | `too-large`), `expected`, `found`, and `position` (`offset`, `line`, `column`).
+- when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` |
+  `unclosed-block-comment` | `unclosed-string` | `reader-error` | `too-large`),
+  `expected`, `found`, and `position` (`offset`, `line`, `column`; absent for
+  `too-large`, where nothing was scanned); for an `unclosed-string` or
+  `unclosed-block-comment` the position is the opening `"` or `#|`.
+- for paren failures (`extra-close`, `mismatch`, `unclosed`): `likely_fixes`, a
+  vector of `{line, original, repaired, delta, added, removed, column,
+  removed_columns, before_comment, truncated, crlf}` inferred by parinfer from
+  indentation (at most 10 entries; the rest are counted in
+  `likely_fixes_omitted`). `column` is the 1-based column of the first change
+  (where an insertion goes), `removed_columns` the columns of the `)` a
+  removal drops, `before_comment` says the change goes before a trailing `;`
+  comment, `truncated` says `original`/`repaired` were cut to 120
+  characters and are then descriptive, not text to write back, and `crlf`
+  says the line ends in CRLF (`original`/`repaired` are shown without the
+  carriage return, so `repaired` is not the line to write back either). Empty
+  when no repair could be inferred.
+- for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
+  seen while the form was still open, when there is one and no likely fix
+  lands on or after it (the field is set exactly when the summary prints the
+  next top-level form hint).
+- `false_positive` (`true`, present only then): the editing tools' reader
+  accepts the input (a `path` or inline `code`), so the scan's finding is most
+  likely a false positive (`a]`, `foo#|bar|`, a reader macro); no
+  `likely_fixes` or instruction is attached in that case.
+- The summary text repeats the diagnosis in prose: the unclosed form's line and
+  head, a `Likely fix, inferred from indentation:` block, and the next top-level
+  form hint. Each likely-fix line is written to be applied verbatim: `add N ")"`
+  only when the closers go at the very end of the line, `remove N ")"` for a
+  pure removal, `insert N ")" at column C (before the trailing ; comment)` when
+  they go before a comment, and otherwise the resulting line; a line cut at the
+  120-character bound is described by position, never offered as text to write.
+  When a fix closes a form whose next code line sits at the same indentation
+  (the shape of a body that was meant to stay inside it), or whose next code
+  line sits in column 1 below an indented fix line (a body that lost its
+  indentation), a NOTE says the lines below have left that form; when the
+  fix rests on an unclosed `[`/`{`, a reminder says the `)` fixes are wrong if
+  that bracket was meant as `(`. The next top-level form hint names its
+  evidence (a `(` in column 1 while a form is still open) and is dropped when
+  a likely fix lands on or after that line, since the two would contradict.
+  A verdict the editing reader contradicts is headlined as a likely false
+  positive, with no edit instruction.
+
+- `next_tool` / `fix_code` / `required_args`: for inline `code`, `lisp-edit-form`
+  (which repairs and writes a form). For a `path` that the edit tools' own
+  parser (the same verdict `fs-write-file`'s guard uses) finds to fail on a
+  delimiter no readtable can fix, `fs-write-file` with
+  `allow_unparseable_overwrite`, since the structural tools cannot locate any
+  form in such a file. A file that parses (a symbol such as `a[b`), one that
+  fails for a reader-level reason (`#.`, an unknown `#?`), or a windowed read
+  keeps the `lisp-edit-form` hint, so the hint never promises an overwrite the
+  guard would refuse. A delimiter-broken file outside the project root gets
+  none of the three: neither `fs-write-file` nor the structural tools can act
+  on it, and the summary says to fix it outside cl-mcp.
 
 Notes:
-- Uses the same read allow-list and 2 MB cap as `fs-read-file`.
-- Ignores delimiters inside strings, `;` line comments, and `#| ... |#` block comments.
+- Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file
+  read that `fs-read-file` truncated at its 1 MB cap, is reported as
+  `kind: too-large` rather than diagnosed from a prefix.
+- When a `path` fails the scan, the file is also parsed with the editing tools'
+  reader (`*read-eval*` off; an in-file `in-readtable` is honoured, so its
+  reader macros run in the server process, as they do for `lisp-read-file`)
+  to decide the next step; inline `code` that fails the scan is read the same
+  way (an `in-readtable` inside the snippet is honoured too). When that reader
+  accepts the input, the scan's
+  finding is a false positive: the text says so first, no `likely_fixes` /
+  `next_top_level_line` are returned, and no "Replace it with" / "Close it
+  with" instruction is attached. The overwrite hint is offered only for a file
+  under the project root, since that is all `fs-write-file` can write.
+- A windowed read (`offset` > 0, or `limit` that the file fills) is a prefix
+  too: `kind` and `position` are reported, but no `likely_fixes`,
+  `next_top_level_line` or diagnosis text, because a valid file's slice looks
+  unbalanced. `position.line`/`column` count from the start of the window,
+  `position.offset` from the start of the file.
+- Ignores delimiters inside strings, `;` line comments, `#| ... |#` block
+  comments (nested), `#\x` character literals, `\`-escaped characters and
+  `|...|` symbols.
+- `[`/`{` are still tracked as delimiters, so a symbol such as `a[b` produces a
+  `mismatch` that the text flags as a possible false positive.
 
 ## `lisp-edit-form`
 Perform structure-aware edits to a top-level form using Eclector CST parsing while
@@ -227,10 +313,31 @@ Operations:
 - **insert_before**: Insert `content` as a new form before the matched form
 - **insert_after**: Insert `content` as a new form after the matched form
 
+Auto-repair: when `content` does not read, missing `)` are inferred from
+**indentation** (parinfer indent mode) and the repaired form is written. The
+inference can place a `)` on the wrong line when the indentation is not what
+you meant, moving a sub-form in or out of its parent while still producing
+readable code. The response therefore shows the changed lines and the repaired
+form; check them, and use `dry_run: true` when the content is non-trivial. A
+`]` or `}` left where `)` was meant, and any leftover the repair cannot make
+readable, is refused with the same line-level diagnosis as `lisp-check-parens`
+and nothing is written. A repair that would change text inside a string or a
+comment is refused too, even when the result happens to read: a fix the tool
+would not suggest is not written either. Content that reads but whose scan
+finds a `]`/`}` where `)` was expected (`(list a] 1)`) is written and flagged
+with `bracket_warning` (also in the summary and in dry-run), as
+`lisp-patch-form` does. A `readtable` argument (or an `in-readtable` earlier in
+the file) that actually changes the syntax switches these standard-syntax
+verdicts off and leaves the verdict to the reader.
+
 Output:
 - `path`, `operation`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
+- `bracket_warning` (string, optional): the content reads, but its delimiter
+  scan found a `]` or `}` where `)` was expected (a symbol character in
+  standard syntax, so a `)` typo survives); the edit is applied and the
+  summary repeats the warning. Also present in dry-run output.
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
@@ -250,6 +357,18 @@ Does NOT auto-repair parentheses — if the patch breaks form structure, it fail
 immediately and no changes are written to disk. Use `lisp-edit-form` instead when
 replacing or inserting entire forms.
 
+When the patched form no longer reads, the error explains the breakage: if
+`new_text` opens and closes a different net number of `)` than `old_text`
+(parentheses inside strings and comments do not count), the message says how
+many `)` to add to or remove from `new_text`; otherwise it carries the same
+line-level diagnosis as `lisp-check-parens`, with line numbers counted within
+the patched form, plus the reader's own error when a `]`/`}` may be a symbol
+character. Under a `readtable` (argument or `in-readtable` in the file) that
+changes the syntax, only the reader's error is reported. If the file itself
+does not parse, the error names the line to fix and the recovery path
+(`lisp-check-parens` → `fs-read-file` → `fs-write-file` with
+`allow_unparseable_overwrite`).
+
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
@@ -264,6 +383,11 @@ Output:
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
 - `delta` (integer, present only when `would_change` is true): character count difference (`new_text` length minus `old_text` length)
+- `bracket_warning` (string, optional): set when the patched form reads but its
+  delimiter scan stops at a `]` or `}` where `)` was expected (in standard
+  syntax the bracket is part of a symbol, so a `)` typo survives silently); the
+  patch is applied as asked, and the summary repeats the warning. Also present
+  in dry-run output.
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):

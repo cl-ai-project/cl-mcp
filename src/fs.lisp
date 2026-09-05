@@ -36,7 +36,8 @@
                 #:send-root-to-session-worker)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
-  (:export #:fs-resolve-read-path
+  (:export #:*lisp-file-unparseable-hook*
+           #:fs-resolve-read-path
            #:fs-read-file
            #:fs-write-file
            #:fs-list-directory
@@ -66,14 +67,32 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
   (with-open-file (in pn :direction :input :element-type 'character)
     (when offset (file-position in offset))
     (let* ((raw-len (ignore-errors (file-length in)))
-           (remaining (and raw-len (max 0 (- raw-len (or offset 0)))))
-           (effective (or limit remaining *fs-read-max-bytes*))
+           (available-octets (and raw-len (max 0 (- raw-len (or offset 0)))))
+           (effective (or limit available-octets *fs-read-max-bytes*))
            (capped (min effective *fs-read-max-bytes*))
            (buf (make-string capped))
            (count (read-sequence buf in :end capped))
            (text (subseq buf 0 count))
-           (truncated (and raw-len (> effective capped))))
-      (values text truncated raw-len))))
+           ;; FILE-LENGTH counts octets even on a character stream, so a
+           ;; multibyte file can look bigger than the cap and still fit in
+           ;; it: report truncation only when the buffer filled and input
+           ;; really remains.
+           ;; Whether input remains past what was read: the peek decodes one
+           ;; character past the buffer; if that byte is not decodable the
+           ;; file simply continues. Reported separately from TRUNCATED so a
+           ;; caller with a LIMIT can tell a window from a whole file without
+           ;; comparing characters to octets.
+           (remaining (and (= count capped)
+                           (handler-case
+                               (not (eq (peek-char nil in nil :eof) :eof))
+                             (error () t))))
+           ;; Without a known file length (FILE-LENGTH failed) an uncapped
+           ;; read that filled the buffer with input remaining is still a
+           ;; truncated read.
+           (truncated (if raw-len
+                          (and (> effective capped) remaining)
+                          (and (null limit) remaining))))
+      (values text truncated raw-len remaining))))
 
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
@@ -85,7 +104,10 @@ Signals an error when PATH is outside the allow-list."
 
 (defun fs-read-file (path &key offset limit)
   "Read text file PATH with optional OFFSET and LIMIT.
-Returns (VALUES content-string truncated-p file-length)."
+Returns (VALUES content-string truncated-p file-length remaining-p):
+TRUNCATED-P is T when the read was cut at the read cap, FILE-LENGTH is the
+file's size in octets, and REMAINING-P is T when input remains past what was
+read (so a LIMIT read can be told apart from a whole file)."
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer"))
   (when (and limit (not (integerp limit)))
@@ -98,12 +120,12 @@ Returns (VALUES content-string truncated-p file-length)."
                "offset" offset
                "limit" limit
                "fd" (fd-count))
-    (multiple-value-bind (text truncated file-length)
+    (multiple-value-bind (text truncated file-length remaining)
         (%read-file-string pn offset limit)
       (log-event :debug "fs.read.close"
                  "path" (namestring pn)
                  "fd" (fd-count))
-      (values text truncated file-length))))
+      (values text truncated file-length remaining))))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
@@ -149,21 +171,83 @@ Returns T on success."
                  '("lisp" "asd")
                  :test #'string=))))
 
-(defun %existing-lisp-overwrite-error (id path)
-  "Return a structured RPC error for forbidden Lisp overwrite, or NIL.
-New Lisp source file creation is allowed."
+(defvar *lisp-file-unparseable-hook* nil
+  "Predicate of two arguments (an absolute pathname and the file's text, which
+%LISP-FILE-UNPARSEABLE-P has read) that
+returns T when the structural editing tools cannot parse that Lisp file in a
+way no readtable can fix. The fs-write-file overwrite guard consults it so
+that overwriting is permitted exactly when lisp-edit-form and
+lisp-patch-form cannot locate any form in the file.
+cl-mcp/src/lisp-edit-form-core installs a predicate built on its own parser
+(which understands named-readtable declarations); this indirection exists
+because fs cannot import that parser without a dependency cycle. When NIL
+the guard always holds: there is no weaker fallback definition.")
+
+(defun %lisp-file-unparseable-p (pn)
+  "Return T when the structural editing tools cannot parse the Lisp source at
+PN in a way no readtable can fix, so that overwriting it is the only repair
+path. The verdict comes from *LISP-FILE-UNPARSEABLE-HOOK*, installed by
+cl-mcp/src/lisp-edit-form-core at load time: the edit tools' own parser,
+which handles named-readtable declarations and classifies failures by
+condition type. Without a hook (a partial image that loaded fs alone) the
+answer is NIL, i.e. the overwrite guard always holds -- there is no
+second, weaker definition of \"unparseable\" to drift from the tools'.
+A read truncated at *FS-READ-MAX-BYTES* is reported as parseable, since a
+cut-off prefix proves nothing, and so is a file that cannot be decoded at
+all (invalid UTF-8, say): failing closed keeps the guard in place instead of
+turning the write into an internal error."
+  (multiple-value-bind (text truncated)
+      (handler-case (%read-file-string pn nil nil)
+        (error () (values "" t)))
+    (and (not truncated)
+         *lisp-file-unparseable-hook*
+         (funcall *lisp-file-unparseable-hook* pn text)
+         t)))
+
+(defun %existing-lisp-overwrite-error (id path allow-unparseable)
+  "Return a structured RPC error for a forbidden Lisp overwrite, or NIL.
+New Lisp source file creation is always allowed. An existing .lisp/.asd file
+may be overwritten only when the caller passed ALLOW-UNPARSEABLE, i.e.
+explicitly judged that the breakage is real rather than custom reader syntax
+the structural tools could handle with a readtable, AND the file does not
+parse (a missing or stray parenthesis, per %LISP-FILE-UNPARSEABLE-P). The
+parse is attempted only when the caller opted in: without the flag the
+answer is a refusal either way, so the common case pays nothing.
+No heuristic can tell real breakage from custom syntax without knowing the
+readtable, so the decision is the caller's; the guard only makes sure a
+file that does parse is never rewritten wholesale."
   (let ((pn (ensure-write-path path)))
     (when (and (probe-file pn)
                (%lisp-source-pathname-p pn))
-      (rpc-error id -32602
-                 "Cannot overwrite existing .lisp/.asd with fs-write-file; use lisp-edit-form."
-                 (make-ht "code" "existing_lisp_overwrite_forbidden"
-                          "path" path
-                          "next_tool" "lisp-edit-form"
-                          "required_args"
-                          (vector "file_path" "form_type" "form_name"
-                                  "operation" "content")
-                          "new_file_creation_allowed" t)))))
+      (let ((unparseable (and allow-unparseable (%lisp-file-unparseable-p pn))))
+        (unless unparseable
+          (if allow-unparseable
+              (rpc-error id -32602
+                         (format nil "Cannot overwrite existing .lisp/.asd with fs-write-file: ~
+the file does not fail on a missing or stray parenthesis (it parses, or fails for ~
+a reader-level reason such as an unknown reader macro), so allow_unparseable_overwrite ~
+does not apply; use lisp-edit-form (with the readtable parameter if the file uses ~
+custom reader syntax).")
+                         (make-ht "code" "existing_lisp_overwrite_forbidden"
+                                  "path" path
+                                  "next_tool" "lisp-edit-form"
+                                  "required_args"
+                                  (vector "file_path" "form_type" "form_name"
+                                          "operation" "content")
+                                  "new_file_creation_allowed" t))
+              ;; The plain refusal keeps its historical wording; the opt-in
+              ;; is advertised through the data field.
+              (rpc-error id -32602
+                         (format nil "Cannot overwrite existing .lisp/.asd with ~
+fs-write-file; use lisp-edit-form.")
+                         (make-ht "code" "existing_lisp_overwrite_forbidden"
+                                  "path" path
+                                  "next_tool" "lisp-edit-form"
+                                  "required_args"
+                                  (vector "file_path" "form_type" "form_name"
+                                          "operation" "content")
+                                  "new_file_creation_allowed" t
+                                  "allow_unparseable_overwrite_available" t))))))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
@@ -331,13 +415,23 @@ collapsed signatures view that saves ~70% of context window tokens."
 Parent directories are automatically created if they do not exist.
 Use this for creating NEW files or editing non-Lisp files (e.g., markdown, config files).
 For editing EXISTING Lisp source code, you MUST use 'lisp-edit-form' instead
-to preserve structure and comments."
+to preserve structure and comments. The one exception: when an existing .lisp
+file no longer parses (a missing or stray parenthesis), lisp-edit-form cannot
+locate any form in it, so overwriting it here is the repair path -- but only
+with allow_unparseable_overwrite=true, because a file that only looks broken
+to the default reader may be valid under a custom readtable."
   :args ((path :type :string :required t
                :description "Relative path under the project root; absolute paths are rejected")
          (content :type :string :required t
-                  :description "Text content to write"))
+                  :description "Text content to write")
+         (allow-unparseable-overwrite
+          :type :boolean :default nil
+          :description "Permit overwriting an existing .lisp/.asd file that does not parse
+(missing or stray parenthesis). Pass true only when you know the file uses no custom
+reader syntax; otherwise use lisp-edit-form with the readtable parameter. Never
+overrides the guard for a file that parses."))
   :body
-  (or (%existing-lisp-overwrite-error id path)
+  (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
       (progn
         (fs-write-file path content)
         (result id

@@ -15,14 +15,23 @@
   (:import-from #:cl-ppcre
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
-                #:parse-top-level-forms)
+                #:parse-top-level-forms
+                #:stray-right-parenthesis
+                #:*standard-readtable*)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis
+                #:format-overwrite-recovery)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
+                #:*lisp-file-unparseable-hook*
                 #:fs-read-file
                 #:fs-resolve-read-path)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-condition-text)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -35,10 +44,22 @@
            #:%strip-name-prefix
            #:%find-target
            #:%resolve-named-readtable
+           #:%nonstandard-readtable-p
            #:%parse-readtable-designator
            #:%detect-readtable-before-node
            #:%whitespace-char-p
-           #:%locate-target-form))
+           #:%locate-target-form
+           #:%file-unparseable-by-edit-tools-p
+           #:%delimiter-failure-p
+           #:%reader-level-failure-p
+           #:file-unparseable-error
+           #:file-unparseable-path
+           #:file-unparseable-diagnosis
+           #:file-unparseable-cause
+           #:file-unparseable-readtable
+           #:file-unparseable-recoverable-p
+           #:file-unparseable-editable-prefix-p
+           #:file-unparseable-message))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
 
@@ -108,9 +129,14 @@ symbols as '#:foo') compare equal to user inputs written without the
   (member ch '(#\Space #\Tab #\Newline #\Return)))
 
 (defun %normalize-paths (file-path)
-  "Return two values: absolute path (pathname) and relative namestring for FS tools."
-  (let ((resolved (fs-resolve-read-path file-path))
-        (root (ensure-directory-pathname *project-root*)))
+  "Return two values: absolute path (pathname) and relative namestring for FS tools.
+The project root is resolved with TRUENAME before the containment test, as
+FS-RESOLVE-READ-PATH resolves the file: a root that is itself a symlink
+(macOS /tmp, a git worktree) must still contain its own files."
+  (let* ((resolved (fs-resolve-read-path file-path))
+         (declared (ensure-directory-pathname *project-root*))
+         (root (or (ignore-errors (ensure-directory-pathname (truename declared)))
+                   declared)))
     (unless (subpathp resolved root)
       (error "Write path ~A is outside project root ~A" file-path root))
     (let* ((relative (enough-pathname resolved root))
@@ -128,6 +154,48 @@ editor-hints.named-readtables package."
         (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
           (when (and find-fn (fboundp find-fn))
             (funcall find-fn designator)))))))
+
+(defun %standard-syntax-readtable-p (rt)
+  "Return T when readtable RT reads exactly like the standard one: the same
+readtable case, the same macro function and terminating status for every
+character below 128, and the same dispatch function for every # sub-character
+below 128. A readtable that merely copies :standard (or the :standard
+designator itself) reads standard syntax and must not switch off the
+standard-syntax delimiter diagnostics.
+A dispatching macro character's own function is a fresh closure in every
+readtable copy (SBCL), so for a character that dispatches in both readtables
+the comparison is made on its sub-characters instead.
+Known limit: only code points below 128 are compared, so a reader macro
+defined on a non-ASCII character is not noticed and the standard-syntax
+diagnostics stay on for that readtable."
+  (let ((std *standard-readtable*))
+    (flet ((dispatching-p (table ch)
+             (and (ignore-errors (progn (get-dispatch-macro-character ch #\a table) t))
+                  t)))
+      (and (eq (readtable-case rt) (readtable-case std))
+           (loop for code from 0 below 128
+                 for ch = (code-char code)
+                 always (or (and (dispatching-p rt ch) (dispatching-p std ch))
+                            (multiple-value-bind (fn non-terminating)
+                                (get-macro-character ch rt)
+                              (multiple-value-bind (std-fn std-nt)
+                                  (get-macro-character ch std)
+                                (and (eq fn std-fn)
+                                     (eq (not non-terminating) (not std-nt)))))))
+           (loop for code from 0 below 128
+                 for ch = (code-char code)
+                 always (eq (ignore-errors (get-dispatch-macro-character #\# ch rt))
+                            (ignore-errors (get-dispatch-macro-character #\# ch std))))))))
+
+(defun %nonstandard-readtable-p (designator)
+  "Return T when DESIGNATOR resolves (via named-readtables) to a readtable
+whose syntax differs from the standard one, so the standard-syntax delimiter
+diagnostics (the ] refusal, bracket advice, lisp-patch-form's depth message)
+must not be used. NIL for no designator, for one that does not resolve (the
+tools then read with the standard readtable anyway), and for a readtable that
+is standard in all but name."
+  (let ((rt (and designator (%resolve-named-readtable designator))))
+    (and rt (not (%standard-syntax-readtable-p rt)) t)))
 
 (defun %parse-readtable-designator (readtable-string)
   "Parse a readtable string from MCP tool args into a symbol designator.
@@ -275,8 +343,132 @@ before TARGET's start position."
                      (consp (cdr value)))
             (setf result (second value))))))))
 
+(defun %delimiter-failure-p (condition)
+  "Return T when CONDITION says the default reader ran out of input
+(END-OF-FILE, including cst's UNTERMINATED-SOURCE: a missing \")\", but also
+an unterminated string or #| comment, since \" and #| are macro characters
+too) or met a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises
+itself on both its parsing paths). Every other reader failure -- an unknown
+dispatch macro such as #?, a disabled #. -- is not counted. Even a delimiter
+failure is not proof that the file is broken (a reader macro supplied through
+the readtable parameter could consume the offending characters), which is why
+fs-write-file additionally requires the caller to opt in before overwriting."
+  (or (typep condition 'end-of-file)
+      (typep condition 'stray-right-parenthesis)))
+
+(defun %reader-level-failure-p (condition)
+  "Return T when the reader itself rejected the text for a reason other than
+a delimiter: a disabled #., an unknown dispatch macro such as #?. Only such a
+failure makes a bracket verdict of the standard-syntax scan a finding rather
+than an instruction. END-OF-FILE is not a READER-ERROR and is excluded anyway
+as a delimiter failure; the edit tools' own synthesized errors (\"content is
+empty\", \"multiple top-level forms\") are plain ERRORs and do not count, so
+a genuinely stray ) keeps its instruction."
+  (and (typep condition 'reader-error)
+       (not (%delimiter-failure-p condition))))
+
+(defun file-unparseable-message (condition)
+  "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
+When the failure is recoverable (a delimiter problem no readtable can fix),
+the text opens with the shared delimiter diagnosis, or the reader error when
+the scan has nothing to add, and ends with an executable recovery path:
+fs-read-file, hand-apply the fix, fs-write-file (which permits overwriting
+such a file). When the caller supplied a readtable, no standard-syntax
+verdict exists: the text names the readtable and says how the overwrite
+guard will decide. Otherwise the failure is reader-level (custom reader
+syntax, a disabled #. form); the file keeps its overwrite protection, so the
+text points at the readtable parameter instead."
+  (let* ((path (file-unparseable-path condition))
+         (diagnosis (file-unparseable-diagnosis condition))
+         (readtable (file-unparseable-readtable condition))
+         (scan-ok (getf diagnosis :ok))
+         (line (getf diagnosis :unclosed-form-line))
+         (head (if scan-ok
+                   (format nil "Cannot parse ~A~@[ under readtable ~(~S~)~]: ~A"
+                           path readtable (file-unparseable-cause condition))
+                   (format-delimiter-diagnosis diagnosis :target path))))
+    (cond
+      ((file-unparseable-recoverable-p condition)
+       ;; fs-write-file takes only a project-relative path, so that is the
+       ;; form the instruction gives; the absolute one stays in the head.
+       (let ((relative (ignore-errors
+                        (namestring
+                         (enough-pathname (pathname path)
+                                          (ensure-directory-pathname
+                                           (truename *project-root*)))))))
+         (format nil "~A~%The file itself does not parse~:[, so lisp-edit-form and ~
+                      lisp-patch-form cannot locate any form in it~; past its ~
+                      broken form: the forms before it can still be edited with ~
+                      lisp-edit-form, but this one is in the broken tail~].~%~
+                      Run lisp-check-parens with path=~S to see the full diagnosis, ~
+                      then ~A"
+                 head (file-unparseable-editable-prefix-p condition) path
+                 (format-overwrite-recovery (or relative path)
+                                            :have-fix (not (null (getf diagnosis
+                                                                       :likely-fixes)))
+                                            :where "above"
+                                            :form-line line))))
+      (readtable
+       (format nil "~A~%No standard-syntax diagnosis is offered under a custom ~
+                    readtable (a reader macro may consume raw parentheses). Run ~
+                    lisp-check-parens with path=~S: if it reports a missing or stray ~
+                    parenthesis and the file uses no custom syntax at that point, ~
+                    fs-write-file with allow_unparseable_overwrite=true can rewrite ~
+                    it (that guard judges the file with the default reader); ~
+                    otherwise fix the custom syntax the reader complained about."
+               head path))
+      (t
+       ;; The reader stopped on something other than a delimiter. When the
+       ;; scan also found a delimiter problem, both are shown: the reader's
+       ;; complaint is what blocks parsing, and the diagnosis above may be a
+       ;; second, real problem or an artifact of custom syntax.
+       (format nil "~A~@[~%The reader itself reported: ~A.~]~%~
+                    ~:[This~;That reader-level failure~] is not a missing or ~
+                    stray parenthesis, so the overwrite path does not apply and ~
+                    fs-write-file keeps refusing to overwrite the file. It may ~
+                    depend on a readtable: if the file uses custom reader macros, ~
+                    pass the readtable parameter (a named-readtable designator) to ~
+                    lisp-edit-form / lisp-patch-form~:[.~; -- the delimiter ~
+                    diagnosis above comes from the standard-syntax scan and may ~
+                    then turn out to be right, or to be that syntax.~]"
+               head
+               (and (not scan-ok) (file-unparseable-cause condition))
+               (not scan-ok)
+               (not scan-ok))))))
+
+(define-condition file-unparseable-error (error)
+  ((path :initarg :path :reader file-unparseable-path)
+   (diagnosis :initarg :diagnosis :reader file-unparseable-diagnosis)
+   (cause :initarg :cause :reader file-unparseable-cause)
+   (readtable :initarg :readtable :initform nil
+              :reader file-unparseable-readtable)
+   (recoverable :initarg :recoverable :initform nil
+                :reader file-unparseable-recoverable-p)
+   (editable-prefix :initarg :editable-prefix :initform nil
+                    :reader file-unparseable-editable-prefix-p))
+  (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
+  (:documentation "Signaled when the target file cannot be parsed into top-level forms.
+RECOVERABLE is T when the failure is a delimiter problem (missing or stray
+parenthesis) that no readtable can fix; only then does fs-write-file permit
+overwriting the file, and only then does the message advertise that path.
+READTABLE is the designator the caller supplied, if any: under a custom
+readtable no standard-syntax verdict is attached (DIAGNOSIS is then a plain
+balanced plist and RECOVERABLE is NIL), and the message says so.
+EDITABLE-PREFIX is T when the parse still returned the forms before the
+breakage (the lenient CL-reader pass after an IN-READTABLE switch does), so
+those forms remain editable and the message must not claim that no form can
+be located."))
+
 (defun %locate-target-form (file-path form-type form-name readtable)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
+Signals FILE-UNPARSEABLE-ERROR, carrying a delimiter diagnosis, when the file
+cannot be parsed at all, or when the target form is not found and the lenient
+CL-reader pass (after an IN-READTABLE switch, or under a READTABLE argument)
+stopped early on a read error; on that lenient pass the forms before the
+breakage remain editable, whereas the Eclector pass yields no forms at all
+from a file that does not parse. A file larger than the fs read
+cap is reported as such instead, because its truncated prefix would only
+yield a misleading delimiter diagnosis.
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -289,15 +481,89 @@ Returns eight values:
   (let ((form-type-str (string-downcase form-type)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
-      (let* ((original (fs-read-file abs))
-             (nodes (parse-top-level-forms original
-                                           :readtable readtable
-                                           :source-path abs))
-             (target (%find-target nodes form-type-str form-name)))
-        (unless target
-          (error "Form ~A ~A not found in ~A" form-type form-name (namestring abs)))
-        (let ((target-snippet (subseq original
-                                     (cst-node-start target)
-                                     (cst-node-end target))))
-          (values abs rel original nodes target target-snippet form-type-str
-                  (extract-in-package-name-from-text original)))))))
+      (multiple-value-bind (original truncated file-length)
+          (fs-read-file abs)
+        (when truncated
+          (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
+                  lisp-edit-form and lisp-patch-form cannot edit files this large, ~
+                  and fs-write-file will not overwrite it either (a truncated read ~
+                  cannot prove the file is broken). Split the file or edit it ~
+                  outside cl-mcp."
+                 (namestring abs) file-length (length original)))
+        (flet ((unparseable (cause &optional editable-prefix)
+                 ;; Under a caller-supplied readtable the standard delimiter
+                 ;; scan is not evidence (a reader macro may consume raw
+                 ;; parentheses), so no scan-based diagnosis or "recoverable"
+                 ;; verdict is attached; the message explains the situation.
+                 ;; EDITABLE-PREFIX: the lenient pass returned forms before
+                 ;; the breakage, which lisp-edit-form can still address.
+                 (error 'file-unparseable-error
+                        :path (namestring abs)
+                        :readtable readtable
+                        :editable-prefix editable-prefix
+                        :diagnosis (if readtable
+                                       (list :ok t)
+                                       (diagnose-delimiters original))
+                        :recoverable (and (null readtable)
+                                          (%delimiter-failure-p cause))
+                        :cause (sanitize-condition-text cause))))
+          (multiple-value-bind (nodes swallowed)
+              (handler-case
+                  (parse-top-level-forms original
+                                         :readtable readtable
+                                         :source-path abs)
+                (error (e) (unparseable e)))
+            (let ((target (%find-target nodes form-type-str form-name)))
+              (unless target
+                (when swallowed
+                  (unparseable swallowed (and nodes t)))
+                (error "Form ~A ~A not found in ~A" form-type form-name
+                       (namestring abs)))
+              (let ((target-snippet (subseq original
+                                           (cst-node-start target)
+                                           (cst-node-end target))))
+                (values abs rel original nodes target target-snippet form-type-str
+                        (extract-in-package-name-from-text original))))))))))
+
+(defun %file-unparseable-by-edit-tools-p (pn &optional text)
+  "Return T when the file at PN is broken in a way no readtable can fix:
+PARSE-TOP-LEVEL-FORMS fails (it signals, or its lenient CL-reader pass after
+an IN-READTABLE switch stopped early, reported as a second value) with a
+delimiter failure per %DELIMITER-FAILURE-P. Any other reader failure -- an
+unknown dispatch macro such as #? that may even consume delimiter-looking
+characters as data -- is not evidence, since the tools' readtable parameter
+may make the file editable, so the overwrite guard must stay in place.
+The second value says why: :DELIMITER (the primary value is T), :PARSED (the
+file parses cleanly, so a scan verdict against it is a false positive),
+:READER-LEVEL (it fails, but not on a delimiter), or :TRUNCATED. The third
+value is T when the failing parse still returned forms (the lenient
+CL-reader pass after an IN-READTABLE switch keeps the forms before the
+breakage), so those forms remain editable with lisp-edit-form and the
+guidance must not claim that no form can be located; callers consult it
+only with a :DELIMITER verdict.
+TEXT, when supplied by the caller (fs's %LISP-FILE-UNPARSEABLE-P has already
+read the file), avoids a second read; otherwise the file is read here, and a read truncated
+at the fs read cap returns NIL because a cut-off prefix of a valid file
+would look unparseable.
+Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
+permits overwriting only files that are broken this way, and called directly
+by lisp-check-parens so its next-step hint rests on the same verdict."
+  (multiple-value-bind (source truncated)
+      (if text (values text nil) (fs-read-file pn))
+    (if truncated
+        (values nil :truncated nil)
+        (handler-case
+            (multiple-value-bind (nodes swallowed)
+                (parse-top-level-forms source :source-path pn)
+              (cond ((null swallowed) (values nil :parsed nil))
+                    ((%delimiter-failure-p swallowed)
+                     (values t :delimiter (and nodes t)))
+                    (t (values nil :reader-level (and nodes t)))))
+          (error (e)
+            (if (%delimiter-failure-p e)
+                (values t :delimiter nil)
+                (values nil :reader-level nil)))))))
+
+;; Register at load time so fs-write-file's overwrite guard agrees with the
+;; edit tools about which files are unparseable.
+(setf *lisp-file-unparseable-hook* #'%file-unparseable-by-edit-tools-p)

@@ -3,12 +3,26 @@
 (defpackage #:cl-mcp/src/validate
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
-                #:fs-read-file)
+                #:fs-read-file
+                #:fs-resolve-read-path)
+  ;; The edit tools' parser itself, not the hook fs installs at load time:
+  ;; a direct dependency so the verdict is there in any image that has this
+  ;; file, not only when lisp-edit-form-core happened to load first.
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%file-unparseable-by-edit-tools-p)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:*repair-lines-limit*
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis
+                #:format-overwrite-recovery
+                #:next-top-level-hint-line)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -17,178 +31,40 @@
 (defparameter *check-parens-max-bytes* (* 2 1024 1024)
   "Maximum number of characters lisp-check-parens will scan in one call.")
 
-(defun %closing (opener)
-  (ecase opener
-    (#\( #\))
-    (#\[ #\])
-    (#\{ #\})))
-
-(defun %scan-parens-push-open (stack line col base-offset ch idx)
-  (cons (list ch line col (+ base-offset idx)) stack))
-
-(defun %scan-parens-pop-open (stack line col base-offset ch idx)
-  (if (null stack)
-      (values stack
-              (list :ok nil
-                    :kind "extra-close"
-                    :expected nil
-                    :found (string ch)
-                    :offset (+ base-offset idx)
-                    :line line
-                    :column col))
-      (destructuring-bind (top-ch top-line top-col top-off) (car stack)
-        (declare (ignore top-line top-col top-off))
-        (let ((expected (%closing top-ch)))
-          (if (char= expected ch)
-              (values (cdr stack) nil)
-              (values stack
-                      (list :ok nil
-                            :kind "mismatch"
-                            :expected (string expected)
-                            :found (string ch)
-                            :offset (+ base-offset idx)
-                            :line line
-                            :column col)))))))
-
-(defstruct scan-state
-  (line 1 :type fixnum)
-  (col 1 :type fixnum)
-  (stack '() :type list)
-  (in-string nil :type boolean)
-  (escape nil :type boolean)
-  (line-comment nil :type boolean)
-  (block-depth 0 :type fixnum)
-  (block-open-pos 0 :type fixnum))
-
-(defun %scan-handle-line-comment (state ch)
-  (when (char= ch #\Newline)
-    (setf (scan-state-line-comment state) nil)))
-
-(defun %scan-handle-string (state ch)
-  (cond
-    ((scan-state-escape state)
-     (setf (scan-state-escape state) nil))
-    ((char= ch #\\)
-     (setf (scan-state-escape state) t))
-    ((char= ch #\")
-     (setf (scan-state-in-string state) nil))))
-
-(defun %scan-handle-block-comment (state ch next)
-  (when (and (char= ch #\|) next (char= next #\#))
-    (decf (scan-state-block-depth state))
-    t))
-
-(defun %scan-handle-normal (state ch next idx base-offset text)
-  "Handle a character in normal (non-string, non-comment) context.
-Returns (VALUES err consumed) where CONSUMED is NIL or a positive integer
-indicating how many additional characters past CH were consumed."
-  (cond
-   ((char= ch #\;) (setf (scan-state-line-comment state) t) (values nil nil))
-   ((char= ch #\") (setf (scan-state-in-string state) t) (values nil nil))
-   ;; Character literal: #\x or #\Space etc.  Skip past entirely so that
-   ;; delimiter characters like #\( are not treated as open-parens.
-   ((and (char= ch #\#) next (char= next #\\))
-    (let ((skip 1))  ; at minimum skip the backslash
-      (let ((char-pos (+ idx 2)))
-        (when (< char-pos (length text))
-          (incf skip)  ; skip the character after backslash
-          ;; Named character literals: consume remaining alpha chars
-          (when (alpha-char-p (char text char-pos))
-            (loop for k from (1+ char-pos) below (length text)
-                  while (alpha-char-p (char text k))
-                  do (incf skip)))))
-      (values nil skip)))
-   ((and (char= ch #\#) next (char= next #\|))
-    (when (zerop (scan-state-block-depth state))
-      (setf (scan-state-block-open-pos state) (+ base-offset idx)))
-    (incf (scan-state-block-depth state))
-    (values nil 1))
-   ((or (char= ch #\() (char= ch #\[) (char= ch #\{))
-    (setf (scan-state-stack state)
-            (%scan-parens-push-open (scan-state-stack state)
-             (scan-state-line state) (scan-state-col state) base-offset ch
-             idx))
-    (values nil nil))
-   ((or (char= ch #\)) (char= ch #\]) (char= ch #\}))
-    (multiple-value-bind (new-stack err)
-        (%scan-parens-pop-open (scan-state-stack state) (scan-state-line state)
-         (scan-state-col state) base-offset ch idx)
-      (setf (scan-state-stack state) new-stack)
-      (values err nil)))
-   (t (values nil nil))))
-
-(defun %scan-advance-position (state ch)
-  (cond
-    ((char= ch #\Newline)
-     (incf (scan-state-line state))
-     (setf (scan-state-col state) 1))
-    (t
-     (incf (scan-state-col state)))))
-
-(defun %scan-parens (text &key (base-offset 0))
-  "Return a plist describing balance of delimiters in TEXT.
-Keys: :ok (boolean), :kind (string|nil), :expected, :found, :offset, :line, :column."
-  (let ((state (make-scan-state))
-        (len (length text))
-        (idx 0))
-    (loop while (< idx len)
-          for ch = (char text idx)
-          for next = (and (< (1+ idx) len) (char text (1+ idx)))
-          do
-            (cond
-              ((scan-state-line-comment state)
-               (%scan-handle-line-comment state ch))
-              ((scan-state-in-string state)
-               (%scan-handle-string state ch))
-              ((plusp (scan-state-block-depth state))
-               (when (%scan-handle-block-comment state ch next)
-                 (incf idx)
-                 (incf (scan-state-col state))))
-              (t
-               (multiple-value-bind (err consumed)
-                   (%scan-handle-normal state ch next idx base-offset text)
-                 (when err
-                   (return-from %scan-parens err))
-                 (when consumed
-                   (let ((n (if (integerp consumed) consumed 1)))
-                     (incf idx n)
-                     (incf (scan-state-col state) n))))))
-            (%scan-advance-position state ch)
-            (incf idx))
-    (when (plusp (scan-state-block-depth state))
-      (let* ((open-pos  (scan-state-block-open-pos state))
-             (local-pos (- open-pos base-offset))
-             (pre       (subseq text 0 (min local-pos (length text))))
-             (r-line    (1+ (count #\Newline pre)))
-             (col-start (or (position #\Newline pre :from-end t) -1))
-             (r-col     (- local-pos col-start)))
-        (return-from %scan-parens
-          (list :ok nil
-                :kind "unclosed-block-comment"
-                :expected nil
-                :found nil
-                :offset open-pos
-                :line r-line
-                :column r-col))))
-    (when (scan-state-stack state)
-      (destructuring-bind (ch l c off) (pop (scan-state-stack state))
-        (return-from %scan-parens
-          (list :ok nil
-                :kind "unclosed"
-                :expected (string (%closing ch))
-                :found nil
-                :offset off
-                :line l
-                :column c))))
-    (list :ok t)))
-
-(defun %maybe-add-lisp-edit-guidance (result kind)
-  "Attach machine-readable remediation hints for broken Lisp delimiters."
-  (when (member kind '("extra-close" "mismatch" "unclosed") :test #'string=)
-    (setf (gethash "fix_code" result) "use_lisp_edit_form"
-          (gethash "next_tool" result) "lisp-edit-form"
-          (gethash "required_args" result)
-          (vector "file_path" "form_type" "form_name" "operation" "content")))
+(defun %maybe-add-lisp-edit-guidance (result kind &key overwritable false-positive no-tool)
+  "Attach machine-readable remediation hints for broken Lisp delimiters.
+The default next step is lisp-edit-form, which repairs and writes a form.
+When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
+same verdict fs-write-file's guard uses) to fail on a delimiter no readtable
+can fix -- the structural tools cannot locate any form in it, so the next
+step is the overwrite path: fs-read-file, apply the fix, fs-write-file with
+allow_unparseable_overwrite. Keying this on the parser rather than on the
+scan keeps the three tools' verdicts consistent: a file that parses (a
+symbol such as a[b), fails for a reader-level reason (#., #?), or was only
+read in part never receives an instruction the guard would then refuse.
+When FALSE-POSITIVE -- that parser accepts the input -- only next_tool is
+set (lisp-edit-form can still edit the file); no fix_code or required_args,
+since they would name a fix for input that needs none. When NO-TOOL -- a
+delimiter-broken file outside the project root, which neither fs-write-file
+nor the structural tools can touch -- nothing is set: the prose is the
+whole answer, and a next_tool would only send the caller into a loop."
+  (when (and (not no-tool)
+             (member kind '("extra-close" "mismatch" "unclosed"
+                            "unclosed-string" "unclosed-block-comment")
+                     :test #'string=))
+    (cond
+      (overwritable
+       (setf (gethash "fix_code" result) "overwrite_with_allow_unparseable"
+             (gethash "next_tool" result) "fs-write-file"
+             (gethash "required_args" result)
+             (vector "path" "content" "allow_unparseable_overwrite")))
+      (false-positive
+       (setf (gethash "next_tool" result) "lisp-edit-form"))
+      (t
+       (setf (gethash "fix_code" result) "use_lisp_edit_form"
+             (gethash "next_tool" result) "lisp-edit-form"
+             (gethash "required_args" result)
+             (vector "file_path" "form_type" "form_name" "operation" "content")))))
   result)
 
 (defun %custom-readtable-p (text)
@@ -197,10 +73,47 @@ When a custom readtable is active, the standard CL reader would produce
 false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
 
+(defun %project-root-truename ()
+  "Return the project root as a resolved directory pathname, or NIL when it is
+unset or does not exist. Both sides of a containment test must be resolved:
+FS-RESOLVE-READ-PATH returns a truename, and a project root that is itself a
+symlink (macOS /tmp, a git worktree) would otherwise never contain it."
+  (let ((root cl-mcp/src/project-root:*project-root*))
+    (and root
+         (ignore-errors
+          (uiop:ensure-directory-pathname
+           (truename (uiop:ensure-directory-pathname root)))))))
+
+(defun %under-project-root-p (path)
+  "Return T when PATH resolves to a file under the project root, i.e. one that
+fs-write-file could rewrite. A file elsewhere on the read allow-list (another
+ASDF system's source) can be checked but not overwritten, so it must not be
+sent to the overwrite path."
+  (let ((root (%project-root-truename)))
+    (and root
+         (ignore-errors (uiop:subpathp (fs-resolve-read-path path) root))
+         t)))
+
+(defun %code-verdict (text)
+  "Return :PARSED when the editing tools' reader accepts inline TEXT (so a
+scan verdict against it is a false positive), else :UNPARSED. The same
+question %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P answers for a file, asked of a
+snippet: *read-eval* stays off and unknown packages are stubbed, as in the
+edit tools."
+  (multiple-value-bind (nodes swallowed)
+      (ignore-errors (cl-mcp/src/cst:parse-top-level-forms text))
+    (declare (ignore nodes))
+    ;; IGNORE-ERRORS returns the condition as its second value on failure,
+    ;; and PARSE-TOP-LEVEL-FORMS returns a swallowed error there on success
+    ;; of its lenient pass: either way a non-NIL second value means "did not
+    ;; read cleanly".
+    (if swallowed :unparsed :parsed)))
+
 (defun %truncate-message (condition)
-  "Extract condition message string, truncating to 200 chars to prevent
-SBCL stream representation leakage (e.g. reader-error ~A includes stream content)."
-  (let ((msg (format nil "~A" condition)))
+  "Extract CONDITION's message for the client: SBCL stream representations
+and the trailing \"Stream:\" section are removed (SANITIZE-ERROR-MESSAGE),
+then the text is truncated to 200 characters."
+  (let ((msg (sanitize-error-message (princ-to-string condition))))
     (if (> (length msg) 200)
         (concatenate 'string (subseq msg 0 197) "...")
         msg)))
@@ -275,13 +188,55 @@ syntax error in the file itself."
               :line    nil
               :column  nil)))))
 
+(defun %fix->hash (fix)
+  "Convert one fix plist from REPAIR-LINE-DIFFERENCES into a string-keyed
+hash. ADDED and REMOVED are the gross edit counts; DELTA is their
+difference, so a relocation (\")(a\" -> \"(a)\") is not mistaken for a no-op
+by a client reading only delta. COLUMN is the 1-based column of the first
+change, REMOVED_COLUMNS the columns of the \")\" a removal drops (so a
+client can tell which one on a line holding several), BEFORE_COMMENT says
+the change goes before a trailing ; comment, TRUNCATED says
+ORIGINAL/REPAIRED were cut to 120 characters and so are descriptive, not
+text to write back, and CRLF says the line ends in CRLF (ORIGINAL/REPAIRED
+are shown without the carriage return, so REPAIRED is not the line to write
+back either)."
+  (let ((h (make-hash-table :test #'equal)))
+    (setf (gethash "line" h) (getf fix :line)
+          (gethash "original" h) (getf fix :original)
+          (gethash "repaired" h) (getf fix :repaired)
+          (gethash "delta" h) (getf fix :delta)
+          (gethash "added" h) (getf fix :added 0)
+          (gethash "removed" h) (getf fix :removed 0)
+          (gethash "column" h) (getf fix :column)
+          (gethash "removed_columns" h) (coerce (getf fix :removed-columns) 'vector)
+          (gethash "before_comment" h) (if (getf fix :before-comment) t nil)
+          (gethash "truncated" h) (if (getf fix :truncated) t nil)
+          (gethash "crlf" h) (if (getf fix :crlf) t nil))
+    h))
+
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Also checks for reader errors (e.g. unknown dispatch characters, #. with
 *read-eval* nil) even when parentheses are balanced.
 Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
-plus a \"position\" hash with \"line\", \"column\", \"offset\"."
+plus a \"position\" hash with \"line\", \"column\", \"offset\" (absent for
+\"too-large\", where nothing was scanned).
+Delimiter failures also carry \"likely_fixes\" (vector of line/original/
+repaired/delta/added/removed/column/removed_columns/before_comment/truncated
+hashes inferred by parinfer, capped at *REPAIR-LINES-LIMIT* entries with the
+rest counted in \"likely_fixes_omitted\"; \"original\" and \"repaired\" are
+cut to 120 characters plus \"...\" and are then descriptive, not text to
+write back, which \"truncated\" flags),
+\"next_top_level_line\" when a later top-level form was swallowed, and
+\"diagnosis_text\" (the guidance the MCP summary appends; not part of the
+MCP payload).
+For a PATH that fails the scan, the file is also parsed with the editing
+tools' own reader (the verdict fs-write-file's overwrite guard uses): a file
+it accepts makes the scan a false positive, so the text says so first and no
+fix, field or instruction is attached; a file that fails on a delimiter no
+readtable can fix gets the overwrite path as its next step. A window into a
+file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -290,25 +245,41 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
     (error "offset must be non-negative"))
   (when (and limit (< limit 0))
     (error "limit must be non-negative"))
-  (let ((text (or code (fs-read-file path :offset offset :limit limit)))
-        (base-off (or offset 0)))
-    (when (> (length text) *check-parens-max-bytes*)
+  (let* ((truncated nil)
+         (remaining nil)
+         (text (or code
+                   (multiple-value-bind (slice truncated-p file-length remaining-p)
+                       (fs-read-file path :offset offset :limit limit)
+                     (declare (ignore file-length))
+                     (setf truncated truncated-p
+                           remaining remaining-p)
+                     slice)))
+         (base-off (or offset 0))
+         ;; A window into a file (an offset, or a limit the file filled with
+         ;; input still remaining) is a prefix like a truncated read: a slice
+         ;; of a valid file looks unbalanced, so no repair hint may be built
+         ;; from it.
+         (partial (and path
+                       (or (plusp base-off)
+                           (and limit (= (length text) limit) remaining)))))
+    ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
+    ;; describe text the file does not end with, so it is reported as too
+    ;; large rather than diagnosed. No "position": nothing was scanned.
+    (when (or truncated (> (length text) *check-parens-max-bytes*))
       (let ((h (make-hash-table :test #'equal)))
         (setf (gethash "ok" h) nil
               (gethash "kind" h) "too-large"
               (gethash "expected" h) nil
               (gethash "found" h) nil)
-        (let ((pos (make-hash-table :test #'equal)))
-          (setf (gethash "offset" pos) base-off
-                (gethash "line" pos) 1
-                (gethash "column" pos) 1)
-          (setf (gethash "position" h) pos))
         (return-from lisp-check-parens h)))
-    (let ((paren-result (%scan-parens text :base-offset base-off))
-          (reader-info  (%try-reader-check text base-off)))
+    (let* ((diagnosis (diagnose-delimiters text :base-offset base-off))
+           ;; The reader check only matters when the delimiters balance.
+           (reader-info (and (getf diagnosis :ok) (%try-reader-check text base-off))))
       (destructuring-bind (&key ok kind expected found
-                                (offset base-off) (line 1) (column 1))
-          paren-result
+                                (offset base-off) (line 1) (column 1)
+                                likely-fixes
+                           &allow-other-keys)
+          diagnosis
         (let ((h (make-hash-table :test #'equal)))
           (cond
             ((not ok)
@@ -322,7 +293,115 @@ plus a \"position\" hash with \"line\", \"column\", \"offset\"."
                      (gethash "line" pos) line
                      (gethash "column" pos) column)
                (setf (gethash "position" h) pos))
-             (%maybe-add-lisp-edit-guidance h kind))
+             ;; The next-step hint and the wording rest on the verdict the
+             ;; fs-write-file guard itself gives (the edit tools' parser),
+             ;; never on the scan alone, and never for a window. It is
+             ;; computed before any text, because a file that parser accepts
+             ;; must not receive a likely fix or an instruction at all.
+             (multiple-value-bind (overwritable verdict editable-prefix)
+                 (cond ((and path (not partial))
+                        (ignore-errors
+                         (%file-unparseable-by-edit-tools-p
+                          (fs-resolve-read-path path) text)))
+                       ;; Inline code gets the same reader check: a snippet
+                       ;; the editing reader accepts (a] or foo#|bar| as
+                       ;; symbols) must not be told to change anything.
+                       ((null path) (values nil (%code-verdict text) nil)))
+               (let ((false-positive (eq verdict :parsed))
+                     (overwrite-hint (and overwritable (%under-project-root-p path))))
+                 (when false-positive
+                   ;; Marked in the payload too, for a client that reads
+                   ;; kind/next_tool and never the text.
+                   (setf (gethash "false_positive" h) t))
+                 ;; The summary's next-step sentence, built here where the
+                 ;; parser's verdict and the project root are known: the
+                 ;; path is given relative to the root because that is the
+                 ;; only form fs-write-file accepts, and a file whose forms
+                 ;; before the breakage were parsed is not called unlocatable.
+                 ;; A delimiter-broken file outside the project root: neither
+                 ;; the structural tools nor fs-write-file can help, and the
+                 ;; old "Use lisp-edit-form" sentence would only loop.
+                 (when (and overwritable (not overwrite-hint))
+                   (setf (gethash "guidance_text" h)
+                         (format nil ". The file does not parse, and it is outside the ~
+                                      project root, so fs-write-file cannot rewrite it ~
+                                      and lisp-edit-form cannot locate any form in it; ~
+                                      fix it outside cl-mcp.")))
+                 (when overwrite-hint
+                   (setf (gethash "guidance_text" h)
+                         (format nil ". The file does not parse~:[, so lisp-edit-form ~
+                                      and lisp-patch-form cannot locate any form in ~
+                                      it~; past its broken form (the forms before it ~
+                                      can still be edited with lisp-edit-form; the ~
+                                      broken tail needs the overwrite path)~]: ~A"
+                                 editable-prefix
+                                 (format-overwrite-recovery
+                                  (namestring
+                                   (uiop:enough-pathname (fs-resolve-read-path path)
+                                                         (%project-root-truename)))
+                                  :have-fix (and likely-fixes t)
+                                  :where "below"))))
+                 (cond
+                   (partial
+                    ;; A slice of the file: say what was seen, never how to
+                    ;; fix it.
+                    (setf (gethash "diagnosis_text" h)
+                          (format nil "Only a window of ~A was checked (offset ~D, ~D ~
+                                       characters), so this may be an artifact of the ~
+                                       window and no repair hint is offered; check the ~
+                                       whole file for one."
+                                  path base-off (length text))))
+                   (t
+                    (setf (gethash "diagnosis_text" h)
+                          ;; The false clause skips the two arguments the true
+                          ;; clause's nested directives would consume.
+                          (format nil "~:[~2*~;The editing tools' reader parses this ~
+                                       ~:[snippet~;file~], so the finding below is ~
+                                       most likely a false positive of the ~
+                                       standard-syntax scan (a token such as ~
+                                       foo#|bar| or a[b reads as one symbol, or a ~
+                                       reader macro from an in-readtable consumes ~
+                                       that text); no repair is suggested~:[~;, and ~
+                                       lisp-edit-form can still edit the file~].~%~]~
+                                       ~:[~;The editing tools' reader also fails on ~
+                                       this file, but not on a delimiter (a reader ~
+                                       macro or #.), so the overwrite path does not ~
+                                       apply and the fix below alone will not make ~
+                                       it parse; lisp-edit-form will report the ~
+                                       reader's complaint.~%~]~A"
+                                  false-positive (and path t) (and path t)
+                                  (eq verdict :reader-level)
+                                  (format-delimiter-diagnosis
+                                   diagnosis :target (or path "code")
+                                             :false-positive false-positive)))
+                    ;; Parinfer fixes exist only for paren problems, not for
+                    ;; an open #| comment or string, and never for a file the
+                    ;; reader accepts.
+                    (unless (or false-positive
+                                (member kind '("unclosed-block-comment" "unclosed-string")
+                                        :test #'string=))
+                      (let* ((total (length likely-fixes))
+                             (kept (min total *repair-lines-limit*)))
+                        (setf (gethash "likely_fixes" h)
+                              (map 'vector #'%fix->hash (subseq likely-fixes 0 kept)))
+                        (when (> total kept)
+                          (setf (gethash "likely_fixes_omitted" h) (- total kept))))
+                      ;; Only when the text prints the hint too (an unclosed
+                      ;; form, and no likely fix on or after that line), so
+                      ;; the payload never pairs the line with a fix that
+                      ;; contradicts it.
+                      (let ((hint-line (next-top-level-hint-line diagnosis)))
+                        (when hint-line
+                          (setf (gethash "next_top_level_line" h) hint-line))))))
+                 ;; fs-write-file only writes under the project root, so the
+                 ;; overwrite hint is promised only for a file it could write;
+                 ;; a delimiter-broken file it cannot write gets no next_tool
+                 ;; at all, so the payload agrees with the prose above.
+                 (%maybe-add-lisp-edit-guidance h kind
+                                                :overwritable (and overwrite-hint t)
+                                                :false-positive false-positive
+                                                :no-tool (and overwritable
+                                                              (not overwrite-hint))))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil
@@ -351,7 +430,13 @@ Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
 when *read-eval* is nil) even when parentheses are balanced. In that case the
 result has kind: \"reader-error\" and a message field describing the error,
 instead of expected/found fields. Files using named-readtables:in-readtable are
-exempt from reader checking to avoid false positives."
+exempt from reader checking to avoid false positives.
+
+When a file fails the delimiter scan it is also parsed with the editing tools'
+reader (*read-eval* off; an in-file in-readtable is honoured, so its reader
+macros run) to pick the next step: a file that reader accepts is reported as a
+likely false positive with no fix attached, and a file broken on a delimiter is
+sent to the fs-write-file overwrite path."
   :args ((path :type :string
                :description "Absolute path inside project or registered ASDF system
 (mutually exclusive with code)")
@@ -393,13 +478,60 @@ exempt from reader checking to avoid false positives."
                                   line col (or message "unknown"))
                           (let ((ef (if (and expected found)
                                         (format nil " (expected ~A, found ~A)" expected found)
-                                        "")))
+                                        ""))
+                                ;; The headline must not call an open string
+                                ;; or comment a parenthesis problem, since
+                                ;; the diagnosis below it says otherwise.
+                                (label (cond ((gethash "false_positive" check-result)
+                                              ;; The headline must not assert
+                                              ;; breakage the paragraph below
+                                              ;; it retracts.
+                                              (format nil "Likely false positive (the ~
+                                               editing tools' reader accepts this ~
+                                               ~:[snippet~;file~]): the standard-syntax ~
+                                               scan reports ~A"
+                                                      path kind))
+                                             ((string= kind "unclosed-string")
+                                              "Unterminated string")
+                                             ((string= kind "unclosed-block-comment")
+                                              "Unterminated block comment")
+                                             ((string= kind "too-large")
+                                              ;; A file hits this through the
+                                              ;; fs-read-file cap; inline code
+                                              ;; through the 2 MB check limit.
+                                              (if path
+                                                  (format nil "Input too large to check: ~
+                                                   nothing was scanned. The read was ~
+                                                   cut at the fs-read-file cap, so the ~
+                                                   structural tools and the ~
+                                                   fs-write-file overwrite path are ~
+                                                   closed for it too; split the file ~
+                                                   or edit it outside cl-mcp")
+                                                  (format nil "Input too large to check: ~
+                                                   nothing was scanned (the code ~
+                                                   exceeds the check limit); check a ~
+                                                   smaller region")))
+                                             (t (format nil "Unbalanced parentheses: ~A"
+                                                        kind)))))
                             (format nil
-                                    "Unbalanced parentheses: ~A~A at line ~D, column ~D~A"
-                                    kind ef line col
-                                    (if next-tool
-                                        " Use lisp-edit-form for existing Lisp files."
-                                        ""))))))))
+                                    ;; No position for too-large: nothing was
+                                    ;; scanned, so line 1 would be noise.
+                                    "~A~:[~A at line ~D, column ~D~;~*~*~*~]~A~@[~%~A~]"
+                                    label (string= kind "too-large") ef line col
+                                    (cond
+                                      ;; The overwrite path, worded by
+                                      ;; LISP-CHECK-PARENS where the parser's
+                                      ;; verdict and the relative path are
+                                      ;; known, rather than sending the caller
+                                      ;; into a loop with lisp-edit-form.
+                                      ((gethash "guidance_text" check-result))
+                                      ;; No edit instruction on a verdict the
+                                      ;; reader has just called a false positive.
+                                      ((and next-tool
+                                            (not (gethash "false_positive" check-result)))
+                                       ". Use lisp-edit-form for existing Lisp files.")
+                                      (t ""))
+                                    (gethash "diagnosis_text" check-result))))))))
           (let* ((kind     (gethash "kind" check-result))
                  (expected (gethash "expected" check-result))
                  (found    (gethash "found" check-result))
@@ -421,6 +553,17 @@ exempt from reader checking to avoid false positives."
               (setf (gethash "next_tool" payload) next-tool))
             (when required-args
               (setf (gethash "required_args" payload) required-args))
+            (let ((fixes (gethash "likely_fixes" check-result))
+                  (omitted (gethash "likely_fixes_omitted" check-result))
+                  (next-line (gethash "next_top_level_line" check-result)))
+              (when fixes
+                (setf (gethash "likely_fixes" payload) fixes))
+              (when omitted
+                (setf (gethash "likely_fixes_omitted" payload) omitted))
+              (when next-line
+                (setf (gethash "next_top_level_line" payload) next-line))
+              (when (gethash "false_positive" check-result)
+                (setf (gethash "false_positive" payload) t)))
             (result id payload)))
       (error (e)
         (result id (make-ht "content" (text-content (format nil "Error: ~A" e))

@@ -221,6 +221,159 @@
                (ok (string= (uiop:read-file-string abs-path) initial)))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-fs-write-allows-unparseable-lisp
+  (flet ((call (tmp-path initial content-json id &key allow)
+           (let ((abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+                 (req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"fs-write-file\","
+                               "\"arguments\":{\"path\":\"~A\",\"content\":~A~
+                                ~:[~;,\"allow_unparseable_overwrite\":true~]}}}")
+                              id tmp-path content-json allow)))
+             (with-open-file (out abs-path :direction :output :if-exists :supersede)
+               (write-string initial out))
+             (unwind-protect
+                  (let ((obj (parse (%pjl req))))
+                    (values (gethash "error" obj)
+                            (uiop:read-file-string abs-path)))
+               (ignore-errors (delete-file abs-path))))))
+    (testing "an unparseable .lisp file is overwritten when the caller opts in"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/unparseable-overwrite.lisp"
+                  (format nil "(defun a ()~%  (list 1)~%")
+                  "\"(defun a ()\\n  (list 1))\\n\"" 91 :allow t)
+          (ok (null err) "opt-in overwrite of a broken file is not an error")
+          (ok (string= after (format nil "(defun a ()~%  (list 1))~%"))
+              "the repaired content was written"))))
+    (testing "without the opt-in the broken file is refused with a dedicated code"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/unparseable-no-optin.lisp"
+                  (format nil "(defun a ()~%  (list 1)~%")
+                  "\";; clobbered\"" 97)
+          (ok err "refused")
+          ;; Without the opt-in the file is not even parsed: the refusal is
+          ;; the plain one, but its data advertises the opt-in.
+          (ok (string= (gethash "code" (gethash "data" err))
+                       "existing_lisp_overwrite_forbidden"))
+          (ok (eql (gethash "allow_unparseable_overwrite_available" (gethash "data" err)) t))
+          (ok (string= after (format nil "(defun a ()~%  (list 1)~%")) "file untouched"))))
+    (testing "the opt-in never overrides the guard for a file that parses"
+      (with-test-project-root
+        (multiple-value-bind (err after)
+            (call "tests/tmp/parseable-optin.lisp"
+                  (format nil "(defun a ()~%  (list 1))~%")
+                  "\";; clobbered\"" 98 :allow t)
+          (ok err "refused")
+          (ok (string= (gethash "code" (gethash "data" err))
+                       "existing_lisp_overwrite_forbidden"))
+          (ok (string= after (format nil "(defun a ()~%  (list 1))~%")) "file untouched"))))))
+
+(deftest tools-call-fs-write-keeps-guard-for-bracket-symbols
+  (testing "a valid file whose symbol contains [ is still protected from overwrite"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/bracket-symbol-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(defun f () foo[)~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                           "\"allow_unparseable_overwrite\":true}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp))
+                    (err (gethash "error" obj)))
+               (ok err "the reader accepts foo[, so the overwrite guard must hold")
+               (ok (string= (uiop:read-file-string abs-path) initial)
+                   "file untouched"))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-fs-write-keeps-guard-for-custom-reader-syntax
+  (flet ((refused-p (tmp-path initial id)
+           (let ((abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+                 (req (format nil
+                              (concatenate
+                               'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"fs-write-file\","
+                               "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                               ;; With the opt-in, so the classification is
+                               ;; what keeps the guard, not the missing flag.
+                               "\"allow_unparseable_overwrite\":true}}}")
+                              id tmp-path)))
+             (with-open-file (out abs-path :direction :output :if-exists :supersede)
+               (write-string initial out))
+             (unwind-protect
+                  (let* ((resp (%pjl req))
+                         (obj (parse resp)))
+                    (and (gethash "error" obj)
+                         (string= (uiop:read-file-string abs-path) initial)))
+               (ignore-errors (delete-file abs-path))))))
+    (testing "balanced #?\"...\" syntax only fails the default reader, so the file stays protected"
+      (with-test-project-root
+        (ok (refused-p "tests/tmp/custom-syntax-overwrite.lisp"
+                       (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+                       95))))
+    (testing "a reader macro that consumes delimiter-looking data also keeps the guard"
+      (with-test-project-root
+        (ok (refused-p "tests/tmp/custom-syntax-parens-overwrite.lisp"
+                       (format nil "(defun f ()~%  #?[(])~%")
+                       96))))))
+
+(deftest tools-call-fs-write-unparseable-check-follows-edit-tools
+  (testing "a broken file that merely mentions in-readtable in a comment can be overwritten"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/in-readtable-comment-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil ";; see in-readtable docs~%(defun a ()~%  (list 1)~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\"(defun a () 1)\\n\","
+                           "\"allow_unparseable_overwrite\":true}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp)))
+               (ok (null (gethash "error" obj))
+                   "the edit tools cannot parse this file, so overwrite is the repair path")
+               (ok (string= (uiop:read-file-string abs-path) (format nil "(defun a () 1)~%"))))
+          (ignore-errors (delete-file abs-path))))))
+  (testing "a valid file with a real in-readtable declaration stays protected"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/in-readtable-valid-overwrite.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(in-readtable :standard)~%(defun f () 1)~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; clobbered\","
+                           "\"allow_unparseable_overwrite\":true}}}")
+                          tmp-path)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((resp (%pjl req))
+                    (obj (parse resp)))
+               (ok (gethash "error" obj) "parseable file: overwrite refused")
+               (ok (string= (uiop:read-file-string abs-path) initial) "file untouched"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-fs-write-allows-new-lisp
   (testing "tools/call fs-write-file allows creating new .lisp files"
     (with-test-project-root
@@ -1398,6 +1551,37 @@
                    "lisp-patch-form with #: prefix form_name should succeed")
                (ok (eql t (gethash "would_change" result))
                    "dry_run result should indicate the patch would change the form"))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-patch-form-keeps-diagnosis-layout
+  (testing "a failing patch reaches the client with its line breaks and its closing sentence"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-patch-diagnosis-layout.lisp")
+             (abs-path (merge-pathnames tmp-path
+                                        cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(defun target (x)~%  (let ((y 1))~%    (+ x y)))~%")))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let* ((req (format nil
+                            (concatenate
+                             'string
+                             "{\"jsonrpc\":\"2.0\",\"id\":5021,\"method\":\"tools/call\","
+                             "\"params\":{\"name\":\"lisp-patch-form\","
+                             "\"arguments\":{\"file_path\":\"~A\","
+                             "\"form_type\":\"defun\","
+                             "\"form_name\":\"target\","
+                             "\"old_text\":\"(let ((y 1))\","
+                             "\"new_text\":\"(let ((y 1)\"}}}") tmp-path))
+                    (resp (%pjl req))
+                    (obj (yason:parse resp))
+                    (msg (%tool-call-message obj)))
+               (ok (%tool-call-failed-p obj) "the patch must be refused")
+               (ok (search "fewer \")\"" msg) "the depth message is there")
+               (ok (search "No changes were written to disk" msg)
+                   "the closing sentence survives")
+               (ok (null (search "#<" msg)) "no SBCL object representation")
+               (ok (string= (uiop:read-file-string abs-path) initial) "file untouched"))
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-lisp-edit-form-empty-form-name-after-prefix

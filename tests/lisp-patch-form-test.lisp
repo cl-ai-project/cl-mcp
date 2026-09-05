@@ -209,7 +209,8 @@ running as root), THUNK is skipped instead."
                 (error (e)
                   (setf err-msg (princ-to-string e))
                   t)))
-          (ok (search "invalid Lisp" err-msg))
+          (ok (or (search "invalid Lisp" err-msg)
+                  (search "fewer \")\"" err-msg)))
           (ok (search "No changes were written" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
@@ -233,7 +234,8 @@ running as root), THUNK is skipped instead."
                   t)))
           (ok (or (search "invalid Lisp" err-msg)
                   (search "trailing content" err-msg)
-                  (search "malformed form text" err-msg))
+                  (search "malformed form text" err-msg)
+                  (search "fewer \")\"" err-msg))
               "error message should describe the structural problem")
           (ok (string= before (fs-read-file path))))))))
 
@@ -666,3 +668,537 @@ running as root), THUNK is skipped instead."
                 "message must not carry an internal-error prefix")
             (ok (and message (search "patch-readonly-legacy" message))
                 "message should name the file that could not be written")))))))
+
+(deftest lisp-patch-form-depth-mismatch-fewer-closes
+  (testing "new_text missing a ) breaks the form, so the depth message is reported"
+    (with-temp-file "tests/tmp/patch-depth-fewer.lisp"
+        (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(print x)"
+                               :new-text "(print x")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "new_text closes 1 fewer \")\" than old_text" err-msg))
+          (ok (search "(old_text: 1 open / 1 close, new_text: 1 open / 0 close)" err-msg))
+          (ok (search "The patch would leave the form unclosed." err-msg))
+          (ok (search "Add 1 \")\" to new_text, or remove 1 \"(\"." err-msg))
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-mismatch-more-closes
+  (testing "new_text with an extra ) fails to parse and gets the opposite advice"
+    (with-temp-file "tests/tmp/patch-depth-more.lisp"
+        (format nil "(defun target (x)~%  (if (> x 0)~%      (print x)~%      nil))~%")
+      (lambda (path)
+        (let ((err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(print x)"
+                               :new-text "(print x))")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok (search "new_text closes 1 more \")\" than old_text" err-msg))
+          (ok (search "The patch would add an extra closing parenthesis." err-msg))
+          (ok (search "Remove 1 \")\" from new_text, or add 1 \"(\"." err-msg)))))))
+
+(deftest lisp-patch-form-depth-reason-respects-string-context
+  (testing "a ) inside a string is not code, so an unrelated reader error is not blamed on depth"
+    (with-temp-file "tests/tmp/patch-string-context.lisp"
+        (format nil "(defun target ()~%  \"a)\")~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "a)"
+                               :new-text "b\" #?")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the #? dispatch is invalid, so the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no false net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-requires-matching-boundary-state
+  (testing "new_text that opens a string past the replacement does not get a depth message"
+    (with-temp-file "tests/tmp/patch-boundary-state.lisp"
+        (format nil "(defun target ()~%  (foo))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; (foo -> "( leaves an unterminated string that swallows the
+              ;; unchanged suffix; the failure is the string, not the parens.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(foo"
+                               :new-text "\"(")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "more \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (null (search "fewer \")\"" err-msg)))
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-sees-pending-string-escape
+  (testing "a trailing backslash inside the new string swallows the suffix quote"
+    (with-temp-file "tests/tmp/patch-boundary-escape.lisp"
+        (format nil "(defun target ()~%  (foo \"x\"))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; (foo "x -> "(\ : both ends are inside a string, but the new
+              ;; one has an escape pending that eats the following quote.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(foo \"x"
+                               :new-text "\"(\\")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "more \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-sees-pending-code-escape
+  (testing "new_text ending in a code escape that eats the suffix ) gets no depth message"
+    (with-temp-file "tests/tmp/patch-boundary-code-escape.lisp"
+        (format nil "(defun target ()~%  foo)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; foo -> (\ : the backslash escapes the original ), so adding
+              ;; one ) to new_text would be escaped too and not repair it.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "foo"
+                               :new-text "(\\")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-sees-cut-off-character-literal
+  (testing "new_text ending in #\\ turns the suffix ) into a character literal"
+    (with-temp-file "tests/tmp/patch-boundary-char-literal.lisp"
+        (format nil "(defun target ()~%  foo)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "foo"
+                               :new-text "(#\\")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-suppressed-under-custom-readtable
+  (testing "with an in-readtable declaration that changes the syntax, no net-parenthesis message"
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-patch-depth-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/patch-custom-readtable-depth.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-patch-depth-syntax)~%~
+                                (defun target (x)~%  (print x))~%")
+                 (lambda (path)
+                   (let ((before (fs-read-file path))
+                         (err-msg nil))
+                     (handler-case
+                         (lisp-patch-form :file-path path
+                                          :form-type "defun"
+                                          :form-name "target"
+                                          :old-text "(print x)"
+                                          :new-text "(print x")
+                       (error (e) (setf err-msg (princ-to-string e))))
+                     (ok err-msg "the patch must still fail")
+                     (ok (null (search "fewer \")\"" err-msg))
+                         "standard lexical rules are not trusted under a custom readtable")
+                     (ok (search "No changes were written to disk." err-msg))
+                     (ok (string= before (fs-read-file path))))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-patch-depth-syntax)))
+        (rove:skip "named-readtables not available")))
+  (testing "an in-readtable :standard declaration keeps the net-parenthesis message"
+    (with-temp-file "tests/tmp/patch-standard-readtable-depth.lisp"
+        (format nil "(in-readtable :standard)~%(defun target (x)~%  (print x))~%")
+      (lambda (path)
+        (let ((err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(print x)"
+                               :new-text "(print x")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok (and err-msg (search "fewer \")\"" err-msg))
+              ":standard reads standard syntax, so the depth message applies"))))))
+
+(deftest lisp-patch-form-diagnosis-suppressed-under-custom-readtable
+  (testing "with an in-readtable that changes the syntax, a parse failure keeps the reader's message"
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-patch-diag-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/patch-custom-readtable-diagnosis.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-patch-diag-syntax)~%~
+                                (defun target ()~%  1)~%")
+                 (lambda (path)
+                   (let ((before (fs-read-file path))
+                         (err-msg nil))
+                     (handler-case
+                         ;; #. is disabled, so the reader fails; the standard
+                         ;; delimiter scan must not replace that with a
+                         ;; bracket diagnosis.
+                         (lisp-patch-form :file-path path
+                                          :form-type "defun"
+                                          :form-name "target"
+                                          :old-text "1"
+                                          :new-text "#.(+ 1 1) [(]")
+                       (error (e) (setf err-msg (princ-to-string e))))
+                     (ok err-msg "the patch must fail")
+                     (ok (search "invalid Lisp" err-msg))
+                     (ok (null (search "Unbalanced parentheses" err-msg))
+                         "no standard-syntax diagnosis under a custom readtable")
+                     (ok (search "No changes were written to disk." err-msg))
+                     (ok (string= before (fs-read-file path))))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-patch-diag-syntax)))
+        (rove:skip "named-readtables not available"))))
+
+(deftest lisp-patch-form-ambiguous-bracket-keeps-reader-error
+  (testing "a [ in a symbol plus a real reader error reports both, not only the hedge"
+    (with-temp-file "tests/tmp/patch-ambiguous-bracket.lisp"
+        (format nil "(defun target ()~%  1)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "1"
+                               :new-text "foo[ #?")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (search "false positive" err-msg) "the bracket diagnosis is hedged")
+          (ok (search "The reader itself reported" err-msg) "the reader error is kept")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-ambiguous-closing-bracket-keeps-reader-error
+  (testing "a symbol ending in ] plus a real reader error keeps the reader error too"
+    (with-temp-file "tests/tmp/patch-ambiguous-closing-bracket.lisp"
+        (format nil "(defun target ()~%  1)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "1"
+                               :new-text "foo] #?")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (search "The reader itself reported" err-msg) "the reader error is kept")
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-ignores-parens-in-multiple-escape
+  (testing "a ( inside a |...| symbol does not manufacture a net-parenthesis message"
+    (with-temp-file "tests/tmp/patch-multiple-escape.lisp"
+        (format nil "(defun target ()~%  (list 1))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(list 1)"
+                               :new-text "(list '|a(b| #?)")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the #? dispatch is invalid, so the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "new_text is balanced; the ( is symbol text")
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-bracket-typo-beats-depth-message
+  (testing "a ] typed for ) is reported as the typo, not as a missing )"
+    (with-temp-file "tests/tmp/patch-bracket-typo.lisp"
+        (format nil "(defun target ()~%  (list 1 2))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(list 1 2)"
+                               :new-text "(list 1 2]")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no net-count instruction that would write (list 1 2])")
+          (ok (search "found \"]\"" err-msg) "the ] is named")
+          (ok (search "replace it with \")\"" err-msg))
+          (ok (search "The reader itself reported: unexpected end of input" err-msg)
+              "the reader's own words are kept for the ambiguous bracket")
+          (ok (null (search "invalid Lisp" err-msg
+                            :start2 (1+ (search "invalid Lisp" err-msg))))
+              "the framing sentence appears once, not inside the reader text too")
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-trailing-content-with-bracket-attributes-nothing-to-the-reader
+  (testing "a trailing-content failure on an ambiguous bracket keeps cl-mcp's words as its own"
+    (with-temp-file "tests/tmp/patch-bracket-trailing.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (let ((err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "t1"
+                               :old-text "(list x)"
+                               :new-text "(list x]))")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "The reader itself reported" err-msg))
+              "no sentence of cl-mcp's own is attributed to the reader")
+          (ok (null (search "disk.." err-msg)) "the closing sentence appears once")
+          (ok (search "No changes were written to disk." err-msg)))))))
+
+(deftest lisp-patch-form-warns-about-a-bracket-that-still-reads
+  (testing "a ] typed for ) that leaves the form readable is written but flagged"
+    (with-temp-file "tests/tmp/patch-bracket-reads.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list x])")
+          (declare (ignore updated))
+          (ok changed-p "the form reads, so the patch is applied")
+          (ok (search "(list x])" (fs-read-file path)))
+          (ok (and warning (search "\"]\"" warning))
+              "the warning names the bracket the scan tripped over")))))
+  (testing "an unmatched [ opener is a symbol character and carries no warning"
+    (with-temp-file "tests/tmp/patch-bracket-opener.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list a[b x)")
+          (declare (ignore updated))
+          (ok changed-p)
+          (ng warning "nothing on the found side, so nothing to flag")))))
+  (testing "a clean patch carries no warning"
+    (with-temp-file "tests/tmp/patch-bracket-clean.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list x x)")
+          (declare (ignore updated))
+          (ok changed-p)
+          (ng warning))))))
+
+(deftest lisp-patch-form-depth-reason-compares-block-comment-depth
+  (testing "boundaries inside block comments at different nesting depths do not match"
+    (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"
+        (format nil "(defun target ()~%  (foo #| c |#))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; (foo #| -> ((#| #| : the suffix's |# now closes only the
+              ;; inner comment, so the outer one swallows the closing parens.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(foo #|"
+                               :new-text "((#| #|")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-reason-pending-constructs-at-boundary
+  (flet ((patch-error (relative initial old new)
+           (with-temp-file relative initial
+             (lambda (path)
+               (let ((before (fs-read-file path))
+                     (err-msg nil))
+                 (handler-case
+                     (lisp-patch-form :file-path path
+                                      :form-type "defun"
+                                      :form-name "target"
+                                      :old-text old
+                                      :new-text new)
+                   (error (e) (setf err-msg (princ-to-string e))))
+                 (ok err-msg "the patch must fail")
+                 (ok (null (search "fewer \")\"" err-msg))
+                     "no manufactured net-parenthesis message")
+                 (ok (search "No changes were written to disk." err-msg))
+                 (ok (string= before (fs-read-file path))))))))
+    (testing "new_text ending with | inside a block comment whose |# needs the suffix"
+      (patch-error "tests/tmp/patch-boundary-block-close.lisp"
+                   (format nil "(defun target ()~%  foo #\\))~%")
+                   "foo " "(#|x|"))
+    (testing "new_text ending with a quote prefix that needs a following form"
+      (patch-error "tests/tmp/patch-boundary-quote.lisp"
+                   (format nil "(defun target ()~%  foo)~%")
+                   "foo" "('"))))
+
+(deftest lisp-patch-form-depth-reason-never-trusts-pending-boundaries
+  (testing "two pending boundaries of different kinds do not count as matching"
+    (with-temp-file "tests/tmp/patch-boundary-pending-kinds.lisp"
+        (format nil "(defun target ()~%  foo #|x|#)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              ;; old ends with | (closes the comment with the suffix #),
+              ;; new ends with # (does not): both :pending, not equivalent.
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "foo #|x|"
+                               :new-text "(foo #|x#")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "fewer \")\"" err-msg))
+              "no manufactured net-parenthesis message")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-depth-check-ignores-strings-and-char-literals
+  (testing "parens inside strings and #\\( do not trip the depth check"
+    (with-temp-file "tests/tmp/patch-depth-strings.lisp"
+        (format nil "(defun target ()~%  (list 1))~%")
+      (lambda (path)
+        (lisp-patch-form :file-path path
+                         :form-type "defun"
+                         :form-name "target"
+                         :old-text "(list 1)"
+                         :new-text "(list \")\" #\\( 1)")
+        (ok (search "(list \")\" #\\( 1)" (fs-read-file path)))))))
+
+(deftest lisp-patch-form-depth-mismatch-inside-docstring-is-allowed
+  (testing "an unbalanced paren added inside a docstring still parses, so it is applied"
+    (with-temp-file "tests/tmp/patch-depth-docstring.lisp"
+        (format nil "(defun target (x)~%  \"Return (1-based index.\"~%  x)~%")
+      (lambda (path)
+        (lisp-patch-form :file-path path
+                         :form-type "defun"
+                         :form-name "target"
+                         :old-text "(1-based index."
+                         :new-text "(1-based index.)")
+        (ok (search "(1-based index.)\"" (fs-read-file path)))))))
+
+(deftest lisp-patch-form-empty-old-text-is-an-argument-error
+  (testing "an empty old_text reports the argument problem, not a depth message"
+    (with-temp-file "tests/tmp/patch-empty-old-text.lisp"
+        (format nil "(defun target (x)~%  x)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text ""
+                               :new-text "(x")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "old_text must not be empty" err-msg))
+          (ng (search "new_text closes" err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-nesting-breakage-gets-diagnosis
+  (testing "equal depth but an early ) yields trailing content and a diagnosis"
+    (with-temp-file "tests/tmp/patch-nesting.lisp"
+        (format nil "(defun target (x)~%  (let ((y 1))~%    (print y)~%    y))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :old-text "(let ((y 1))"
+                               :new-text ")) (let ((y 1)) ((")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg)
+          (ok (search "invalid Lisp" err-msg))
+          (ok (search "Unbalanced parentheses in the patched form" err-msg))
+          (ok (search "line 2" err-msg)
+              "the inferred line of the early ) is named")
+          (ok (search "No changes were written to disk." err-msg))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-patch-form-broken-file-gives-guidance
+  (testing "patching a file that does not parse returns the shared guidance"
+    (with-temp-file "tests/tmp/patch-broken-file.lisp"
+        (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-patch-form::lisp-patch-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "b"
+                     "old_text" "2"
+                     "new_text" "3")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "patch-broken-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "unclosed (form starting at line 1: \"(defun a ()\")" text))
+            (ok (search "Next top-level form probably begins at line 4" text))
+            (ok (search "Run lisp-check-parens with path=" text))))))))

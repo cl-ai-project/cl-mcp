@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
-                #:%normalize-string)
+                #:%normalize-string
+                #:file-unparseable-error)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -1025,6 +1026,298 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (and text (search "not found" text))
                 "error message should mention not found")))))))
 
+(deftest lisp-edit-form-broken-file-gives-guidance
+  (testing "editing a file that does not parse names the open form and the next tool"
+    (with-temp-file "tests/tmp/edit-form-broken-file.lisp"
+        (format nil "(in-package #:cl-user)~%~%(defun probe-a (x)~%  (let ((y (* x 2)))~%    (if (> y 10)~%        (format t \"big\")~%        (format t \"small\")~%    y))~%~%(defun probe-c (x)~%  (list x x x))~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "probe-c"
+                              :operation "replace"
+                              :content "(defun probe-c (x) (list x))")
+            (file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal file-unparseable-error")
+          (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" err))
+          (ok (search "Likely fix, inferred from indentation:" err))
+          (ok (search "line 7:" err))
+          (ok (search "Next top-level form probably begins at line 10" err))
+          (ok (search "The file itself does not parse, so lisp-edit-form and lisp-patch-form" err))
+          (ok (search "cannot locate any form in it." err))
+          (ok (search "Run lisp-check-parens with path=" err))
+          (ok (search "starting at line 3" err))
+          (ok (search "write the whole file back with fs-write-file" err)
+              "recovery path must be executable with cl-mcp tools alone")
+          (ng (search "use lisp-edit-form (operation" err)
+              "must not send the caller back into the tool that just failed")
+          (ok (string= before (fs-read-file path)) "file untouched"))))))
+
+(deftest file-unparseable-hook-denies-truncated-reads
+  (testing "a valid file larger than the read cap is not classified as unparseable"
+    (with-temp-file "tests/tmp/edit-form-large-valid.lisp"
+        (format nil "(defun target ()~%  (list 1 2 3 4 5 6 7 8 9 10))~%")
+      (lambda (path)
+        (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+          (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                     (pathname path)))
+              "a truncated read must keep the overwrite guard in place")))))
+  (testing "editing such a file reports the read limit, not a paren diagnosis"
+    (with-temp-file "tests/tmp/edit-form-large-valid-2.lisp"
+        (format nil "(defun target ()~%  (list 1 2 3 4 5 6 7 8 9 10))~%")
+      (lambda (path)
+        (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16)
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () 1)")
+            (error (e) (setf err (princ-to-string e))))
+          (ok (search "read limit" err)
+              "message names the cause instead of guessing at parentheses")
+          (ok (null (search "Likely fix" err))))))))
+
+(deftest file-unparseable-hook-requires-delimiter-breakage
+  (testing "custom syntax failing the default reader is not unparseable, even with odd parens"
+    (with-temp-file "tests/tmp/edit-form-custom-syntax.lisp"
+        (format nil "(defun f ()~%  #?[(])~%")
+      (lambda (path)
+        (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path)))
+            "the unknown #? macro may consume the ( as data, so the guard must hold"))))
+  (testing "a missing ) and an extra ) are delimiter failures no readtable can fix"
+    (with-temp-file "tests/tmp/edit-form-missing-close.lisp"
+        (format nil "(defun a ()~%  (list 1)~%")
+      (lambda (path)
+        (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+             (pathname path)))))
+    (with-temp-file "tests/tmp/edit-form-extra-close.lisp"
+        (format nil "(defun a ()~%  (list 1)))~%")
+      (lambda (path)
+        (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+             (pathname path))))))
+  (testing "the reader-level failure message points at the readtable parameter"
+    (with-temp-file "tests/tmp/edit-form-custom-syntax-2.lisp"
+        (format nil "(defun greet (name)~%  #?\"Hello ${name}\")~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "greet"
+                              :operation "replace"
+                              :content "(defun greet (name) name)")
+            (file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "without a readtable the file does not parse")
+          (ok (search "readtable" err) "message mentions the readtable parameter")
+          (ok (null (search "overwriting is allowed" err))
+              "must not promise an overwrite that the guard will refuse"))))))
+
+(deftest file-unparseable-message-for-open-block-comment
+  (testing "a file ending inside #| gets closing guidance, not a reference to a likely fix"
+    (with-temp-file "tests/tmp/edit-form-open-block-comment.lisp"
+        (format nil "(defun target () 1)~%#| never closed~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "nonexistent"
+                              :operation "replace"
+                              :content "(defun nonexistent () 1)")
+            (file-unparseable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "the open comment makes the file unparseable")
+          (ok (search "Close it with |#" err))
+          (ok (search "apply the change described above" err))
+          (ok (null (search "Likely fix" err)) "no likely fix exists for a comment problem")
+          (ok (search "allow_unparseable_overwrite=true" err)
+              "an open comment is a delimiter failure, so the recovery path applies"))))))
+
+(deftest file-unparseable-after-in-readtable-switch
+  ;; After (in-readtable ...) the CST parser reads with the standard CL reader
+  ;; and swallows read errors, returning the nodes it has. That path only
+  ;; exists when named-readtables is loaded and the readtable resolves.
+  (if (and (%try-load "named-readtables")
+           (cl-mcp/src/cst::%try-switch-readtable :standard))
+      (progn
+        (testing "a form broken after an in-readtable switch still counts as unparseable"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-broken.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "the swallowed read error must make the hook return T")
+              (let ((err nil))
+                (handler-case
+                    (lisp-edit-form :file-path path
+                                    :form-type "defun"
+                                    :form-name "b"
+                                    :operation "replace"
+                                    :content "(defun b () 2)")
+                  (file-unparseable-error (e)
+                    (setf err (princ-to-string e))))
+                (ok err "editing the broken form signals file-unparseable-error, not not-found")
+                (ok (search "write the whole file back with fs-write-file" err)
+                    "recovery path is present")))))
+        (testing "a stray ) after the switch is classified structurally, not by reader wording"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1))~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "the stray ) is a delimiter failure"))))
+        (testing "a stray ) behind a line or block comment is still recognised"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray-comment.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%;; note~%)~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "line comment before the stray )")))
+          (with-temp-file "tests/tmp/edit-form-in-readtable-stray-block.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%#| x #| y |# |# )~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "nested block comment before the stray )"))))
+        (testing "an unterminated #| comment after the switch is a delimiter failure"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-open-block.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%~
+                           #| never closed~%(defun b () 2)~%")
+            (lambda (path)
+              (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                   (pathname path))
+                  "EOF inside a block comment must not look like a clean end of file"))))
+        (testing "a readtable that redefines ) is left to interpret it itself"
+          ;; Bracket-list syntax: [ and ] read lists, ) is a plain constituent.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-bracket-lists :merge '(:standard))))
+            (set-macro-character #\[ (get-macro-character #\( ) nil rt)
+            (set-macro-character #\] (get-macro-character #\) ) nil rt)
+            (set-syntax-from-char #\) #\a rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-bracket-readtable.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-bracket-lists)~%~
+                                  [defun a [] 1]~%)foo~%")
+                   (lambda (path)
+                     (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                (pathname path)))
+                         ")foo is a symbol under this readtable, not a stray paren")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-bracket-lists))))
+        (testing "a readtable that redefines ; keeps its own reading of it"
+          ;; ; reads the following form (like quote), so ;(defun ...) is a defun.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-semicolon-reads :merge '(:standard))))
+            (set-macro-character #\; (lambda (s c) (declare (ignore c)) (read s t nil t))
+                                 nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-semicolon-readtable.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-semicolon-reads)~%~
+                                  ;(defun target () 1)~%")
+                   (lambda (path)
+                     (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                (pathname path))))
+                     (lisp-edit-form :file-path path
+                                     :form-type "defun"
+                                     :form-name "target"
+                                     :operation "replace"
+                                     :content "(defun target () 2)")
+                     (ok (search "(defun target () 2)" (fs-read-file path))
+                         "the form behind the redefined ; was located and replaced")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-semicolon-reads))))
+        (testing "a readtable that makes Newline a macro character keeps its forms"
+          ;; Each newline reads as the keyword :nl, so it must reach READ.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-newline-macro :merge '(:standard))))
+            (set-macro-character #\Newline (lambda (s c) (declare (ignore s c)) :nl) nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-newline-readtable.lisp"
+                     ;; The newline ending the ; comment must reach the macro too.
+                     (format nil "(in-readtable :cl-mcp-test-newline-macro)~%~
+                                  (defun a () 1) ; trailing comment~%")
+                   (lambda (path)
+                     (let* ((nodes (cl-mcp/src/cst:parse-top-level-forms
+                                    (fs-read-file path) :source-path (pathname path)))
+                            (newline-forms (count :nl nodes
+                                                  :key #'cl-mcp/src/cst:cst-node-value)))
+                       ;; The newline right after the in-readtable form is
+                       ;; consumed by Eclector's READ before the switch; the
+                       ;; one after the defun reaches the CL-reader pass and
+                       ;; must be handed to the macro (0 would mean discarded).
+                       (ok (= newline-forms 1)
+                           "the newline after the switch was read by the macro"))))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-newline-macro))))
+        (testing "a stray ) reached through a zero-value Newline macro is still classified"
+          ;; Newline reads as nothing, so READ itself runs into the ) and the
+          ;; structural peek never sees it; the native error is normalised.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-newline-void :merge '(:standard))))
+            (set-macro-character #\Newline (lambda (s c) (declare (ignore s c)) (values))
+                                 nil rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-newline-void-stray.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-newline-void)~%(defun a () 1)~%)~%")
+                   (lambda (path)
+                     (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                          (pathname path))
+                         "the stray ) behind the void macro counts as a delimiter failure")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-newline-void))))
+        (testing "a macro that consumes a balanced ) and then fails is not a stray paren"
+          ;; #S(...) with an unknown structure reads its balanced list and then
+          ;; signals; the stream stops right after ), which must not be
+          ;; mistaken for an unmatched close.
+          (with-temp-file "tests/tmp/edit-form-in-readtable-struct.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%~
+                           #S(cl-mcp-no-such-struct-xyz :a 1)~%")
+            (lambda (path)
+              (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                         (pathname path)))
+                  "a reader error after a balanced ) is not a delimiter failure"))))
+        (testing "a stray ) behind a value-less macro that swallowed a ( is still classified"
+          ;; #[ ... ] is a custom comment that returns no values; the ( it
+          ;; contains must not make the following stray ) look balanced.
+          (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                             :cl-mcp-test-bracket-comment :merge '(:standard))))
+            (set-dispatch-macro-character
+             #\# #\[
+             (lambda (s c n)
+               (declare (ignore c n))
+               (loop for ch = (read-char s nil nil)
+                     until (or (null ch) (char= ch #\])))
+               (values))
+             rt)
+            (unwind-protect
+                 (with-temp-file "tests/tmp/edit-form-bracket-comment-stray.lisp"
+                     (format nil "(in-readtable :cl-mcp-test-bracket-comment)~%~
+                                  (defun a () 1)~%#[ignored (]~%)~%")
+                   (lambda (path)
+                     (ok (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                          (pathname path))
+                         "the readtable itself reads nothing before the ), so it is stray")))
+              (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                       :cl-mcp-test-bracket-comment))))
+        (testing "a form before the breakage can still be edited"
+          (with-temp-file "tests/tmp/edit-form-in-readtable-broken-2.lisp"
+              (format nil "(in-readtable :standard)~%(defun a () 1)~%(defun b ()~%  (list 1)~%")
+            (lambda (path)
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "a"
+                              :operation "replace"
+                              :content "(defun a () 2)")
+              (ok (search "(defun a () 2)" (fs-read-file path)))))))
+      (skip "named-readtables not available; in-readtable switch path not exercised")))
+
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
   (testing "old protocol errors return -32603 rpc-error, not isError"
     (with-temp-file "tests/tmp/edit-old-proto.lisp"
@@ -1173,3 +1466,533 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               "sibling preview field reflects the deletion")
           (ok (string= before (fs-read-file path))
               "dry-run writes nothing to disk"))))))
+
+(deftest lisp-edit-form-warning-distinguishes-added-and-dropped
+  (testing "extra closing parens are reported as dropped, never as a negative count"
+    (with-temp-file "tests/tmp/edit-form-dropped.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed-p fixes)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (let ((y 1))~%    (+ x y))))"))
+          (declare (ignore updated changed-p))
+          (ok (search "1 extra closing delimiter dropped by parinfer" warning))
+          (ng (search "-1" warning))
+          (ok (= (length fixes) 1))
+          (ok (= (getf (first fixes) :line) 3))
+          (ok (= (getf (first fixes) :delta) -1)))))))
+
+(deftest lisp-edit-form-warning-counts-gross-edits
+  (testing "a relocated ) reports one added and one dropped, not a net zero"
+    (with-temp-file "tests/tmp/edit-form-relocated.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content ")(defun target () 1")
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "1 extra closing delimiter dropped by parinfer" warning))
+          (ng (search "content repaired by parinfer" warning)))))))
+
+(deftest lisp-edit-form-repair-ignores-parens-in-multiple-escape
+  (testing "a ( inside a |...| symbol is not counted, so the repair adds exactly one )"
+    (with-temp-file "tests/tmp/edit-form-multiple-escape.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target ()~%  (list '|a(b| 1)"))
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "(list '|a(b| 1))" (fs-read-file path))
+              "one ) was added after the form, the symbol untouched"))))))
+
+(deftest lisp-edit-form-warning-added-wording
+  (testing "missing closing parens are reported as added"
+    (with-temp-file "tests/tmp/edit-form-added.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed-p fixes)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))"))
+          (declare (ignore updated changed-p))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (= (getf (first fixes) :line) 2))
+          (ok (search "(let ((y 1))" (fs-read-file path))
+              "the binding list was closed on line 2, not at the end"))))))
+
+(deftest lisp-edit-form-refuses-stray-bracket
+  (testing "content with ] where ) was meant is rejected and nothing is written"
+    (with-temp-file "tests/tmp/edit-form-stray-bracket.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal content-unrepairable-error")
+          (ok (search "Unbalanced parentheses in content: expected \")\" but found \"]\" at line 2, column 13." err))
+          (ok (search "replace it with \")\"." err))
+          (ok (string= before (fs-read-file path)) "file untouched"))))))
+
+(deftest lisp-edit-form-repairs-content-with-bracket-symbols
+  (testing "an unmatched [ that may be a symbol character does not block the repair"
+    (with-temp-file "tests/tmp/edit-form-bracket-symbol-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (list a[b x)"))
+          (declare (ignore updated))
+          (ok (search "closing delimiter" warning)
+              "the missing ) is added by parinfer as on main")
+          (ok (search "(list a[b x))" (fs-read-file path))
+              "a[b is left alone and the form is closed")))))
+  (testing "an unmatched [ opener with no other breakage is not refused either"
+    (with-temp-file "tests/tmp/edit-form-bracket-opener-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (foo [bar x"))
+          (declare (ignore updated))
+          (ok (search "(foo [bar x))" (fs-read-file path)))
+          (ok (search (format nil "2 closing delimiters added by parinfer. If the \"[\" at ~
+                                   line 2, column 8 was meant as \"(\", the \")\" added ~
+                                   are wrong: replace it and edit again.")
+                      warning)
+              "the warning ends with the shared opener caveat, naming the ["))))))
+
+(deftest lisp-edit-form-repairs-content-ending-in-a-comment
+  (testing "a missing ) on a line with a trailing comment is repaired before the comment"
+    (with-temp-file "tests/tmp/edit-form-trailing-comment-repair.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (list x) ; done"))
+          (declare (ignore updated))
+          (ok (search "closing delimiter" warning))
+          (ok (search "(list x)) ; done" (fs-read-file path))
+              "the ) is inserted before the comment, so the form reads"))))))
+
+(deftest lisp-edit-form-summary-flags-a-relocating-repair
+  (testing "a closer inserted before the last code line is called out in the summary"
+    ;; Indentation puts (g x) and (h x) outside the when; parinfer closes the
+    ;; when on line 2, which the changed-lines list alone would not make plain.
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (when x" :repaired "  (when x)"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun t1 (x)~%  (when x)~%  (g x)~%  (h x))"))))
+      (ok (search "NOTE: the fix on line 2 closes a form there" summary))
+      (ok (search "no longer inside that form" summary))))
+  (testing "a closer before a trailing comment line is not a relocation either"
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (list 1 2)" :repaired "  (list 1 2))"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun f ()~%  (list 1 2))~%;; note~%"))))
+      (ng (search "NOTE:" summary) "only a comment follows; nothing moved")))
+  (testing "an append on the last line is not a relocation"
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (list 1)" :repaired "  (list 1))"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun t1 ()~%  (list 1))~%"))))
+      (ng (search "NOTE:" summary)))))
+
+(deftest lisp-edit-form-refusal-hides-reader-internals
+  (testing "the reader error kept in a refusal carries no SBCL stream object"
+    (with-temp-file "tests/tmp/edit-form-refusal-sanitized.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (let ((y 1]~%~
+                                                    (+ x y)))"))
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "should signal content-unrepairable-error")
+          (ok (search "(reader: " err) "the reader's own error is still appended")
+          (ok (null (search "#<" err)) "no #<...> object representation leaks")
+          (ok (search "replace it with \")\"." err)
+              "the multi-line diagnosis itself is untouched"))))))
+
+(deftest lisp-edit-form-refusal-does-not-instruct-when-the-reader-failed-elsewhere
+  (testing "a ] the scan trips over is only described when the reader stopped on #."
+    (with-temp-file "tests/tmp/edit-form-refusal-reader-elsewhere.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () (list a] #.(1+ 1)))")
+            (error (e) (setf err (princ-to-string e))))
+          (ok err "the content does not read, so it is refused")
+          (ok (search "found \"]\"" err) "the scan's finding is described")
+          (ng (search "Replace it with" err) "but not turned into an instruction")
+          (ok (search "(reader: " err) "the reader's own complaint is what to act on"))))))
+
+(deftest lisp-edit-form-refusal-keeps-the-instruction-for-a-stray-close
+  (testing "a stray ) is a real delimiter problem: the instruction stays"
+    (with-temp-file "tests/tmp/edit-form-refusal-stray-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil "(defun target (x)~%  (foo x))~%  (bar x))"))
+            (error (e) (setf err (princ-to-string e))))
+          (ok err)
+          (ok (search "extra \")\"" err))
+          (ok (search "Either remove that" err)
+              "the edit tools' own errors do not make the finding a false positive"))))))
+
+(deftest lisp-edit-form-leading-stray-close-is-a-delimiter-failure
+  (testing "a ) at the very start of content is classified structurally, not by SBCL's wording"
+    (with-temp-file "tests/tmp/edit-form-leading-stray-close.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content (format nil ")~%(defun target ()~%  (list a] 1)"))
+            (error (e) (setf err (princ-to-string e))))
+          (ok err)
+          (ok (search "extra \")\" at line 1, column 1" err))
+          (ok (search "Either remove that" err)
+              "the reader's own words agree with the scan, so the instruction stays"))))))
+
+(deftest lisp-edit-form-warns-about-a-bracket-that-still-reads
+  (testing "a ] where ) was meant that still reads is written but flagged, as lisp-patch-form does"
+    (with-temp-file "tests/tmp/edit-form-bracket-reads.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed fixes validated bracket-warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target () (list a] 1))")
+          (declare (ignore updated warning fixes validated))
+          (ok changed)
+          (ok (search "(list a] 1)" (fs-read-file path)))
+          (ok (and bracket-warning (search "\"]\"" bracket-warning)))))))
+  (testing "clean content carries no bracket warning"
+    (with-temp-file "tests/tmp/edit-form-bracket-clean.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning changed fixes validated bracket-warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content "(defun target () (list a 1))")
+          (declare (ignore updated warning fixes validated))
+          (ok changed)
+          (ng bracket-warning))))))
+
+(deftest lisp-edit-form-refuses-a-repair-after-an-unfinished-token
+  (testing "content ending in a lone reader prefix is refused with the reason, not written"
+    (with-temp-file "tests/tmp/edit-form-unfinished-token.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((before (fs-read-file path))
+              (err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () (list '")
+            (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+              (setf err (princ-to-string e))))
+          (ok err "the only repair would follow an unfinished token, so it is not written")
+          (ok (search "unfinished token" err))
+          (ok (string= before (fs-read-file path))))))))
+
+(deftest lisp-edit-form-content-honours-in-readtable-in-file
+  (testing "content is validated under the readtable the file switched to"
+    ;; #?[...] reads raw text through ]; without the file's readtable the
+    ;; content would fail on #? and the scan would then blame the ].
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-file-raw-bracket :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n)
+             (declare (ignore c n))
+             (read-char s)
+             (coerce (loop for ch = (read-char s nil nil)
+                           until (or (null ch) (char= ch #\]))
+                           collect ch)
+                     'string))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-in-readtable-content.lisp"
+                   (format nil "(named-readtables:in-readtable ~
+                                :cl-mcp-test-file-raw-bracket)~%(defun b () 1)~%")
+                 (lambda (path)
+                   (lisp-edit-form :file-path path
+                                   :form-type "defun"
+                                   :form-name "b"
+                                   :operation "replace"
+                                   :content "(defun b () #?[(])")
+                   (ok (search "(defun b () #?[(])" (fs-read-file path))
+                       "the content was accepted as written under the file's readtable")))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-file-raw-bracket)))
+        (skip "named-readtables not available"))))
+
+(deftest lisp-edit-form-custom-readtable-skips-delimiter-verdicts
+  (testing "under a readtable that changes the syntax, the scan neither refuses nor explains"
+    ;; Under a custom readtable ] may be meaningful, so the ] refusal that
+    ;; applies to plain content is not applied; the reader decides.
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-bracket-syntax :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n) (declare (ignore c n)) (read-line s nil ""))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-custom-readtable-bracket.lisp"
+                   (format nil "(defun target () :old)~%")
+                 (lambda (path)
+                   (multiple-value-bind (updated warning)
+                       (lisp-edit-form :file-path path
+                                       :form-type "defun"
+                                       :form-name "target"
+                                       :operation "replace"
+                                       :readtable :cl-mcp-test-bracket-syntax
+                                       :content (format nil "(defun target ()~%  foo]"))
+                     (declare (ignore updated))
+                     (ok (search "closing delimiter" warning)
+                         "parinfer still closes the form under the custom readtable")
+                     (ok (search "foo]" (fs-read-file path))
+                         "foo] was accepted as the readtable's business"))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-bracket-syntax)))
+        (skip "named-readtables not available")))
+  (testing "readtable :standard is not a loophole: foo] is still refused"
+    (if (%try-load "named-readtables")
+        (with-temp-file "tests/tmp/edit-form-standard-readtable-bracket.lisp"
+            (format nil "(defun target () :old)~%")
+          (lambda (path)
+            (let ((before (fs-read-file path))
+                  (err nil))
+              (handler-case
+                  (lisp-edit-form :file-path path
+                                  :form-type "defun"
+                                  :form-name "target"
+                                  :operation "replace"
+                                  :readtable :standard
+                                  :content (format nil "(defun target ()~%  foo]"))
+                (cl-mcp/src/lisp-edit-form::content-unrepairable-error (e)
+                  (setf err (princ-to-string e))))
+              (ok err "content-unrepairable-error under :standard")
+              (ok (search "replace it with \")\"." err))
+              (ok (string= before (fs-read-file path)) "file untouched"))))
+        (skip "named-readtables not available"))))
+
+(deftest lisp-edit-form-readtable-file-failure-gives-no-scan-verdict
+  (testing "a file that fails under the caller's readtable gets no standard-syntax advice"
+    ;; #?[...] reads raw text through ]; the ( inside is data. Line 3 is
+    ;; genuinely missing a ), but the standard scanner would blame the ].
+    (if (%try-load "named-readtables")
+        (let ((rt (funcall (find-symbol "MAKE-READTABLE" "NAMED-READTABLES")
+                           :cl-mcp-test-raw-bracket :merge '(:standard))))
+          (set-dispatch-macro-character
+           #\# #\?
+           (lambda (s c n)
+             (declare (ignore c n))
+             (read-char s)
+             (coerce (loop for ch = (read-char s nil nil)
+                           until (or (null ch) (char= ch #\]))
+                           collect ch)
+                     'string))
+           rt)
+          (unwind-protect
+               (with-temp-file "tests/tmp/edit-form-readtable-file-failure.lisp"
+                   (format nil "(defun a () #?[(])~%(defun b ()~%  (list 1)~%")
+                 (lambda (path)
+                   (let ((err nil))
+                     (handler-case
+                         (lisp-edit-form :file-path path
+                                         :form-type "defun"
+                                         :form-name "b"
+                                         :operation "replace"
+                                         :readtable :cl-mcp-test-raw-bracket
+                                         :content "(defun b () 2)")
+                       (file-unparseable-error (e)
+                         (setf err (princ-to-string e))))
+                     (ok err "the missing ) on line 3 still makes the file unparseable")
+                     (ok (null (search "Replace it with" err))
+                         "no standard-syntax bracket advice under a custom readtable")
+                     (ok (null (search "Likely fix" err)))
+                     (ok (search "cl-mcp-test-raw-bracket" err)
+                         "the message names the readtable that was tried")
+                     (ok (search "unexpected end of input" err)
+                         "the reader's end-of-file is worded, not a dangling clause"))))
+            (funcall (find-symbol "UNREGISTER-READTABLE" "NAMED-READTABLES")
+                     :cl-mcp-test-raw-bracket)))
+        (skip "named-readtables not available"))))
+
+(deftest lisp-edit-form-accepts-balanced-braces-with-missing-paren
+  (testing "content using {...} reader-macro syntax is still auto-repaired"
+    (with-temp-file "tests/tmp/edit-form-braces.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "replace"
+                            :content (format nil "(defun target (x)~%  (foo {a b}~%  (bar x))"))
+          (declare (ignore updated))
+          (ok (search "1 closing delimiter added by parinfer" warning))
+          (ok (search "(foo {a b})" (fs-read-file path))
+              "the paren was added after the braces, and the braces were kept"))))))
+
+(deftest lisp-edit-form-dry-run-carries-repair-fixes
+  (testing "dry-run hash exposes the repair line diff"
+    (with-temp-file "tests/tmp/edit-form-dry-run-fixes.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((res (lisp-edit-form :file-path path
+                                   :form-type "defun"
+                                   :form-name "target"
+                                   :operation "replace"
+                                   :dry-run t
+                                   :content (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))"))))
+          (ok (stringp (gethash "parinfer_warning" res)))
+          (ok (= (length (gethash "repair_fixes" res)) 1)))))))
+
+(deftest lisp-edit-form-summary-shows-repaired-form
+  (testing "non-dry-run summary shows what parinfer actually wrote"
+    (with-temp-file "tests/tmp/edit-form-summary-repaired.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "content" (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))")))
+               (response (funcall handler state "repaired-1" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ok (search "Applied replace to defun target" text))
+          (ok (search "WARNING: 1 closing delimiter added by parinfer" text))
+          (ok (search "Changed lines:" text))
+          (ok (search "line 2: \"  (let ((y 1)\"  ->  add 1 \")\"" text))
+          (ok (search "--- repaired form ---" text))
+          (ok (search "(let ((y 1))" text)))))))
+
+(deftest lisp-edit-form-dry-run-summary-shows-changed-lines
+  (testing "dry-run summary lists the changed lines but not a second copy of the form"
+    (with-temp-file "tests/tmp/edit-form-dry-run-changed-lines.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let* ((state (cl-mcp/src/state:make-state))
+               (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+               (args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "form_type" "defun"
+                      "form_name" "target"
+                      "operation" "replace"
+                      "dry_run" t
+                      "content" (format nil "(defun target (x)~%  (let ((y 1)~%    (+ x y)))")))
+               (response (funcall handler state "repaired-dry" args))
+               (result-obj (gethash "result" response))
+               (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+          (ok (search "Changed lines:" text))
+          (ok (search "--- preview ---" text))
+          (ng (search "--- repaired form ---" text)))))))
+
+(deftest lisp-edit-form-handler-stray-bracket-is-tool-error
+  (testing "unrepairable content is an isError result on the new protocol"
+    (with-temp-file "tests/tmp/edit-form-handler-stray.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "target"
+                     "operation" "replace"
+                     "content" (format nil "(defun target (x)~%  (let ((y 1]~%    (+ x y)))"))))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "stray-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "found \"]\"" text))))))))
+
+(deftest lisp-edit-form-handler-broken-file-is-tool-error
+  (testing "a file that does not parse yields guidance as an isError result"
+    (with-temp-file "tests/tmp/edit-form-handler-broken.lisp"
+        (format nil "(defun a ()~%  (list 1)~%~%(defun b ()~%  2)~%")
+      (lambda (path)
+        (let ((state (cl-mcp/src/state:make-state))
+              (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+              (args (cl-mcp/src/tools/helpers:make-ht
+                     "file_path" path
+                     "form_type" "defun"
+                     "form_name" "b"
+                     "operation" "replace"
+                     "content" "(defun b () 3)")))
+          (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+          (let* ((response (funcall handler state "broken-1" args))
+                 (result-obj (gethash "result" response))
+                 (text (gethash "text" (aref (gethash "content" result-obj) 0))))
+            (ng (gethash "error" response))
+            (ok (gethash "isError" result-obj))
+            (ok (search "Run lisp-check-parens with path=" text))
+            (ok (search "Next top-level form probably begins at line 4" text))))))))

@@ -8,21 +8,36 @@
                           #:cst-node-value
                           #:cst-node-start
                           #:cst-node-end)
+  (:import-from #:cl-mcp/src/cst
+                #:%skip-whitespace-and-comments
+                #:stray-right-parenthesis
+                #:*standard-readtable*)
   (:import-from #:cl-mcp/src/fs
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis
+                #:repair-line-differences
+                #:format-repair-lines
+                #:format-bracket-warning
+                #:opener-ambiguous-p
+                #:format-opener-caveat
+                #:format-relocation-note
+                #:scan-delimiters)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:rpc-error #:text-content
-                #:arg-validation-error #:json-bool)
+                #:arg-validation-error #:json-bool #:tool-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message
+                #:sanitize-condition-text
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
@@ -30,9 +45,13 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%resolve-named-readtable
+                #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
-                #:%locate-target-form)
+                #:%locate-target-form
+                #:%reader-level-failure-p
+                #:%detect-readtable-before-node
+                #:file-unparseable-error)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
 
@@ -56,6 +75,46 @@
            "example_operation_sequence" (vector "insert_after" "insert_after")
            "required_args"
            (vector "file_path" "form_type" "form_name" "operation" "content")))
+
+(define-condition content-unrepairable-error (error)
+  ((message :initarg :message :reader content-unrepairable-message))
+  (:report (lambda (c s) (write-string (content-unrepairable-message c) s)))
+  (:documentation "Signaled when CONTENT is unbalanced and parinfer cannot make it readable."))
+
+(defun %repair-warning (fixes &optional repaired nonstandard-rt)
+  "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string,
+or NIL when there are none. Added and dropped closing delimiters are summed
+from each fix's gross :added and :removed counts (not the net :delta, which
+hides a relocation such as \")(defun f () 1\" -> \"(defun f () 1)\") and
+reported separately; the count is never negative. When REPAIRED (the
+repaired content) still opens a [ or { that never closes, the warning ends
+with FORMAT-OPENER-CAVEAT -- the same sentence lisp-check-parens prints --
+naming the bracket's position and saying the ) fixes are wrong if it was
+meant as (. That is a standard-syntax verdict, so it is not given under a
+readtable that changes the syntax (NONSTANDARD-RT)."
+  (when fixes
+    (let* ((added (loop for fix in fixes sum (getf fix :added 0)))
+           (dropped (loop for fix in fixes sum (getf fix :removed 0)))
+           (scan (and repaired (not nonstandard-rt) (scan-delimiters repaired)))
+           (caveat (and scan (opener-ambiguous-p scan)
+                        (format-opener-caveat scan :action "edit"))))
+      (format nil "~{~A~^; ~}~@[. ~A~]"
+              (remove nil
+                      (list (when (plusp added)
+                              (format nil "~D closing delimiter~:P added by parinfer"
+                                      added))
+                            (when (plusp dropped)
+                              (format nil "~D extra closing delimiter~:P dropped by ~
+                                           parinfer"
+                                      dropped))))
+              caveat))))
+
+(defun %bracket-warning (text nonstandard-rt)
+  "Return the shared bracket warning (FORMAT-BRACKET-WARNING) for TEXT, or
+NIL under a readtable that changes the syntax (NONSTANDARD-RT), where the
+scan is not evidence."
+  (unless nonstandard-rt
+    (format-bracket-warning text :target "the content")))
 
 (defun %ensure-blank-separation (prefix between)
   "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
@@ -103,7 +162,9 @@ blank line. For EOF boundary use a single newline."
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns the validated (possibly repaired) content.
+using parinfer:apply-indent-mode. Returns four values: the validated
+(possibly repaired) content, a parinfer warning string or NIL, the repair
+line diff or NIL, and a bracket warning (FORMAT-BRACKET-WARNING) or NIL.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -113,7 +174,11 @@ it with a `;; removed' comment marker, and `insert_*' to place bare
 comments near a target form."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
-         (*readtable* (if custom-rt custom-rt (copy-readtable nil))))
+         (*readtable* (if custom-rt custom-rt (copy-readtable nil)))
+         ;; Standard-syntax verdicts are withheld only for a readtable that
+         ;; really changes the syntax; :standard (or a plain copy of it) must
+         ;; not become a loophole around the ] refusal.
+         (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
     (labels ((whitespace-char-p (ch)
                (member ch '(#\Space #\Tab #\Newline #\Return)))
              (comment-only-p (text)
@@ -150,11 +215,31 @@ comments near a target form."
                                 (setf saw-form t
                                       cursor next-pos)))
                    (error nil nil))))
+             (stray-close-check (text)
+               ;; The same structural evidence cst uses: after whitespace and
+               ;; comments, a ) where a form should start is a stray ) -- a
+               ;; delimiter failure by condition type, not by the reader's
+               ;; wording (SBCL's own unmatched-close error is a plain
+               ;; reader-error that %DELIMITER-FAILURE-P cannot recognise).
+               ;; An open #| comment reported by the skip is a delimiter
+               ;; failure too. Skipped when the readtable changes what )
+               ;; means.
+               (when (eq (get-macro-character #\) *readtable*)
+                         (get-macro-character #\) *standard-readtable*))
+                 (with-input-from-string (s text)
+                   (let ((open-comment (%skip-whitespace-and-comments s *readtable*)))
+                     (when open-comment
+                       (error open-comment))
+                     (when (eql (peek-char nil s nil :eof) #\))
+                       (error 'stray-right-parenthesis
+                              :stream s
+                              :message "Unmatched closing parenthesis character )."))))))
              (try-parse (text)
                (handler-case
                    (call-with-package-context
                     package-name
                     (lambda ()
+                      (stray-close-check text)
                       (multiple-value-bind (form pos)
                           (read-from-string text nil :eof)
                         (when (eq form :eof)
@@ -167,38 +252,99 @@ comments near a target form."
                                                       text :start pos)
                                      len)))
                           (when (< rest-start len)
-                            (if (rest-parses-as-complete-forms-p text rest-start)
-                                (error 'multiple-top-level-forms-error)
-                                (error
-                                 "content has trailing malformed characters after the first form"))))
+                            (cond
+                              ;; A trailing comment after the form is part
+                              ;; of the content, not malformed text.
+                              ((comment-only-p (subseq text rest-start)) nil)
+                              ((rest-parses-as-complete-forms-p text rest-start)
+                               (error 'multiple-top-level-forms-error))
+                              (t
+                               (error "content has trailing malformed characters ~
+                                       after the first form")))))
                         text))
                     :source-path source-path)
                  (error (e)
                    (values nil e)))))
       (when (comment-only-p content)
-        (return-from %validate-and-repair-content (values content nil)))
+        (return-from %validate-and-repair-content (values content nil nil nil)))
       (multiple-value-bind (result err)
           (try-parse content)
         (if result
-            (values result nil)
-            (let ((repaired (apply-indent-mode content)))
-              (multiple-value-bind (repaired-result repaired-err)
-                  (try-parse repaired)
-                (cond
-                  (repaired-result
-                   (log-event :info "lisp.edit.form" "auto-repair" "success"
-                              "original-error" (princ-to-string err))
-                   (let ((added-count (- (length repaired) (length content))))
-                     (values repaired-result
-                             (format nil "~D closing delimiter~:P ~
-                                          ~[were~;was~:;were~] added by parinfer"
-                                     added-count added-count))))
-                  ((and (typep err 'multiple-top-level-forms-error)
-                        (typep repaired-err 'multiple-top-level-forms-error))
-                   (error err))
-                  (t
-                   (error "content parse error: ~A (repair also failed: ~A)"
-                          err repaired-err))))))))))
+            (values result nil nil (%bracket-warning result nonstandard-rt))
+            (let ((diagnosis (diagnose-delimiters content)))
+              ;; Under a custom readtable the standard delimiter scan is not
+              ;; trustworthy (a reader macro may consume raw parentheses as
+              ;; data), so its verdicts are not used to refuse or explain;
+              ;; only the reader's own outcome counts then.
+              ;; An unmatched [ or { (EXPECTED "]" or "}") is never grounds
+              ;; for refusal: it may be a symbol character, in which case
+              ;; parinfer's output reads fine and is written as before.
+              ;; A repair rejected because it would change text inside a
+              ;; string or comment (:outside-code) is refused even for an
+              ;; ambiguous opener: what the tool would not suggest, it does
+              ;; not write.
+              (when (and (not nonstandard-rt)
+                         (not (getf diagnosis :ok))
+                         (getf diagnosis :repair-failed)
+                         (or (eq (getf diagnosis :repair-failed) :outside-code)
+                             (not (opener-ambiguous-p diagnosis))))
+                ;; Keep the reader's own error too: for an ambiguous [ or ]
+                ;; the scan may be a false positive, and the reader error
+                ;; (an unknown #? macro, say) is then the actionable part.
+                ;; Sanitized so no SBCL stream object reaches the client.
+                ;; When the reader stopped on something other than a
+                ;; delimiter (a disabled #., an unknown #?), the bracket may
+                ;; well be a symbol character: describe it, but do not
+                ;; instruct; the reader's own complaint is the actionable part.
+                (error 'content-unrepairable-error
+                       :message (format nil "~A (reader: ~A)"
+                                        (format-delimiter-diagnosis
+                                         diagnosis :target "content"
+                                                   :false-positive
+                                                   (%reader-level-failure-p err))
+                                        (sanitize-condition-text err))))
+              ;; Parinfer already ran inside DIAGNOSE-DELIMITERS when the
+              ;; scan found a delimiter problem; reuse its output. Only a
+              ;; balanced text that still fails to read runs it here.
+              (let ((repaired (or (getf diagnosis :repaired)
+                                  (apply-indent-mode content))))
+                (multiple-value-bind (repaired-result repaired-err)
+                    (try-parse repaired)
+                  (cond
+                    (repaired-result
+                     (log-event :info "lisp.edit.form" "auto-repair" "success"
+                                "original-error" (princ-to-string err))
+                     (let ((fixes (repair-line-differences content repaired)))
+                       (values repaired-result
+                               (%repair-warning fixes repaired-result nonstandard-rt)
+                               fixes
+                               (%bracket-warning repaired-result nonstandard-rt))))
+                    ((and (typep err 'multiple-top-level-forms-error)
+                          (typep repaired-err 'multiple-top-level-forms-error))
+                     (error err))
+                    ((and (not nonstandard-rt) (not (getf diagnosis :ok)))
+                     ;; Keep the reader error too: a paren problem often hides
+                     ;; a second, unrelated read error that the user still
+                     ;; needs -- unless the finding is an open string or
+                     ;; comment, which the reader's "end of input" would only
+                     ;; restate. A reader stopped elsewhere makes the
+                     ;; bracket verdict a finding, not an instruction.
+                     (error 'content-unrepairable-error
+                            :message
+                            (format nil "~A~@[ (repair also failed: ~A)~]"
+                                    (format-delimiter-diagnosis
+                                     diagnosis :target "content"
+                                               :false-positive
+                                               (%reader-level-failure-p repaired-err))
+                                    (and (not (member (getf diagnosis :kind)
+                                                      '("unclosed-string"
+                                                        "unclosed-block-comment")
+                                                      :test #'string=))
+                                         (sanitize-condition-text repaired-err)))))
+                    (t
+                     (error "content parse error: ~A (repair also failed: ~A)"
+                            (sanitize-condition-text err)
+                            (sanitize-condition-text repaired-err))))))))))))
 
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
@@ -333,6 +479,26 @@ dry-run summary show the edited form instead of the whole updated file.
          (%trim-outer-whitespace content)
          (ensure-trailing-newline content)))))
 
+(defun %repair-summary (warning fixes repaired-form &key include-form)
+  "Return the text appended to a success summary when parinfer repaired the
+content, or NIL when WARNING is NIL. Lists the changed lines and, when
+INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
+The relocation note (FORMAT-RELOCATION-NOTE: a closer inserted on a line
+whose next code line sits at the same indentation) is the one
+lisp-check-parens prints, so the two tools describe the same repair in the
+same words. The bracket-opener reminder is part of WARNING, built by
+%REPAIR-WARNING where the readtable is known."
+  (when warning
+    (with-output-to-string (s)
+      (format s "~%WARNING: ~A" warning)
+      (when fixes
+        (format s "~%Changed lines:~A" (format-repair-lines fixes)))
+      (let ((note (format-relocation-note fixes repaired-form)))
+        (when note
+          (format s "~%~A" note)))
+      (when include-form
+        (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form))))))
+
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
         (normalize-blank-lines t) readtable)
@@ -347,7 +513,13 @@ Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
-to use for parsing both the file and the new content."
+to use for parsing both the file and the new content.
+
+For non-delete operations without DRY-RUN, returns six values: the updated
+file text, the parinfer warning or NIL, whether the file changed, the repair
+line diff or NIL, the validated content that was spliced in, and a bracket
+warning (a ] or } found where ) was expected, in content that still reads)
+or NIL."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -367,7 +539,7 @@ to use for parsing both the file and the new content."
     (multiple-value-bind
         (abs rel original nodes target target-snippet _ file-package-name)
         (%locate-target-form file-path form-type form-name readtable)
-      (declare (ignore nodes _))
+      (declare (ignore _))
       (if (eq op-key :delete)
           ;; Delete path: no content validation needed
           (let* ((updated
@@ -394,9 +566,15 @@ to use for parsing both the file and the new content."
               (values updated nil t))
              (t (values updated nil nil))))
           ;; Non-delete path: validate and repair content
-          (multiple-value-bind (validated-content parinfer-warning)
-              (%validate-and-repair-content content readtable file-package-name
-                                            abs)
+          ;; Content is validated under the readtable in effect at the target:
+          ;; the caller's argument, or an (in-readtable ...) earlier in the
+          ;; file, as lisp-patch-form does.
+          (multiple-value-bind (validated-content parinfer-warning repair-fixes
+                                bracket-warning)
+              (%validate-and-repair-content
+               content
+               (or readtable (%detect-readtable-before-node nodes target))
+               file-package-name abs)
             (let* ((updated
                     (%apply-operation original target op-key validated-content
                                       normalize-blank-lines))
@@ -415,14 +593,22 @@ to use for parsing both the file and the new content."
                         (gethash "preview_form" result)
                         (%preview-form-text op-key validated-content
                                             normalize-blank-lines)
+                        ;; The untrimmed content the repair line numbers
+                        ;; refer to, for the relocation note in the summary.
+                        (gethash "validated_content" result) validated-content
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized)
                   (when parinfer-warning
-                    (setf (gethash "parinfer_warning" result) parinfer-warning))
+                    (setf (gethash "parinfer_warning" result) parinfer-warning
+                          (gethash "repair_fixes" result) repair-fixes))
+                  (when bracket-warning
+                    (setf (gethash "bracket_warning" result) bracket-warning))
                   result))
                (would-change (fs-write-file rel updated)
-                (values updated parinfer-warning t))
-               (t (values updated parinfer-warning nil)))))))))
+                (values updated parinfer-warning t repair-fixes validated-content
+                        bracket-warning))
+               (t (values updated parinfer-warning nil repair-fixes
+                          validated-content bracket-warning)))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
@@ -466,7 +652,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (error 'arg-validation-error :arg-name "content"
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
-        (multiple-value-bind (updated parinfer-warning changed-p)
+        (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
+                              repaired-form bracket-warning)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -478,17 +665,25 @@ is used instead of Eclector, which means comments are NOT preserved."))
           (if dry_run
               ;; The summary inlines only the edited FORM (preview_form), never
               ;; the whole updated file: "preview" holds the full file and is
-              ;; kept as a sibling JSON field for backward compatibility.
+              ;; kept as a sibling JSON field for backward compatibility. The
+              ;; relocation note is computed against the untrimmed content the
+              ;; repair line numbers refer to, not the trimmed preview form.
               (let* ((preview (gethash "preview" updated))
                      (preview-form (gethash "preview_form" updated))
                      (would-change (eq t (gethash "would_change" updated)))
                      (original-form (gethash "original" updated))
                      (pw (gethash "parinfer_warning" updated))
+                     (bw (gethash "bracket_warning" updated))
                      (summary
                       (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~
-                                   ~@[~%WARNING: ~A~]~@[~%~%--- original ---~%~A~]~
+                                   ~@[~A~]~@[~%WARNING: ~A~]~
+                                   ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
-                              operation form_type form_name file_path would-change pw
+                              operation form_type form_name file_path would-change
+                              (%repair-summary pw (gethash "repair_fixes" updated)
+                                               (or (gethash "validated_content" updated)
+                                                   preview-form))
+                              bw
                               (%truncate-snippet original-form)
                               (%truncate-snippet preview-form))))
                 (result id
@@ -502,24 +697,45 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "preview" preview
                                "preview_form" preview-form
                                "content" (text-content summary)
-                               (when pw
-                                 (list "parinfer_warning" pw)))))
+                               (append
+                                (when pw
+                                  (list "parinfer_warning" pw))
+                                (when bw
+                                  (list "bracket_warning" bw))))))
               (let ((summary
                      (cond
                        ((not changed-p)
-                        (format nil "No change to ~A ~A in ~A (content matches existing form)~@[~%WARNING: ~A~]"
-                                form_type form_name file_path parinfer-warning))
+                        (format nil
+                                "No change to ~A ~A in ~A (content matches existing form)~
+                                 ~@[~A~]~@[~%WARNING: ~A~]"
+                                form_type form_name file_path
+                                (%repair-summary parinfer-warning repair-fixes
+                                                 repaired-form :include-form t)
+                                bracket-warning))
                        (t
-                        (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~%WARNING: ~A~]"
-                                operation form_type form_name file_path (length updated) parinfer-warning)))))
+                        (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~A~]~
+                                     ~@[~%WARNING: ~A~]"
+                                operation form_type form_name file_path (length updated)
+                                (%repair-summary parinfer-warning repair-fixes
+                                                 repaired-form :include-form t)
+                                bracket-warning)))))
                 (result id
-                        (make-ht "path" file_path
-                                 "operation" operation
-                                 "form_type" form_type
-                                 "form_name" form_name
-                                 "would_change" (json-bool changed-p)
-                                 "bytes" (length updated)
-                                 "content" (text-content summary))))))
+                        (apply #'make-ht
+                               "path" file_path
+                               "operation" operation
+                               "form_type" form_type
+                               "form_name" form_name
+                               "would_change" (json-bool changed-p)
+                               "bytes" (length updated)
+                               "content" (text-content summary)
+                               (when bracket-warning
+                                 (list "bracket_warning" bracket-warning)))))))
+      (content-unrepairable-error (e)
+        (tool-error id (sanitize-for-json (princ-to-string e))
+                    :protocol-version (protocol-version state)))
+      (file-unparseable-error (e)
+        (tool-error id (sanitize-for-json (princ-to-string e))
+                    :protocol-version (protocol-version state)))
       (multiple-top-level-forms-error ()
         (if (and (protocol-version state)
                  (string>= (protocol-version state) "2025-11-25"))
