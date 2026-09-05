@@ -92,13 +92,20 @@ Returns a list of alists, each containing:
   "Convert clgrep results (list of alists) to a vector of hash tables.
 Deduplicates results by (file, form-start-byte): when a single form
 contains multiple pattern matches, the form appears once with a
-MATCH_LINES array listing all individual (line, match) pairs."
+MATCH_LINES array listing all individual (line, match) pairs.
+A result inside an unterminated form (the file does not parse, and the
+form swallowed the rest of it) is never grouped: that \"form\" is an
+artifact of the breakage, and folding the swallowed definitions into one
+entry would hide them from the text summary, which prints one line per
+entry. Each such result keeps its own entry and a one-element MATCH_LINES."
   (let ((groups (make-hash-table :test #'equal))
         (order nil))
     (dolist (result results)
       (let* ((file (cdr (assoc :file result)))
              (form-start-byte (cdr (assoc :form-start-byte result)))
-             (key (cons file form-start-byte)))
+             (key (if (cdr (assoc :unterminated result))
+                      (list file form-start-byte (cdr (assoc :line result)))
+                      (cons file form-start-byte))))
         (unless (gethash key groups)
           (push key order))
         (push result (gethash key groups))))
@@ -120,6 +127,29 @@ MATCH_LINES array listing all individual (line, match) pairs."
              representative))
          (nreverse order))))
 
+(defun %unparseable-notes (results)
+  "Return one note string per file in RESULTS that holds a match inside an
+unterminated form, in first-seen order. The note names the line where the
+unclosed form opens and says how the matches below it are attributed, so a
+caller can tell a swallowed definition from a real one and knows that a
+form_types filter will not find it. Files without such a match get no note:
+a broken file that matched nothing is not this search's problem."
+  (let ((seen (make-hash-table :test #'equal))
+        (notes nil))
+    (dolist (result results)
+      (when (cdr (assoc :unterminated result))
+        (let ((file (cdr (assoc :file result))))
+          (unless (gethash file seen)
+            (setf (gethash file seen) t)
+            (push (format nil "NOTE: ~A does not parse: a form opened at line ~D is never ~
+                               closed.~%  Matches at or below that line are listed ~
+                               individually; their form type and signature are those ~
+                               of the unclosed form, not of the definition they sit ~
+                               in. Run lisp-check-parens for the fix."
+                          file (cdr (assoc :form-start-line result)))
+                  notes)))))
+    (nreverse notes)))
+
 (define-tool "clgrep-search"
   :description "Perform semantic grep search for a pattern in Lisp files.
 Unlike regular grep, this tool understands Lisp structure and returns
@@ -130,6 +160,10 @@ Use this as the FIRST choice for code exploration before code-find/code-describe
 
 Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
 Use 'include_form: true' to get complete form text when needed.
+
+A file that does not parse (a form left open to the end of the file) is still
+searched: matches inside the unclosed form are listed one per line, attributed
+to that form, and a NOTE names the file and the line where it opens.
 
 Recommended workflow:
 1. clgrep-search to locate functions/usages across the project
@@ -161,19 +195,28 @@ dependency's sources can be searched the same way lisp-read-file can read them."
                          :form-types form-types
                          :limit limit
                          :include-form include-form))
-         (formatted (%format-clgrep-results results)))
-    (result id
-            (make-ht "content" (text-content
-                       (with-output-to-string (s)
-                         (format s "~D ~:[matches~;match~] for ~S~@[ in ~A~]:~%"
-                                 (length formatted) (= 1 (length formatted)) pattern path)
-                         (loop for match across formatted
-                               do (format s "  ~A:~A [~A] ~A~%"
-                                          (gethash "file" match)
-                                          (gethash "line" match)
-                                          (gethash "form-type" match)
-                                          (or (gethash "signature" match)
-                                              (gethash "form-name" match))))))
-                     "matches" formatted
-                     "count" (length formatted)
-                     "limited" (<= effective-limit (length results))))))
+         (formatted (%format-clgrep-results results))
+         (notes (%unparseable-notes results))
+         (payload
+          (make-ht "content" (text-content
+                              (with-output-to-string (s)
+                                (format s "~D ~:[matches~;match~] for ~S~@[ in ~A~]:~%"
+                                        (length formatted) (= 1 (length formatted))
+                                        pattern path)
+                                (loop for match across formatted
+                                      do (format s "  ~A:~A [~A] ~A~%"
+                                                 (gethash "file" match)
+                                                 (gethash "line" match)
+                                                 (gethash "form-type" match)
+                                                 (or (gethash "signature" match)
+                                                     (gethash "form-name" match))))
+                                ;; Notes go in the text: sibling JSON fields
+                                ;; are not rendered by most clients.
+                                (dolist (note notes)
+                                  (format s "~A~%" note))))
+                   "matches" formatted
+                   "count" (length formatted)
+                   "limited" (<= effective-limit (length results)))))
+    (when notes
+      (setf (gethash "notes" payload) (coerce notes 'vector)))
+    (result id payload)))
