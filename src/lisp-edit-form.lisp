@@ -72,22 +72,23 @@
   (:documentation "Signaled when CONTENT is unbalanced and parinfer cannot make it readable."))
 
 (defun %repair-warning (fixes)
-  "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string.
-Added and dropped closing delimiters are summed from each fix's gross
-:added and :removed counts (not the net :delta, which hides a relocation
-such as \")(defun f () 1\" -> \"(defun f () 1)\") and reported separately;
-the count is never negative."
-  (let ((added (loop for fix in fixes sum (getf fix :added 0)))
-        (dropped (loop for fix in fixes sum (getf fix :removed 0))))
-    (format nil "~{~A~^; ~}"
-            (remove nil
-                    (list (when (plusp added)
-                            (format nil "~D closing delimiter~:P added by parinfer" added))
-                          (when (plusp dropped)
-                            (format nil "~D extra closing delimiter~:P dropped by parinfer"
-                                    dropped))
-                          (when (and (zerop added) (zerop dropped))
-                            "content repaired by parinfer"))))))
+  "Describe FIXES (from REPAIR-LINE-DIFFERENCES) as a parinfer warning string,
+or NIL when there are none. Added and dropped closing delimiters are summed
+from each fix's gross :added and :removed counts (not the net :delta, which
+hides a relocation such as \")(defun f () 1\" -> \"(defun f () 1)\") and
+reported separately; the count is never negative."
+  (when fixes
+    (let ((added (loop for fix in fixes sum (getf fix :added 0)))
+          (dropped (loop for fix in fixes sum (getf fix :removed 0))))
+      (format nil "~{~A~^; ~}"
+              (remove nil
+                      (list (when (plusp added)
+                              (format nil "~D closing delimiter~:P added by parinfer"
+                                      added))
+                            (when (plusp dropped)
+                              (format nil "~D extra closing delimiter~:P dropped by ~
+                                           parinfer"
+                                      dropped))))))))
 
 (defun %ensure-blank-separation (prefix between)
   "Return BETWEEN extended so PREFIX+BETWEEN ends with at least two newlines.
@@ -411,14 +412,30 @@ dry-run summary show the edited form instead of the whole updated file.
 (defun %repair-summary (warning fixes repaired-form &key include-form)
   "Return the text appended to a success summary when parinfer repaired the
 content, or NIL when WARNING is NIL. Lists the changed lines and, when
-INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET)."
+INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
+When a closer was inserted on a line before the last code line of
+REPAIRED-FORM (a mid-form insertion rather than an append at the end), the
+lines below it have left the form it closed: the summary says so, because
+the changed-lines list alone does not make that visible."
   (when warning
-    (with-output-to-string (s)
-      (format s "~%WARNING: ~A" warning)
-      (when fixes
-        (format s "~%Changed lines:~A" (format-repair-lines fixes)))
-      (when include-form
-        (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form))))))
+    (let* ((trimmed (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                       repaired-form))
+           (last-line (1+ (count #\Newline trimmed)))
+           (relocations (loop for fix in fixes
+                              when (and (plusp (getf fix :added 0))
+                                        (< (getf fix :line) last-line))
+                                collect (getf fix :line))))
+      (with-output-to-string (s)
+        (format s "~%WARNING: ~A" warning)
+        (when fixes
+          (format s "~%Changed lines:~A" (format-repair-lines fixes)))
+        (when relocations
+          (format s "~%NOTE: parinfer closed a form on line~P ~{~D~^, ~}, so the lines ~
+                     below ~:[it~;them~] are no longer inside that form; verify the ~
+                     nesting (indentation decides where a form ends)."
+                  (length relocations) relocations (cdr relocations)))
+        (when include-form
+          (format s "~%~%--- repaired form ---~%~A" (%truncate-snippet repaired-form)))))))
 
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run

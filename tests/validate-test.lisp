@@ -161,7 +161,9 @@
                (let ((res (lisp-check-parens :path (namestring abs))))
                  (ok (string= (%kind res) "unclosed-block-comment"))
                  (ok (null (guard-overwritable-p)))
-                 (ok (string= (gethash "next_tool" res) "lisp-edit-form"))))
+                 (ok (string= (gethash "next_tool" res) "lisp-edit-form"))
+                 (ok (search "false positive" (gethash "diagnosis_text" res))
+                     "the text says the editing tools' reader parses the file")))
              (testing "a plain missing ) agrees in the other direction"
                (write-text (format nil "(defun f ()~%  (list 1 2~%"))
                (let ((res (lisp-check-parens :path (namestring abs))))

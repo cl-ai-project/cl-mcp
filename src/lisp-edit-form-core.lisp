@@ -48,6 +48,7 @@
            #:%detect-readtable-before-node
            #:%whitespace-char-p
            #:%locate-target-form
+           #:%file-unparseable-by-edit-tools-p
            #:file-unparseable-error
            #:file-unparseable-path
            #:file-unparseable-diagnosis
@@ -496,25 +497,35 @@ delimiter failure per %DELIMITER-FAILURE-P. Any other reader failure -- an
 unknown dispatch macro such as #? that may even consume delimiter-looking
 characters as data -- is not evidence, since the tools' readtable parameter
 may make the file editable, so the overwrite guard must stay in place.
+The second value says why: :DELIMITER (the primary value is T), :PARSED (the
+file parses cleanly, so a scan verdict against it is a false positive),
+:READER-LEVEL (it fails, but not on a delimiter), or :TRUNCATED.
 TEXT, when supplied by the caller (fs-write-file has already read the file),
 avoids a second read; otherwise the file is read here, and a read truncated
 at the fs read cap returns NIL because a cut-off prefix of a valid file
 would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file
-permits overwriting only files that are broken this way. (On the lenient
-CL-reader pass -- after an IN-READTABLE switch or under a readtable
+permits overwriting only files that are broken this way, and called directly
+by lisp-check-parens so its next-step hint rests on the same verdict. (On the
+lenient CL-reader pass -- after an IN-READTABLE switch or under a readtable
 argument -- a file whose breakage lies after the target form is still
 partially editable by lisp-edit-form, which only reports it when the target
 is not found; the guard classifies such a file by the whole-file parse.)"
   (multiple-value-bind (source truncated)
       (if text (values text nil) (fs-read-file pn))
-    (and (not truncated)
-         (handler-case
-             (multiple-value-bind (nodes swallowed)
-                 (parse-top-level-forms source :source-path pn)
-               (declare (ignore nodes))
-               (and swallowed (%delimiter-failure-p swallowed) t))
-           (error (e) (%delimiter-failure-p e))))))
+    (if truncated
+        (values nil :truncated)
+        (handler-case
+            (multiple-value-bind (nodes swallowed)
+                (parse-top-level-forms source :source-path pn)
+              (declare (ignore nodes))
+              (cond ((null swallowed) (values nil :parsed))
+                    ((%delimiter-failure-p swallowed) (values t :delimiter))
+                    (t (values nil :reader-level))))
+          (error (e)
+            (if (%delimiter-failure-p e)
+                (values t :delimiter)
+                (values nil :reader-level)))))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.

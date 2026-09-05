@@ -982,6 +982,55 @@ running as root), THUNK is skipped instead."
               "the framing sentence appears once, not inside the reader text too")
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-patch-form-trailing-content-with-bracket-attributes-nothing-to-the-reader
+  (testing "a trailing-content failure on an ambiguous bracket keeps cl-mcp's words as its own"
+    (with-temp-file "tests/tmp/patch-bracket-trailing.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (let ((err-msg nil))
+          (handler-case
+              (lisp-patch-form :file-path path
+                               :form-type "defun"
+                               :form-name "t1"
+                               :old-text "(list x)"
+                               :new-text "(list x]))")
+            (error (e) (setf err-msg (princ-to-string e))))
+          (ok err-msg "the patch must fail")
+          (ok (null (search "The reader itself reported" err-msg))
+              "no sentence of cl-mcp's own is attributed to the reader")
+          (ok (null (search "disk.." err-msg)) "the closing sentence appears once")
+          (ok (search "No changes were written to disk." err-msg)))))))
+
+(deftest lisp-patch-form-warns-about-a-bracket-that-still-reads
+  (testing "a ] typed for ) that leaves the form readable is written but flagged"
+    (with-temp-file "tests/tmp/patch-bracket-reads.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list x])")
+          (declare (ignore updated))
+          (ok changed-p "the form reads, so the patch is applied")
+          (ok (search "(list x])" (fs-read-file path)))
+          (ok (and warning (search "\"]\"" warning))
+              "the warning names the bracket the scan tripped over")))))
+  (testing "a clean patch carries no warning"
+    (with-temp-file "tests/tmp/patch-bracket-clean.lisp"
+        (format nil "(defun t1 (x)~%  (list x))~%")
+      (lambda (path)
+        (multiple-value-bind (updated changed-p warning)
+            (lisp-patch-form :file-path path
+                             :form-type "defun"
+                             :form-name "t1"
+                             :old-text "(list x)"
+                             :new-text "(list x x)")
+          (declare (ignore updated))
+          (ok changed-p)
+          (ng warning))))))
+
 (deftest lisp-patch-form-depth-reason-compares-block-comment-depth
   (testing "boundaries inside block comments at different nesting depths do not match"
     (with-temp-file "tests/tmp/patch-boundary-block-depth.lisp"

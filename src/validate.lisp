@@ -3,9 +3,13 @@
 (defpackage #:cl-mcp/src/validate
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
-                #:*lisp-file-unparseable-hook*
                 #:fs-read-file
                 #:fs-resolve-read-path)
+  ;; The edit tools' parser itself, not the hook fs installs at load time:
+  ;; a direct dependency so the verdict is there in any image that has this
+  ;; file, not only when lisp-edit-form-core happened to load first.
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%file-unparseable-by-edit-tools-p)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
@@ -249,17 +253,26 @@ MCP payload)."
                   ;; kind whose guidance text explains the number.
                   (when (and next-top-level-line (string= kind "unclosed"))
                     (setf (gethash "next_top_level_line" h) next-top-level-line)))))
-             ;; The overwrite hint is promised only on the verdict the
-             ;; fs-write-file guard itself will give (the edit tools' parser,
-             ;; via the hook), never on the scan alone, and never for a window.
-             (%maybe-add-lisp-edit-guidance
-              h kind
-              :overwritable (and path (not partial)
-                                 *lisp-file-unparseable-hook*
-                                 (ignore-errors
-                                  (funcall *lisp-file-unparseable-hook*
-                                           (fs-resolve-read-path path) text))
-                                 t)))
+             ;; The next-step hint rests on the verdict the fs-write-file
+             ;; guard itself gives (the edit tools' parser), never on the
+             ;; scan alone, and never for a window. A file that parser
+             ;; accepts makes the scan's verdict a false positive (a token
+             ;; such as foo#|bar| or a[b), and the text says so.
+             (multiple-value-bind (overwritable verdict)
+                 (and path (not partial)
+                      (ignore-errors
+                       (%file-unparseable-by-edit-tools-p
+                        (fs-resolve-read-path path) text)))
+               (when (eq verdict :parsed)
+                 (setf (gethash "diagnosis_text" h)
+                       (format nil "~A~%The editing tools' reader parses this file, ~
+                                    so this is most likely a false positive of the ~
+                                    standard-syntax scan (a token such as foo#|bar| ~
+                                    or a[b reads as one symbol); lisp-edit-form can ~
+                                    still edit it."
+                               (gethash "diagnosis_text" h))))
+               (%maybe-add-lisp-edit-guidance h kind
+                                              :overwritable (and overwritable t))))
             (reader-info
              ;; Parens OK but reader error detected
              (setf (gethash "ok" h) nil

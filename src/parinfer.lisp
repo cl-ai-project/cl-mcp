@@ -255,6 +255,7 @@ ends in a ; comment they go before the comment."
           (push processed processed-lines)
           (push (cond ((not (and (state-code-seen state)
                                  (not (state-in-string state))
+                                 (not (state-in-symbol state))
                                  (zerop (state-block-depth state))))
                        nil)
                       ;; A trailing ; comment: closers go before it. Its text

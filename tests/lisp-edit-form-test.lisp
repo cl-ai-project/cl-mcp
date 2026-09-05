@@ -1597,6 +1597,25 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "(list x)) ; done" (fs-read-file path))
               "the ) is inserted before the comment, so the form reads"))))))
 
+(deftest lisp-edit-form-summary-flags-a-relocating-repair
+  (testing "a closer inserted before the last code line is called out in the summary"
+    ;; Indentation puts (g x) and (h x) outside the when; parinfer closes the
+    ;; when on line 2, which the changed-lines list alone would not make plain.
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (when x" :repaired "  (when x)"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun t1 (x)~%  (when x)~%  (g x)~%  (h x))"))))
+      (ok (search "NOTE: parinfer closed a form on line 2" summary))
+      (ok (search "no longer inside that form" summary))))
+  (testing "an append on the last line is not a relocation"
+    (let ((summary (cl-mcp/src/lisp-edit-form::%repair-summary
+                    "1 closing delimiter added by parinfer"
+                    '((:line 2 :original "  (list 1)" :repaired "  (list 1))"
+                       :delta 1 :added 1 :removed 0))
+                    (format nil "(defun t1 ()~%  (list 1))~%"))))
+      (ng (search "NOTE:" summary)))))
+
 (deftest lisp-edit-form-refusal-hides-reader-internals
   (testing "the reader error kept in a refusal carries no SBCL stream object"
     (with-temp-file "tests/tmp/edit-form-refusal-sanitized.lisp"

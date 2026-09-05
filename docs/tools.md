@@ -243,6 +243,10 @@ Notes:
 - Uses the same read allow-list as `fs-read-file`. Input over 2 MB, or a file
   read that `fs-read-file` truncated at its 1 MB cap, is reported as
   `kind: too-large` rather than diagnosed from a prefix.
+- When a `path` fails the scan, the file is also parsed with the editing tools'
+  reader (`*read-eval*` off; an in-file `in-readtable` is honoured, so its
+  reader macros run in the server process, as they do for `lisp-read-file`)
+  to decide the next step and to flag a scan false positive.
 - A windowed read (`offset` > 0, or `limit` that the file fills) is a prefix
   too: `kind` and `position` are reported, but no `likely_fixes`,
   `next_top_level_line` or diagnosis text, because a valid file's slice looks
@@ -335,6 +339,11 @@ Output:
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content
 - `delta` (integer, present only when `would_change` is true): character count difference (`new_text` length minus `old_text` length)
+- `bracket_warning` (string, optional): set when the patched form reads but its
+  delimiter scan stops at a `]` or `}` where `)` was expected (in standard
+  syntax the bracket is part of a symbol, so a `)` typo survives silently); the
+  patch is applied as asked, and the summary repeats the warning. Also present
+  in dry-run output.
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):

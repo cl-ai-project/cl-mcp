@@ -163,24 +163,27 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
 (defun %diagnosed-reason (form-text fallback &optional reader-text)
   "Return the patch failure reason for FORM-TEXT. When the delimiter scan
 finds the breakage, the shared diagnosis is used; otherwise FALLBACK, the
-complete message built from the reader's failure. A mismatch that rests on a
-] or } (see BRACKET-AMBIGUOUS-P) may be a false positive, so READER-TEXT --
-the reader's own words alone, without the sentence FALLBACK wraps them in --
-is kept alongside the diagnosis instead of discarded."
+complete message built from the failure. A mismatch that rests on a ] or }
+(see BRACKET-AMBIGUOUS-P) may be a false positive, so READER-TEXT -- the
+reader's own words alone, when the caller has them -- is kept alongside the
+diagnosis instead of discarded; without READER-TEXT nothing is attributed to
+the reader."
   (let ((diagnosis (diagnose-delimiters form-text)))
     (if (getf diagnosis :ok)
         fallback
         (format nil "patch operation produced invalid Lisp (line numbers below are ~
                      within the patched form). ~A~
-                     ~:[ No changes were written to disk.~
-                     ~;~%The reader itself reported: ~A. No changes were written to disk.~]"
+                     ~@[~%The reader itself reported: ~A.~] ~
+                     No changes were written to disk."
                 (format-delimiter-diagnosis diagnosis :target "the patched form")
-                (bracket-ambiguous-p diagnosis)
-                (or reader-text fallback)))))
+                (and (bracket-ambiguous-p diagnosis) reader-text)))))
 
 (defun %validate-form-parseable (form-text &key readtable-designator
                                              package-name source-path
-                                             depth-reason)
+                                             depth-reason
+                                             (nonstandard-rt
+                                              (%nonstandard-readtable-p
+                                               readtable-designator)))
   "Validate that FORM-TEXT parses as a single complete Lisp form.
 Does NOT attempt parinfer repair. Signals PATCH-OPERATION-ERROR, carrying a
 delimiter diagnosis when one applies, if the text does not parse correctly.
@@ -203,7 +206,7 @@ parentheses as data), so the reader's own failure is reported."
     (flet ((diagnosed (fallback &optional reader-text)
              ;; A readtable that is standard in all but name keeps the
              ;; standard diagnosis; only a syntax change withholds it.
-             (if (%nonstandard-readtable-p readtable-designator)
+             (if nonstandard-rt
                  fallback
                  (%diagnosed-reason form-text fallback reader-text)))
            (depth-message ()
@@ -261,7 +264,12 @@ patched form really does fail to parse.
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
-to use for parsing the file."
+to use for parsing the file.
+
+Returns three values: the updated file text, whether the file changed, and a
+bracket warning or NIL. The warning is set when the patched form reads but
+its delimiter scan stops at a ] or } (a possible ) typo that standard syntax
+silently accepts as part of a symbol), so the caller can check it."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name))
     (error "file_path, form_type, and form_name must be strings"))
   (unless (and (stringp old-text) (stringp new-text))
@@ -280,12 +288,15 @@ to use for parsing the file."
       (let* ((would-change (not (string= original updated)))
              (readtable-designator
                (or readtable (%detect-readtable-before-node nodes target)))
+             ;; Computed once: the readtable comparison probes 256 characters.
+             (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
              ;; Counted in the form's lexical context: a ")" inside a string
              ;; or comment is not code and must not produce a depth message.
-             ;; Under a custom readtable the standard lexical rules cannot be
-             ;; trusted (a reader macro may consume raw parentheses as data),
-             ;; so no depth message is offered at all; the reader's own
-             ;; failure is reported through the normal diagnosis path.
+             ;; Under a readtable that changes the syntax the standard lexical
+             ;; rules cannot be trusted (a reader macro may consume raw
+             ;; parentheses as data), so no depth message is offered at all;
+             ;; the reader's own failure is reported through the normal
+             ;; diagnosis path.
              ;; A ] or } typed for ) changes the net count too, but "add 1 )"
              ;; would then write code that reads (as a symbol ending in ]);
              ;; let the bracket diagnosis speak instead.
@@ -293,7 +304,7 @@ to use for parsing the file."
              ;; has failed to parse, so a successful patch pays nothing.
              (depth-reason
                (lambda ()
-                 (and (not (%nonstandard-readtable-p readtable-designator))
+                 (and (not nonstandard-rt)
                       (not (%bracket-mismatch-p modified-form))
                       (%check-depth-balance form-text modified-form
                                             match-pos old-text new-text)))))
@@ -303,27 +314,45 @@ to use for parsing the file."
            :readtable-designator readtable-designator
            :package-name file-package-name
            :source-path abs
-           :depth-reason depth-reason))
-        (log-event :debug "lisp.patch.form"
-                   "path" (namestring abs)
-                   "form_type" form-type
-                   "form_name" form-name
-                   "dry_run" dry-run
-                   "would_change" would-change)
-        (cond
-          (dry-run
-           (let ((result (make-hash-table :test #'equal)))
-             (setf (gethash "would_change" result) would-change
-                   (gethash "original" result) target-snippet
-                   (gethash "preview" result) modified-form
-                   (gethash "file_path" result) (namestring abs)
-                   (gethash "operation" result) "patch")
-             result))
-          (would-change
-           (fs-write-file rel updated)
-           (values updated t))
-          (t
-           (values updated nil)))))))
+           :depth-reason depth-reason
+           :nonstandard-rt nonstandard-rt))
+        ;; The form reads, but a ] or } where ) was meant reads too (as part
+        ;; of a symbol). Written as asked -- the caller may mean it -- but
+        ;; flagged, since silently accepting it is how such typos survive.
+        (let ((bracket-warning
+                (and would-change
+                     (not nonstandard-rt)
+                     (%bracket-mismatch-p modified-form)
+                     (let ((scan (scan-delimiters modified-form)))
+                       (format nil "the patched form reads, but its delimiter scan ~
+                                    finds ~S where ~S was expected (line ~D, column ~D ~
+                                    within the form); in standard syntax that ~
+                                    character is part of a symbol name, so check ~
+                                    that it is what you meant."
+                               (getf scan :found) (getf scan :expected)
+                               (getf scan :line) (getf scan :column))))))
+          (log-event :debug "lisp.patch.form"
+                     "path" (namestring abs)
+                     "form_type" form-type
+                     "form_name" form-name
+                     "dry_run" dry-run
+                     "would_change" would-change)
+          (cond
+            (dry-run
+             (let ((result (make-hash-table :test #'equal)))
+               (setf (gethash "would_change" result) would-change
+                     (gethash "original" result) target-snippet
+                     (gethash "preview" result) modified-form
+                     (gethash "file_path" result) (namestring abs)
+                     (gethash "operation" result) "patch")
+               (when bracket-warning
+                 (setf (gethash "bracket_warning" result) bracket-warning))
+               result))
+            (would-change
+             (fs-write-file rel updated)
+             (values updated t bracket-warning))
+            (t
+             (values updated nil nil))))))))
 
 (define-tool "lisp-patch-form"
   :description "Scoped text replacement within a matched top-level Lisp form.
@@ -366,7 +395,7 @@ is used instead of Eclector, which means comments are NOT preserved."))
              (error 'arg-validation-error :arg-name "readtable"
                     :message (format nil "~A" e))))))
     (handler-case
-        (multiple-value-bind (updated changed-p)
+        (multiple-value-bind (updated changed-p bracket-warning)
             (lisp-patch-form :file-path file_path
                              :form-type form_type
                              :form-name form_name
@@ -383,21 +412,27 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                       form_type form_name file_path would-change
                                       original-form preview)))
                 (result id
-                        (make-ht "path" file_path
-                                 "operation" "patch"
-                                 "form_type" form_type
-                                 "form_name" form_name
-                                 "would_change" (json-bool would-change)
-                                 "original" original-form
-                                 "preview" preview
-                                 "content" (text-content summary))))
+                        (apply #'make-ht
+                               "path" file_path
+                               "operation" "patch"
+                               "form_type" form_type
+                               "form_name" form_name
+                               "would_change" (json-bool would-change)
+                               "original" original-form
+                               "preview" preview
+                               "content" (text-content summary)
+                               (let ((warning (gethash "bracket_warning" updated)))
+                                 (when warning
+                                   (list "bracket_warning" warning))))))
               (let ((summary
                      (if (not changed-p)
                          (format nil "No change to ~A ~A in ~A (old_text already matches new_text)"
                                  form_type form_name file_path)
-                         (format nil "Applied patch to ~A ~A in ~A (~D chars → ~D chars)"
+                         (format nil "Applied patch to ~A ~A in ~A (~D chars → ~D chars)~
+                                      ~@[~%WARNING: ~A~]"
                                  form_type form_name file_path
-                                 (length old_text) (length new_text)))))
+                                 (length old_text) (length new_text)
+                                 bracket-warning))))
                 (result id
                         (apply #'make-ht
                                "path" file_path
@@ -406,8 +441,11 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                "would_change" (json-bool changed-p)
                                "bytes" (length updated)
                                "content" (text-content summary)
-                               (when changed-p
-                                 (list "delta" (- (length new_text) (length old_text)))))))))
+                               (append
+                                (when changed-p
+                                  (list "delta" (- (length new_text) (length old_text))))
+                                (when bracket-warning
+                                  (list "bracket_warning" bracket-warning))))))))
       ;; CLAUSE ORDER IS LOAD-BEARING. PATCH-OPERATION-ERROR and
       ;; ARG-VALIDATION-ERROR are both subtypes of ERROR, so both must stay
       ;; ahead of the generic clause; reordering silently changes the response
