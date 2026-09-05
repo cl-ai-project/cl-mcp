@@ -151,6 +151,15 @@
     (ok (eq (lexical-state-at "(a #\\))" 4) :pending) "# at the limit")
     (ok (eq (lexical-state-at "(a #\\))" 6) :code) "#\\) consumed inside the range")))
 
+(deftest lexical-state-at-stops-before-a-cut-off-character-literal
+  (testing "a #\\ whose literal character lies past the scan limit is pending"
+    ;; characters: ( a space # \ ) b  -- the # is index 3, the literal ) is index 5
+    (ok (eq (lexical-state-at "(a #\\)b" 5) :pending) "#\\ at the limit")
+    (ok (eq (lexical-state-at "(a #\\)b" 6) :code) "#\\) consumed inside the range")
+    (multiple-value-bind (opens closes) (count-delimiter-depth "(a #\\)b" :end 5)
+      (ok (= opens 1) "the #\\ did not swallow anything")
+      (ok (= closes 0)))))
+
 (deftest scan-delimiters-handles-nested-block-comments
   (testing "a nested #| ... |# inside a block comment does not end it early"
     (ok (getf (scan-delimiters "(a #| outer #| inner |# ( |# b)") :ok)

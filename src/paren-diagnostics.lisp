@@ -285,14 +285,17 @@ parenthesis inside one is still reported as code."
                  ((and (char= ch #\#) next (char= next #\|))
                   (incf block-depth) (incf idx) (incf col))
                  ((and (char= ch #\#) next (char= next #\\))
-                  ;; #\x or #\Name: skip the backslash and the literal itself.
-                  (let ((skip 1))
-                    (when (< (+ idx 2) (length text))
-                      (incf skip)
-                      (when (alpha-char-p (char text (+ idx 2)))
-                        (loop for k from (+ idx 3) below (length text)
-                              while (alpha-char-p (char text k))
-                              do (incf skip))))
+                  ;; #\x or #\Name: skip the backslash and the literal itself,
+                  ;; but never past END -- a literal cut off by the scan limit
+                  ;; is reported as pending, like a lone \ or # would be.
+                  (when (>= (+ idx 2) len)
+                    (setf pending t)
+                    (return))
+                  (let ((skip 2))
+                    (when (alpha-char-p (char text (+ idx 2)))
+                      (loop for k from (+ idx 3) below len
+                            while (alpha-char-p (char text k))
+                            do (incf skip)))
                     (incf idx skip)
                     (incf col skip)))
                  (t (funcall function ch idx line col)))

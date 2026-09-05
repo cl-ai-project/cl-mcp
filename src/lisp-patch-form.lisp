@@ -232,16 +232,22 @@ to use for parsing the file."
     (declare (ignore _))
     (multiple-value-bind (updated modified-form form-text match-pos)
         (%apply-patch-operation original target old-text new-text)
-      (let ((would-change (not (string= original updated)))
-            ;; Counted in the form's lexical context: a ")" inside a string
-            ;; or comment is not code and must not produce a depth message.
-            (depth-reason (%check-depth-balance form-text modified-form
-                                                match-pos old-text new-text)))
+      (let* ((would-change (not (string= original updated)))
+             (readtable-designator
+               (or readtable (%detect-readtable-before-node nodes target)))
+             ;; Counted in the form's lexical context: a ")" inside a string
+             ;; or comment is not code and must not produce a depth message.
+             ;; Under a custom readtable the standard lexical rules cannot be
+             ;; trusted (a reader macro may consume raw parentheses as data),
+             ;; so no depth message is offered at all; the reader's own
+             ;; failure is reported through the normal diagnosis path.
+             (depth-reason (and (null readtable-designator)
+                                (%check-depth-balance form-text modified-form
+                                                      match-pos old-text new-text))))
         (when would-change
           (%validate-form-parseable
            modified-form
-           :readtable-designator (or readtable
-                                     (%detect-readtable-before-node nodes target))
+           :readtable-designator readtable-designator
            :package-name file-package-name
            :source-path abs
            :depth-reason depth-reason))
