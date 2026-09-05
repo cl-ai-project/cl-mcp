@@ -167,7 +167,8 @@ Returns T on success."
                  :test #'string=))))
 
 (defvar *lisp-file-unparseable-hook* nil
-  "Predicate of two arguments (an absolute pathname and the file's text) that
+  "Predicate of two arguments (an absolute pathname and the file's text, which
+%LISP-FILE-UNPARSEABLE-P has read) that
 returns T when the structural editing tools cannot parse that Lisp file in a
 way no readtable can fix. The fs-write-file overwrite guard consults it so
 that overwriting is permitted exactly when lisp-edit-form and

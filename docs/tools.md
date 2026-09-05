@@ -128,9 +128,8 @@ readtable could fix; a file that parses, a truncated read, or an unreadable
 file is still refused. The intended recovery loop is `lisp-check-parens` →
 `fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
 project root, and the guidance the tools print gives it in that form. The
-plain refusal (no flag)
-carries `allow_unparseable_overwrite_available: true` in its error data so a
-client can discover the opt-in.
+plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
+in its error data so a client can discover the opt-in.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -227,6 +226,10 @@ Output:
   inferred.
 - for `unclosed`: `next_top_level_line`, the line of the first column-0 `(`
   seen while the form was still open, when there is one.
+- `false_positive` (`true`, present only then): the editing tools' reader
+  accepts the input (a `path` or inline `code`), so the scan's finding is most
+  likely a false positive (`a]`, `foo#|bar|`, a reader macro); no
+  `likely_fixes` or instruction is attached in that case.
 - The summary text repeats the diagnosis in prose: the unclosed form's line and
   head, a `Likely fix, inferred from indentation:` block, and the next top-level
   form hint.

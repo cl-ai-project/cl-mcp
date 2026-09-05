@@ -610,6 +610,17 @@ Rove で TDD 順(失敗テストを先に書く)で進める。
   `lisp-edit-form` で編集でき、壊れた末尾だけ上書き経路が必要」とする
   (`%file-unparseable-by-edit-tools-p` の第 3 値、`file-unparseable-error` の
   `editable-prefix`)。
+- **インライン `code` も偽陽性判定する**: `path` なしの `code` でもスキャンが失敗
+  したら編集ツールのリーダー(`parse-top-level-forms`)で読み、受理されれば
+  ファイルと同じ偽陽性扱い(指示なし、`likely_fixes` なし)。§10 の「インライン
+  `code` では従来の案内を残す」は `next_tool` の話であって診断文には及ばない。
+  偽陽性は `false_positive: true` としてペイロードにも載せ、文面を読まない
+  クライアントにも伝わるようにする。
+- **`lisp-edit-form` の拒否文面とリーダーの失敗理由**: リーダーが区切り記号以外
+  (`#.` や未知の `#?`)で止まった場合、`]` の指摘は所見だけにして
+  「Replace it with」を付けない(`format-delimiter-diagnosis` の
+  `false-positive`)。未終端の文字列・ブロックコメントには「repair also
+  failed」の付記を出さない。
 - **`file-unparseable-error` の非回復分岐**: スキャンが区切り記号の問題を見つけて
   いてもリーダーが別の理由で止まった場合、診断とリーダーの苦情の両方を示し、
   「区切り記号の問題ではない」と診断を否定する文は使わない。

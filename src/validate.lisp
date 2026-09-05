@@ -81,6 +81,21 @@ sent to the overwrite path."
          (ignore-errors (uiop:subpathp (fs-resolve-read-path path) root))
          t)))
 
+(defun %code-verdict (text)
+  "Return :PARSED when the editing tools' reader accepts inline TEXT (so a
+scan verdict against it is a false positive), else :READER-LEVEL. The same
+question %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P answers for a file, asked of a
+snippet: *read-eval* stays off and unknown packages are stubbed, as in the
+edit tools."
+  (multiple-value-bind (nodes swallowed)
+      (ignore-errors (cl-mcp/src/cst:parse-top-level-forms text))
+    (declare (ignore nodes))
+    ;; IGNORE-ERRORS returns the condition as its second value on failure,
+    ;; and PARSE-TOP-LEVEL-FORMS returns a swallowed error there on success
+    ;; of its lenient pass: either way a non-NIL second value means "did not
+    ;; read cleanly".
+    (if swallowed :reader-level :parsed)))
+
 (defun %truncate-message (condition)
   "Extract CONDITION's message for the client: SBCL stream representations
 and the trailing \"Stream:\" section are removed (SANITIZE-ERROR-MESSAGE),
@@ -258,12 +273,20 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
              ;; computed before any text, because a file that parser accepts
              ;; must not receive a likely fix or an instruction at all.
              (multiple-value-bind (overwritable verdict editable-prefix)
-                 (and path (not partial)
-                      (ignore-errors
-                       (%file-unparseable-by-edit-tools-p
-                        (fs-resolve-read-path path) text)))
+                 (cond ((and path (not partial))
+                        (ignore-errors
+                         (%file-unparseable-by-edit-tools-p
+                          (fs-resolve-read-path path) text)))
+                       ;; Inline code gets the same reader check: a snippet
+                       ;; the editing reader accepts (a] or foo#|bar| as
+                       ;; symbols) must not be told to change anything.
+                       ((null path) (values nil (%code-verdict text) nil)))
                (let ((false-positive (eq verdict :parsed))
                      (overwrite-hint (and overwritable (%under-project-root-p path))))
+                 (when false-positive
+                   ;; Marked in the payload too, for a client that reads
+                   ;; kind/next_tool and never the text.
+                   (setf (gethash "false_positive" h) t))
                  ;; The summary's next-step sentence, built here where the
                  ;; parser's verdict and the project root are known: the
                  ;; path is given relative to the root because that is the
@@ -462,7 +485,9 @@ sent to the fs-write-file overwrite path."
               (when omitted
                 (setf (gethash "likely_fixes_omitted" payload) omitted))
               (when next-line
-                (setf (gethash "next_top_level_line" payload) next-line)))
+                (setf (gethash "next_top_level_line" payload) next-line))
+              (when (gethash "false_positive" check-result)
+                (setf (gethash "false_positive" payload) t)))
             (result id payload)))
       (error (e)
         (result id (make-ht "content" (text-content (format nil "Error: ~A" e))

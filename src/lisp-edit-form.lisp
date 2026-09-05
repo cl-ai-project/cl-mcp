@@ -41,6 +41,7 @@
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
                 #:%locate-target-form
+                #:%delimiter-failure-p
                 #:%detect-readtable-before-node
                 #:file-unparseable-error)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
@@ -243,10 +244,16 @@ comments near a target form."
                 ;; the scan may be a false positive, and the reader error
                 ;; (an unknown #? macro, say) is then the actionable part.
                 ;; Sanitized so no SBCL stream object reaches the client.
+                ;; When the reader stopped on something other than a
+                ;; delimiter (a disabled #., an unknown #?), the bracket may
+                ;; well be a symbol character: describe it, but do not
+                ;; instruct; the reader's own complaint is the actionable part.
                 (error 'content-unrepairable-error
                        :message (format nil "~A (reader: ~A)"
-                                        (format-delimiter-diagnosis diagnosis
-                                                                    :target "content")
+                                        (format-delimiter-diagnosis
+                                         diagnosis :target "content"
+                                                   :false-positive
+                                                   (not (%delimiter-failure-p err)))
                                         (sanitize-condition-text err))))
               ;; Parinfer already ran inside DIAGNOSE-DELIMITERS when the
               ;; scan found a delimiter problem; reuse its output. Only a
@@ -267,12 +274,22 @@ comments near a target form."
                     ((and (not nonstandard-rt) (not (getf diagnosis :ok)))
                      ;; Keep the reader error too: a paren problem often hides
                      ;; a second, unrelated read error that the user still
-                     ;; needs.
+                     ;; needs -- unless the finding is an open string or
+                     ;; comment, which the reader's "end of input" would only
+                     ;; restate. A reader stopped elsewhere makes the
+                     ;; bracket verdict a finding, not an instruction.
                      (error 'content-unrepairable-error
-                            :message (format nil "~A (repair also failed: ~A)"
-                                             (format-delimiter-diagnosis
-                                              diagnosis :target "content")
-                                             (sanitize-condition-text repaired-err))))
+                            :message
+                            (format nil "~A~@[ (repair also failed: ~A)~]"
+                                    (format-delimiter-diagnosis
+                                     diagnosis :target "content"
+                                               :false-positive
+                                               (not (%delimiter-failure-p repaired-err)))
+                                    (and (not (member (getf diagnosis :kind)
+                                                      '("unclosed-string"
+                                                        "unclosed-block-comment")
+                                                      :test #'string=))
+                                         (sanitize-condition-text repaired-err)))))
                     (t
                      (error "content parse error: ~A (repair also failed: ~A)"
                             err repaired-err)))))))))))

@@ -1644,6 +1644,24 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Replace it with \")\"." err)
               "the multi-line diagnosis itself is untouched"))))))
 
+(deftest lisp-edit-form-refusal-does-not-instruct-when-the-reader-failed-elsewhere
+  (testing "a ] the scan trips over is only described when the reader stopped on #."
+    (with-temp-file "tests/tmp/edit-form-refusal-reader-elsewhere.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((err nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () (list a] #.(1+ 1)))")
+            (error (e) (setf err (princ-to-string e))))
+          (ok err "the content does not read, so it is refused")
+          (ok (search "found \"]\"" err) "the scan's finding is described")
+          (ng (search "Replace it with" err) "but not turned into an instruction")
+          (ok (search "(reader: " err) "the reader's own complaint is what to act on"))))))
+
 (deftest lisp-edit-form-content-honours-in-readtable-in-file
   (testing "content is validated under the readtable the file switched to"
     ;; #?[...] reads raw text through ]; without the file's readtable the

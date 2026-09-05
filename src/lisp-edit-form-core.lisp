@@ -49,6 +49,7 @@
            #:%whitespace-char-p
            #:%locate-target-form
            #:%file-unparseable-by-edit-tools-p
+           #:%delimiter-failure-p
            #:file-unparseable-error
            #:file-unparseable-path
            #:file-unparseable-diagnosis
@@ -126,9 +127,14 @@ symbols as '#:foo') compare equal to user inputs written without the
   (member ch '(#\Space #\Tab #\Newline #\Return)))
 
 (defun %normalize-paths (file-path)
-  "Return two values: absolute path (pathname) and relative namestring for FS tools."
-  (let ((resolved (fs-resolve-read-path file-path))
-        (root (ensure-directory-pathname *project-root*)))
+  "Return two values: absolute path (pathname) and relative namestring for FS tools.
+The project root is resolved with TRUENAME before the containment test, as
+FS-RESOLVE-READ-PATH resolves the file: a root that is itself a symlink
+(macOS /tmp, a git worktree) must still contain its own files."
+  (let* ((resolved (fs-resolve-read-path file-path))
+         (declared (ensure-directory-pathname *project-root*))
+         (root (or (ignore-errors (ensure-directory-pathname (truename declared)))
+                   declared)))
     (unless (subpathp resolved root)
       (error "Write path ~A is outside project root ~A" file-path root))
     (let* ((relative (enough-pathname resolved root))
@@ -524,9 +530,10 @@ file parses cleanly, so a scan verdict against it is a false positive),
 value is T when the failing parse still returned forms (the lenient
 CL-reader pass after an IN-READTABLE switch keeps the forms before the
 breakage), so those forms remain editable with lisp-edit-form and the
-guidance must not claim that no form can be located.
-TEXT, when supplied by the caller (fs-write-file has already read the file),
-avoids a second read; otherwise the file is read here, and a read truncated
+guidance must not claim that no form can be located; callers consult it
+only with a :DELIMITER verdict.
+TEXT, when supplied by the caller (fs's %LISP-FILE-UNPARSEABLE-P has already
+read the file), avoids a second read; otherwise the file is read here, and a read truncated
 at the fs read cap returns NIL because a cut-off prefix of a valid file
 would look unparseable.
 Installed into cl-mcp/src/fs:*lisp-file-unparseable-hook* so fs-write-file

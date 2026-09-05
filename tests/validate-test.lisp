@@ -224,6 +224,26 @@
                    (rove:skip "named-readtables not available"))))
         (ignore-errors (delete-file abs))))))
 
+(deftest lisp-check-parens-inline-code-the-reader-accepts-gets-no-instruction
+  (testing "valid inline code with a ] symbol is a false positive, not a typo to fix"
+    (let ((res (lisp-check-parens :code "(list a] 1)")))
+      (ok (null (%ok? res)))
+      (ok (string= (%kind res) "mismatch"))
+      (ok (eq (gethash "false_positive" res) t))
+      (ok (null (gethash "likely_fixes" res)))
+      (ng (search "Replace it with" (gethash "diagnosis_text" res)))
+      (ok (zerop (search "The editing tools' reader parses" (gethash "diagnosis_text" res))))))
+  (testing "a symbol with #| inside is not told to close a comment"
+    (let ((res (lisp-check-parens :code "(list foo#|bar| 1)")))
+      (ok (string= (%kind res) "unclosed-block-comment"))
+      (ok (eq (gethash "false_positive" res) t))
+      (ng (search "Close it with" (gethash "diagnosis_text" res)))))
+  (testing "inline code that really is broken keeps its fix"
+    (let ((res (lisp-check-parens :code (format nil "(defun f ()~%  (list 1 2"))))
+      (ok (null (gethash "false_positive" res)))
+      (ok (vectorp (gethash "likely_fixes" res)))
+      (ok (search "Likely fix" (gethash "diagnosis_text" res))))))
+
 (deftest lisp-check-parens-limit-equal-to-a-multibyte-file-is-not-a-window
   (testing "a limit equal to the character count reads the whole file, octets notwithstanding"
     (let* ((root (asdf:system-source-directory :cl-mcp))

@@ -53,6 +53,14 @@
   (:report (lambda (c s) (write-string (patch-operation-reason c) s)))
   (:documentation "Raised for expected patch failures (not-found, multiple-match, invalid result)."))
 
+(defun %bound-snippet (text)
+  "Return TEXT cut to 2048 characters plus a marker when it is longer, so a
+dry-run summary of a large form does not echo the whole form twice."
+  (if (> (length text) 2048)
+      (concatenate 'string (subseq text 0 2048)
+                   (format nil "~%... [truncated, ~D characters total]" (length text)))
+      text))
+
 (defun %bracket-mismatch-p (form-text)
   "Return T when the delimiter scan of FORM-TEXT stops at a mismatch that
 rests on a bracket (see BRACKET-AMBIGUOUS-P): the typo case where a net
@@ -416,7 +424,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
                                       ~%~%--- original ---~%~A~%~%--- preview ---~%~A"
                                       form_type form_name file_path would-change
                                       (gethash "bracket_warning" updated)
-                                      original-form preview)))
+                                      (%bound-snippet original-form)
+                                      (%bound-snippet preview))))
                 (result id
                         (apply #'make-ht
                                "path" file_path
