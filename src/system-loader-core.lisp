@@ -185,7 +185,18 @@ DEFUN' lines are noise that drown real warnings."
                               (*load-print* nil)
                               (*standard-output* (make-string-output-stream))
                               (*trace-output* (make-string-output-stream))
-                              (*error-output* stderr))
+                              (*error-output* stderr)
+                              ;; log4cl's console appender writes to a synonym
+                              ;; stream for *DEBUG-IO*, which in a worker
+                              ;; resolves to the original stdout fd whose read
+                              ;; end the parent closed after the handshake --
+                              ;; any write there raises BROKEN-PIPE and aborts
+                              ;; the load.  Rebinding these interactive streams
+                              ;; keeps that output captured instead of hitting
+                              ;; the dead pipe.
+                              (*debug-io* stderr)
+                              (*terminal-io* stderr)
+                              (*query-io* stderr))
                           (if syms
                               (progv (nreverse syms) (nreverse vals)
                                 (with-compilation-unit (:override t)
@@ -213,7 +224,10 @@ DEFUN' lines are noise that drown real warnings."
                             (*load-print* nil)
                             (*standard-output* (make-string-output-stream))
                             (*trace-output* (make-string-output-stream))
-                            (*error-output* stderr))
+                            (*error-output* stderr)
+                            (*debug-io* stderr)
+                            (*terminal-io* stderr)
+                            (*query-io* stderr))
                         (funcall thunk))))
               (setf completed-p t)
               (values result warning-count
