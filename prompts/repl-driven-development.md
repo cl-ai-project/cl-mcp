@@ -119,7 +119,8 @@ the worker image has the macro's definition loaded.
 
 **New Files workflow:**
 1. Create minimal file via `fs-write-file`: `(in-package ...)` + a stub `defun` as anchor
-2. Verify with `lisp-check-parens` on the written file
+2. Read `fs-write-file`'s response: if the file does not parse it says `WARNING`, shows the
+   diagnosis, and the next write to it needs `allow_unparseable_overwrite: true`
 3. Expand via `lisp-edit-form`: `replace` the stub, then `insert_after` for additional forms
 
 **File edits do not reload in the worker.** After `lisp-edit-form`, either re-evaluate the form via `repl-eval` or call `load-system` to reload from disk.

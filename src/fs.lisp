@@ -36,6 +36,10 @@
                 #:send-root-to-session-worker)
   (:import-from #:uiop/utility #:string-prefix-p)
   (:import-from #:uiop/filesystem #:ensure-directories-exist)
+  ;; No cycle: paren-diagnostics depends on parinfer and uiop only.
+  (:import-from #:cl-mcp/src/paren-diagnostics
+                #:diagnose-delimiters
+                #:format-delimiter-diagnosis)
   (:export #:*lisp-file-unparseable-hook*
            #:fs-resolve-read-path
            #:fs-read-file
@@ -249,6 +253,32 @@ fs-write-file; use lisp-edit-form.")
                                   "new_file_creation_allowed" t
                                   "allow_unparseable_overwrite_available" t))))))))
 
+(defun %post-write-parse-warning (pn path content)
+  "Return a warning for the caller of fs-write-file when CONTENT, just written
+to the Lisp source file PN (PATH is its project-relative name), does not
+parse; NIL otherwise, and NIL for non-Lisp files. The verdict is the one
+*LISP-FILE-UNPARSEABLE-HOOK* gives, i.e. exactly the condition under which the
+overwrite guard would let this file be rewritten: a delimiter failure no
+readtable can fix. A reader-level failure (an unknown reader macro) gets no
+warning, since the hook cannot tell it from custom syntax. Without a hook (a
+partial image that loaded fs alone) there is no verdict and no warning. The
+text carries the shared delimiter diagnosis -- or, should the reader fail
+where the scan sees balance, a plain sentence -- and says that the next write
+needs allow_unparseable_overwrite=true, because the file now exists and does
+not parse, so the guard would otherwise refuse the very fix it asks for."
+  (when (and *lisp-file-unparseable-hook*
+             (%lisp-source-pathname-p pn)
+             (funcall *lisp-file-unparseable-hook* pn content))
+    (format nil "WARNING: the file was written but does not parse.~%~A~%~
+                 Fix it and write it again with fs-write-file (path=~S, ~
+                 allow_unparseable_overwrite=true; the file now exists and does not ~
+                 parse, so the overwrite guard requires the flag)."
+            (or (format-delimiter-diagnosis (diagnose-delimiters content) :target path)
+                (concatenate 'string
+                             "The editing tools' reader cannot parse the file as "
+                             "written; run lisp-check-parens for the position."))
+            path)))
+
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
   (let* ((namestr (file-namestring path))
@@ -419,7 +449,11 @@ to preserve structure and comments. The one exception: when an existing .lisp
 file no longer parses (a missing or stray parenthesis), lisp-edit-form cannot
 locate any form in it, so overwriting it here is the repair path -- but only
 with allow_unparseable_overwrite=true, because a file that only looks broken
-to the default reader may be valid under a custom readtable."
+to the default reader may be valid under a custom readtable.
+After writing a .lisp/.asd file its content is checked with the parser the
+overwrite guard uses: the write still succeeds, but if the file does not parse
+the response says so, shows the diagnosis, and reminds you that the next write
+to it needs allow_unparseable_overwrite=true."
   :args ((path :type :string :required t
                :description "Relative path under the project root; absolute paths are rejected")
          (content :type :string :required t
@@ -434,12 +468,16 @@ overrides the guard for a file that parses."))
   (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
       (progn
         (fs-write-file path content)
-        (result id
-                (make-ht "success" t
-                         "content" (text-content
-                                    (format nil "Wrote ~A (~D chars)" path (length content)))
-                         "path" path
-                         "bytes" (length content))))))
+        (let* ((warning (%post-write-parse-warning (ensure-write-path path) path content))
+               (payload (make-ht "success" t
+                                 "content" (text-content
+                                            (format nil "Wrote ~A (~D chars)~@[~%~A~]"
+                                                    path (length content) warning))
+                                 "path" path
+                                 "bytes" (length content))))
+          (when warning
+            (setf (gethash "unparseable" payload) t))
+          (result id payload)))))
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.

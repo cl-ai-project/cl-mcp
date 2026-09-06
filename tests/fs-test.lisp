@@ -3,9 +3,15 @@
 (defpackage #:cl-mcp/tests/fs-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:ng)
   (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
   (:import-from #:asdf #:system-source-directory)
+  ;; Named so ASDF loads it: fs-write-file's post-write warning and its
+  ;; overwrite guard both follow *lisp-file-unparseable-hook*, which this
+  ;; system installs at load time.  Without the dependency the hook is NIL
+  ;; here and neither behaviour can be observed.
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%file-unparseable-by-edit-tools-p)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
@@ -370,3 +376,99 @@
           (ok (uiop:pathname-equal
                (uiop:ensure-directory-pathname resolved-no-slash)
                (uiop:ensure-directory-pathname resolved-with-slash))))))))
+
+(defun %call-fs-write (path content &key allow)
+  "Call the fs-write-file tool handler and return (VALUES text payload error):
+the summary text, the result hash, and the JSON-RPC error hash, if any."
+  (let ((args (cl-mcp/src/tools/helpers:make-ht "path" path "content" content)))
+    (when allow
+      (setf (gethash "allow_unparseable_overwrite" args) t))
+    (let* ((response (cl-mcp/src/fs::fs-write-file-handler
+                      (cl-mcp/src/state:make-state) 1 args))
+           (payload (gethash "result" response))
+           (content (and payload (gethash "content" payload))))
+      (values (and content (plusp (length content)) (gethash "text" (aref content 0)))
+              payload
+              (gethash "error" response)))))
+
+(defmacro with-scratch-file ((relative) &body body)
+  "Run BODY under the test project root, then delete RELATIVE if it exists."
+  `(with-test-project-root
+     (unwind-protect
+          (progn ,@body)
+       (ignore-errors
+        (delete-file (merge-pathnames ,relative cl-mcp/src/project-root:*project-root*))))))
+
+(deftest fs-write-file-warns-when-the-written-lisp-does-not-parse
+  (with-scratch-file ("tests/tmp/write-warn-new.lisp")
+    (multiple-value-bind (text payload err)
+        (%call-fs-write "tests/tmp/write-warn-new.lisp"
+                        (format nil "(defun a (x)~%  (list x)~%~%(defun b (y)~%  (list y))~%"))
+      (testing "the write itself succeeds"
+        (ok (null err))
+        (ok (eq t (gethash "success" payload)))
+        (ok (search "Wrote tests/tmp/write-warn-new.lisp" text))
+        (ok (probe-file (merge-pathnames "tests/tmp/write-warn-new.lisp"
+                                         cl-mcp/src/project-root:*project-root*))))
+      (testing "the text says the file does not parse and shows the diagnosis"
+        (ok (search "WARNING: the file was written but does not parse." text))
+        (ok (search "unclosed (form starting at line 1" text))
+        (ok (search "Likely fix" text)))
+      (testing "and it says the next write needs the flag"
+        (ok (search "allow_unparseable_overwrite=true" text))
+        (ok (eq t (gethash "unparseable" payload)))))
+    (testing "the second write without the flag is refused, which is why the warning says so"
+      (multiple-value-bind (text payload err)
+          (%call-fs-write "tests/tmp/write-warn-new.lisp"
+                          (format nil "(defun a (x)~%  (list x))~%~%(defun b (y)~%  (list y))~%"))
+        (declare (ignore text payload))
+        (ok err "an existing unparseable .lisp needs the opt-in")))
+    (testing "the write the warning asked for succeeds and warns no more"
+      (multiple-value-bind (text payload err)
+          (%call-fs-write "tests/tmp/write-warn-new.lisp"
+                          (format nil "(defun a (x)~%  (list x))~%~%(defun b (y)~%  (list y))~%")
+                          :allow t)
+        (ok (null err))
+        (ng (search "WARNING" text))
+        (ok (null (gethash "unparseable" payload)))))))
+
+(deftest fs-write-file-does-not-warn-for-parseable-or-non-lisp-content
+  (testing "a balanced .lisp gets the plain summary"
+    (with-scratch-file ("tests/tmp/write-warn-ok.lisp")
+      (multiple-value-bind (text payload)
+          (%call-fs-write "tests/tmp/write-warn-ok.lisp" (format nil "(defun a () 1)~%"))
+        (ng (search "WARNING" text))
+        (ok (null (gethash "unparseable" payload))))))
+  (testing "a .md file is never parsed"
+    (with-scratch-file ("tests/tmp/write-warn-notes.md")
+      (multiple-value-bind (text payload)
+          (%call-fs-write "tests/tmp/write-warn-notes.md" (format nil "# Notes~%(((~%"))
+        (ng (search "WARNING" text))
+        (ok (null (gethash "unparseable" payload))))))
+  (testing "custom reader syntax that only fails the default reader is not called broken"
+    (with-scratch-file ("tests/tmp/write-warn-custom.lisp")
+      (multiple-value-bind (text payload)
+          (%call-fs-write "tests/tmp/write-warn-custom.lisp"
+                          (format nil "(defun f ()~%  #?[(])~%"))
+        (ng (search "WARNING" text) "the hook says nil for a reader-level failure")
+        (ok (null (gethash "unparseable" payload)))))))
+
+(deftest fs-write-file-warning-follows-the-hook
+  (testing "without a hook there is no verdict, so no warning and no error"
+    (with-scratch-file ("tests/tmp/write-warn-nohook.lisp")
+      (let ((cl-mcp/src/fs:*lisp-file-unparseable-hook* nil))
+        (multiple-value-bind (text payload err)
+            (%call-fs-write "tests/tmp/write-warn-nohook.lisp" (format nil "(defun a ()~%"))
+          (ok (null err))
+          (ng (search "WARNING" text))
+          (ok (null (gethash "unparseable" payload)))))))
+  (testing "a hook verdict on balanced-looking text still warns, with a plain sentence"
+    (with-scratch-file ("tests/tmp/write-warn-stub.lisp")
+      (let ((cl-mcp/src/fs:*lisp-file-unparseable-hook*
+              (lambda (pn text) (declare (ignore pn text)) t)))
+        (multiple-value-bind (text payload)
+            (%call-fs-write "tests/tmp/write-warn-stub.lisp" (format nil "(defun a () 1)~%"))
+          (ok (search "WARNING" text))
+          (ok (search "cannot parse the file as written" text))
+          (ok (search "allow_unparseable_overwrite=true" text))
+          (ok (eq t (gethash "unparseable" payload))))))))
