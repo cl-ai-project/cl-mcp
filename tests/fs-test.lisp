@@ -15,6 +15,7 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file
+                #:fs-window-start
                 #:fs-list-directory
                 #:fs-resolve-read-path
                 #:fs-get-project-info
@@ -399,6 +400,36 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
        (ignore-errors
         (delete-file (merge-pathnames ,relative cl-mcp/src/project-root:*project-root*))))))
 
+(deftest fs-test-process-has-the-overwrite-guards-verdict-installed
+  (testing "loading this test system installs the edit tools' parser as the hook"
+    (ok (eq (fdefinition '%file-unparseable-by-edit-tools-p)
+            cl-mcp/src/fs:*lisp-file-unparseable-hook*)
+        "the post-write warning and the overwrite guard follow the real verdict here")))
+
+(deftest fs-window-start-measures-the-prefix-before-a-window
+  (testing "newlines before the window and characters since the last one"
+    (with-scratch-file ("tests/tmp/window-start.lisp")
+      ;; "(defun a ()" plus its newline is 12 characters, so offset 15 sits
+      ;; three characters into line 2.
+      (fs-write-file "tests/tmp/window-start.lisp" (format nil "(defun a ()~%  (list 1))~%"))
+      (multiple-value-bind (lines col)
+          (fs-window-start "tests/tmp/window-start.lisp" 15)
+        (ok (= 1 lines))
+        (ok (= 3 col)))
+      (multiple-value-bind (lines col)
+          (fs-window-start "tests/tmp/window-start.lisp" 12)
+        (ok (= 1 lines) "an offset at a line start has seen its newline")
+        (ok (= 0 col) "and nothing of the new line yet"))
+      (multiple-value-bind (lines col)
+          (fs-window-start "tests/tmp/window-start.lisp" 0)
+        (ok (= 0 lines))
+        (ok (= 0 col)))))
+  (testing "the read policy applies, as for fs-read-file"
+    (with-test-project-root
+      (ok (handler-case (progn (fs-window-start "/etc/passwd" 5) nil)
+            (error () t))
+          "a path outside the project and every registered system is refused"))))
+
 (deftest fs-write-file-warns-when-the-written-lisp-does-not-parse
   (with-scratch-file ("tests/tmp/write-warn-new.lisp")
     (multiple-value-bind (text payload err)
@@ -485,3 +516,22 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
           (ok (search "Wrote tests/tmp/write-warn-boom.lisp" text))
           (ng (search "WARNING" text))
           (ok (null (gethash "unparseable" payload))))))))
+
+(deftest fs-write-file-does-not-promise-an-overwrite-the-guard-would-refuse
+  (testing "content past the read cap is warned about without the flag instruction"
+    (with-scratch-file ("tests/tmp/write-warn-huge.lisp")
+      ;; The guard re-reads the file on the next write and treats a read cut at
+      ;; the cap as parseable, so it would refuse the overwrite the flag promises.
+      (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+        (multiple-value-bind (text payload err)
+            (%call-fs-write "tests/tmp/write-warn-huge.lisp"
+                            (format nil "(defun a (x)~%  (list x)~%"))
+          (ok (null err))
+          (ok (eq t (gethash "success" payload)))
+          (ok (search "WARNING: the file was written but does not parse." text)
+              "the breakage is still reported")
+          (ok (search "larger than the fs read cap" text))
+          (ok (search "split the file or fix it outside cl-mcp" text))
+          (ng (search "allow_unparseable_overwrite=true" text)
+              "no promise the overwrite guard cannot keep")
+          (ok (eq t (gethash "unparseable" payload))))))))

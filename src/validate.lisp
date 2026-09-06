@@ -4,7 +4,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
-                #:fs-resolve-read-path)
+                #:fs-resolve-read-path
+                #:fs-window-start)
   ;; The edit tools' parser itself, not the hook fs installs at load time:
   ;; a direct dependency so the verdict is there in any image that has this
   ;; file, not only when lisp-edit-form-core happened to load first.
@@ -218,28 +219,15 @@ back either)."
 (defun %window-start (path offset)
   "Return two values for the window of PATH that begins at character OFFSET:
 the number of newlines before it and the number of characters between the
-last of those newlines (or the start of the file) and the window. A failure
-reported at window line L, column C is at file line L + newlines and, on the
-first window line only, column C + that character count. The prefix is read
-one character at a time up to the same FILE-POSITION %READ-FILE-STRING seeks
-to, so the count stops exactly where the window starts even in a multibyte
-file, and no buffer is built, so the fs read cap does not apply. Returns
-(VALUES 0 0) for OFFSET 0 or when the file cannot be read."
+last of those newlines (or the start of the file) and the window, as
+FS-WINDOW-START measures them -- the file is opened only through the fs
+layer, under the same read policy as the slice itself. A failure reported at
+window line L, column C is at file line L + newlines and, on the first window
+line only, column C + that character count. Returns (VALUES 0 0) for OFFSET 0
+or when the prefix cannot be read."
   (if (or (null offset) (zerop offset))
       (values 0 0)
-      (handler-case
-          (with-open-file (in (fs-resolve-read-path path)
-                              :direction :input :element-type 'character)
-            (let ((lines 0)
-                  (col 0))
-              (loop for ch = (and (< (file-position in) offset)
-                                  (read-char in nil nil))
-                    while ch
-                    do (if (char= ch #\Newline)
-                           (setf lines (1+ lines)
-                                 col 0)
-                           (incf col)))
-              (values lines col)))
+      (handler-case (fs-window-start path offset)
         (error () (values 0 0)))))
 
 (defun %file-line (line window-start)

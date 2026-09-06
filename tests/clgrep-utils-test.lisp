@@ -17,7 +17,6 @@
                 #:extract-form-type-and-name
                 #:extract-form-signature
                 #:scan-toplevel-forms
-                #:toplevel-form-start-pos
                 #:toplevel-form-end-pos
                 #:toplevel-form-start-line
                 #:toplevel-form-end-line

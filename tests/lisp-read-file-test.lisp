@@ -1093,8 +1093,8 @@ message it signals, or NIL when it returns normally."
 (defun %read-file-tool-text (path &rest kvs)
   "Call the lisp-read-file tool handler on PATH with KVS argument pairs at the
 2025-11-25 protocol and return (VALUES text is-error)."
-  (let* ((state (cl-mcp/src/state:make-state))
-         (args (apply #'cl-mcp/src/tools/helpers:make-ht "path" path kvs)))
+  (let ((state (cl-mcp/src/state:make-state))
+        (args (apply #'cl-mcp/src/tools/helpers:make-ht "path" path kvs)))
     (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
     (let* ((response (cl-mcp/src/lisp-read-file::lisp-read-file-handler state 1 args))
            (payload (gethash "result" response))
@@ -1165,13 +1165,13 @@ message it signals, or NIL when it returns normally."
       (unwind-protect
            ;; The file sits under the cl-mcp system's source directory, which the
            ;; read policy allows, but outside the (narrowed) project root.
-           (let* ((cl-mcp/src/project-root:*project-root* narrow)
-                  (message (%unparseable-message (namestring outside))))
-             (ok message)
-             (ok (search "extra \")\"" message) "the diagnosis is still given")
-             (ok (search "outside the project root" message))
-             (ng (search "fs-write-file (path=" message)
-                 "no overwrite instruction for a path fs-write-file would reject"))
+           (let ((cl-mcp/src/project-root:*project-root* narrow))
+             (let ((message (%unparseable-message (namestring outside))))
+               (ok message)
+               (ok (search "extra \")\"" message) "the diagnosis is still given")
+               (ok (search "outside the project root" message))
+               (ng (search "fs-write-file (path=" message)
+                   "no overwrite instruction for a path fs-write-file would reject")))
         (ignore-errors (delete-file outside))))))
 
 (deftest lisp-read-file-truncated-read-is-not-diagnosed

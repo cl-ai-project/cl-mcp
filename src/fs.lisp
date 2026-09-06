@@ -43,6 +43,7 @@
   (:export #:*lisp-file-unparseable-hook*
            #:fs-resolve-read-path
            #:fs-read-file
+           #:fs-window-start
            #:fs-write-file
            #:fs-list-directory
            #:fs-get-project-info
@@ -130,6 +131,38 @@ read (so a LIMIT read can be told apart from a whole file)."
                  "path" (namestring pn)
                  "fd" (fd-count))
       (values text truncated file-length remaining))))
+
+(defun fs-window-start (path offset)
+  "Return two values for the window of PATH that FS-READ-FILE opens at OFFSET:
+the number of newlines before the window and the number of characters between
+the last of those newlines (or the start of the file) and the window. A
+failure reported at window line L, column C is therefore at file line
+L + newlines and, on the first window line only, column C + that count.
+The prefix is read one character at a time up to the same FILE-POSITION
+%READ-FILE-STRING seeks to, so the count stops exactly where the window starts
+even in a multibyte file, and no buffer is built, so *FS-READ-MAX-BYTES* does
+not apply. PATH is checked against the read policy like FS-READ-FILE.
+Returns (VALUES 0 0) for a NIL or zero OFFSET."
+  (when (and offset (not (integerp offset)))
+    (error "offset must be an integer"))
+  (when (and offset (< offset 0))
+    (error "offset must be non-negative"))
+  (if (or (null offset) (zerop offset))
+      (values 0 0)
+      (let ((pn (allowed-read-path path)))
+        (unless pn
+          (error "Read not permitted for path ~A" path))
+        (with-open-file (in pn :direction :input :element-type 'character)
+          (let ((lines 0)
+                (col 0))
+            (loop for ch = (and (< (file-position in) offset)
+                                (read-char in nil nil))
+                  while ch
+                  do (if (char= ch #\Newline)
+                         (setf lines (1+ lines)
+                               col 0)
+                         (incf col)))
+            (values lines col))))))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
@@ -267,6 +300,12 @@ where the scan sees balance, a plain sentence -- and says that the next write
 needs allow_unparseable_overwrite=true, because the file now exists and does
 not parse, so the guard would otherwise refuse the very fix it asks for.
 
+CONTENT longer than *FS-READ-MAX-BYTES* is the one case where that promise
+would be false: the guard re-reads the file from disk on the next write and
+treats a read cut at the cap as parseable, so it would refuse the repair. For
+such content the text says to split the file or fix it outside cl-mcp instead,
+as %LOCATE-TARGET-FORM does for files it cannot read whole.
+
 This runs after the file is already on disk, so nothing here may turn a
 successful write into an error: an error from the hook counts as no verdict
 (no warning, as with no hook at all), and an error while diagnosing falls
@@ -274,10 +313,7 @@ back to the plain sentence."
   (when (and *lisp-file-unparseable-hook*
              (%lisp-source-pathname-p pn)
              (ignore-errors (funcall *lisp-file-unparseable-hook* pn content)))
-    (format nil "WARNING: the file was written but does not parse.~%~A~%~
-                 Fix it and write it again with fs-write-file (path=~S, ~
-                 allow_unparseable_overwrite=true; the file now exists and does not ~
-                 parse, so the overwrite guard requires the flag)."
+    (format nil "WARNING: the file was written but does not parse.~%~A~%~A"
             (or (handler-case
                     (format-delimiter-diagnosis (diagnose-delimiters content)
                                                 :target path)
@@ -285,7 +321,16 @@ back to the plain sentence."
                 (concatenate 'string
                              "The editing tools' reader cannot parse the file as "
                              "written; run lisp-check-parens for the position."))
-            path)))
+            (if (> (length content) *fs-read-max-bytes*)
+                (format nil "The file is also larger than the fs read cap (~D characters), ~
+                             so neither lisp-edit-form nor fs-write-file's overwrite path ~
+                             (allow_unparseable_overwrite) can repair it: split the file ~
+                             or fix it outside cl-mcp."
+                        *fs-read-max-bytes*)
+                (format nil "Fix it and write it again with fs-write-file (path=~S, ~
+                             allow_unparseable_overwrite=true; the file now exists and ~
+                             does not parse, so the overwrite guard requires the flag)."
+                        path)))))
 
 (defun %entry-name (path)
   "Return display name for PATH, trimming trailing slash on directories."
