@@ -4,7 +4,10 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests
-                #:detect-test-framework)
+                #:detect-test-framework
+                #:call-with-test-run-deadline
+                #:coerce-timeout-seconds
+                #:make-timeout-result)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -38,6 +41,8 @@ Returns:
 - framework (string)
 - duration_ms (integer)
 - stdout (string, present when non-empty) — captured test standard output
+  (Rove only: the FiveAM backend deliberately does not redirect the
+  standard streams, so it reports no stdout/stderr — use debug_output)
 - stderr (string, present when non-empty) — captured test error output
 - debug_output (string, present when non-empty) — output written to *test-debug-output* stream
 NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
@@ -73,20 +78,20 @@ Examples:
                                    "test" test
                                    "tests" tests
                                    "timeout_seconds" timeout-seconds))
-    (let ((effective-timeout (or timeout-seconds 300)))
-      (let ((test-result
-              (handler-case
-                  (sb-ext:with-timeout effective-timeout
-                    (run-tests system
-                               :framework framework
-                               :test test
-                               :tests tests))
-                (sb-ext:timeout ()
-                  (make-ht "passed" 0
-                           "failed" 1
-                           "framework" "timeout"
-                           "duration_ms" (round (* effective-timeout 1000))
-                           "failed_tests" (vector
-                                           (make-ht "test_name" "TIMEOUT"
-                                                    "reason" (format nil "Tests timed out after ~A seconds" effective-timeout))))))))
-        (result id (build-run-tests-response test-result))))))
+    (let ((effective-timeout (or (coerce-timeout-seconds timeout-seconds) 300)))
+      (multiple-value-bind (test-result status)
+          (call-with-test-run-deadline
+           (lambda ()
+             (run-tests system
+                        :framework framework
+                        :test test
+                        :tests tests))
+           effective-timeout)
+        (result id
+                (build-run-tests-response
+                 (ecase status
+                   (:ok test-result)
+                   (:timeout (make-timeout-result test-result))
+                   ;; Re-signal so real failures stay visible instead of
+                   ;; being reported as a bogus test result.
+                   (:error (error test-result)))))))))

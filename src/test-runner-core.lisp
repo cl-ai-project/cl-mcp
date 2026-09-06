@@ -8,9 +8,16 @@
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:bordeaux-threads
+                #:destroy-thread
+                #:make-thread
+                #:thread-alive-p)
   (:export #:run-tests
            #:detect-test-framework
            #:make-load-failure-result
+           #:make-timeout-result
+           #:coerce-timeout-seconds
+           #:call-with-test-run-deadline
            #:*test-debug-output*
            #:*load-lock-wrapper*
            #:*max-test-output-length*))
@@ -487,6 +494,126 @@ representation covers both Rove and FiveAM target-resolution failures."
        :reason (if hint
                    (format nil "~A~%~%Hint: ~A" detail hint)
                    detail))))))
+
+(defun make-timeout-result (seconds)
+  "Build the structured result for a test run that hit its SECONDS deadline.
+Returned in place of a test result so the caller always gets a
+machine-readable hash-table (failed:1, framework \"timeout\") rather than
+an opaque RPC-level error, mirroring MAKE-LOAD-FAILURE-RESULT."
+  (make-test-result
+   :passed 0
+   :failed 1
+   :pending 0
+   :framework :timeout
+   :duration (round (* 1000 (or seconds 0)))
+   :failed-tests
+   (vector
+    (make-failure-detail
+     :test-name "TIMEOUT"
+     :description (format nil "Tests timed out after ~A seconds" seconds)
+     :reason
+     (format nil "The test run exceeded its ~A second deadline. A suite that ~
+                  leaves a server or thread running can outlive the deadline, ~
+                  so the worker may still be busy; use pool-kill-worker to get ~
+                  a fresh worker before retrying."
+             seconds)))))
+
+(defun coerce-timeout-seconds (value)
+  "Coerce VALUE to a positive number of seconds, or NIL when unusable.
+Accepts a number, or a string holding one.  JSON has a single number type,
+but not every client sends timeout_seconds as a number, and a string that
+reaches the (NUMBERP ...) guards in the worker handler and in
+PROXY-TO-WORKER is dropped there, silently widening a caller's 60 second
+deadline to the 300 second default.  NIL for a non-positive or unparseable
+value lets callers fall back to their own default."
+  (typecase value
+    (number (when (plusp value) value))
+    (string
+     (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) value)))
+       ;; Only pass text that can only be a number to READ-FROM-STRING: the
+       ;; reader interns symbols in the current package, so an arbitrary
+       ;; client string must never reach it.  The numeric-charset check
+       ;; keeps this to integers and simple decimals (plus exponents).
+       (when (and (plusp (length trimmed))
+                  (every (lambda (ch) (find ch "0123456789+-.eE"))
+                         trimmed))
+         (multiple-value-bind (parsed pos)
+             (ignore-errors
+              (let ((*read-eval* nil)) (read-from-string trimmed nil nil)))
+           (when (and (numberp parsed)
+                      (eql pos (length trimmed))
+                      (plusp parsed))
+             parsed)))))
+    (t nil)))
+
+(defun call-with-test-run-deadline (thunk timeout-seconds)
+  "Run THUNK (a test run) on a dedicated thread, answering by TIMEOUT-SECONDS.
+Returns two values: a result and a status keyword.
+
+  :OK       THUNK returned; the result is its value.
+  :TIMEOUT  TIMEOUT-SECONDS elapsed first; the result is those seconds.
+  :ERROR    THUNK signalled; the result is the condition object.
+
+THUNK also runs under SB-EXT:WITH-TIMEOUT, so the ordinary case -- a slow
+but well-behaved suite -- unwinds inside the run thread and releases its
+locks and UNWIND-PROTECT cleanups normally.  The polling wrapper only
+matters when that cannot happen.  A suite that leaves a blocking call
+running (a server accept loop, say) is invisible to SB-EXT:WITH-TIMEOUT,
+which cannot interrupt a blocking foreign call; run inline, such a suite
+pins the worker's single connection thread for as long as the call blocks,
+and every later tool call for that session hangs with it.  Answering from
+the polling thread bounds the wait no matter what the suite left running,
+so one wedged suite can no longer take the session down.
+
+The run thread is destroyed only on a wall-clock deadline it failed to
+observe, and a run that completes during the grace period still yields its
+real result -- completed work is never discarded as a timeout."
+  (let ((outcome nil)
+        (thread nil))
+    (flet ((finish ()
+             (let ((o (or outcome
+                          (cons :error "test run thread vanished"))))
+               (values (cdr o) (car o))))
+           (run ()
+             (setf outcome
+                   (handler-case
+                       (if timeout-seconds
+                           (sb-ext:with-timeout timeout-seconds
+                             (cons :ok (funcall thunk)))
+                           (cons :ok (funcall thunk)))
+                     (sb-ext:timeout () (cons :timeout timeout-seconds))
+                     (serious-condition (e) (cons :error e))))))
+      (setf thread (make-thread #'run :name "mcp-run-tests"))
+      (let ((deadline
+              (when timeout-seconds
+                (+ (get-internal-real-time)
+                   (round (* timeout-seconds
+                             internal-time-units-per-second))))))
+        (loop while (thread-alive-p thread)
+              do (when (and deadline (>= (get-internal-real-time) deadline))
+                   (return))
+                 (sleep 0.05d0))
+        (cond
+          ((not (thread-alive-p thread))
+           (finish))
+          (t
+           ;; Give the run a moment to observe its own WITH-TIMEOUT: a
+           ;; cooperative unwind is preferable to destroying the thread,
+           ;; because it releases the locks the run is holding.
+           (sleep 0.5d0)
+           (if (not (thread-alive-p thread))
+               (finish)
+               (progn
+                 (ignore-errors (destroy-thread thread))
+                 (loop repeat 20
+                       while (thread-alive-p thread)
+                       do (sleep 0.05d0))
+                 (ignore-errors
+                  (log-event :warn "test.runner.deadline"
+                             "timeout" timeout-seconds
+                             "thread_destroyed"
+                             (not (thread-alive-p thread))))
+                 (values timeout-seconds :timeout)))))))))
 
 (defun %extract-defpackage-names-from-file (pathname &optional scan-package)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -1354,26 +1481,23 @@ Returns HT."
 SPECS is a list of suite/test symbols passed to %FIVEAM-RUN.  On a runner
 crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
-stream-capture, crash-handling, and result-assembly logic lives in one place."
+stream-capture, crash-handling, and result-assembly logic lives in one place.
+
+NOTE: *standard-output* and *error-output* are intentionally NOT redirected.
+Binding them (even to a broadcast stream) causes integration test suites that
+spawn real threads and sockets to hang inside the worker process.  Only
+*test-debug-output* (cl-mcp's own stream) is captured."
   (let ((start-time (get-internal-real-time))
-         (stdout-stream (make-string-output-stream))
-         (stderr-stream (make-string-output-stream))
-         (debug-stream (make-string-output-stream))
-         all-results)
+        (debug-stream (make-string-output-stream))
+        all-results)
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
-           (stdout () (%truncate-test-output
-                       (get-output-stream-string stdout-stream)))
-           (stderr () (%truncate-test-output
-                       (get-output-stream-string stderr-stream)))
            (debug-output () (get-output-stream-string debug-stream)))
       (handler-case
           (dolist (spec specs)
             (let ((results
-                    (let ((*standard-output* stdout-stream)
-                          (*error-output* stderr-stream)
-                          (*test-debug-output* debug-stream))
+                    (let ((*test-debug-output* debug-stream))
                       (%fiveam-run spec))))
               (when results
                 (setf all-results (append all-results results)))))
@@ -1390,7 +1514,7 @@ stream-capture, crash-handling, and result-assembly logic lives in one place."
                                          (princ-to-string c))))
                       crash-test-names)
               :framework :fiveam :duration (duration-ms))
-             (stdout) (stderr) (debug-output)))))
+             nil nil (debug-output)))))
       (multiple-value-bind (passed failed pending failure-details)
           (%fiveam-extract-results all-results)
         (%fiveam-attach-output
@@ -1398,7 +1522,7 @@ stream-capture, crash-handling, and result-assembly logic lives in one place."
           :passed passed :failed failed :pending pending
           :failed-tests failure-details
           :framework :fiveam :duration (duration-ms))
-         (stdout) (stderr) (debug-output))))))
+         nil nil (debug-output))))))
 
 (defun run-fiveam-tests (system-name)
   "Run the FiveAM suites belonging to SYSTEM-NAME and return results.

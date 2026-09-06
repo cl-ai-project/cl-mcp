@@ -18,6 +18,8 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/test-runner-core
+                #:coerce-timeout-seconds)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message)
   (:import-from #:bordeaux-threads
@@ -49,7 +51,12 @@ Set MCP_NO_WORKER_POOL=1 to disable.")
   "Default timeout (seconds) for proxy-to-worker RPC calls.
 Prevents requests from hanging indefinitely when a worker handler
 is stuck.  300 seconds (5 minutes) accommodates long-running
-operations like system compilation.")
+operations like system compilation.
+
+When the caller provides a timeout_seconds parameter (e.g. for
+run-tests), the effective proxy timeout is clamped to the smaller
+of this value and (caller_timeout + 10), so the proxy does not
+outlive the worker's own deadline by a wide margin.")
 
 (defvar *active-requests* (make-hash-table :test 'equal)
   "Maps MCP request-id (as string) to session-id for in-flight
@@ -274,13 +281,32 @@ TOCTOU race with concurrent requests for the same session."
                           "session" session-id
                           "method" method)
                (let* ((user-timeout
-                       (and (hash-table-p params)
-                            (gethash "timeout_seconds" params)))
+                       (coerce-timeout-seconds
+                        (and (hash-table-p params)
+                             (gethash "timeout_seconds" params))))
                       (effective-timeout
-                       (if (and user-timeout (numberp user-timeout)
-                                (plusp user-timeout))
-                           (max *proxy-rpc-timeout*
-                                (ceiling (+ user-timeout 30)))
+                       (if user-timeout
+                           ;; Respect the user's timeout intent.  The
+                           ;; worker enforces the same value, so the
+                           ;; proxy should wait only slightly longer
+                           ;; (small buffer for the response to arrive)
+                           ;; rather than the old
+                           ;; (max *proxy-rpc-timeout* …), which let
+                           ;; the proxy wait up to 300 s even when the
+                           ;; user asked for 90 s.
+                           ;;
+                           ;; COERCE-TIMEOUT-SECONDS also accepts a
+                           ;; numeric string: a client that sends
+                           ;; timeout_seconds as "60" would otherwise
+                           ;; fail the (NUMBERP …) guard here and fall
+                           ;; through to the 300 s default, widening
+                           ;; the window in which a wedged suite can
+                           ;; outlive the client's own deadline.
+                           ;; No cap on *proxy-rpc-timeout*: a caller may
+                           ;; legitimately ask for more than 300 s, and the
+                           ;; worker enforces that same deadline, so the
+                           ;; small buffer below is all the margin needed.
+                           (ceiling (+ user-timeout 10))
                            *proxy-rpc-timeout*)))
                  (handler-case
                      (funcall %cached-worker-rpc% worker method params
