@@ -14,17 +14,28 @@
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content #:arg-validation-error)
+                #:make-ht #:result #:rpc-error #:text-content
+                #:arg-validation-error #:validation-message #:tool-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/state
+                #:protocol-version)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:*homeless-due-to-teardown*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:normalize-path-for-display)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-for-json
+                #:sanitize-error-message)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
-                #:%parse-readtable-designator)
+                #:%parse-readtable-designator
+                #:file-unparseable-error
+                #:file-unparseable-message
+                #:file-unparseable-diagnosis
+                #:make-file-unparseable-condition
+                #:signal-file-unparseable)
   (:import-from #:cl-ppcre
                 #:scan
                 #:create-scanner)
@@ -491,71 +502,102 @@ whitespace."
 
 (defun %format-lisp-file (text name-scanner content-scanner include-comments
                           comment-context &key readtable source-path)
+  "Render TEXT, the Lisp source at SOURCE-PATH, in collapsed form.
+Returns two values: the display string and the meta hash.
+A file whose parse signals (the Eclector pass yields no forms at all from a
+file that does not parse) is reported through SIGNAL-FILE-UNPARSEABLE, so the
+caller sees the same delimiter diagnosis and recovery path as the editing
+tools. When the lenient CL-reader pass (after an IN-READTABLE switch, or under
+READTABLE) stops early instead, PARSE-TOP-LEVEL-FORMS returns the forms it
+read plus the error as a second value: those forms are rendered, and the same
+guidance is appended below them, because a prefix shown without a word about
+where it stops would read as the whole file. Meta then carries \"unparseable\"
+and, when the diagnosis names it, \"unparseable_from_line\"."
   (multiple-value-bind (source-lines-count comment-lines blank-lines)
       (%line-stats text)
-    (let* ((nodes (parse-top-level-forms text
-                                         :readtable readtable
-                                         :source-path source-path))
-           (line-width (%line-number-width source-lines-count))
-           (expanded 0)
-           (total-forms 0)
-           (*package* *package*)
-           (display
-            (with-output-to-string (out)
-              (let ((pending-comments nil))
-                (dolist (node nodes)
-                  (cond
-                    ((and include-comments (%comment-node-p node))
-                     (let ((comment
-                            (ensure-trailing-newline
-                             (%comment-text node text))))
-                       (cond
-                         ((string= comment-context "all")
-                          (write-string comment out))
-                         ((string= comment-context "preceding")
-                          (push comment pending-comments)))))
-                    ((and (typep node 'cst-node)
-                          (eq (cst-node-kind node) :expr))
-                     (incf total-forms)
-                     (when (and include-comments pending-comments)
-                       (dolist (comment (nreverse pending-comments))
-                         (write-string comment out))
-                       (setf pending-comments nil))
-                     (multiple-value-bind (line expanded?)
-                         (%format-lisp-form node text name-scanner
-                                            content-scanner line-width)
-                       (when expanded? (incf expanded))
-                       (write-string (ensure-trailing-newline line) out))
-                     ;; Track in-package to set *package* for correct
-                     ;; symbol printing of subsequent forms.
-                     (let* ((form (cst-node-value node))
-                            (head (and (consp form) (car form))))
-                       (when (and (symbolp head)
-                                  (string= (symbol-name head) "IN-PACKAGE")
-                                  (consp (cdr form)))
-                         (let* ((designator (second form))
-                                (pkg-name
-                                 (cond ((stringp designator) designator)
-                                       ((symbolp designator)
-                                        (symbol-name designator)))))
-                           (when pkg-name
-                             (let ((pkg (find-package pkg-name)))
-                               (when pkg
-                                 (setf *package* pkg))))))))
-                    (t (setf pending-comments nil))))
-                (when (and include-comments
-                           (string/= comment-context "none")
-                           pending-comments)
-                  (dolist (comment (nreverse pending-comments))
-                    (write-string comment out)))))))
-      (values display
-              (let ((meta (make-hash-table :test #'equal)))
-                (setf (gethash "total_forms" meta) total-forms
-                      (gethash "expanded_forms" meta) expanded
-                      (gethash "comment_lines" meta) comment-lines
-                      (gethash "blank_lines" meta) blank-lines
-                      (gethash "source_lines" meta) source-lines-count)
-                meta)))))
+    (multiple-value-bind (nodes swallowed)
+        (handler-case
+            (parse-top-level-forms text
+                                   :readtable readtable
+                                   :source-path source-path)
+          (error (e)
+            (signal-file-unparseable source-path text e :readtable readtable)))
+      (let* ((line-width (%line-number-width source-lines-count))
+             (expanded 0)
+             (total-forms 0)
+             (*package* *package*)
+             (display
+              (with-output-to-string (out)
+                (let ((pending-comments nil))
+                  (dolist (node nodes)
+                    (cond
+                      ((and include-comments (%comment-node-p node))
+                       (let ((comment
+                              (ensure-trailing-newline
+                               (%comment-text node text))))
+                         (cond
+                           ((string= comment-context "all")
+                            (write-string comment out))
+                           ((string= comment-context "preceding")
+                            (push comment pending-comments)))))
+                      ((and (typep node 'cst-node)
+                            (eq (cst-node-kind node) :expr))
+                       (incf total-forms)
+                       (when (and include-comments pending-comments)
+                         (dolist (comment (nreverse pending-comments))
+                           (write-string comment out))
+                         (setf pending-comments nil))
+                       (multiple-value-bind (line expanded?)
+                           (%format-lisp-form node text name-scanner
+                                              content-scanner line-width)
+                         (when expanded? (incf expanded))
+                         (write-string (ensure-trailing-newline line) out))
+                       ;; Track in-package to set *package* for correct
+                       ;; symbol printing of subsequent forms.
+                       (let* ((form (cst-node-value node))
+                              (head (and (consp form) (car form))))
+                         (when (and (symbolp head)
+                                    (string= (symbol-name head) "IN-PACKAGE")
+                                    (consp (cdr form)))
+                           (let* ((designator (second form))
+                                  (pkg-name
+                                   (cond ((stringp designator) designator)
+                                         ((symbolp designator)
+                                          (symbol-name designator)))))
+                             (when pkg-name
+                               (let ((pkg (find-package pkg-name)))
+                                 (when pkg
+                                   (setf *package* pkg))))))))
+                      (t (setf pending-comments nil))))
+                  (when (and include-comments
+                             (string/= comment-context "none")
+                             pending-comments)
+                    (dolist (comment (nreverse pending-comments))
+                      (write-string comment out))))))
+             (meta (make-hash-table :test #'equal)))
+        (setf (gethash "total_forms" meta) total-forms
+              (gethash "expanded_forms" meta) expanded
+              (gethash "comment_lines" meta) comment-lines
+              (gethash "blank_lines" meta) blank-lines
+              (gethash "source_lines" meta) source-lines-count)
+        (if swallowed
+            ;; The lenient pass stopped early: say so under what it could
+            ;; show, with the same guidance the editing tools give.
+            (let* ((condition (make-file-unparseable-condition
+                               source-path text swallowed
+                               :readtable readtable
+                               :editable-prefix (and nodes t)))
+                   (diagnosis (file-unparseable-diagnosis condition))
+                   (from-line (or (getf diagnosis :unclosed-form-line)
+                                  (getf diagnosis :line))))
+              (setf (gethash "unparseable" meta) t)
+              (when from-line
+                (setf (gethash "unparseable_from_line" meta) from-line))
+              (values (format nil "~A~%~%~A~%"
+                              (string-right-trim '(#\Newline) display)
+                              (file-unparseable-message condition))
+                      meta))
+            (values display meta))))))
 
 (defun %read-lines-slice (pathname offset limit)
   "Return three values: sliced text, truncated?, and total line count."
@@ -609,19 +651,25 @@ whitespace."
 
 (defun %lisp-read-file-content (resolved collapsed name-scanner content-scanner offset line-limit
                                  include-comments comment-context &key readtable)
+  "Return three values for RESOLVED: the content string, the meta hash and the
+mode name. The collapsed Lisp branch refuses a read cut at the fs cap (a
+prefix of a valid file would only yield a misleading delimiter diagnosis) and
+otherwise defers to %FORMAT-LISP-FILE, which signals FILE-UNPARSEABLE-ERROR
+for a file that does not parse."
   (cond
     ((and collapsed (lisp-source-path-p resolved))
-     (let ((text (fs-read-file resolved)))
-       (handler-case
-           (multiple-value-bind (display meta-table)
-               (%format-lisp-file text name-scanner content-scanner include-comments comment-context
-                                  :source-path resolved
-                                  :readtable readtable)
-             (values display meta-table "lisp-collapsed"))
-         (end-of-file ()
-           (error "Unexpected end of file while parsing ~A; ~
-                   check for unbalanced parentheses (use lisp-check-parens)"
-                  (file-namestring resolved))))))
+     (multiple-value-bind (text truncated file-length) (fs-read-file resolved)
+       (when truncated
+         (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read), ~
+                 so the collapsed view cannot be built from it. Read a region with ~
+                 collapsed=false (offset and limit are lines), or split the file."
+                (file-namestring resolved) file-length (length text)))
+       (multiple-value-bind (display meta-table)
+           (%format-lisp-file text name-scanner content-scanner include-comments
+                              comment-context
+                              :source-path resolved
+                              :readtable readtable)
+         (values display meta-table "lisp-collapsed"))))
     ((not collapsed)
      (multiple-value-bind (text total)
          (%read-lines-slice resolved (or offset 0) line-limit)
@@ -734,7 +782,10 @@ signature lines are printed rather than quoted, as is the form
 content_pattern matches against.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
-to guide pagination. Use the suggested offset value in a follow-up call."
+to guide pagination. Use the suggested offset value in a follow-up call.
+A file that does not parse cannot be collapsed: the error names the broken
+form, the likely fix and the recovery path (the same diagnosis lisp-check-parens
+and lisp-edit-form give). Raw mode still works on such a file."
   :args ((path :type :string :required t
                :description "Path to read; absolute inside project or registered ASDF system,
 or relative to project root")
@@ -754,17 +805,41 @@ Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
 is used instead of Eclector, which means comments are NOT preserved."))
   :body
-  (let ((file-result
-          (lisp-read-file path
-                          :collapsed collapsed
-                          :name-pattern name_pattern
-                          :content-pattern content_pattern
-                          :offset offset
-                          :limit limit
-                          :readtable (%parse-readtable-designator readtable))))
-    (result id
-            (make-ht "content" (text-content (gethash "content" file-result))
-                     "text" (gethash "content" file-result)
-                     "path" (gethash "path" file-result)
-                     "mode" (gethash "mode" file-result)
-                     "meta" (gethash "meta" file-result)))))
+  ;; Mirrors lisp-macroexpand's tool body: a file that does not parse is an
+  ;; expected operational failure whose guidance is multi-line and long, so
+  ;; it is presented as its own message instead of behind define-tool's
+  ;; generic "Internal error during ..." wrapper, which reads as a cl-mcp bug
+  ;; and invites a retry.
+  ;;
+  ;; ARG-VALIDATION-ERROR is a subtype of ERROR and MUST stay listed first:
+  ;; HANDLER-CASE takes the first matching clause, so the ERROR clause below
+  ;; would otherwise catch validation failures and strip them of the
+  ;; protocol-aware treatment define-tool's own handler gives them.
+  (handler-case
+      (let ((file-result
+              (lisp-read-file path
+                              :collapsed collapsed
+                              :name-pattern name_pattern
+                              :content-pattern content_pattern
+                              :offset offset
+                              :limit limit
+                              :readtable (%parse-readtable-designator readtable))))
+        (result id
+                (make-ht "content" (text-content (gethash "content" file-result))
+                         "text" (gethash "content" file-result)
+                         "path" (gethash "path" file-result)
+                         "mode" (gethash "mode" file-result)
+                         "meta" (gethash "meta" file-result))))
+    (arg-validation-error (e)
+      (tool-error id (validation-message e)
+                  :protocol-version (protocol-version state)))
+    (file-unparseable-error (e)
+      (tool-error id (sanitize-for-json (princ-to-string e))
+                  :protocol-version (protocol-version state)))
+    (error (e)
+      (let ((msg (sanitize-for-json
+                  (sanitize-error-message (format nil "~A" e)))))
+        (if (and (protocol-version state)
+                 (string>= (protocol-version state) "2025-11-25"))
+            (result id (make-ht "content" (text-content msg) "isError" t))
+            (rpc-error id -32603 msg))))))
