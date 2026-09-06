@@ -279,20 +279,31 @@ return (VALUES text payload): the rendered summary and the result hash."
           (ok (= 1 (length (gethash "match_lines" swallowed))))
           (ok (= 1 (length (gethash "notes" payload)))))))))
 
-(deftest clgrep-search-tool-form-types-cannot-see-into-an-unterminated-form
+(deftest clgrep-search-tool-form-types-still-lists-matches-inside-an-unterminated-form
   (with-broken-fixture ("tests/tmp/clgrep-broken-types/")
-    (testing "a swallowed defmacro is invisible to a form_types filter, by design"
+    (testing "a swallowed defmacro passes a form_types filter it cannot be typed against"
       (multiple-value-bind (text payload)
           (%call-clgrep "defmacro tokenize" "path" "tests/tmp/clgrep-broken-types/"
                         "form_types" (vector "defmacro"))
-        (ok (= 0 (gethash "count" payload)))
-        (ok (search "0 matches" text))))
-    (testing "without the filter it is found, attributed to the form that swallowed it"
+        (ok (= 1 (gethash "count" payload)))
+        (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
+        (ok (search "NOTE: broken.lisp does not parse" text))
+        (ok (search "regardless of any form_types filter" text)
+            "the note says the filter did not decide this match")
+        (ok (search "form type and signature are those of the unclosed form" text))))
+    (testing "without the filter the same match is found, attributed the same way"
       (multiple-value-bind (text payload)
           (%call-clgrep "defmacro tokenize" "path" "tests/tmp/clgrep-broken-types/")
         (ok (= 1 (gethash "count" payload)))
         (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
-        (ok (search "NOTE: broken.lisp does not parse" text))))))
+        (ok (search "NOTE: broken.lisp does not parse" text))))
+    (testing "a healthy file is still filtered out by form_types, with no note"
+      (multiple-value-bind (text payload)
+          (%call-clgrep "defun healthy-one" "path" "tests/tmp/clgrep-broken-types/"
+                        "form_types" (vector "defmacro"))
+        (ok (= 0 (gethash "count" payload)))
+        (ok (search "0 matches" text))
+        (ok (null (search "NOTE:" text)))))))
 
 (deftest clgrep-search-tool-healthy-files-keep-grouping-and-get-no-note
   (with-broken-fixture ("tests/tmp/clgrep-healthy/")

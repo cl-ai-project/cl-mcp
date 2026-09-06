@@ -1005,8 +1005,9 @@ FORM-LINE), and write it back with fs-write-file. RELATIVE-PATH is the
 project-relative path that fs-write-file requires. Ends with the
 custom-reader-syntax caveat."
   (format nil "confirm the line with lisp-read-file (collapsed=false~@[, offset=~D, ~
-               limit=1~]; offset and limit are 0-based lines, and raw mode works on a ~
-               file that does not parse), read the whole file with fs-read-file (exact ~
+               limit=1~]; offset is a 0-based line and limit a line count, and raw mode ~
+               works on a file that does not parse), read the whole file with ~
+               fs-read-file (exact ~
                bytes; do not copy from lisp-read-file's raw mode, which re-joins lines ~
                and may append a footer), apply the ~:[change described ~A~;fix shown ~
                under \"Likely fix\"~*~]~@[ to the form starting at line ~D~], and write ~

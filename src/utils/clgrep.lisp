@@ -639,6 +639,10 @@ Returns an alist like extract-toplevel-form, or NIL."
    (:unterminated . t): the file does not parse there, and the form type,
    name and signature reported are those of the unclosed form, not of the
    definition the match sits in. Healthy matches carry no such key.
+   Such a match passes the FORM-TYPES filter unconditionally, because the
+   type it would be filtered on is the unclosed form's rather than its own;
+   dropping it would lose the match silently, exactly where the caller has
+   no way to learn that the file does not parse.
 
    Pre-computes toplevel form map and package map once per file for O(n)
    performance instead of O(n*m) where m is the number of matches."
@@ -673,6 +677,7 @@ Returns an alist like extract-toplevel-form, or NIL."
                                 (extract-form-signature full-form-text)))
                           (when
                               (or (null form-types)
+                                  (cdr (assoc :unterminated form-info))
                                   (member form-type form-types :test
                                           #'string-equal))
                             (let ((result

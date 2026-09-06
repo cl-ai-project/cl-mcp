@@ -398,8 +398,10 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                                                          (%project-root-truename)))
                                   :have-fix (and likely-fixes t)
                                   :where "below"
-                                  :fix-line (and likely-fixes
-                                                 (getf (first likely-fixes) :line))))))
+                                  :fix-line (or (and likely-fixes
+                                                     (getf (first likely-fixes) :line))
+                                                (getf diagnosis :unclosed-form-line)
+                                                (getf diagnosis :line))))))
                  (cond
                    (partial
                     ;; A slice of the file: say what was seen, never how to

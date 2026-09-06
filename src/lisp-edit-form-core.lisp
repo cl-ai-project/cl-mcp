@@ -416,8 +416,10 @@ overwrite protection, so the text points at the readtable parameter instead."
                                                 :have-fix (not (null fixes))
                                                 :where "above"
                                                 :form-line line
-                                                :fix-line (and fixes
-                                                               (getf (first fixes) :line))))
+                                                :fix-line (or (and fixes
+                                                                   (getf (first fixes) :line))
+                                                              line
+                                                              (getf diagnosis :line))))
              ;; Outside the project root: neither the structural tools nor
              ;; fs-write-file can touch it, so no recovery path is promised.
              (format nil "~A~%The file does not parse, and it is outside the project ~

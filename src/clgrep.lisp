@@ -131,8 +131,9 @@ entry. Each such result keeps its own entry and a one-element MATCH_LINES."
   "Return one note string per file in RESULTS that holds a match inside an
 unterminated form, in first-seen order. The note names the line where the
 unclosed form opens and says how the matches below it are attributed, so a
-caller can tell a swallowed definition from a real one and knows that a
-form_types filter will not find it. Files without such a match get no note:
+caller can tell a swallowed definition from a real one and knows that those
+matches are listed whatever the form_types filter says, because the type they
+would be filtered on is the unclosed form's. Files without such a match get no note:
 a broken file that matched nothing is not this search's problem."
   (let ((seen (make-hash-table :test #'equal))
         (notes nil))
@@ -143,9 +144,10 @@ a broken file that matched nothing is not this search's problem."
             (setf (gethash file seen) t)
             (push (format nil "NOTE: ~A does not parse: a form opened at line ~D is never ~
                                closed.~%  Matches at or below that line are listed ~
-                               individually; their form type and signature are those ~
-                               of the unclosed form, not of the definition they sit ~
-                               in. Run lisp-check-parens for the fix."
+                               individually and regardless of any form_types filter, ~
+                               because their form type and signature are those of the ~
+                               unclosed form, not of the definition they sit in. Run ~
+                               lisp-check-parens for the fix."
                           file (cdr (assoc :form-start-line result)))
                   notes)))))
     (nreverse notes)))

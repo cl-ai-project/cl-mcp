@@ -331,8 +331,9 @@ character ). Remove the extra \")\" (lisp-check-parens reports its line and colu
   (:report (lambda (c s) (write-string (unterminated-source-message c) s)))
   (:documentation "Signaled when the reader hit end of input inside a form.
 Carries the same explanatory message as other reader errors but stays a
-subtype of END-OF-FILE, so callers that treat a premature end of input
-specially (lisp-read-file's unbalanced-parentheses hint) keep working."))
+subtype of END-OF-FILE, because %DELIMITER-FAILURE-P in lisp-edit-form-core
+tests for END-OF-FILE to classify the failure as a recoverable delimiter
+problem -- for the editing tools and lisp-read-file alike."))
 
 (define-condition stray-right-parenthesis (reader-error)
   ((message :initarg :message :reader stray-right-parenthesis-message))
@@ -403,8 +404,10 @@ or use a separate evaluation step."
 (lisp-check-parens reports its line and column)."
                                            e)))
                   ((typep e 'end-of-file)
-                   ;; Keep the END-OF-FILE type: lisp-read-file turns it into
-                   ;; an unbalanced-parentheses hint.
+                   ;; Keep the END-OF-FILE type: %delimiter-failure-p in
+                   ;; lisp-edit-form-core tests for it to classify this as a
+                   ;; recoverable delimiter problem, for the editing tools and
+                   ;; lisp-read-file alike.
                    (error 'unterminated-source
                           :stream stream
                           :message (format nil "Reader error: ~A~%~%If this file uses custom ~

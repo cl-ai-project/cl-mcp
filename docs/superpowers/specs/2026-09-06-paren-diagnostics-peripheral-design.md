@@ -267,12 +267,17 @@ NOTE: src/tokens.lisp does not parse: a form opened at line 39 is never closed.
 
 - 文面は「フォームが閉じていない」と言い、「unclosed form」とは言わない。
   未終了の原因が文字列や `#|` のこともあり、`lisp-check-parens` がそれを言い分ける。
-- **`form_types` フィルタの制限を注記に含める。** 破損行以降のマッチは
-  囲みフォームの `form-type` を継承するので、飲み込まれた `defmacro` を
-  `form_types=["defmacro"]` で探すと依然として見つからない。これは
-  本設計では直さない (正しい境界を推定するのは新しい診断ロジックになる) が、
-  注記で「その行以降の型と署名は囲みフォームのもの」と言っておけば、
-  エージェントは `form_types` を外して再検索できる。
+- **未終了フォーム内のマッチは `form_types` フィルタを無条件に通す。**
+  破損行以降のマッチが持つ `form-type` は囲みフォームのものであって、
+  そのマッチ自身の型は不明である。不明な型で判定して落とすと、
+  `form_types` を指定した呼び出し元には `0 matches` だけが返り、
+  注記も出ないので破損に気づく手段が一切なくなる (§3 の
+  「無言で欠落させない」に真っ向から反する。注記が最も要る呼び出し元に
+  届かないのが最悪の形である)。そこで `search-in-file` の型判定を
+  `(or (null form-types) (cdr (assoc :unterminated form-info)) (member ...))`
+  とし、注記の側で「その行以降のマッチは `form_types` の指定にかかわらず
+  列挙されている。型と署名は囲みフォームのものであって、そのマッチが属する
+  定義のものではない」と言う。正しい境界の推定は依然として行わない (4.6 参照)。
 - ファイル単位。複数ファイル検索で 1 ファイルが壊れていても他は無影響。
 - 注記は該当ファイルにマッチがあった場合にのみ出す。壊れているが
   マッチのないファイルについて注記を並べても雑音にしかならない。
@@ -538,8 +543,8 @@ hook が `nil` を返すためである。確実なときだけ警告すると�
   1 行ずつ現れること (重複排除されないこと)。
 - それらのエントリに `unterminated: true` が付くこと。
 - 破損ファイルに注記が出ること。注記が `form_types` の制限に触れること。
-- 飲み込まれた `defmacro` が `form_types=["defmacro"]` では見つからず、
-  フィルタなしでは見つかること (制限の文書化)。
+- 飲み込まれた `defmacro` が `form_types=["defmacro"]` でも見つかり、注記が出ること;
+  健全なファイルでは `form_types` が従来通り除外すること。
 - 健全なファイルでは注記が出ず、重複排除が従来通り働くこと (回帰防止)。
 - 複数ファイル検索で、健全なファイルの結果が破損ファイルの影響を受けないこと。
 
@@ -595,7 +600,8 @@ hook が `nil` を返すためである。確実なときだけ警告すると�
 を手動で確認する。
 
 **リント**: コミット前に `mallet src/*.lisp`。
-**PR 前**: `(asdf:compile-system :cl-mcp :force t)` で警告を洗い、
+**PR 前**: `(asdf:compile-system :cl-mcp :force :all)` で警告を洗い
+(`:force t` は package-inferred system の親システムしか再コンパイルせず何も起きない)、
 `rove cl-mcp.asd` を新規プロセスで実行する
 (単一ファイルのテスト実行は失敗を隠すため)。
 
@@ -654,3 +660,27 @@ hook が `nil` を返すためである。確実なときだけ警告すると�
   流し読みによる前置計測 (フォールバック分岐を廃止)、`window` フィールド。
 - **§3**: 出力フィールド追加の許容と「無言で欠落させない」を方針に明記。
 - **§7**: 実装順序を追加。
+
+**2026-09-06 実装後の最終レビュー反映** — 8 タスク実装後のブランチ全体レビューの指摘。
+
+- **4.1**: 未終了フォーム内のマッチは `form_types` フィルタを無条件に通すよう変更
+  (旧: 制限を注記で文書化するに留める)。フィルタで落とすと注記ごと消えて
+  `0 matches` になり、注記が最も要る呼び出し元に届かないため。§5 のテスト項目も
+  肯定形に差し替えた。
+- **4.3**: `%post-write-parse-warning` の hook 呼び出しを `ignore-errors` で、
+  診断文の組み立てを `handler-case` で囲む。ディスクに書き終えた成功が
+  `Internal error during fs-write-file` として報告されるのを防ぐ
+  (「書き込み自体は必ず成功させる」の担保)。
+- **4.4**: `:fix-line` に Likely fix がないときのフォールバック
+  (`unclosed-form-line` → 診断の `:line`) を 2 つの呼び出し元の両方で実装。
+  文面の「offset and limit are 0-based lines」を「offset is a 0-based line and
+  limit a line count」に訂正 (`limit` は行数であって行番号ではない)。
+- **§5 / `CLAUDE.md` / 実装計画 Task 8**: PR 前のコンパイルを
+  `(asdf:compile-system :cl-mcp :force t)` から `:force :all` に変更。
+  package-inferred system では `:force t` が親システムしか対象にせず
+  何も再コンパイルしない (Task 8 で実測)。
+- `src/cst.lisp` の `unterminated-source` の docstring と `end-of-file` 分岐の
+  コメントを更新。`end-of-file` 型を保つ理由は、本ブランチで削除された
+  `lisp-read-file` の unbalanced-parentheses hint ではなく、
+  `lisp-edit-form-core` の `%delimiter-failure-p` が `end-of-file` を見て
+  復旧可能な区切り文字の失敗と分類することである。

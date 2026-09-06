@@ -2288,7 +2288,7 @@ Claude-Session: https://claude.ai/code/session_01BpidmyXVyFDkT2rYoHQ6y5"
 
 ```bash
 ros -e '(ql:quickload :cl-mcp :silent t)' \
-    -e '(asdf:compile-system :cl-mcp :force t)' 2>&1 | grep -iE "warning|error" | grep -v "UIOP" | head -40
+    -e '(asdf:compile-system :cl-mcp :force :all)' 2>&1 | grep -iE "warning|error" | grep -v "UIOP" | head -40
 ```
 Expected: 本 PR で触ったファイル (`clgrep`, `validate`, `lisp-edit-form-core`, `lisp-read-file`, `paren-diagnostics`, `fs`) に新しい WARNING が出ない。UIOP 由来の約 427 件は既知のノイズ。
 

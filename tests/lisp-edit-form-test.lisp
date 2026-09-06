@@ -1139,6 +1139,8 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Close it with |#" err))
           (ok (search "apply the change described above" err))
           (ok (null (search "Likely fix" err)) "no likely fix exists for a comment problem")
+          (ok (search "offset=1, limit=1" err)
+              "no likely fix, so the offset falls back to the opener's line")
           (ok (search "allow_unparseable_overwrite=true" err)
               "an open comment is a delimiter failure, so the recovery path applies"))))))
 

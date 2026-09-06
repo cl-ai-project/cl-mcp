@@ -27,7 +27,9 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 
 **Fallback** (stale image / package conflicts): `rove cl-mcp.asd` from Bash for a clean process.
 
-**Pre-PR**: `(asdf:compile-system :cl-mcp :force t)` to catch warnings, then run full test suite.
+**Pre-PR**: `(asdf:compile-system :cl-mcp :force :all)` to catch warnings, then run full test suite.
+(`:force t` recompiles nothing here: cl-mcp is a package-inferred system, so the work is in the
+per-file subsystems that only `:force :all` reaches.)
 
 **Linting** (required before commit):
 ```bash

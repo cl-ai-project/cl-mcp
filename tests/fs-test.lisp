@@ -472,3 +472,16 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
           (ok (search "cannot parse the file as written" text))
           (ok (search "allow_unparseable_overwrite=true" text))
           (ok (eq t (gethash "unparseable" payload))))))))
+
+(deftest fs-write-file-survives-a-hook-that-errors
+  (testing "an error from the hook is no verdict: the write succeeds and says nothing"
+    (with-scratch-file ("tests/tmp/write-warn-boom.lisp")
+      (let ((cl-mcp/src/fs:*lisp-file-unparseable-hook*
+              (lambda (pn text) (declare (ignore pn text)) (error "boom"))))
+        (multiple-value-bind (text payload err)
+            (%call-fs-write "tests/tmp/write-warn-boom.lisp" (format nil "(defun a ()~%"))
+          (ok (null err) "the file is on disk, so this must not be reported as an error")
+          (ok (eq t (gethash "success" payload)))
+          (ok (search "Wrote tests/tmp/write-warn-boom.lisp" text))
+          (ng (search "WARNING" text))
+          (ok (null (gethash "unparseable" payload))))))))

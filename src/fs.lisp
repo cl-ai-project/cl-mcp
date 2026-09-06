@@ -265,15 +265,23 @@ partial image that loaded fs alone) there is no verdict and no warning. The
 text carries the shared delimiter diagnosis -- or, should the reader fail
 where the scan sees balance, a plain sentence -- and says that the next write
 needs allow_unparseable_overwrite=true, because the file now exists and does
-not parse, so the guard would otherwise refuse the very fix it asks for."
+not parse, so the guard would otherwise refuse the very fix it asks for.
+
+This runs after the file is already on disk, so nothing here may turn a
+successful write into an error: an error from the hook counts as no verdict
+(no warning, as with no hook at all), and an error while diagnosing falls
+back to the plain sentence."
   (when (and *lisp-file-unparseable-hook*
              (%lisp-source-pathname-p pn)
-             (funcall *lisp-file-unparseable-hook* pn content))
+             (ignore-errors (funcall *lisp-file-unparseable-hook* pn content)))
     (format nil "WARNING: the file was written but does not parse.~%~A~%~
                  Fix it and write it again with fs-write-file (path=~S, ~
                  allow_unparseable_overwrite=true; the file now exists and does not ~
                  parse, so the overwrite guard requires the flag)."
-            (or (format-delimiter-diagnosis (diagnose-delimiters content) :target path)
+            (or (handler-case
+                    (format-delimiter-diagnosis (diagnose-delimiters content)
+                                                :target path)
+                  (error () nil))
                 (concatenate 'string
                              "The editing tools' reader cannot parse the file as "
                              "written; run lisp-check-parens for the position."))
