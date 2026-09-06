@@ -3,10 +3,12 @@
 (defpackage #:cl-mcp/tests/lisp-read-file-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok
+                #:deftest #:testing #:ok #:ng
                 #:skip)
   (:import-from #:cl-mcp/src/lisp-read-file
                 #:lisp-read-file)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:file-unparseable-error)
   (:import-from #:cl-mcp/src/fs
                 #:fs-write-file
                 #:fs-resolve-read-path)
@@ -1058,3 +1060,139 @@ not reader output: no backquote encloses it, so it must print as a list.")
                                                :content-pattern "eclector"))))
          (ok (null (search "`(let" content))
              "no form expanded, so the macro body is not shown"))))))
+
+(defparameter *missing-close-source*
+  (format nil "~{~A~%~}"
+          (list "(in-package #:cl-user)"
+                ""
+                "(defun probe-a (x)"
+                "  (let ((y (* x 2)))"
+                "    (if (> y 10)"
+                "        (format t \"big\")"
+                "        (format t \"small\")"
+                "    y))"
+                ""
+                "(defun probe-c (x)"
+                "  (list x x x))"))
+  "PROBE-A (line 3) never closes: line 8 needs one more ), so PROBE-C is swallowed.")
+
+(defparameter *stray-close-source*
+  (format nil "~{~A~%~}"
+          (list "(defun a ()"
+                "  (list 1)))"
+                ""
+                "(defun b () 2)"))
+  "One ) too many at the end of line 2.")
+
+(defun %unparseable-message (path &rest keys)
+  "Call lisp-read-file on PATH with KEYS and return the file-unparseable-error
+message it signals, or NIL when it returns normally."
+  (handler-case (progn (apply #'lisp-read-file path keys) nil)
+    (file-unparseable-error (e) (princ-to-string e))))
+
+(defun %read-file-tool-text (path &rest kvs)
+  "Call the lisp-read-file tool handler on PATH with KVS argument pairs at the
+2025-11-25 protocol and return (VALUES text is-error)."
+  (let ((state (cl-mcp/src/state:make-state))
+        (args (apply #'cl-mcp/src/tools/helpers:make-ht "path" path kvs)))
+    (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+    (let* ((response (cl-mcp/src/lisp-read-file::lisp-read-file-handler state 1 args))
+           (payload (gethash "result" response))
+           (content (and payload (gethash "content" payload))))
+      (values (and content (plusp (length content)) (gethash "text" (aref content 0)))
+              (and payload (gethash "isError" payload))))))
+
+(deftest lisp-read-file-broken-file-gets-the-shared-diagnosis
+  (testing "a missing ) is reported with the form, the likely fix and the recovery path"
+    (with-temp-lisp-file "tests/tmp/read-file-missing-close.lisp" *missing-close-source*
+      (lambda (path)
+        (let ((message (%unparseable-message path)))
+          (ok message "collapsed reading of a broken file signals file-unparseable-error")
+          (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" message))
+          (ok (search "Likely fix, inferred from indentation:" message))
+          (ok (search "Next top-level form probably begins at line 10" message))
+          (ok (search "fs-write-file" message)
+              "the recovery path is executable with cl-mcp tools alone")
+          (ng (search "use lisp-check-parens)" message) "the old one-line hint is gone")))))
+  (testing "a stray ) takes the same path instead of escaping as an internal error"
+    (with-temp-lisp-file "tests/tmp/read-file-stray-close.lisp" *stray-close-source*
+      (lambda (path)
+        (let ((message (%unparseable-message path)))
+          (ok message "stray-right-parenthesis is not end-of-file, and must still be caught")
+          (ok (search "extra \")\" at line 2" message))
+          (multiple-value-bind (text is-error) (%read-file-tool-text path)
+            (ok is-error)
+            (ok (search "extra \")\"" text))
+            (ng (search "Internal error during" text))))))))
+
+(deftest lisp-read-file-lenient-path-shows-the-prefix-and-says-where-it-stops
+  (if (%try-load :named-readtables)
+      (with-temp-lisp-file "tests/tmp/read-file-lenient-break.lisp"
+          (format nil "~{~A~%~}"
+                  (list "(in-package #:cl-user)"
+                        "(named-readtables:in-readtable :standard)"
+                        ""
+                        "(defun before-break () 1)"
+                        ""
+                        "(defun after-break ()"
+                        "  (list 1)"
+                        ""
+                        "(defun never-seen () 3)"))
+        (lambda (path)
+          (let* ((result (lisp-read-file path))
+                 (content (gethash "content" result))
+                 (meta (gethash "meta" result)))
+            (testing "the forms before the breakage are still shown"
+              (ok (search "(defun before-break ()" content)))
+            (testing "and the breakage is named below them, never silently dropped"
+              (ok (search "unclosed (form starting at line 6" content))
+              (ok (search "forms before it can still be edited" content)
+                  "the message knows the prefix is editable")
+              (ok (eq t (gethash "unparseable" meta)))
+              (ok (eql 6 (gethash "unparseable_from_line" meta))))
+            (testing "the swallowed definition is not presented as a form"
+              (ng (search ": (defun never-seen" content))))))
+      (skip "named-readtables not available")))
+
+(deftest lisp-read-file-broken-file-outside-the-project-root-gets-no-overwrite-path
+  (testing "a dependency's broken source is diagnosed but not sent to fs-write-file"
+    (let* ((root (system-source-directory :cl-mcp))
+           (narrow (merge-pathnames "tests/tmp/narrow-root/" root))
+           (outside (merge-pathnames "tests/tmp/outside-broken.lisp" root)))
+      (ensure-directories-exist narrow)
+      (with-open-file (out outside :direction :output :if-exists :supersede)
+        (write-string *stray-close-source* out))
+      (unwind-protect
+           ;; The file sits under the cl-mcp system's source directory, which the
+           ;; read policy allows, but outside the (narrowed) project root.
+           (let ((cl-mcp/src/project-root:*project-root* narrow))
+             (let ((message (%unparseable-message (namestring outside))))
+               (ok message)
+               (ok (search "extra \")\"" message) "the diagnosis is still given")
+               (ok (search "outside the project root" message))
+               (ng (search "fs-write-file (path=" message)
+                   "no overwrite instruction for a path fs-write-file would reject")))
+        (ignore-errors (delete-file outside))))))
+
+(deftest lisp-read-file-truncated-read-is-not-diagnosed
+  (testing "a valid file larger than the read cap is reported as too large, not as broken"
+    (with-temp-lisp-file "tests/tmp/read-file-large-valid.lisp"
+        (format nil "(defun target ()~%  (list 1 2 3 4 5 6 7 8 9 10))~%")
+      (lambda (path)
+        (let ((message (handler-case
+                           (let ((cl-mcp/src/fs::*fs-read-max-bytes* 16))
+                             (lisp-read-file path)
+                             nil)
+                         (error (e) (princ-to-string e)))))
+          (ok message "the read is cut, so reading must fail")
+          (ok (search "exceeds the read limit" message))
+          (ng (search "Unbalanced" message) "a cut-off prefix is not a delimiter verdict"))))))
+
+(deftest lisp-read-file-raw-mode-still-reads-a-broken-file
+  (testing "collapsed=false does not parse, so it shows the text as is"
+    (with-temp-lisp-file "tests/tmp/read-file-raw-broken.lisp" *stray-close-source*
+      (lambda (path)
+        (let* ((result (lisp-read-file path :collapsed nil :offset 1 :limit 1))
+               (content (gethash "content" result)))
+          (ok (string= (gethash "mode" result) "raw"))
+          (ok (search "(list 1)))" content)))))))

@@ -15,7 +15,13 @@
                 #:extract-package-for-line
                 #:semantic-grep
                 #:extract-form-type-and-name
-                #:extract-form-signature))
+                #:extract-form-signature
+                #:scan-toplevel-forms
+                #:toplevel-form-end-pos
+                #:toplevel-form-start-line
+                #:toplevel-form-end-line
+                #:toplevel-form-unterminated-p))
+
 (in-package #:cl-mcp/tests/clgrep-utils-test)
 
 ;;; Test data content for grep-file tests
@@ -406,6 +412,70 @@ Final line
       (ok (null (semantic-grep dir "probe-value"
                                :form-types '("define-endpoint")
                                :include-form nil))))))
+
+(deftest test-scan-toplevel-forms-keeps-unterminated-form
+  (testing "a form still open at EOF is returned, flagged, and spans to the end"
+    (let* ((content (format nil "(defun a ()~%  (list 1))~%~%(defun b ()~%  (list 2)~%~%~
+                                 (defun c ()~%  (list 3))~%"))
+           (forms (scan-toplevel-forms content)))
+      (ok (= 2 (length forms)) "a closes; b swallows c, so two forms")
+      (let ((a (first forms))
+            (b (second forms)))
+        (ok (null (toplevel-form-unterminated-p a)))
+        (ok (= 1 (toplevel-form-start-line a)))
+        (ok (toplevel-form-unterminated-p b))
+        (ok (= 4 (toplevel-form-start-line b)))
+        (ok (= (length content) (toplevel-form-end-pos b))
+            "an unterminated form ends where the input ends")
+        (ok (= 8 (toplevel-form-end-line b))
+            "and its line range ends on the swallowed definition's last line"))))
+  (testing "EOF inside a string still yields the enclosing form, flagged"
+    (let ((forms (scan-toplevel-forms
+                  (format nil "(defun a ()~%  \"never closed~%(defun b () 1)~%"))))
+      (ok (= 1 (length forms)))
+      (ok (toplevel-form-unterminated-p (first forms)))))
+  (testing "EOF inside a block comment does the same"
+    (let ((forms (scan-toplevel-forms
+                  (format nil "(defun a ()~%  #| never closed~%(defun b () 1)~%"))))
+      (ok (= 1 (length forms)))
+      (ok (toplevel-form-unterminated-p (first forms)))))
+  (testing "without a trailing newline the end line is still the last content line"
+    (let ((forms (scan-toplevel-forms "(defun a ()")))
+      (ok (= 1 (length forms)))
+      (ok (toplevel-form-unterminated-p (first forms)))
+      (ok (= 1 (toplevel-form-end-line (first forms))))))
+  (testing "a balanced input flags nothing"
+    (let ((forms (scan-toplevel-forms (format nil "(defun a () 1)~%(defun b () 2)~%"))))
+      (ok (= 2 (length forms)))
+      (ok (notany #'toplevel-form-unterminated-p forms)))))
+
+(defparameter *broken-dsl-file-content* "(in-package #:clgrep-dsl-demo)
+
+(defun before-break (s)
+  (probe-value s))
+
+(defun swallowing (s)
+  (probe-value s)
+
+(defun after-break (s)
+  (probe-value s))
+"
+  "The ) closing SWALLOWING's body (line 7) is missing, so it swallows AFTER-BREAK.")
+
+(deftest test-semantic-grep-reports-matches-inside-an-unterminated-form
+  (with-temp-dsl-project (dir *broken-dsl-file-content*)
+    (let ((results (semantic-grep dir "probe-value" :include-form nil)))
+      (testing "the match below the breakage is not dropped"
+        (ok (= 3 (length results)))
+        (ok (member 10 (mapcar (lambda (r) (cdr (assoc :line r))) results))
+            "line 10 sits inside the swallowed definition"))
+      (testing "matches inside the unterminated form are flagged, the one before it is not"
+        (let ((before (find 4 results :key (lambda (r) (cdr (assoc :line r)))))
+              (inside (find 10 results :key (lambda (r) (cdr (assoc :line r))))))
+          (ok (null (assoc :unterminated before)) "healthy results carry no key at all")
+          (ok (eq t (cdr (assoc :unterminated inside))))
+          (ok (string= "swallowing" (cdr (assoc :form-name inside)))
+              "attributed to the form that swallowed it, by design"))))))
 
 (defparameter *qualified-dsl-file-content*
   "(in-package #:clgrep-dsl-demo)

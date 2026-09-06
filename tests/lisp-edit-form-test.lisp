@@ -12,7 +12,9 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%normalize-string
-                #:file-unparseable-error)
+                #:file-unparseable-error
+                #:file-unparseable-message
+                #:make-file-unparseable-condition)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -1137,6 +1139,8 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "Close it with |#" err))
           (ok (search "apply the change described above" err))
           (ok (null (search "Likely fix" err)) "no likely fix exists for a comment problem")
+          (ok (search "offset=1, limit=1" err)
+              "no likely fix, so the offset falls back to the opener's line")
           (ok (search "allow_unparseable_overwrite=true" err)
               "an open comment is a delimiter failure, so the recovery path applies"))))))
 
@@ -1317,6 +1321,47 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                               :content "(defun a () 2)")
               (ok (search "(defun a () 2)" (fs-read-file path)))))))
       (skip "named-readtables not available; in-readtable switch path not exercised")))
+
+(deftest file-unparseable-message-outside-project-root-promises-no-overwrite
+  (testing "a recoverable file the project root does not contain gets no fs-write-file path"
+    (let* ((root (system-source-directory :cl-mcp))
+           (narrow (merge-pathnames* "tests/tmp/narrow-root/" root))
+           (outside (merge-pathnames* "tests/tmp/outside-broken.lisp" root))
+           (text (format nil "(defun a ()~%  (list 1)~%")))
+      (ensure-directories-exist narrow)
+      (with-open-file (out outside :direction :output :if-exists :supersede)
+        (write-string text out))
+      (unwind-protect
+           (let* ((cl-mcp/src/project-root:*project-root* narrow)
+                  (cause (handler-case
+                             (progn (cl-mcp/src/cst:parse-top-level-forms text) nil)
+                           (error (e) e)))
+                  (message (file-unparseable-message
+                            (make-file-unparseable-condition (truename outside) text cause))))
+             (ok cause "the fixture must fail to parse")
+             (ok (search "outside the project root" message))
+             (ok (search "fix it outside cl-mcp" message))
+             (ng (search "fs-write-file (path=" message)
+                 "no overwrite instruction for a path fs-write-file would reject")
+             (ok (search "unclosed (form starting at line 1" message)
+                 "the diagnosis itself is still given"))
+        (ignore-errors (delete-file outside)))))
+  (testing "the same file under the project root keeps the recovery path"
+    (let* ((root (system-source-directory :cl-mcp))
+           (inside (merge-pathnames* "tests/tmp/inside-broken.lisp" root))
+           (text (format nil "(defun a ()~%  (list 1)~%")))
+      (with-open-file (out inside :direction :output :if-exists :supersede)
+        (write-string text out))
+      (unwind-protect
+           (let* ((cl-mcp/src/project-root:*project-root* root)
+                  (cause (handler-case
+                             (progn (cl-mcp/src/cst:parse-top-level-forms text) nil)
+                           (error (e) e)))
+                  (message (file-unparseable-message
+                            (make-file-unparseable-condition (truename inside) text cause))))
+             (ok (search "fs-write-file (path=\"tests/tmp/inside-broken.lisp\"" message))
+             (ng (search "outside the project root" message)))
+        (ignore-errors (delete-file inside))))))
 
 (deftest lisp-edit-form-old-protocol-error-returns-rpc-error
   (testing "old protocol errors return -32603 rpc-error, not isError"

@@ -4,7 +4,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
-                #:fs-resolve-read-path)
+                #:fs-resolve-read-path
+                #:fs-window-start)
   ;; The edit tools' parser itself, not the hook fs installs at load time:
   ;; a direct dependency so the verdict is there in any image that has this
   ;; file, not only when lisp-edit-form-core happened to load first.
@@ -37,7 +38,8 @@ The default next step is lisp-edit-form, which repairs and writes a form.
 When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
 same verdict fs-write-file's guard uses) to fail on a delimiter no readtable
 can fix -- the structural tools cannot locate any form in it, so the next
-step is the overwrite path: fs-read-file, apply the fix, fs-write-file with
+step is the overwrite path: lisp-read-file (raw mode) to confirm the line,
+fs-read-file for the exact full text, apply the fix, fs-write-file with
 allow_unparseable_overwrite. Keying this on the parser rather than on the
 scan keeps the three tools' verdicts consistent: a file that parses (a
 symbol such as a[b), fails for a reader-level reason (#., #?), or was only
@@ -214,6 +216,34 @@ back either)."
           (gethash "crlf" h) (if (getf fix :crlf) t nil))
     h))
 
+(defun %window-start (path offset)
+  "Return two values for the window of PATH that begins at character OFFSET:
+the number of newlines before it and the number of characters between the
+last of those newlines (or the start of the file) and the window, as
+FS-WINDOW-START measures them -- the file is opened only through the fs
+layer, under the same read policy as the slice itself. A failure reported at
+window line L, column C is at file line L + newlines and, on the first window
+line only, column C + that character count. Returns (VALUES 0 0) for OFFSET 0
+or when the prefix cannot be read."
+  (if (or (null offset) (zerop offset))
+      (values 0 0)
+      (handler-case (fs-window-start path offset)
+        (error () (values 0 0)))))
+
+(defun %file-line (line window-start)
+  "Translate window-relative LINE (1-based) to a file line using WINDOW-START,
+the (newlines characters) list built from %WINDOW-START. NIL stays NIL."
+  (and line (+ line (first window-start))))
+
+(defun %file-column (line column window-start)
+  "Translate window-relative COLUMN on window LINE to a file column. Only the
+window's first line begins mid-line; every later line starts where the file's
+does, so only there the characters before the window are added."
+  (and column
+       (if (eql line 1)
+           (+ column (second window-start))
+           column)))
+
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
 Also checks for reader errors (e.g. unknown dispatch characters, #. with
@@ -236,7 +266,10 @@ tools' own reader (the verdict fs-write-file's overwrite guard uses): a file
 it accepts makes the scan a false positive, so the text says so first and no
 fix, field or instruction is attached; a file that fails on a delimiter no
 readtable can fix gets the overwrite path as its next step. A window into a
-file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
+file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only;
+it carries a \"window\" hash (offset, length, first_line), its line and column
+are translated to the file's with %WINDOW-START, and a reader error found in
+it is flagged in \"diagnosis_text\" as a likely artifact of the window."
   (when (and path code)
     (error "Provide either PATH or CODE, not both"))
   (when (and (null path) (null code))
@@ -261,7 +294,12 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
          ;; from it.
          (partial (and path
                        (or (plusp base-off)
-                           (and limit (= (length text) limit) remaining)))))
+                           (and limit (= (length text) limit) remaining))))
+         ;; Where the window starts in the file (newlines before it, characters
+         ;; since the last one), so every line and column below is the file's.
+         (window-start (if (and path (plusp base-off))
+                           (multiple-value-list (%window-start path base-off))
+                           (list 0 0))))
     ;; A read cut at the fs cap is a prefix of the file: a verdict on it would
     ;; describe text the file does not end with, so it is reported as too
     ;; large rather than diagnosed. No "position": nothing was scanned.
@@ -281,6 +319,13 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                            &allow-other-keys)
           diagnosis
         (let ((h (make-hash-table :test #'equal)))
+          (when partial
+            ;; For a client that reads the payload and never the text: the
+            ;; verdict below describes this window, not the whole file.
+            (setf (gethash "window" h)
+                  (make-ht "offset" base-off
+                           "length" (length text)
+                           "first_line" (1+ (first window-start)))))
           (cond
             ((not ok)
              ;; Paren error takes priority
@@ -290,8 +335,8 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                    (gethash "found" h) found)
              (let ((pos (make-hash-table :test #'equal)))
                (setf (gethash "offset" pos) offset
-                     (gethash "line" pos) line
-                     (gethash "column" pos) column)
+                     (gethash "line" pos) (%file-line line window-start)
+                     (gethash "column" pos) (%file-column line column window-start))
                (setf (gethash "position" h) pos))
              ;; The next-step hint and the wording rest on the verdict the
              ;; fs-write-file guard itself gives (the edit tools' parser),
@@ -340,7 +385,11 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                                    (uiop:enough-pathname (fs-resolve-read-path path)
                                                          (%project-root-truename)))
                                   :have-fix (and likely-fixes t)
-                                  :where "below"))))
+                                  :where "below"
+                                  :fix-line (or (and likely-fixes
+                                                     (getf (first likely-fixes) :line))
+                                                (getf diagnosis :unclosed-form-line)
+                                                (getf diagnosis :line))))))
                  (cond
                    (partial
                     ;; A slice of the file: say what was seen, never how to
@@ -411,9 +460,22 @@ file (OFFSET, or a LIMIT with input remaining) is diagnosed for its kind only."
                    (r-line (getf reader-info :line))
                    (r-col  (getf reader-info :column)))
                (setf (gethash "offset" pos) (getf reader-info :offset))
-               (when r-line   (setf (gethash "line" pos) r-line))
-               (when r-col    (setf (gethash "column" pos) r-col))
-               (setf (gethash "position" h) pos)))
+               (when r-line
+                 (setf (gethash "line" pos) (%file-line r-line window-start)))
+               (when r-col
+                 (setf (gethash "column" pos) (%file-column r-line r-col window-start)))
+               (setf (gethash "position" h) pos))
+             ;; A window starts wherever the offset fell -- inside a string or
+             ;; a comment as likely as not -- so what the reader trips over
+             ;; there is often the window's own edge, not the file's fault.
+             (when partial
+               (setf (gethash "diagnosis_text" h)
+                     (format nil "Only a window of ~A was checked (offset ~D, ~D ~
+                                  characters). A reader error in a window is often ~
+                                  an artifact of where the window starts (inside a ~
+                                  string or a comment, say), so treat it as a hint ~
+                                  only; check the whole file before acting on it."
+                             path base-off (length text)))))
             (t
              ;; Both checks passed
              (setf (gethash "ok" h) t)))
@@ -474,8 +536,9 @@ sent to the fs-write-file overwrite path."
                            (line     (and pos (gethash "line" pos)))
                            (col      (and pos (gethash "column" pos))))
                       (if (string= kind "reader-error")
-                          (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A"
-                                  line col (or message "unknown"))
+                          (format nil "Reader error~@[ at line ~D~]~@[, column ~D~]: ~A~@[~%~A~]"
+                                  line col (or message "unknown")
+                                  (gethash "diagnosis_text" check-result))
                           (let ((ef (if (and expected found)
                                         (format nil " (expected ~A, found ~A)" expected found)
                                         ""))
@@ -563,7 +626,10 @@ sent to the fs-write-file overwrite path."
               (when next-line
                 (setf (gethash "next_top_level_line" payload) next-line))
               (when (gethash "false_positive" check-result)
-                (setf (gethash "false_positive" payload) t)))
+                (setf (gethash "false_positive" payload) t))
+              (let ((window (gethash "window" check-result)))
+                (when window
+                  (setf (gethash "window" payload) window))))
             (result id payload)))
       (error (e)
         (result id (make-ht "content" (text-content (format nil "Error: ~A" e))

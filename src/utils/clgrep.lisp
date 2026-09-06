@@ -14,7 +14,13 @@
            #:target-file-p
            #:path-ignored-p
            #:glob-to-regex
-           #:semantic-grep))
+           #:semantic-grep
+           #:scan-toplevel-forms
+           #:toplevel-form-start-pos
+           #:toplevel-form-end-pos
+           #:toplevel-form-start-line
+           #:toplevel-form-end-line
+           #:toplevel-form-unterminated-p))
 (in-package #:cl-mcp/src/utils/clgrep)
 
 (defun grep-file (pattern filepath &key (output *standard-output*))
@@ -54,11 +60,16 @@
              (uiop:quit 3))))))))
 
 (defstruct toplevel-form
-  "Represents a top-level form with its position and line range."
+  "Represents a top-level form with its position and line range.
+UNTERMINATED-P is T when the form was still open at the end of the input
+(a missing \")\", or an unterminated string or block comment inside it): its
+END-POS is then the input length and END-LINE the last line, so that the
+lines it swallowed still belong to a form."
   start-pos
   end-pos
   start-line
-  end-line)
+  end-line
+  (unterminated-p nil))
 
 (defun scan-toplevel-forms (content)
   "Scan CONTENT and return a list of TOPLEVEL-FORM structs.
@@ -144,6 +155,23 @@
              (when (char= char #\Newline)
                (incf current-line))
              (incf pos))
+    ;; A form still open at EOF swallows the rest of the file. Keep it, flagged,
+    ;; so the lines it swallowed still belong to a form instead of vanishing
+    ;; from every result; callers decide how to present it.
+    (when form-start-pos
+      ;; CURRENT-LINE has already moved past a trailing newline, so step back to
+      ;; the last line holding content: the closing-paren path above reports that
+      ;; line, and both paths must agree on what END-LINE means.
+      (let ((last-line (if (and (plusp len)
+                                (char= (char content (1- len)) #\Newline))
+                           (1- current-line)
+                           current-line)))
+        (push (make-toplevel-form :start-pos form-start-pos
+                                  :end-pos len
+                                  :start-line form-start-line
+                                  :end-line last-line
+                                  :unterminated-p t)
+              forms)))
     (nreverse forms)))
 
 (defun split-lines (text)
@@ -595,7 +623,8 @@ Returns an alist like extract-toplevel-form, or NIL."
                 (cons :start-line (toplevel-form-start-line form))
                 (cons :end-line (toplevel-form-end-line form))
                 (cons :start-byte (toplevel-form-start-pos form))
-                (cons :end-byte (toplevel-form-end-pos form)))))))
+                (cons :end-byte (toplevel-form-end-pos form))
+                (cons :unterminated (toplevel-form-unterminated-p form)))))))
   nil)
 
 (defun search-in-file
@@ -606,6 +635,14 @@ Returns an alist like extract-toplevel-form, or NIL."
    only include results where the form type matches.
    If INCLUDE-FORM is NIL, omit the :form field from results (saves tokens).
    Each result is an alist with file, line, match, package, signature, and optionally form.
+   A match inside a form still open at the end of the file carries
+   (:unterminated . t): the file does not parse there, and the form type,
+   name and signature reported are those of the unclosed form, not of the
+   definition the match sits in. Healthy matches carry no such key.
+   Such a match passes the FORM-TYPES filter unconditionally, because the
+   type it would be filtered on is the unclosed form's rather than its own;
+   dropping it would lose the match silently, exactly where the caller has
+   no way to learn that the file does not parse.
 
    Pre-computes toplevel form map and package map once per file for O(n)
    performance instead of O(n*m) where m is the number of matches."
@@ -640,6 +677,7 @@ Returns an alist like extract-toplevel-form, or NIL."
                                 (extract-form-signature full-form-text)))
                           (when
                               (or (null form-types)
+                                  (cdr (assoc :unterminated form-info))
                                   (member form-type form-types :test
                                           #'string-equal))
                             (let ((result
@@ -669,6 +707,12 @@ Returns an alist like extract-toplevel-form, or NIL."
                                                        (cdr
                                                         (assoc :text
                                                                form-info)))))))
+                              ;; Only when true, so a healthy result carries
+                              ;; no key and the JSON payload gains none.
+                              (when (cdr (assoc :unterminated form-info))
+                                (setf result
+                                        (append result
+                                                (list (cons :unterminated t)))))
                               (push result results))))))))))
      (error (condition)
             (format *error-output* "Warning: Could not read ~A: ~A~%" filepath

@@ -204,3 +204,126 @@
       (let ((results (clgrep-search "defun" :path "src/" :recursive nil :limit 5)))
         (ok (listp results))
         (ok (> (length results) 0) "should find defun under src/")))))
+
+(defparameter *broken-source*
+  (format nil "~{~A~%~}"
+          (list "(in-package #:cl-user)"
+                ""
+                "(defun openerp (ch)"
+                "  (list ch))"
+                ""
+                "(defun matching-closer (ch)"
+                "  (list ch)"
+                ""
+                "(defmacro tokenize (text)"
+                "  (list text))"))
+  "MATCHING-CLOSER (line 6) is missing its closing ), so it swallows TOKENIZE (line 9).")
+
+(defparameter *healthy-source*
+  (format nil "~{~A~%~}"
+          (list "(defun healthy-one ()"
+                "  (list :alpha)"
+                "  (list :alpha))"
+                ""
+                "(defun healthy-two () :beta)"))
+  "Balanced; HEALTHY-ONE matches \"alpha\" and \"list\" on two lines each.")
+
+(defmacro with-broken-fixture ((relative-dir) &body body)
+  "Create RELATIVE-DIR under the cl-mcp project root holding broken.lisp and
+healthy.lisp, bind *project-root* to that root, run BODY, delete the directory."
+  `(let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (dir (uiop:ensure-directory-pathname
+                (merge-pathnames ,relative-dir *project-root*))))
+     (ensure-directories-exist dir)
+     (unwind-protect
+          (progn
+            (with-open-file (out (merge-pathnames "broken.lisp" dir)
+                                 :direction :output :if-exists :supersede)
+              (write-string *broken-source* out))
+            (with-open-file (out (merge-pathnames "healthy.lisp" dir)
+                                 :direction :output :if-exists :supersede)
+              (write-string *healthy-source* out))
+            ,@body)
+       (uiop:delete-directory-tree dir :validate t))))
+
+(defun %call-clgrep (pattern &rest kvs)
+  "Call the clgrep-search tool handler with PATTERN plus KVS argument pairs and
+return (VALUES text payload): the rendered summary and the result hash."
+  (let* ((args (apply #'cl-mcp/src/tools/helpers:make-ht "pattern" pattern kvs))
+         (response (cl-mcp/src/clgrep::clgrep-search-handler
+                    (cl-mcp/src/state:make-state) 1 args))
+         (payload (gethash "result" response))
+         (content (and payload (gethash "content" payload))))
+    (values (and content (plusp (length content)) (gethash "text" (aref content 0)))
+            payload)))
+
+(deftest clgrep-search-tool-lists-matches-inside-an-unterminated-form
+  (with-broken-fixture ("tests/tmp/clgrep-broken/")
+    (multiple-value-bind (text payload)
+        (%call-clgrep "def(un|macro) (openerp|matching-closer|tokenize)"
+                      "path" "tests/tmp/clgrep-broken/")
+      (testing "every definition is visible in the text, the swallowed one included"
+        (ok (search "broken.lisp:3 [defun] (openerp ch)" text))
+        (ok (search "broken.lisp:6 [defun] (matching-closer ch)" text))
+        (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text)
+            "the line inside the unterminated form gets its own line in the text"))
+      (testing "the note names the file and the line where the unclosed form opens"
+        (ok (search "NOTE: broken.lisp does not parse: a form opened at line 6" text))
+        (ok (search "form type and signature are those of the unclosed form" text))
+        (ok (search "lisp-check-parens" text)))
+      (testing "the payload carries the same facts"
+        (let* ((matches (gethash "matches" payload))
+               (swallowed (find 9 matches :key (lambda (m) (gethash "line" m)))))
+          (ok swallowed)
+          (ok (eq t (gethash "unterminated" swallowed)))
+          (ok (= 1 (length (gethash "match_lines" swallowed))))
+          (ok (= 1 (length (gethash "notes" payload)))))))))
+
+(deftest clgrep-search-tool-form-types-still-lists-matches-inside-an-unterminated-form
+  (with-broken-fixture ("tests/tmp/clgrep-broken-types/")
+    (testing "a swallowed defmacro passes a form_types filter it cannot be typed against"
+      (multiple-value-bind (text payload)
+          (%call-clgrep "defmacro tokenize" "path" "tests/tmp/clgrep-broken-types/"
+                        "form_types" (vector "defmacro"))
+        (ok (= 1 (gethash "count" payload)))
+        (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
+        (ok (search "NOTE: broken.lisp does not parse" text))
+        (ok (search "regardless of any form_types filter" text)
+            "the note says the filter did not decide this match")
+        (ok (search "form type and signature are those of the unclosed form" text))))
+    (testing "without the filter the same match is found, attributed the same way"
+      (multiple-value-bind (text payload)
+          (%call-clgrep "defmacro tokenize" "path" "tests/tmp/clgrep-broken-types/")
+        (ok (= 1 (gethash "count" payload)))
+        (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
+        (ok (search "NOTE: broken.lisp does not parse" text))))
+    (testing "a healthy file is still filtered out by form_types, with no note"
+      (multiple-value-bind (text payload)
+          (%call-clgrep "defun healthy-one" "path" "tests/tmp/clgrep-broken-types/"
+                        "form_types" (vector "defmacro"))
+        (ok (= 0 (gethash "count" payload)))
+        (ok (search "0 matches" text))
+        (ok (null (search "NOTE:" text)))))))
+
+(deftest clgrep-search-tool-healthy-files-keep-grouping-and-get-no-note
+  (with-broken-fixture ("tests/tmp/clgrep-healthy/")
+    (multiple-value-bind (text payload)
+        (%call-clgrep "alpha" "path" "tests/tmp/clgrep-healthy/")
+      (testing "two matching lines in one balanced form are still one entry"
+        (ok (= 1 (gethash "count" payload)))
+        (ok (= 2 (length (gethash "match_lines" (aref (gethash "matches" payload) 0))))))
+      (testing "no note when the search touched no unterminated form"
+        (ok (null (search "NOTE:" text)))
+        (ok (null (gethash "notes" payload)))))))
+
+(deftest clgrep-search-tool-broken-file-does-not-affect-a-healthy-neighbour
+  (with-broken-fixture ("tests/tmp/clgrep-mixed/")
+    (multiple-value-bind (text payload)
+        (%call-clgrep "list" "path" "tests/tmp/clgrep-mixed/")
+      (let ((healthy (remove-if-not (lambda (m) (search "healthy.lisp" (gethash "file" m)))
+                                    (coerce (gethash "matches" payload) 'list))))
+        (ok (= 1 (length healthy)) "healthy-one's two list lines still group into one entry")
+        (ok (notany (lambda (m) (gethash "unterminated" m)) healthy)))
+      (ok (= 1 (/ (length (cl-ppcre:all-matches "NOTE:" text)) 2))
+          "exactly one note, for the one broken file")
+      (ok (= 1 (length (gethash "notes" payload)))))))
