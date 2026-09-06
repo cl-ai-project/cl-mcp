@@ -230,12 +230,17 @@ line to change, and names the next top-level form when a form swallowed the rest
 the file. Fix with `lisp-edit-form`.
 
 If the **file itself** no longer parses, `lisp-edit-form` and `lisp-patch-form` cannot
-locate any form in it. Recover with `fs-read-file`, apply the likely fix by hand, and
-write the whole file back with `fs-write-file` with `allow_unparseable_overwrite: true`
-(its `path` must be relative to the project root; the error message prints that path)
-(it refuses to overwrite an existing `.lisp` file otherwise, and the flag never applies
-to a file that parses). If the file only looks broken because it uses custom reader
-syntax such as `#?"..."`, pass the `readtable` parameter to `lisp-edit-form` instead.
+locate any form in it. Recover in two steps. First confirm the reported line with
+`lisp-read-file` (`collapsed: false`, `offset: <line - 1>`, `limit: 1`; raw mode works
+on a broken file and its offset/limit are lines). Then read the whole file with
+`fs-read-file` (exact bytes; do not copy from `lisp-read-file`'s raw mode, which
+re-joins lines and may append a `[Showing lines ...]` footer), apply the likely fix by
+hand, and write the whole file back with `fs-write-file` with
+`allow_unparseable_overwrite: true` (its `path` must be relative to the project root;
+the error message prints that path) (it refuses to overwrite an existing `.lisp` file
+otherwise, and the flag never applies to a file that parses). If the file only looks
+broken because it uses custom reader syntax such as `#?"..."`, pass the `readtable`
+parameter to `lisp-edit-form` instead.
 
 ### lisp-macroexpand returns "NOT EXPANDED" or a package error
 - The macro must be **defined in the worker image**, not just present on disk. Run

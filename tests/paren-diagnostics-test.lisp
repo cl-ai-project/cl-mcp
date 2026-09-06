@@ -11,7 +11,8 @@
                 #:lexical-state-at
                 #:repair-line-differences
                 #:format-repair-lines
-                #:format-delimiter-diagnosis))
+                #:format-delimiter-diagnosis
+                #:format-overwrite-recovery))
 
 (in-package #:cl-mcp/tests/paren-diagnostics-test)
 
@@ -36,6 +37,23 @@
 (defparameter +stray-bracket+
   (format nil "(defun f (x)~%  (let ((y 1]~%    (+ x y)))")
   "A \"]\" where \")\" was meant, on line 2 column 13.")
+
+(deftest format-overwrite-recovery-names-both-read-tools
+  (testing "the line is confirmed with lisp-read-file at a precomputed offset"
+    (let ((text (format-overwrite-recovery "src/a.lisp" :have-fix t :fix-line 41)))
+      (ok (search "lisp-read-file (collapsed=false, offset=40, limit=1" text)
+          "offset is 0-based lines, so line 41 is offset 40")
+      (ok (search "read the whole file with fs-read-file" text)
+          "the full text for writing back still comes from fs-read-file")
+      (ok (search "do not copy from lisp-read-file's raw mode" text))
+      (ok (search "fix shown under \"Likely fix\"" text))
+      (ok (search "fs-write-file (path=\"src/a.lisp\", allow_unparseable_overwrite=true" text))))
+  (testing "without a fix line no offset is invented"
+    (let ((text (format-overwrite-recovery "src/a.lisp" :where "above" :form-line 3)))
+      (ng (search "offset=" text))
+      (ok (search "lisp-read-file (collapsed=false;" text)
+          "raw mode is still named as the way to look at the file")
+      (ok (search "change described above to the form starting at line 3" text)))))
 
 (deftest scan-delimiters-balanced
   (testing "balanced text returns :ok t"

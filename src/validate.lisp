@@ -37,7 +37,8 @@ The default next step is lisp-edit-form, which repairs and writes a form.
 When OVERWRITABLE -- the file was judged by the edit tools' own parser (the
 same verdict fs-write-file's guard uses) to fail on a delimiter no readtable
 can fix -- the structural tools cannot locate any form in it, so the next
-step is the overwrite path: fs-read-file, apply the fix, fs-write-file with
+step is the overwrite path: lisp-read-file (raw mode) to confirm the line,
+fs-read-file for the exact full text, apply the fix, fs-write-file with
 allow_unparseable_overwrite. Keying this on the parser rather than on the
 scan keeps the three tools' verdicts consistent: a file that parses (a
 symbol such as a[b), fails for a reader-level reason (#., #?), or was only
@@ -396,7 +397,9 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                                    (uiop:enough-pathname (fs-resolve-read-path path)
                                                          (%project-root-truename)))
                                   :have-fix (and likely-fixes t)
-                                  :where "below"))))
+                                  :where "below"
+                                  :fix-line (and likely-fixes
+                                                 (getf (first likely-fixes) :line))))))
                  (cond
                    (partial
                     ;; A slice of the file: say what was seen, never how to

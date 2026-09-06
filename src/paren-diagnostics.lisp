@@ -990,22 +990,32 @@ symbol character with no ) typo behind it."
                  target (getf scan :found) (getf scan :expected)
                  (getf scan :line) (getf scan :column) (getf scan :found)))))
 
-(defun format-overwrite-recovery (relative-path &key have-fix (where "below") form-line)
+(defun format-overwrite-recovery (relative-path &key have-fix (where "below") form-line fix-line)
   "Return the recovery steps for a file that fails on a delimiter no readtable
-can fix, worded once for both lisp-check-parens and file-unparseable-error:
-read it with fs-read-file, apply the fix (HAVE-FIX: the one shown under
-\"Likely fix\"; otherwise the change described WHERE -- \"below\" or
-\"above\" -- optionally to the form starting at FORM-LINE), and write it
-back with fs-write-file. RELATIVE-PATH is the project-relative path that
-fs-write-file requires. Ends with the custom-reader-syntax caveat."
-  (format nil "read it with fs-read-file, apply the ~:[change described ~A~;fix shown under ~
-               \"Likely fix\"~*~]~@[ to the form starting at line ~D~], and write the ~
-               whole file back with fs-write-file (path=~S, ~
+can fix, worded once for both lisp-check-parens and file-unparseable-error.
+Two read tools, for two jobs: confirm the line with lisp-read-file in raw mode
+(collapsed=false works on a file that does not parse, and its offset and limit
+are lines, so FIX-LINE -- the 1-based line of the likely fix, when known --
+becomes a ready-made offset=FIX-LINE-1), then read the whole file with
+fs-read-file, whose text is exact (the raw mode re-joins lines and may append
+a footer, so it must not be the source of the write-back), apply the fix
+(HAVE-FIX: the one shown under \"Likely fix\"; otherwise the change described
+WHERE -- \"below\" or \"above\" -- optionally to the form starting at
+FORM-LINE), and write it back with fs-write-file. RELATIVE-PATH is the
+project-relative path that fs-write-file requires. Ends with the
+custom-reader-syntax caveat."
+  (format nil "confirm the line with lisp-read-file (collapsed=false~@[, offset=~D, ~
+               limit=1~]; offset and limit are 0-based lines, and raw mode works on a ~
+               file that does not parse), read the whole file with fs-read-file (exact ~
+               bytes; do not copy from lisp-read-file's raw mode, which re-joins lines ~
+               and may append a footer), apply the ~:[change described ~A~;fix shown ~
+               under \"Likely fix\"~*~]~@[ to the form starting at line ~D~], and write ~
+               the whole file back with fs-write-file (path=~S, ~
                allow_unparseable_overwrite=true; it refuses to overwrite an existing ~
                Lisp file otherwise). If the file uses custom reader syntax that the ~
                default reader cannot parse, pass the readtable parameter to ~
                lisp-edit-form instead of overwriting."
-          have-fix where form-line relative-path))
+          (and fix-line (1- fix-line)) have-fix where form-line relative-path))
 
 (defun format-relocation-note (fixes text)
   "Return the NOTE sentence for those FIXES (from REPAIR-LINE-DIFFERENCES over
