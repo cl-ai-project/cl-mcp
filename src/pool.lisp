@@ -31,6 +31,7 @@
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
                 #:worker-leaked-threads
+                #:*retired-leaked-thread-reason*
                 #:worker-tcp-port
                 #:worker-pid #:worker-id
                 #:worker-process-info
@@ -311,6 +312,16 @@ init cannot brick a session's repl-eval/load-system."
           (gethash "package" ht) (getf config :package))
     ht))
 
+(defun %retirement-crash-p (condition)
+  "True when CONDITION is a worker that retired deliberately rather than died.
+
+A worker exits when it finds it is still carrying a thread a deadline could
+not stop, and that reaches the parent as a crash like any other.  It is not
+evidence about whatever the worker happened to be doing at the time, so
+callers that draw conclusions from a crash have to exclude it."
+  (equal *retired-leaked-thread-reason*
+         (ignore-errors (worker-crashed-reason condition))))
+
 (defun %monitor-init (worker session-id max-failures)
   "Poll worker/init-status until terminal, updating failure/disable state.
 Runs on a short-lived background thread with backoff (0.1s -> 2s cap; no
@@ -363,9 +374,13 @@ further init."
                    (%release-runtime-owner-if worker)))
                (return))
               (t nil)))))
-    (worker-crashed ()
+    (worker-crashed (c)
+      ;; A worker that retired for carrying a leaked thread is not evidence
+      ;; about init: it exited deliberately, and blaming init for it disables
+      ;; initialization for every later worker in the pool.
       (bt:with-lock-held (*pool-lock*)
-        (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+        (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker)
+                   (not (%retirement-crash-p c)))
           (setf (gethash (worker-id worker) *init-attributable-crashes*) t
                 *runtime-init-disabled* t)
           (log-event :warn "pool.init.hard-crash"
@@ -403,13 +418,16 @@ worker before the init monitor does."
               (bt:make-thread
                (lambda () (%monitor-init worker session-id max-failures))
                :name (format nil "pool-init-monitor-~A" (worker-id worker)))))
-        (worker-crashed ()
+        (worker-crashed (c)
+          ;; See %MONITOR-INIT: a deliberate retirement is not an init failure.
           (bt:with-lock-held (*pool-lock*)
-            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker)
+                       (not (%retirement-crash-p c)))
               (setf (gethash (worker-id worker) *init-attributable-crashes*) t
                     *runtime-init-disabled* t)))
-          (log-event :warn "pool.init.hard-crash"
-                     "session" session-id "worker_id" (worker-id worker))
+          (unless (%retirement-crash-p c)
+            (log-event :warn "pool.init.hard-crash"
+                       "session" session-id "worker_id" (worker-id worker)))
           (%release-runtime-owner-if worker))
         (error (e)
           ;; A non-crash init-start failure means init never ran; drop the

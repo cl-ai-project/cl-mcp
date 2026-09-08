@@ -143,7 +143,12 @@ common case is unchanged on the wire."
     (setf (gethash "jsonrpc" ht) "2.0"
           (gethash "id" ht) id
           (gethash "error" ht) err)
-    ht))
+    ;; Noted on failures as well as successes.  A handler can leak its
+    ;; deadline's thread and then return an error, and a parent updating only
+    ;; on success would keep reporting the count it last saw -- stale in both
+    ;; directions, missing a leak that just happened and holding on to one
+    ;; that has since ended.
+    (%note-leaked-threads ht)))
 
 (defun %dispatch-request (server id method params)
   "Dispatch a JSON-RPC request to the registered handler.

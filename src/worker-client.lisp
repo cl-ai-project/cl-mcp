@@ -38,6 +38,7 @@
            #:kill-worker
            #:worker-crashed
            #:worker-crashed-reason
+           #:*retired-leaked-thread-reason*
            #:worker-spawn-failed
            #:+max-json-line-bytes+
            #:%read-line-limited
@@ -99,9 +100,24 @@ Each thread terminates and self-removes after reaping its process.")
              (format s "Failed to spawn worker: ~A"
                      (worker-spawn-failed-message c)))))
 
+(defparameter *retired-leaked-thread-reason* "retired-leaked-thread"
+  "Crash reason for a worker that exited rather than serve a request while
+carrying a thread a deadline could not stop.
+
+It reaches the parent as EOF like any other death, so this is what the reason
+is set to when the worker's last answer said it was carrying one.  Callers
+that treat a crash as evidence about something else -- %MONITOR-INIT, which
+disables runtime initialization when the init owner crashes -- check for it
+rather than blaming an unrelated subsystem for a deliberate retirement.")
+
 (define-condition worker-rpc-error (error)
   ((code :initarg :code :reader worker-rpc-error-code)
-   (message :initarg :message :reader worker-rpc-error-message))
+   (message :initarg :message :reader worker-rpc-error-message)
+   ;; Carried on the condition because the count rides the same envelope as
+   ;; the error, and the reader signals before it can return anything.  Its
+   ;; only consumer is WORKER-RPC, which records it before re-signalling.
+   (leaked-threads :initarg :leaked-threads :initform nil
+                   :reader worker-rpc-error-leaked-threads))
   (:report (lambda (c s)
              (format s "JSON-RPC error ~A: ~A"
                      (worker-rpc-error-code c)
@@ -444,7 +460,8 @@ corruption."
                  (when err
                    (error 'worker-rpc-error
                           :code (gethash "code" err)
-                          :message (gethash "message" err))))
+                          :message (gethash "message" err)
+                          :leaked-threads (gethash "leaked_threads" json))))
                ;; Return the result, and alongside it the count of threads the
                ;; worker says a deadline could not stop.  The worker retires
                ;; itself before serving another request when it is carrying
@@ -741,8 +758,18 @@ without marking the worker as crashed."
                     (if (integerp leaked) leaked 0))
               result))
         (end-of-file ()
-          (%mark-worker-crashed worker "eof")
-          (error 'worker-crashed :worker worker :reason "eof"))
+          ;; A worker that retired for carrying a leaked thread exits without
+          ;; answering, which arrives here as EOF like any other death.  The
+          ;; count it reported on its last answer is what tells the two apart,
+          ;; and the distinction matters: %MONITOR-INIT treats a crash by the
+          ;; runtime-init owner as init-attributable and disables
+          ;; initialization for every later worker.  A deliberate retirement
+          ;; is not an init failure.
+          (let ((reason (if (plusp (worker-leaked-threads worker))
+                            *retired-leaked-thread-reason*
+                            "eof")))
+            (%mark-worker-crashed worker reason)
+            (error 'worker-crashed :worker worker :reason reason)))
         (sb-ext:timeout ()
           (%mark-worker-crashed worker "timeout")
           (error 'worker-crashed :worker worker :reason "timeout"))
@@ -751,7 +778,13 @@ without marking the worker as crashed."
           (error 'worker-crashed :worker worker :reason "stream-error"))
         (worker-rpc-error (e)
           ;; Legitimate worker-side error (e.g. "symbol not found").
-          ;; Re-signal without marking the worker as crashed.
+          ;; Re-signal without marking the worker as crashed -- but record the
+          ;; count first: a handler can leak its deadline's thread and then
+          ;; return an error, and updating only on success leaves the parent
+          ;; reporting whatever it last saw, stale in both directions.
+          (let ((leaked (worker-rpc-error-leaked-threads e)))
+            (setf (worker-leaked-threads worker)
+                  (if (integerp leaked) leaked 0)))
           (error e))
         (error (e)
           ;; Protocol error (parse failure, ID mismatch, etc.).

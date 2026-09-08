@@ -157,7 +157,16 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (%wait-until-dead thread *unwind-grace-seconds*))
                  (when (and thread (thread-alive-p thread))
                    (ignore-errors (destroy-thread thread))
-                   (%wait-until-dead thread *destroy-grace-seconds*)))
+                   (%wait-until-dead thread *destroy-grace-seconds*))
+                 ;; Recorded here rather than on the way out, because STOP is
+                 ;; also what the UNWIND-PROTECT cleanup runs.  A nested
+                 ;; deadline unwound by an outer one never reaches its normal
+                 ;; return, and registering only there would let the thread it
+                 ;; could not stop go unrecorded -- leaving the image looking
+                 ;; clean while still carrying it.
+                 (when (and thread (thread-alive-p thread))
+                   (with-lock-held (%leaked-lock%)
+                     (pushnew thread %leaked-threads%))))
                (finish (timed-out leaked)
                  (let ((settled outcome))
                    (cond
@@ -200,17 +209,12 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                      (%wait-until-dead thread timeout-seconds)
                      (let ((timed-out (thread-alive-p thread)))
                        (stop)
-                       (let ((leaked (thread-alive-p thread)))
-                         ;; Recorded, not merely returned: the caller answers
-                         ;; one request and moves on, while the thread it
-                         ;; could not stop outlives every later one.  The
-                         ;; image has to be able to say it is still carrying
-                         ;; it, which is what LEAKED-THREADS answers.
-                         (when leaked
-                           (with-lock-held (%leaked-lock%)
-                             (pushnew thread %leaked-threads%)))
-                         (multiple-value-prog1 (finish timed-out leaked)
-                           (setf answered t))))))
+                       ;; STOP has already recorded the thread if it survived;
+                       ;; the caller is told here so it can say so in its own
+                       ;; result.
+                       (multiple-value-prog1 (finish timed-out
+                                                     (thread-alive-p thread))
+                         (setf answered t)))))
               ;; A non-local exit from the caller -- an outer deadline, a
               ;; kill -- must not leave the run thread executing unnoticed.
               ;; Guarded so the normal path does not pay for a second
