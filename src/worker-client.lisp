@@ -30,6 +30,7 @@
            #:worker-session-id
            #:worker-id
            #:worker-needs-reset-notification
+           #:worker-leaked-threads
            #:worker-stream-lock
            #:clear-reset-notification
            #:check-and-clear-reset-notification
@@ -167,6 +168,11 @@ Handles both LF and CRLF line endings."
   (session-id nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
+  ;; Count of threads the worker last reported a deadline could not stop.
+  ;; Diagnostic only: the worker retires itself rather than waiting to be
+  ;; told, so nothing in the parent acts on this -- it exists so pool-status
+  ;; can show the condition while it lasts.
+  (leaked-threads 0 :type integer)
   (crash-history-pushed-p nil :type boolean)
   (last-crash-reason nil)
   (last-exit-status nil)
@@ -439,8 +445,13 @@ corruption."
                    (error 'worker-rpc-error
                           :code (gethash "code" err)
                           :message (gethash "message" err))))
-               ;; Return the result
-               (gethash "result" json)))))
+               ;; Return the result, and alongside it the count of threads the
+               ;; worker says a deadline could not stop.  The worker retires
+               ;; itself before serving another request when it is carrying
+               ;; one, so this exists to make the condition visible in
+               ;; pool-status during the window before that happens.
+               (values (gethash "result" json)
+                       (gethash "leaked_threads" json))))))
     (if timeout
         (sb-ext:with-timeout timeout
           (do-read))
@@ -721,7 +732,14 @@ without marking the worker as crashed."
       (handler-case
           (progn
             (%send-json-rpc (worker-stream worker) id method params)
-            (%read-json-rpc-response (worker-stream worker) id timeout))
+            (multiple-value-bind (result leaked)
+                (%read-json-rpc-response (worker-stream worker) id timeout)
+              ;; Recorded for pool-status.  Nothing here acts on it: the
+              ;; worker retires itself rather than waiting to be told, since
+              ;; only it can see whether the thread is still running now.
+              (setf (worker-leaked-threads worker)
+                    (if (integerp leaked) leaked 0))
+              result))
         (end-of-file ()
           (%mark-worker-crashed worker "eof")
           (error 'worker-crashed :worker worker :reason "eof"))

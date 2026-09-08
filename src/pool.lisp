@@ -30,6 +30,7 @@
                 #:signal-worker-terminate
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
+                #:worker-leaked-threads
                 #:worker-tcp-port
                 #:worker-pid #:worker-id
                 #:worker-process-info
@@ -1392,7 +1393,13 @@ unrestricted REPL access bypassing MCP security policies."
                 (gethash "tcp_port" ht) (worker-tcp-port w)
                 (gethash "pid" ht) (worker-pid w)
                 (gethash "state" ht) (string-downcase
-                                       (symbol-name (worker-state w))))
+                                       (symbol-name (worker-state w)))
+                ;; Threads a deadline could not stop, as of this worker's last
+                ;; answer.  It retires itself before serving another request
+                ;; while carrying one, so a non-zero count here means the
+                ;; condition arose and the worker has not been asked for
+                ;; anything since.
+                (gethash "leaked_threads" ht) (worker-leaked-threads w))
           (vector-push-extend ht result))))
     result))
 

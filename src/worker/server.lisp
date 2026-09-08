@@ -9,6 +9,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/utils/deadline #:leaked-threads)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited
                 #:+max-json-line-bytes+)
@@ -76,13 +77,62 @@ that returns a hash-table to be used as the JSON-RPC result."
   "Encode OBJ as a single-line JSON string."
   (with-output-to-string (s) (yason:encode obj s)))
 
+(defconstant +leaked-thread-exit-code+ 70
+  "Exit code a worker uses when it retires for carrying a leaked thread.
+Distinct from a crash so the parent's recorded exit status tells the two
+apart in the logs; the parent treats both the same way, by replacing the
+worker.")
+
+(defparameter *retire-action*
+  (lambda (leaked)
+    (declare (ignore leaked))
+    ;; :ABORT T, because unwinding would run cleanups belonging to the very
+    ;; threads this is retiring for.
+    (sb-ext:exit :code +leaked-thread-exit-code+ :abort t))
+  "What a worker does when it finds it is carrying a leaked thread.
+Called with the list of them.  Indirected so the decision to retire can be
+tested without taking the test process down: exiting is the behaviour under
+test, and a test that could only assert it by dying could not assert it.")
+
+(defun %retire-if-carrying-leaked-threads (method)
+  "Retire this worker when a deadline left a thread running that is still alive.
+METHOD is logged so the request that found the condition is identifiable.
+Returns normally, and cheaply, when there is nothing to retire for."
+  (let ((leaked (leaked-threads)))
+    (when leaked
+      (ignore-errors
+       (log-event :error "worker.retiring.leaked-threads"
+                  "method" method
+                  "threads" (length leaked)
+                  "names" (format nil "~{~A~^,~}"
+                                  (mapcar (lambda (thread)
+                                            (or (ignore-errors
+                                                 (bt:thread-name thread))
+                                                "unnamed"))
+                                          leaked))))
+      (ignore-errors (finish-output *error-output*))
+      (funcall *retire-action* leaked))))
+
+(defun %note-leaked-threads (ht)
+  "Add the count of threads this worker could not stop, when there are any.
+
+Reported alongside every response so the parent can show the condition in
+pool-status during the window between a deadline giving up on a thread and the
+next request, which is exactly when someone is likely to be asking what went
+wrong.  Absent from ordinary responses rather than reported as zero, so the
+common case is unchanged on the wire."
+  (let ((leaked (length (leaked-threads))))
+    (when (plusp leaked)
+      (setf (gethash "leaked_threads" ht) leaked)))
+  ht)
+
 (defun %make-result (id payload)
   "Build a JSON-RPC 2.0 success response hash-table."
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "jsonrpc" ht) "2.0"
           (gethash "id" ht) id
           (gethash "result" ht) payload)
-    ht))
+    (%note-leaked-threads ht)))
 
 (defun %make-error (id code message)
   "Build a JSON-RPC 2.0 error response hash-table."
@@ -135,6 +185,21 @@ the shared secret."
          (return-from %dispatch-request
            (%encode-response
             (%make-error id -32600 "Authentication failed")))))))
+  ;; A deadline that could not stop its thread leaves that thread running in
+  ;; this image: holding locks it took, mutating the state later work reads,
+  ;; and competing for the CPU.  The caller that hit the deadline was answered
+  ;; and told so; every request after it would be served by a process that is
+  ;; quietly wrong.  Retire before serving one.
+  ;;
+  ;; Checked here rather than remembered from when it happened, because the
+  ;; thread may since have finished on its own -- LEAKED-THREADS prunes -- and
+  ;; a worker that recovered should keep the session state it still holds.
+  ;;
+  ;; Exiting rather than answering with an error: the parent's crash handling
+  ;; already replaces a worker that stops answering and tells the caller its
+  ;; state was reset, whereas an error would leave this image in the pool to
+  ;; fail the same way on every later request.  See *RETIRE-ACTION*.
+  (%retire-if-carrying-leaked-threads method)
   ;; Normal dispatch for authenticated connections
   (let ((handler (gethash method (worker-server-methods server))))
     (if (null handler)

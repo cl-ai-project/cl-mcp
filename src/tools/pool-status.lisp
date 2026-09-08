@@ -49,10 +49,13 @@ tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
                (when (and workers (plusp (length workers)))
                  (format s "~&~%Workers:")
                  (loop for w across workers
-                       do (format s "~&  #~A [~A] pid=~A port=~A~@[ session=~A~]"
+                       do (format s "~&  #~A [~A] pid=~A port=~A~@[ session=~A~]~
+                                     ~[~:;~:* leaked_threads=~D (will be ~
+                                     replaced on its next request)~]"
                                   (gethash "id" w)
                                   (gethash "state" w)
                                   (gethash "pid" w)
                                   (gethash "tcp_port" w)
-                                  (gethash "session" w))))))))
+                                  (gethash "session" w)
+                                  (or (gethash "leaked_threads" w) 0))))))))
     (result id info)))
