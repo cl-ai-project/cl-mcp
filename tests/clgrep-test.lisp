@@ -76,12 +76,15 @@
       (let ((results (clgrep-search "." :path "."
                                     :recursive t
                                     :form-types #("defmethod")))
-            ;; The same search unfiltered, over one small directory so it
-            ;; stays cheap.  Showing it spans several form types is what makes
-            ;; the single-form-type result below evidence that the filter ran,
-            ;; rather than an accident of what the pattern happened to hit.
+            ;; The same search unfiltered.  Showing it spans several form
+            ;; types is what makes the single-form-type result below evidence
+            ;; that the filter ran, rather than an accident of what the
+            ;; pattern happened to hit.  A small explicit limit keeps it cheap
+            ;; -- the default 200 is more than enough to see several types,
+            ;; and asking for it made the "small directory" pointless.
             (unfiltered (clgrep-search "." :path "src/utils/"
-                                       :recursive nil)))
+                                       :recursive nil
+                                       :limit 50)))
         (ok (listp results))
         (ok (> (length results) 0) "Should find at least one defmethod")
         (ok (> (length (remove-duplicates

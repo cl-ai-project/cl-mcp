@@ -56,12 +56,65 @@
       (dotimes (i 100) (format s "line ~D~%" i))
       (ok (plusp (bounded-output-dropped s)))
       (ok (search "total chars" (bounded-output-string s)))))
-  (testing "the pretty printer can write to it"
-    ;; STREAM-LINE-COLUMN returns NIL, which the printer must tolerate.
-    (let ((s (make-bounded-output-stream 1000)))
-      (let ((*print-pretty* t))
-        (prin1 '(a (b (c (d (e (f (g (h (i (j)))))))))) s))
-      (ok (plusp (length (bounded-output-string s)))))))
+  (testing "column-sensitive output matches a string-output-stream exactly"
+    ;; Tolerating the stream is not enough -- it has to be faithful.
+    ;; FRESH-LINE, ~T and the pretty printer all consult STREAM-LINE-COLUMN,
+    ;; so a stream answering NIL silently rewrites what it captures: ~& emits
+    ;; a newline even at the start of a line, ~T mis-tabulates, and lines wrap
+    ;; as though every write began at column zero.  Comparing against the
+    ;; stream this replaced is the only assertion that catches that.
+    (flet ((render (make-stream)
+             (let ((s (funcall make-stream)))
+               (format s "first line~%")
+               (format s "~&already at column zero~%")
+               (write-string "mid-line" s)
+               (format s "~&after a partial line~%")
+               (format s "col:~10Tx~%")
+               (write-string "PREFIX: " s)
+               (let ((*print-pretty* t) (*print-right-margin* 20))
+                 (prin1 '(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15) s))
+               s)))
+      (let ((bounded (bounded-output-string
+                      (render (lambda () (make-bounded-output-stream 10000)))))
+            (reference (get-output-stream-string
+                        (render #'make-string-output-stream))))
+        (ok (equal reference bounded)
+            (format nil "bounded=~S reference=~S" bounded reference)))))
+  (testing "the column keeps tracking past the limit"
+    ;; Dropped writes still move the cursor the writer sees, so ~& has to make
+    ;; the same decision after the limit as before it.
+    (let ((s (make-bounded-output-stream 5)))
+      (write-string "0123456789" s)
+      (ok (= 10 (sb-gray:stream-line-column s)))
+      (write-char #\Newline s)
+      (ok (= 0 (sb-gray:stream-line-column s))))))
+
+(deftest bounded-stream-does-not-retain-what-it-drops
+  (testing "writing far past the limit costs a fraction of what keeping it would"
+    ;; The point of the stream, and the one property none of the assertions
+    ;; above would notice: truncating a STRING-OUTPUT-STREAM afterwards gives
+    ;; exactly the same reported text while the heap pays for everything the
+    ;; writer produced.  Calibrated against that stream rather than a fixed
+    ;; byte count, so the test says "bounded" rather than encoding one SBCL's
+    ;; allocation behaviour.
+    (let ((chunk (make-string 10000 :initial-element #\x))
+          (reps 200))
+      (flet ((consed (thunk)
+               (sb-ext:gc :full t)
+               (let ((before (sb-ext:get-bytes-consed)))
+                 (funcall thunk)
+                 (- (sb-ext:get-bytes-consed) before))))
+        (let ((retaining (consed (lambda ()
+                                   (let ((s (make-string-output-stream)))
+                                     (dotimes (i reps) (write-string chunk s))
+                                     (get-output-stream-string s)))))
+              (bounding (consed (lambda ()
+                                  (let ((s (make-bounded-output-stream 1000)))
+                                    (dotimes (i reps) (write-string chunk s))
+                                    (bounded-output-string s))))))
+          (ok (< bounding (floor retaining 10))
+              (format nil "~D bytes to bound ~D characters, against ~D to retain them"
+                      bounding (* reps (length chunk)) retaining)))))))
 
 (deftest bounded-stream-drains-like-a-string-output-stream
   (testing "reading it twice yields the retained text once"
