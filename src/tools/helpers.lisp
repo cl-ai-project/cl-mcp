@@ -16,6 +16,8 @@
            #:tool-error
            ;; JSON serialization helpers
            #:json-bool
+           ;; Failures that leave the worker usable
+           #:transient-error
            ;; Argument extraction helpers
            #:arg-validation-error
            #:validation-message
@@ -84,6 +86,19 @@ Typical usage in MCP tool responses:
 ;;;;
 ;;;; These helpers simplify the common pattern of extracting and validating
 ;;;; arguments from the MCP tool call args hash-table.
+
+(define-condition transient-error (simple-error)
+  ()
+  (:documentation "An error whose cause leaves this worker usable.
+
+Signalled when an operation could not proceed for a reason that will pass on
+its own -- a concurrent load holding a lock, say -- rather than because the
+image is damaged.  Response builders check for it before appending their
+standing advice to replace the worker: for these failures that advice is
+actively harmful, because it destroys work that was about to finish.
+
+A subtype of SIMPLE-ERROR so that handlers written for the ordinary case,
+which is what most callers have, still catch it."))
 
 (define-condition arg-validation-error (error)
   ((arg-name :initarg :arg-name :reader arg-name)

@@ -231,8 +231,13 @@ Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
                                      co)))
                       (format s "~%~%Compiler output:~%~A"
                               (string-right-trim '(#\Newline) body)))))
-                (format s "~%~%Hint: the worker process may now have a broken package state. ~
-Use pool-kill-worker to get a fresh worker, then retry load-system."))))))
+                ;; Withheld when the failure left the image intact -- a
+                ;; concurrent load still holding the ASDF lock, say.  There
+                ;; the advice is actively harmful: following it aborts work
+                ;; that was about to finish.
+                (unless (gethash "worker_healthy" ht)
+                  (format s "~%~%Hint: the worker process may now have a broken package state. ~
+Use pool-kill-worker to get a fresh worker, then retry load-system.")))))))
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

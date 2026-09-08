@@ -10,7 +10,8 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
+                #:make-ht
+                #:transient-error)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/project-root
@@ -398,6 +399,12 @@ registering it."
                  (compiler-stderr *last-compiler-stderr*))
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
+             ;; Carried so the response builder can withhold its standing
+             ;; advice to replace the worker: for a failure that leaves the
+             ;; image intact -- another load still holding the lock -- that
+             ;; advice would destroy work about to finish.
+             (when (typep err 'transient-error)
+               (setf (gethash "worker_healthy" ht) t))
              (setf (gethash "message" ht)
                    (sanitize-for-json
                     (or (ignore-errors (princ-to-string err))

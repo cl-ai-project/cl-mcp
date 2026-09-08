@@ -13,7 +13,7 @@
   (:import-from #:cl-mcp/src/system-loader-core #:load-system)
   (:import-from #:cl-mcp/src/repl-core #:repl-eval)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
-  (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
+  (:import-from #:cl-mcp/src/tools/helpers #:make-ht #:transient-error)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*asdf-load-lock*
            #:*asdf-load-lock-timeout*
@@ -68,12 +68,19 @@ really does have to be replaced."
                 "owner" (or owner-name "none")
                 "init_in_progress" (if init-in-progress "true" "false")))
     (if init-in-progress
-        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
+        ;; TRANSIENT-ERROR, so the response builders withhold their standing
+        ;; "replace the worker" advice.  Appending it here would undo the
+        ;; whole point of separating these two cases: the caller would be told
+        ;; to run pool-kill-worker and would abort a healthy load.
+        (error 'transient-error
+               :format-control
+               "Timed out after ~A seconds waiting for this worker's ASDF ~
                 load lock: the init hook is still loading and holds it. That ~
                 load has no deadline of its own, so a cold compile of a large ~
-                system can legitimately take longer. Wait for worker/init-status ~
-                to report ready, or retry with a larger timeout_seconds."
-               *asdf-load-lock-timeout*)
+                system can legitimately take longer. Wait for ~
+                worker/init-status to report ready, or retry with a larger ~
+                timeout_seconds."
+               :format-arguments (list *asdf-load-lock-timeout*))
         (error "Timed out after ~A seconds waiting for this worker's ASDF ~
                 load lock~@[, held by thread ~A~]. A previous run most likely ~
                 left a thread behind that never released it; this worker ~

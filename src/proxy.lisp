@@ -48,9 +48,16 @@ Set MCP_NO_WORKER_POOL=1 to disable.")
     (setf *use-worker-pool* nil)))
 
 (defvar *proxy-rpc-timeout* 300
-  "Deadline (seconds) the worker is assumed to enforce when the caller names
-none.  Tools that take a timeout_seconds argument default to this same value
-on the worker side, so it is the figure the proxy has to outlast.")
+  "Deadline (seconds) the proxy assumes the worker enforces when the caller
+names none.
+
+The tools that take a timeout_seconds argument all default to a server-side
+deadline of their own: run-tests and repl-eval to this same 300, load-system
+to 120.  Anything smaller than this figure is covered by waiting for it, so
+one number is enough here -- but a tool that ever ran without a deadline would
+not be, since the proxy would give up on a worker that is merely still
+working, and a proxy timeout kills the worker rather than reporting a
+timeout.")
 
 (defvar *proxy-rpc-buffer* 30
   "Seconds the proxy waits beyond the deadline the worker enforces.
@@ -63,6 +70,14 @@ repl-eval can be max_output_length bytes.  Too small a margin and the proxy
 gives up first, and a proxy timeout is not a timeout report: WORKER-RPC marks
 the worker crashed and kills it, so the session's whole Lisp state is reset
 for what was merely a slow answer.")
+
+(defconstant +max-proxy-rpc-timeout+ 86400
+  "Upper bound (seconds) on how long the proxy will wait for one worker call.
+SB-EXT:WITH-TIMEOUT converts its argument to internal time units in a
+(SIGNED-BYTE 64), so an unclamped caller-supplied value -- JSON's 1e20 reads
+as a double -- becomes a bignum and a TYPE-ERROR, which WORKER-RPC reports as
+a protocol error and kills the worker for.  A day is far beyond any legitimate
+call.")
 
 (defvar *active-requests* (make-hash-table :test 'equal)
   "Maps MCP request-id (as string) to session-id for in-flight
@@ -242,7 +257,8 @@ image or pool lifecycle are cleared before re-verification."
 One rule, with no per-method knowledge: wait out the deadline the worker will
 enforce, then the margin for its answer to arrive.  The caller's
 timeout_seconds is that deadline when given; when the caller is silent the
-worker falls back to the same default this proxy does.
+worker falls back to a default of its own, and *PROXY-RPC-TIMEOUT* is the
+largest of those.
 
 Adding the margin in BOTH cases is what keeps the two from expiring together.
 With the caller silent, worker and proxy would otherwise both sit on 300 s,
@@ -250,13 +266,17 @@ the proxy would give up a moment before the worker finished building its own
 timeout result, and the graceful timeout report that path exists to deliver
 would be replaced by a killed worker and a reset session.
 
-No cap: a caller may legitimately ask for more than 300 s, and the worker
-enforces that same deadline."
-  (ceiling (+ (or (coerce-timeout-seconds
-                   (and (hash-table-p params)
-                        (gethash "timeout_seconds" params)))
-                  *proxy-rpc-timeout*)
-              *proxy-rpc-buffer*)))
+Clamped at the top because the result is handed to SB-EXT:WITH-TIMEOUT, which
+takes a (SIGNED-BYTE 64) of internal time units: a caller sending 1e20 would
+otherwise produce a bignum, a TYPE-ERROR on the read, and a worker killed for
+a protocol error it did not commit.  A day is far past any legitimate call and
+well inside the range."
+  (let ((requested (or (coerce-timeout-seconds
+                        (and (hash-table-p params)
+                             (gethash "timeout_seconds" params)))
+                       *proxy-rpc-timeout*)))
+    (min +max-proxy-rpc-timeout+
+         (ceiling (+ requested *proxy-rpc-buffer*)))))
 
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.

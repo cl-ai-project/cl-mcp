@@ -7,7 +7,8 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
+                #:make-ht
+                #:transient-error)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
   (:export #:run-tests
@@ -460,11 +461,18 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
      :test-name "SYSTEM-LOAD"
      :description (format nil "Could not load test system ~A" system-name)
      :reason
-     (format nil "~A~%~%Hint: the worker process may have a broken ~
-                  package state. Use pool-kill-worker to get a fresh ~
-                  worker, then retry run-tests."
-             (or (ignore-errors (princ-to-string condition))
-                 "unprintable condition"))))))
+     (let ((text (or (ignore-errors (princ-to-string condition))
+                     "unprintable condition")))
+       ;; The hint is withheld for a failure that left the image intact -- a
+       ;; concurrent load still holding the ASDF lock, say.  There it is
+       ;; actively harmful: following it aborts work about to finish, and
+       ;; such a condition carries its own, correct advice.
+       (if (typep condition 'transient-error)
+           text
+           (format nil "~A~%~%Hint: the worker process may have a broken ~
+                        package state. Use pool-kill-worker to get a fresh ~
+                        worker, then retry run-tests."
+                   text)))))))
 
 (defun make-resolution-failure-result (condition)
   "Convert a TEST-RESOLUTION-ERROR into a structured test-result so RUN-TESTS

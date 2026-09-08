@@ -39,8 +39,21 @@
     (dolist (bait '("e12" "1e2e" "--" "+" "..." "1.2.3" "1.5e2"))
       (ok (null (coerce-timeout-seconds bait))
           (format nil "~S is rejected" bait)))
-    (ok (null (find-symbol "E12" (find-package "CL-MCP/SRC/TEST-RUNNER-CORE")))
-        "and is rejected without being interned"))
+    ;; READ-FROM-STRING interns into the *dynamic* value of *PACKAGE*, not
+    ;; into the package this file was compiled in, so the interning check has
+    ;; to watch whatever package is current during the call.  Watching the
+    ;; wrong one passes against the old implementation too and proves nothing.
+    (let ((probe (make-package (symbol-name (gensym "COERCE-PROBE"))
+                               :use nil)))
+      (unwind-protect
+           (let ((*package* probe)
+                 (interned 0))
+             (dolist (bait '("e12" "1e2e" "--" "+" "..." "1.2.3" "1.5e2"))
+               (coerce-timeout-seconds bait))
+             (do-symbols (sym probe) (declare (ignore sym)) (incf interned))
+             (ok (zerop interned)
+                 "and is rejected without interning anything"))
+        (delete-package probe))))
   (testing "unusable values yield NIL so callers keep their own default"
     (ok (null (coerce-timeout-seconds nil)))
     (ok (null (coerce-timeout-seconds "abc")))
@@ -80,28 +93,27 @@
               (format nil "answered in ~,2Fs, not after the 30s sleep"
                       elapsed)))))))
 
-(deftest deadline-answers-even-when-the-run-cannot-be-interrupted
-  (testing "a run busy in a condition handler still cannot hold the caller"
-    ;; Stands in for a suite that keeps working through anything raised at it
-    ;; -- a retry loop around a flaky operation, say.  Run inline, such a
-    ;; suite wedges the worker's single connection thread and every later
-    ;; tool call for the session with it; here the caller is answered at the
-    ;; deadline regardless.
+(deftest deadline-throw-cannot-be-swallowed-by-a-handler-case
+  (testing "a run that handles everything raised at it is still stopped"
+    ;; This is what the deadline being a THROW rather than a condition buys.
+    ;; A suite that keeps working through anything raised at it -- a retry
+    ;; loop around a flaky operation, say -- would swallow a signalled
+    ;; deadline and run on; run inline it wedges the worker's single
+    ;; connection thread and every later tool call for the session with it.
+    ;; A throw is not a condition and this HANDLER-CASE cannot see it, so the
+    ;; thread dies on the first interrupt.
     ;;
-    ;; Note this does NOT reach the leaked-thread branch: the deadline is a
-    ;; throw, which a HANDLER-CASE cannot swallow, so this thread dies on the
-    ;; first interrupt.  DEADLINE-REPORTS-A-THREAD-IT-COULD-NOT-STOP covers
-    ;; the genuinely uninterruptible case.
+    ;; Which is also why this test does NOT reach the leaked-thread branch:
+    ;; DEADLINE-REPORTS-A-THREAD-IT-COULD-NOT-STOP covers the genuinely
+    ;; uninterruptible case, where interrupts are deferred outright.
     (let ((start (get-internal-real-time)))
-      (multiple-value-bind (result status)
+      (multiple-value-bind (result status leaked)
           (call-with-test-run-deadline
            (lambda ()
              (let ((stop (+ (get-internal-real-time)
                             (* 60 internal-time-units-per-second))))
                (loop while (< (get-internal-real-time) stop)
                      do (handler-case (sleep 0.05)
-                          ;; Swallow the deadline unwind and keep going:
-                          ;; exactly the uninterruptible case.
                           (serious-condition () nil)))
                :finished))
            1)
@@ -109,6 +121,8 @@
                           internal-time-units-per-second)))
           (ok (eq :timeout status))
           (ok (eql 1 result))
+          (ok (not leaked)
+              "the throw stopped it, so no thread was left behind")
           (ok (< elapsed 10)
               (format nil "answered in ~,2Fs despite the run still blocking"
                       elapsed)))))))
@@ -128,7 +142,11 @@
       (multiple-value-bind (result status leaked)
           (call-with-test-run-deadline
            (lambda ()
-             (sb-sys:without-interrupts (sleep 4))
+             ;; Well past the ~2.5 s the deadline machinery needs, so a
+             ;; loaded machine cannot let the thunk finish before the
+             ;; assertions run -- LEAKED would then flip to NIL and the test
+             ;; would fail for a reason that is not the one it is about.
+             (sb-sys:without-interrupts (sleep 20))
              :finished)
            1)
         (let ((elapsed (/ (- (get-internal-real-time) start)

@@ -104,7 +104,13 @@ result_preview, and error_context."
                    :package (or package *package*)
                    :print-level print-level
                    :print-length print-length
-                   :timeout-seconds timeout-seconds
+                   ;; Always a server-side deadline, as run-tests has: without
+                   ;; one an accidental (loop) pins this worker's single
+                   ;; connection thread, and the proxy -- which budgets for
+                   ;; this same default -- eventually gives up and kills the
+                   ;; worker, resetting the session for what should have been
+                   ;; a timeout report.
+                   :timeout-seconds (or timeout-seconds 300)
                    :max-output-length max-output-length
                    :safe-read safe-read
                    :locals-preview-frames locals-preview-frames
@@ -153,7 +159,13 @@ it gives up and kills the worker."
                          ;; Bound inside the lambda, not around it: this runs
                          ;; on the deadline thread, which does not inherit
                          ;; bindings made here.
-                         (let ((*asdf-load-lock-timeout* budget))
+                         ;; A margin below the load's own budget, so which of
+                       ;; the two fires is settled by design rather than by
+                       ;; the deadline poller's 50 ms granularity.  The lock
+                       ;; message names the thread holding it and what to do;
+                       ;; the load's generic timeout does not.
+                       (let ((*asdf-load-lock-timeout*
+                               (max 1 (- budget 1))))
                            (with-asdf-load-lock (funcall thunk))))))
                  (load-system system
                               :force force
@@ -197,7 +209,14 @@ caller is answered at the deadline even while the suite is still blocked."
                ;; docstring for why the test run itself must stay outside it.
                (let ((*load-lock-wrapper*
                        (lambda (thunk)
-                         (with-asdf-load-lock (funcall thunk)))))
+                         ;; Bound to the caller's budget, as %HANDLE-LOAD-SYSTEM
+                         ;; does, so the lock's own diagnostic can actually be
+                         ;; reached: left at the global default a caller asking
+                         ;; for less than that always meets the run deadline
+                         ;; first and never sees which thread held the lock.
+                         (let ((*asdf-load-lock-timeout*
+                                 (max 1 (- effective-timeout 1))))
+                           (with-asdf-load-lock (funcall thunk))))))
                  (run-tests system
                             :framework framework
                             :test test

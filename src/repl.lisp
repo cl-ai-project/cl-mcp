@@ -10,7 +10,7 @@
                 #:repl-eval
                 #:*default-eval-package*)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result)
+                #:make-ht #:result #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:import-from #:cl-mcp/src/tools/response-builders
@@ -107,9 +107,19 @@ read in the original package. Use separate repl-eval calls or specify the
                                   "locals_preview_max_elements" locals-preview-max-elements
                                   "locals_preview_skip_internal" locals-preview-skip-internal))
    ;; Fallback: inline execution (default when *use-worker-pool* is nil)
+   ;;
+   ;; Validated and defaulted here to match what the worker handler does, so
+   ;; the same input means the same thing with and without the worker pool:
+   ;; without this a zero ran unbounded here while the worker rejected it, and
+   ;; an omitted value ran unbounded here while the worker enforced 300 s.
+   (when (and timeout-seconds (not (plusp timeout-seconds)))
+     (error 'arg-validation-error
+            :arg-name "timeout_seconds"
+            :message "timeout_seconds must be a positive number"))
    (multiple-value-bind (printed raw-value stdout stderr error-context)
        (repl-eval code :package (or package *package*) :print-level print-level
-        :print-length print-length :timeout-seconds timeout-seconds
+        :print-length print-length
+        :timeout-seconds (or timeout-seconds 300)
         :max-output-length max-output-length :safe-read safe-read
         :locals-preview-frames locals-preview-frames :locals-preview-max-depth
         locals-preview-max-depth :locals-preview-max-elements

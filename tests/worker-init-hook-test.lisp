@@ -91,6 +91,44 @@
     (ok (eq :ran (with-asdf-load-lock :ran))
         "a thunk's own return value survives the timeout plumbing")))
 
+(deftest asdf-load-lock-busy-does-not-advise-killing-a-healthy-worker
+  (testing "a caller blocked behind a running init is not told to kill it"
+    ;; The init hook holds this lock for a whole cold compile with no deadline
+    ;; of its own, so a large application system legitimately outlasts the
+    ;; timeout.  Telling that caller to run pool-kill-worker would abort a
+    ;; load that was about to finish.  The signaller distinguishes the two
+    ;; cases, but the advice is appended afterwards by the response builder,
+    ;; so suppressing it there is what actually reaches the client.
+    (let* ((held (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (holder (bt:make-thread
+                    (lambda ()
+                      (with-asdf-load-lock
+                        (bt:signal-semaphore held)
+                        (bt:wait-on-semaphore release)))
+                    ;; The thread name is what tells a running init apart from
+                    ;; a thread that outlived its deadline.
+                    :name "mcp-worker-init")))
+      (unwind-protect
+           (progn
+             (bt:wait-on-semaphore held)
+             (let ((params (make-hash-table :test 'equal)))
+               (setf (gethash "system" params) "alexandria"
+                     (gethash "force" params) nil
+                     (gethash "timeout_seconds" params) 2)
+               (let* ((resp (cl-mcp/src/worker/handlers::%handle-load-system
+                             params))
+                      (text (gethash "text"
+                                     (aref (gethash "content" resp) 0))))
+                 (ok (search "init hook is still loading" text)
+                     "the message names the real cause")
+                 (ok (search "worker/init-status" text)
+                     "and says what to wait for")
+                 (ok (null (search "pool-kill-worker" text))
+                     "and does not tell the caller to destroy a healthy worker"))))
+        (bt:signal-semaphore release)
+        (bt:join-thread holder)))))
+
 (deftest init-state-transitions
   (testing "state starts idle, moves to loading/running/failed, snapshots as a hash-table"
     (cl-mcp/src/worker/init-hook::%reset-init-state)
