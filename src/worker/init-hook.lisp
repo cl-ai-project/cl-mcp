@@ -49,6 +49,39 @@ this message, which names the cause and the fix, instead.")
 *ASDF-LOAD-LOCK-TIMEOUT* seconds to acquire it."
   `(call-with-asdf-load-lock (lambda () ,@body)))
 
+(defun %signal-asdf-load-lock-timeout ()
+  "Signal that *ASDF-LOAD-LOCK* could not be acquired, naming the likely cause.
+
+Two very different situations reach here and they need opposite advice.  The
+init hook loads on its own thread, holding this lock for a whole cold compile
+with no deadline of its own, so a large application system legitimately keeps
+it past this timeout -- telling that caller to kill the worker would abort a
+healthy load that was about to finish.  Any other owner is a thread that
+outlived its deadline and will never release the lock, and there the worker
+really does have to be replaced."
+  (let* ((owner (sb-thread:mutex-owner *asdf-load-lock*))
+         (owner-name (and owner (sb-thread:thread-name owner)))
+         (init-in-progress (equal owner-name "mcp-worker-init")))
+    (ignore-errors
+     (log-event :error "worker.asdf-load-lock.timeout"
+                "seconds" *asdf-load-lock-timeout*
+                "owner" (or owner-name "none")
+                "init_in_progress" (if init-in-progress "true" "false")))
+    (if init-in-progress
+        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
+                load lock: the init hook is still loading and holds it. That ~
+                load has no deadline of its own, so a cold compile of a large ~
+                system can legitimately take longer. Wait for worker/init-status ~
+                to report ready, or retry with a larger timeout_seconds."
+               *asdf-load-lock-timeout*)
+        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
+                load lock~@[, held by thread ~A~]. A previous run most likely ~
+                left a thread behind that never released it; this worker ~
+                cannot load systems again. Use pool-kill-worker to get a ~
+                fresh worker."
+               *asdf-load-lock-timeout*
+               owner-name))))
+
 (defun call-with-asdf-load-lock (thunk)
   "Call THUNK holding *ASDF-LOAD-LOCK*, or signal if it cannot be acquired.
 Times out rather than blocking forever, so a lock left owned by a thread that
@@ -69,18 +102,7 @@ expires, so RAN distinguishes that from a THUNK that returned NIL."
                    (multiple-value-list (funcall thunk)))))
     (if ran
         (values-list values)
-        (let ((owner (sb-thread:mutex-owner *asdf-load-lock*)))
-          (ignore-errors
-           (log-event :error "worker.asdf-load-lock.timeout"
-                      "seconds" *asdf-load-lock-timeout*
-                      "owner" (if owner (sb-thread:thread-name owner) "none")))
-          (error "Timed out after ~A seconds waiting for this worker's ASDF ~
-                  load lock~@[, held by thread ~A~]. A previous run most ~
-                  likely left a thread behind that never released it; this ~
-                  worker cannot load systems again. Use pool-kill-worker to ~
-                  get a fresh worker."
-                 *asdf-load-lock-timeout*
-                 (and owner (sb-thread:thread-name owner)))))))
+        (%signal-asdf-load-lock-timeout))))
 
 (defvar *init-lock* (bt:make-lock "worker-init-state")
   "Protects *INIT-STATE*.")

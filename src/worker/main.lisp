@@ -223,9 +223,16 @@ Roswell REPL."
               ;; output-suppression helpers (%call-with-suppressed-output,
               ;; repl-eval) rebind them to capture streams, so logging inside
               ;; load-system/repl-eval is still returned in tool results.
+              ;; *TRACE-OUTPUT* is a synonym for the same descriptor, and it
+              ;; is where (TIME ...) and TRACE write -- evaluated code using
+              ;; either would otherwise hit the dead pipe exactly as log4cl
+              ;; did.  *STANDARD-INPUT* is the pipe's other half and has
+              ;; nothing left to read.
               (setf *debug-io* interactive
                     *terminal-io* interactive
-                    *query-io* interactive))
+                    *query-io* interactive
+                    *trace-output* devnull
+                    *standard-input* (make-concatenated-stream)))
             (%start-parent-watchdog)
             (start-accept-loop server))))
     (serious-condition (e)

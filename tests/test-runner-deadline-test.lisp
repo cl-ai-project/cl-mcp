@@ -81,12 +81,17 @@
                       elapsed)))))))
 
 (deftest deadline-answers-even-when-the-run-cannot-be-interrupted
-  (testing "a run that swallows the interrupt still cannot hold the caller"
-    ;; Stands in for a suite blocked in something SB-EXT:WITH-TIMEOUT cannot
-    ;; unwind -- a server accept loop left behind by the tests, say.  Run
-    ;; inline, that wedges the worker's single connection thread and every
-    ;; later tool call for the session with it; here the caller is answered
-    ;; at the deadline regardless, and the blocked thread is torn down.
+  (testing "a run busy in a condition handler still cannot hold the caller"
+    ;; Stands in for a suite that keeps working through anything raised at it
+    ;; -- a retry loop around a flaky operation, say.  Run inline, such a
+    ;; suite wedges the worker's single connection thread and every later
+    ;; tool call for the session with it; here the caller is answered at the
+    ;; deadline regardless.
+    ;;
+    ;; Note this does NOT reach the leaked-thread branch: the deadline is a
+    ;; throw, which a HANDLER-CASE cannot swallow, so this thread dies on the
+    ;; first interrupt.  DEADLINE-REPORTS-A-THREAD-IT-COULD-NOT-STOP covers
+    ;; the genuinely uninterruptible case.
     (let ((start (get-internal-real-time)))
       (multiple-value-bind (result status)
           (call-with-test-run-deadline

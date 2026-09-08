@@ -75,11 +75,17 @@ key-present-with-false (use NIL)."
   "Evaluate code and return the same response structure as define-tool
 \"repl-eval\": content, stdout, stderr, and optional result_object_id,
 result_preview, and error_context."
-  (let ((code (gethash "code" params))
+  (let* ((code (gethash "code" params))
          (package (gethash "package" params))
          (print-level (gethash "print_level" params))
          (print-length (gethash "print_length" params))
-         (timeout-seconds (gethash "timeout_seconds" params))
+         ;; Coerced for the same reason %HANDLE-LOAD-SYSTEM coerces: params
+         ;; arrive unvalidated here, and %REPL-EVAL-WITH-TIMEOUT treats a
+         ;; non-real value as "no deadline at all" -- so a string would run
+         ;; unbounded while the proxy, which does accept it, budgets for it
+         ;; and kills the worker when that budget runs out.
+         (raw-timeout (gethash "timeout_seconds" params))
+         (timeout-seconds (coerce-timeout-seconds raw-timeout))
          (max-output-length (gethash "max_output_length" params))
          (safe-read (gethash "safe_read" params))
          (include-result-preview (%bool-default params "include_result_preview" t))
@@ -91,6 +97,8 @@ result_preview, and error_context."
          (locals-preview-skip-internal (%bool-default params "locals_preview_skip_internal" t)))
     (unless code
       (error "code is required"))
+    (when (and raw-timeout (null timeout-seconds))
+      (error "timeout_seconds must be a positive number"))
     (multiple-value-bind (printed raw-value stdout stderr error-context)
         (repl-eval code
                    :package (or package *package*)

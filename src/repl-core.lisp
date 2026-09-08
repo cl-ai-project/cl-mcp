@@ -148,6 +148,10 @@ on large outputs)."
              (*debug-io* interactive)
              (*terminal-io* interactive)
              (*query-io* interactive)
+             ;; (TIME ...) and TRACE write here, and its default is a synonym
+             ;; for the process's stdout.  Captured rather than redirected, so
+             ;; a caller who asks for timings gets them back in the result.
+             (*trace-output* stdout)
              (*compile-verbose* nil)
              (*compile-print* nil))
         (%call-with-compiler-streams

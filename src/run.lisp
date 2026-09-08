@@ -45,7 +45,7 @@ that passes nothing, and both need the same protection."
          (eql 1 (sb-sys:fd-stream-fd base)))))
 
 (defun %call-with-stdout-isolated (out thunk)
-  "Call THUNK with this image's global output streams kept off OUT.
+  "Call THUNK with this image's global standard streams kept off OUT.
 
 Only when OUT really is the process's own stdout.  That descriptor is then the
 JSON-RPC channel, and nothing else in the image may write to it: with the
@@ -55,17 +55,28 @@ test suite spawns sees only the GLOBAL value of a special -- so a stray
 client.  Being invisible to spawned threads is exactly why these are SETF and
 not bound.
 
-*DEBUG-IO*, *TERMINAL-IO* and *QUERY-IO* move with it: they default to the
-terminal, which is the same descriptor.  They get a two-way stream so they
-keep the bidirectional contract ANSI requires of them, the same shape the
-worker process uses.  Logging is untouched -- *LOG-STREAM* follows
-*ERROR-OUTPUT* on fd 2.
+Every stream SBCL points at that descriptor by default moves, not just
+*STANDARD-OUTPUT*: *TRACE-OUTPUT* is where (TIME ...) and TRACE write and is a
+synonym for the same fd, and *DEBUG-IO*, *TERMINAL-IO* and *QUERY-IO* default
+to the terminal.  The three interactive ones get a two-way stream so they keep
+the bidirectional contract ANSI requires of them, the same shape the worker
+process uses.  *STANDARD-INPUT* moves too: a stray READ in evaluated code
+would otherwise eat the client's next request line.  Logging is untouched --
+*LOG-STREAM* follows *ERROR-OUTPUT* on fd 2.
 
 The globals are restored on the way out, so a second RUN in this image does
-not pick the sink up as its own OUT and silently discard every response."
+not pick the sink up as its own OUT and silently discard every response.
+
+One caveat for embedders: SETF assigns to the innermost binding, so a caller
+that wraps RUN in its own (LET ((*STANDARD-OUTPUT* ...)) ...) gets its binding
+rewritten and leaves the global -- the value spawned threads actually see --
+untouched.  Both documented entry points call RUN at toplevel, where there is
+no such binding."
   (if (not (%process-stdout-p out))
       (funcall thunk)
       (let ((saved-output *standard-output*)
+            (saved-trace *trace-output*)
+            (saved-input *standard-input*)
             (saved-debug *debug-io*)
             (saved-terminal *terminal-io*)
             (saved-query *query-io*)
@@ -75,11 +86,15 @@ not pick the sink up as its own OUT and silently discard every response."
           (unwind-protect
                (progn
                  (setf *standard-output* sink
+                       *trace-output* sink
+                       *standard-input* (make-concatenated-stream)
                        *debug-io* (interactive)
                        *terminal-io* (interactive)
                        *query-io* (interactive))
                  (funcall thunk))
             (setf *standard-output* saved-output
+                  *trace-output* saved-trace
+                  *standard-input* saved-input
                   *debug-io* saved-debug
                   *terminal-io* saved-terminal
                   *query-io* saved-query))))))

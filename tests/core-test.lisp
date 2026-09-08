@@ -53,18 +53,30 @@
         "through a synonym stream, which is what *standard-output* normally is")
     (ok (not (cl-mcp/src/run::%process-stdout-p (make-string-output-stream)))
         "a caller's own stream is not the process channel"))
-  (testing "all four globals are moved off the channel while the session runs"
+  (testing "every stream on that descriptor moves while the session runs"
+    ;; *TRACE-OUTPUT* matters as much as *STANDARD-OUTPUT* here: it is a
+    ;; synonym for the same descriptor by default, and it is where (TIME ...)
+    ;; and TRACE write.
     (let (inside)
       (cl-mcp/src/run::%call-with-stdout-isolated
        sb-sys:*stdout*
        (lambda ()
          (setf inside
                (list (cl-mcp/src/run::%process-stdout-p *standard-output*)
+                     (cl-mcp/src/run::%process-stdout-p *trace-output*)
                      (cl-mcp/src/run::%process-stdout-p *debug-io*)
                      (cl-mcp/src/run::%process-stdout-p *terminal-io*)
                      (cl-mcp/src/run::%process-stdout-p *query-io*)))))
-      (ok (equal '(nil nil nil nil) inside)
+      (ok (equal '(nil nil nil nil nil) inside)
           "nothing reachable from a spawned thread still points at fd 1")))
+  (testing "and standard input stops competing for the client's requests"
+    ;; A stray READ in evaluated code would otherwise consume the next
+    ;; JSON-RPC request line off the same pipe the server is reading.
+    (let (eof)
+      (cl-mcp/src/run::%call-with-stdout-isolated
+       sb-sys:*stdout*
+       (lambda () (setf eof (read-char *standard-input* nil :eof))))
+      (ok (eq :eof eof))))
   (testing "the replacements stay bidirectional, as ANSI requires"
     (let (readable)
       (cl-mcp/src/run::%call-with-stdout-isolated
@@ -74,11 +86,12 @@
   (testing "and are restored, so a later run does not inherit the sink as OUT"
     ;; Left in place, the sink becomes the next RUN's default OUT and every
     ;; JSON-RPC response is silently discarded.
-    (let ((before (list *standard-output* *debug-io* *terminal-io* *query-io*)))
+    (let ((before (list *standard-output* *trace-output* *standard-input*
+                        *debug-io* *terminal-io* *query-io*)))
       (cl-mcp/src/run::%call-with-stdout-isolated sb-sys:*stdout*
                                                   (lambda () nil))
-      (ok (equal before (list *standard-output* *debug-io*
-                              *terminal-io* *query-io*)))))
+      (ok (equal before (list *standard-output* *trace-output* *standard-input*
+                              *debug-io* *terminal-io* *query-io*)))))
   (testing "a caller's own OUT leaves the image alone"
     (let ((before *standard-output*))
       (cl-mcp/src/run::%call-with-stdout-isolated (make-string-output-stream)

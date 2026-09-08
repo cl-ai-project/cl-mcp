@@ -95,13 +95,30 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (ignore-errors
                     (interrupt-thread
                      thread
-                     ;; Checked in the interrupted thread, where publication
-                     ;; cannot be in progress: it runs under
+                     ;; OUTCOME is checked in the interrupted thread, where
+                     ;; publication cannot be in progress: it runs under
                      ;; WITHOUT-INTERRUPTS, so an OUTCOME seen here is
                      ;; complete.  A run that finished just as the deadline
                      ;; expired is therefore left to return normally instead
                      ;; of being unwound out of its own result.
-                     (lambda () (unless outcome (throw tag :deadline)))))
+                     ;;
+                     ;; IGNORE-ERRORS around the throw, and not only around
+                     ;; INTERRUPT-THREAD: this closure runs later, on the run
+                     ;; thread, outside any handler of ours.  A thread can be
+                     ;; alive with the CATCH already gone -- an earlier throw
+                     ;; consumed it and the thread is still winding down --
+                     ;; and a throw to a tag that no longer exists is an
+                     ;; unhandled CONTROL-ERROR there.  The worker runs under
+                     ;; SB-EXT:DISABLE-DEBUGGER, where that kills the process
+                     ;; outright: the session would lose all its state to a
+                     ;; deadline whose whole purpose is to answer gracefully.
+                     ;; The window is narrow -- STOP has to run twice, which
+                     ;; takes a non-local exit between FINISH and ANSWERED --
+                     ;; but the guard costs nothing and the failure it
+                     ;; prevents is total.
+                     (lambda ()
+                       (unless outcome
+                         (ignore-errors (throw tag :deadline))))))
                    (%wait-until-dead thread *unwind-grace-seconds*))
                  (when (and thread (thread-alive-p thread))
                    (ignore-errors (destroy-thread thread))
