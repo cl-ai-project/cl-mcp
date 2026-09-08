@@ -47,6 +47,7 @@
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
                 #:with-asdf-load-lock
+                #:*asdf-load-lock-timeout*
                 #:handle-init-start
                 #:handle-init-status)
   (:export #:register-all-handlers))
@@ -114,7 +115,15 @@ result_preview, and error_context."
 (defun %handle-load-system (params)
   "Load an ASDF system.  Returns the same structure as define-tool
 \"load-system\".  Holds *ASDF-LOAD-LOCK* so it cannot overlap a
-concurrent worker/init load or another load-system."
+concurrent worker/init load or another load-system.
+
+The caller's timeout_seconds bounds the whole call, waiting for that lock
+included.  Acquisition happens outside LOAD-SYSTEM's own deadline, so leaving
+it unbounded let a request with a small timeout sit far past the budget the
+proxy allows it -- and a proxy timeout kills the worker instead of reporting
+anything.  What the wait consumes is therefore subtracted from the deadline
+given to the load itself.  RUN-TESTS needs none of this: it takes the lock
+from inside its own deadline thread, which bounds the wait already."
   (let* ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
@@ -127,11 +136,18 @@ concurrent worker/init load or another load-system."
       (error "system is required"))
     (when (and raw-timeout (null timeout-seconds))
       (error "timeout_seconds must be a positive number"))
-    (let ((ht (with-asdf-load-lock
-                (load-system system
-                             :force force
-                             :clear-fasls clear-fasls
-                             :timeout-seconds (or timeout-seconds 120)))))
+    (let* ((budget (or timeout-seconds 120))
+           (started (get-internal-real-time))
+           (ht (let ((*asdf-load-lock-timeout* budget))
+                 (with-asdf-load-lock
+                   (let ((remaining
+                           (- budget
+                              (/ (- (get-internal-real-time) started)
+                                 internal-time-units-per-second))))
+                     (load-system system
+                                  :force force
+                                  :clear-fasls clear-fasls
+                                  :timeout-seconds (max 1 remaining)))))))
       (build-load-system-response system ht))))
 
 ;;; ---------------------------------------------------------------------------

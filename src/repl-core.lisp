@@ -333,7 +333,17 @@ result is returned -- completed work is never discarded as a timeout."
           (:error (values-list (%thunk-error-result result)))
           (:timeout
            (values
-            (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
+            (if leaked
+                ;; The evaluation is still running: it can still print, still
+                ;; consume CPU, and still mutate this session's state under
+                ;; later requests, so say so rather than implying it stopped.
+                (format nil "Evaluation timed out after ~,2F seconds and ~
+                             could not be stopped: it is still running in ~
+                             this worker. Use pool-kill-worker to get a ~
+                             fresh worker."
+                        timeout-seconds)
+                (format nil "Evaluation timed out after ~,2F seconds"
+                        timeout-seconds))
             :timeout "" "" nil))))))
 
 (defun repl-eval (input &key (package *default-eval-package*)

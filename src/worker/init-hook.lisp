@@ -16,6 +16,7 @@
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*asdf-load-lock*
+           #:*asdf-load-lock-timeout*
            #:with-asdf-load-lock
            #:handle-init-start
            #:handle-init-status))
@@ -52,23 +53,34 @@ this message, which names the cause and the fix, instead.")
   "Call THUNK holding *ASDF-LOAD-LOCK*, or signal if it cannot be acquired.
 Times out rather than blocking forever, so a lock left owned by a thread that
 outlived its deadline surfaces as one actionable error instead of hanging
-every later load in this worker."
-  (if (sb-thread:grab-mutex *asdf-load-lock*
-                            :timeout *asdf-load-lock-timeout*)
-      (unwind-protect (funcall thunk)
-        (sb-thread:release-mutex *asdf-load-lock*))
-      (let ((owner (sb-thread:mutex-owner *asdf-load-lock*)))
-        (ignore-errors
-         (log-event :error "worker.asdf-load-lock.timeout"
-                    "seconds" *asdf-load-lock-timeout*
-                    "owner" (if owner (sb-thread:thread-name owner) "none")))
-        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
-                load lock~@[, held by thread ~A~]. A previous run most likely ~
-                left a thread behind that never released it; this worker ~
-                cannot load systems again. Use pool-kill-worker to get a ~
-                fresh worker."
-               *asdf-load-lock-timeout*
-               (and owner (sb-thread:thread-name owner))))))
+every later load in this worker.
+
+SB-THREAD:WITH-MUTEX rather than a GRAB-MUTEX/UNWIND-PROTECT pair: SBCL
+documents GRAB-MUTEX and RELEASE-MUTEX as not interrupt-safe, and this runs on
+the very thread a run-tests deadline interrupts.  An interrupt arriving
+between GRAB-MUTEX returning and the UNWIND-PROTECT being established would
+leak the lock outright -- the exact failure the timeout below exists to make
+survivable.  WITH-MUTEX returns NIL rather than signalling when the timeout
+expires, so RAN distinguishes that from a THUNK that returned NIL."
+  (let* ((ran nil)
+         (values (sb-thread:with-mutex (*asdf-load-lock*
+                                        :timeout *asdf-load-lock-timeout*)
+                   (setf ran t)
+                   (multiple-value-list (funcall thunk)))))
+    (if ran
+        (values-list values)
+        (let ((owner (sb-thread:mutex-owner *asdf-load-lock*)))
+          (ignore-errors
+           (log-event :error "worker.asdf-load-lock.timeout"
+                      "seconds" *asdf-load-lock-timeout*
+                      "owner" (if owner (sb-thread:thread-name owner) "none")))
+          (error "Timed out after ~A seconds waiting for this worker's ASDF ~
+                  load lock~@[, held by thread ~A~]. A previous run most ~
+                  likely left a thread behind that never released it; this ~
+                  worker cannot load systems again. Use pool-kill-worker to ~
+                  get a fresh worker."
+                 *asdf-load-lock-timeout*
+                 (and owner (sb-thread:thread-name owner)))))))
 
 (defvar *init-lock* (bt:make-lock "worker-init-state")
   "Protects *INIT-STATE*.")

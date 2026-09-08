@@ -68,38 +68,64 @@ A throw also cannot be swallowed by a HANDLER-CASE inside the thunk, which a
 condition can.  Only when the interrupt goes unobserved -- a blocking foreign
 call cannot run it -- is the thread destroyed.
 
-Completed work is never discarded: the thunk records its outcome before the
-throw can unwind past it, and that outcome is preferred over the deadline on
-return, so a run that finishes while the deadline is being enforced still
-yields its real value."
+Completed work survives a deadline that expires alongside it, which takes two
+guards rather than one.  The thunk runs with interrupts enabled inside a
+WITHOUT-INTERRUPTS, so once it returns, delivery of the deadline throw is
+deferred until its values have been published -- a naked assignment would let
+the throw land after the thunk returned but before its result was stored.  And
+the interrupt function re-reads OUTCOME in the interrupted thread before
+throwing, where publication cannot be half-done, so a run that finished just
+as the deadline expired is left to return normally instead of being unwound
+out of its own result."
   (if (not (and timeout-seconds (realp timeout-seconds) (plusp timeout-seconds)))
       (values (multiple-value-list (funcall thunk)) :ok nil)
       (let* ((tag (list :deadline))
              (outcome nil)
              (thread (make-thread
                       (lambda ()
-                        ;; OUTCOME is assigned inside the CATCH so a result
-                        ;; that landed before the interrupt survives it; the
-                        ;; thrown value is deliberately dropped.
                         (catch tag
-                          (handler-case
-                              (setf outcome
-                                    (cons :ok (multiple-value-list
-                                               (funcall thunk))))
-                            (serious-condition (e)
-                              (setf outcome (cons :error e))))))
+                          (sb-sys:without-interrupts
+                            (handler-case
+                                (setf outcome
+                                      (cons :ok
+                                            (multiple-value-list
+                                             (sb-sys:with-local-interrupts
+                                               (funcall thunk)))))
+                              (serious-condition (e)
+                                (setf outcome (cons :error e)))))))
                       :name name)))
-        (flet ((finish (leaked)
+        (flet ((stop ()
+                 ;; Cooperative unwind first: it runs the thread's
+                 ;; UNWIND-PROTECT cleanups and releases the locks it holds.
+                 (when (thread-alive-p thread)
+                   (ignore-errors
+                    (interrupt-thread
+                     thread
+                     ;; Checked in the interrupted thread, where publication
+                     ;; cannot be in progress: it runs under
+                     ;; WITHOUT-INTERRUPTS, so an OUTCOME seen here is
+                     ;; complete.  A run that finished just as the deadline
+                     ;; expired is therefore left to return normally instead
+                     ;; of being unwound out of its own result.
+                     (lambda () (unless outcome (throw tag :deadline)))))
+                   (%wait-until-dead thread *unwind-grace-seconds*))
+                 (when (thread-alive-p thread)
+                   (ignore-errors (destroy-thread thread))
+                   (%wait-until-dead thread *destroy-grace-seconds*)))
+               (finish (leaked)
                  (let ((settled outcome))
                    (if settled
                        (values (cdr settled) (car settled) leaked)
                        (values timeout-seconds :timeout leaked)))))
-          (%wait-until-dead thread timeout-seconds)
-          (when (thread-alive-p thread)
-            (ignore-errors
-             (interrupt-thread thread (lambda () (throw tag :deadline))))
-            (%wait-until-dead thread *unwind-grace-seconds*))
-          (when (thread-alive-p thread)
-            (ignore-errors (destroy-thread thread))
-            (%wait-until-dead thread *destroy-grace-seconds*))
-          (finish (thread-alive-p thread))))))
+          (let ((answered nil))
+            (unwind-protect
+                 (progn
+                   (%wait-until-dead thread timeout-seconds)
+                   (stop)
+                   (multiple-value-prog1 (finish (thread-alive-p thread))
+                     (setf answered t)))
+              ;; A non-local exit from the caller -- an outer deadline, a
+              ;; kill -- must not leave the run thread executing unnoticed.
+              ;; Guarded so the normal path does not pay for a second
+              ;; interrupt-and-destroy cycle it has already completed.
+              (unless answered (stop))))))))

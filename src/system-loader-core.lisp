@@ -25,11 +25,15 @@
 
 (defun %load-with-timeout (thunk timeout-seconds)
   "Execute THUNK under a TIMEOUT-SECONDS deadline on its own thread.
-Returns (values result-list timed-out-p errored-p).
+Returns (values result-list timed-out-p errored-p leaked-p).
 RESULT-LIST is a list of the thunk's multiple return values on success,
 or a single-element list containing the error condition on failure.
 TIMED-OUT-P is T if the load was still running when the deadline passed.
 ERRORED-P is T if the thunk signaled.
+LEAKED-P is T when the load thread outlived both the cooperative unwind and
+DESTROY-THREAD.  It matters to the caller: that thread is still inside ASDF,
+so the load this call gave up on keeps mutating the image's ASDF, package and
+compiler state while later requests run against it.
 
 If the load completes while the deadline is being enforced, the result is
 returned as a success -- completed work is never discarded as a timeout.
@@ -44,13 +48,13 @@ See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced."
                       "name" "mcp-load-system"
                       "timeout" timeout-seconds)))
         (ecase status
-          (:ok (values result nil nil))
-          (:timeout (values nil t nil))
-          (:error (values (list result) nil t))))
+          (:ok (values result nil nil nil))
+          (:timeout (values nil t nil leaked))
+          (:error (values (list result) nil t nil))))
     ;; Only reachable on the inline path (no deadline), where
     ;; CALL-WITH-DEADLINE-THREAD lets conditions propagate.
     (error (c)
-      (values (list c) nil t))))
+      (values (list c) nil t nil))))
 
 (defvar *last-compiler-stderr* nil
   "Captured compiler stderr from the most recent %call-with-suppressed-output call.
@@ -294,7 +298,7 @@ registering it."
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
-    (multiple-value-bind (result-list timed-out-p errored-p)
+    (multiple-value-bind (result-list timed-out-p errored-p leaked-p)
         (%load-with-timeout
          (lambda ()
            (flet ((%do-load ()
@@ -351,10 +355,17 @@ registering it."
           (timed-out-p (setf (gethash "status" ht) "timeout")
            (setf (gethash "duration_ms" ht) elapsed-ms)
            (setf (gethash "message" ht)
-                 (format nil "Load timed out after ~,2F seconds"
-                         timeout-seconds))
+                 (if leaked-p
+                     (format nil "Load timed out after ~,2F seconds and could ~
+                                  not be stopped: it is still running in this ~
+                                  worker and may hold the ASDF load lock. Use ~
+                                  pool-kill-worker to get a fresh worker."
+                             timeout-seconds)
+                     (format nil "Load timed out after ~,2F seconds"
+                             timeout-seconds)))
            (log-event :warn "load-system-timeout" "system" system-name
-                      "timeout" timeout-seconds))
+                      "timeout" timeout-seconds
+                      "thread_leaked" (if leaked-p "true" "false")))
           (errored-p
            (let ((err (first result-list))
                  (compiler-stderr *last-compiler-stderr*))
