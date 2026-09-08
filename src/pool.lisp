@@ -40,6 +40,7 @@
                 #:worker-last-exit-status
                 #:worker-last-exit-code
                 #:worker-crashed
+                #:worker-crashed-reason
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/proxy
@@ -318,9 +319,21 @@ init cannot brick a session's repl-eval/load-system."
 A worker exits when it finds it is still carrying a thread a deadline could
 not stop, and that reaches the parent as a crash like any other.  It is not
 evidence about whatever the worker happened to be doing at the time, so
-callers that draw conclusions from a crash have to exclude it."
-  (equal *retired-leaked-thread-reason*
-         (ignore-errors (worker-crashed-reason condition))))
+callers that draw conclusions from a crash have to exclude it.
+
+Typed rather than wrapped in IGNORE-ERRORS: the first version of this guarded
+the reader that way, and when the reader turned out not to be imported here
+the swallowed undefined-function error made the whole exclusion silently
+inert.  A TYPEP costs the same and cannot hide that."
+  (and (typep condition 'worker-crashed)
+       (equal *retired-leaked-thread-reason*
+              (worker-crashed-reason condition))))
+
+(defun %retired-worker-p (worker)
+  "True when WORKER died by retiring rather than by crashing.
+The same distinction as %RETIREMENT-CRASH-P, asked of the worker struct after
+the fact rather than of the condition at the time."
+  (equal *retired-leaked-thread-reason* (worker-last-crash-reason worker)))
 
 (defun %monitor-init (worker session-id max-failures)
   "Poll worker/init-status until terminal, updating failure/disable state.
@@ -727,7 +740,8 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (unless (%init-attributable-crash-p crashed-worker)
+             (unless (or (%retired-worker-p crashed-worker)
+                         (%init-attributable-crash-p crashed-worker))
                (setf history
                      (remove-if (lambda (ts) (< ts window-start)) history))
                (push now history)
@@ -1108,8 +1122,15 @@ cannot be created."
          ;; Skip push if %handle-worker-crash already pushed for this
          ;; worker (prevents double-counting in the race window where
          ;; the health monitor detects the crash first).
+         ;; A deliberate retirement is excluded: a user calling something
+         ;; uninterruptible three times in five minutes would otherwise trip
+         ;; the breaker and halt the session, where before this branch they
+         ;; got three timeouts and kept working.  The worker is replaced each
+         ;; time and the replacement starts clean, so it is not evidence of an
+         ;; unstable pool.
          (when (and (eq :crashed (worker-state entry))
                     (not (worker-crash-history-pushed-p entry))
+                    (not (%retired-worker-p entry))
                     (not (%init-attributable-crash-p entry)))
            (let* ((now (get-universal-time))
                   (window-start (- now *crash-breaker-window*))

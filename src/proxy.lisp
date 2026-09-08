@@ -18,6 +18,8 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/worker-client
+                #:*retired-leaked-thread-reason*)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:coerce-timeout-seconds)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -163,12 +165,25 @@ When crash details are provided, they are included for diagnostics."
          (ht (make-ht)))
     (setf (gethash "content" ht)
             (text-content
-             (format nil "Worker process crashed~@[ (~A)~] and was restarted. ~
-                          All Lisp state (loaded systems, defined ~
-                          functions, package state) has been reset. ~
-                          Please run load-system again to restore ~
-                          your environment."
-                     detail))
+             (if (equal reason *retired-leaked-thread-reason*)
+                 ;; Not a crash, and saying so matters: the user is owed the
+                 ;; connection between an earlier timeout they were told about
+                 ;; and a reset they were not expecting.
+                 (format nil "Worker process was replaced~@[ (~A)~]. An ~
+                              earlier run exceeded its timeout and left a ~
+                              thread that could not be stopped, so the worker ~
+                              was retired rather than serve further requests ~
+                              from it. All Lisp state (loaded systems, ~
+                              defined functions, package state) has been ~
+                              reset. Please run load-system again to restore ~
+                              your environment."
+                         detail)
+                 (format nil "Worker process crashed~@[ (~A)~] and was ~
+                              restarted. All Lisp state (loaded systems, ~
+                              defined functions, package state) has been ~
+                              reset. Please run load-system again to restore ~
+                              your environment."
+                         detail)))
           (gethash "isError" ht) t)
     ht))
 

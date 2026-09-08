@@ -39,6 +39,7 @@
            #:worker-crashed
            #:worker-crashed-reason
            #:*retired-leaked-thread-reason*
+           #:+leaked-thread-exit-code+
            #:worker-spawn-failed
            #:+max-json-line-bytes+
            #:%read-line-limited
@@ -99,6 +100,13 @@ Each thread terminates and self-removes after reaping its process.")
   (:report (lambda (c s)
              (format s "Failed to spawn worker: ~A"
                      (worker-spawn-failed-message c)))))
+
+(defconstant +leaked-thread-exit-code+ 70
+  "Exit code a worker uses when it retires for carrying a leaked thread.
+
+Lives here rather than with the worker server that uses it because the parent
+is the other half of the contract: this is what it reads to tell a deliberate
+retirement from a crash, and a worker cannot depend on the parent's side.")
 
 (defparameter *retired-leaked-thread-reason* "retired-leaked-thread"
   "Crash reason for a worker that exited rather than serve a request while
@@ -729,6 +737,25 @@ Returns nothing."
                "exit_code" (or exit-code "unknown")
                "reason" reason)))
 
+(defun %retired-for-leaked-thread-p (worker)
+  "True when WORKER's death was a deliberate retirement, not a crash.
+
+Decided on the exit code, which the worker sets on its way out and which is
+the only signal that describes the death itself.  The leaked-thread count from
+its last answer is a fallback: it is a proxy, and a stale one -- a worker can
+report a leak, have the thread finish, and then genuinely die on the next
+call, which the count alone would misread as a retirement and so hide a real
+crash from the callers that draw conclusions from one."
+  (let ((process (worker-process-info worker)))
+    (or (ignore-errors
+         (and process
+              (member (sb-ext:process-status process) '(:exited))
+              (eql +leaked-thread-exit-code+
+                   (sb-ext:process-exit-code process))))
+        ;; The process may not have been reaped yet, or may be gone entirely.
+        (and (integerp (worker-leaked-threads worker))
+             (plusp (worker-leaked-threads worker))))))
+
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
@@ -765,7 +792,7 @@ without marking the worker as crashed."
           ;; runtime-init owner as init-attributable and disables
           ;; initialization for every later worker.  A deliberate retirement
           ;; is not an init failure.
-          (let ((reason (if (plusp (worker-leaked-threads worker))
+          (let ((reason (if (%retired-for-leaked-thread-p worker)
                             *retired-leaked-thread-reason*
                             "eof")))
             (%mark-worker-crashed worker reason)

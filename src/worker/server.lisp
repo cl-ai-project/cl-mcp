@@ -77,12 +77,6 @@ that returns a hash-table to be used as the JSON-RPC result."
   "Encode OBJ as a single-line JSON string."
   (with-output-to-string (s) (yason:encode obj s)))
 
-(defconstant +leaked-thread-exit-code+ 70
-  "Exit code a worker uses when it retires for carrying a leaked thread.
-Distinct from a crash so the parent's recorded exit status tells the two
-apart in the logs; the parent treats both the same way, by replacing the
-worker.")
-
 (defparameter *retire-action*
   (lambda (leaked)
     (declare (ignore leaked))
@@ -94,11 +88,24 @@ Called with the list of them.  Indirected so the decision to retire can be
 tested without taking the test process down: exiting is the behaviour under
 test, and a test that could only assert it by dying could not assert it.")
 
+(defparameter *methods-exempt-from-retirement*
+  '("worker/ping" "worker/init-status")
+  "Methods that observe the worker rather than ask it to do anything.
+
+The rule is to retire rather than *serve* a request, and these serve nothing.
+It matters for worker/init-status in particular: the pool polls it every
+fraction of a second while an init runs, so retiring on one would throw away
+a load that can take minutes -- and the poll is how the pool was going to find
+out about the retirement anyway.  Retirement still happens the moment real
+work is asked for.")
+
 (defun %retire-if-carrying-leaked-threads (method)
   "Retire this worker when a deadline left a thread running that is still alive.
 METHOD is logged so the request that found the condition is identifiable.
 Returns normally, and cheaply, when there is nothing to retire for."
-  (let ((leaked (leaked-threads)))
+  (let ((leaked (unless (member method *methods-exempt-from-retirement*
+                                :test #'string=)
+                  (leaked-threads))))
     (when leaked
       (ignore-errors
        (log-event :error "worker.retiring.leaked-threads"
@@ -162,7 +169,19 @@ the shared secret."
               (null (uiop/os:getenv "MCP_WORKER_SECRET")))
     (return-from %dispatch-request
       (%encode-response
-       (%make-error id -32600 "Not authenticated"))))
+       ;; Built without the leaked-thread note.  The retirement gate is
+       ;; deliberately placed after this point, and telling an unauthenticated
+       ;; peer anything about the worker's internal state before it has
+       ;; authenticated would give away before the gate what the gate exists
+       ;; to withhold.
+       (let ((err (make-hash-table :test 'equal))
+             (ht (make-hash-table :test 'equal)))
+         (setf (gethash "code" err) -32600
+               (gethash "message" err) "Not authenticated")
+         (setf (gethash "jsonrpc" ht) "2.0"
+               (gethash "id" ht) id
+               (gethash "error" ht) err)
+         ht))))
   ;; Handle authentication as a built-in method
   (when (string= method "worker/authenticate")
     (let ((expected (uiop/os:getenv "MCP_WORKER_SECRET"))

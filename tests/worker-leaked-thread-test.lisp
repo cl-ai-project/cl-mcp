@@ -19,6 +19,7 @@
   ;; for the package-inferred system to load it.
   (:import-from #:cl-mcp/src/worker/server)
   (:import-from #:cl-mcp/src/worker-client)
+  (:import-from #:cl-mcp/src/pool)
   (:import-from #:yason))
 
 (in-package #:cl-mcp/tests/worker-leaked-thread-test)
@@ -203,8 +204,81 @@ and makes the assertions depend on the runner being fast enough to observe it."
         (cl-mcp/src/worker-client:worker-rpc worker "worker/probe" nil)
         (ok (eql 0 (count-on worker))
             "so pool-status stops reporting a worker that recovered")))
+    (testing "the worker puts the count on both kinds of envelope"
+      ;; The cases above hand WORKER-RPC an envelope built by the test, so
+      ;; they cover the reader and the parent's slot but not the worker
+      ;; actually writing the field -- and a handler that leaks and then
+      ;; returns an error uses the error envelope.
+      (with-clean-leak-record
+        (leak-one-thread)
+        (ok (eql 1 (gethash "leaked_threads"
+                            (cl-mcp/src/worker/server::%make-result 1 "ok")))
+            "on a result")
+        (ok (eql 1 (gethash "leaked_threads"
+                            (cl-mcp/src/worker/server::%make-error
+                             1 -32603 "boom")))
+            "and on an error")))
     (testing "the worker omits the field entirely when carrying nothing"
       (with-clean-leak-record
-        (let ((ht (cl-mcp/src/worker/server::%make-result 1 "payload")))
+        (dolist (ht (list (cl-mcp/src/worker/server::%make-result 1 "payload")
+                          (cl-mcp/src/worker/server::%make-error 1 -1 "e")))
           (ok (null (nth-value 1 (gethash "leaked_threads" ht)))
               "the key is absent rather than reported as zero"))))))
+
+(deftest a-retirement-is-classified-apart-from-a-crash
+  ;; The chain nothing covered, and the one with the widest blast radius: a
+  ;; worker that retires reaches the parent as EOF like any other death, and
+  ;; %MONITOR-INIT reads a crash by the runtime-init owner as init's fault and
+  ;; disables initialization for every later worker in the pool.  The first
+  ;; version of this guard was inert -- the reader it called was not imported
+  ;; and IGNORE-ERRORS swallowed the undefined-function error -- and shipped
+  ;; because no test asked the question.
+  (labels ((dead-worker (&key leaked)
+             ;; No process, so classification falls back to the count the
+             ;; worker last reported, which is the path that runs when the
+             ;; process is gone or not yet reaped.
+             (cl-mcp/src/worker-client::make-worker
+              :state :bound
+              :leaked-threads (or leaked 0)
+              :stream (make-two-way-stream (make-string-input-stream "")
+                                           (make-broadcast-stream))))
+           (reason-of (worker)
+             (handler-case
+                 (progn (cl-mcp/src/worker-client:worker-rpc
+                         worker "worker/probe" nil)
+                        nil)
+               (cl-mcp/src/worker-client:worker-crashed (c)
+                 (cl-mcp/src/worker-client:worker-crashed-reason c)))))
+    (testing "a worker that died carrying one is reported as retired"
+      (let ((reason (reason-of (dead-worker :leaked 1))))
+        (ok (equal cl-mcp/src/worker-client::*retired-leaked-thread-reason*
+                   reason)
+            (format nil "reason was ~S" reason))))
+    (testing "a worker that died carrying nothing is reported as a crash"
+      (ok (equal "eof" (reason-of (dead-worker)))))
+    (testing "and the pool tells the two apart"
+      ;; The predicate the init monitor consults.  Asserted through a real
+      ;; WORKER-CRASHED condition, because what broke before was the reader
+      ;; used to get the reason out of one.
+      (let ((retired (make-condition
+                      'cl-mcp/src/worker-client:worker-crashed
+                      :worker nil
+                      :reason cl-mcp/src/worker-client::*retired-leaked-thread-reason*))
+            (crashed (make-condition
+                      'cl-mcp/src/worker-client:worker-crashed
+                      :worker nil :reason "eof")))
+        (ok (cl-mcp/src/pool::%retirement-crash-p retired)
+            "a retirement is recognized, so init is not blamed for it")
+        (ok (not (cl-mcp/src/pool::%retirement-crash-p crashed))
+            "and a real crash still counts against init")))
+    (testing "a retirement is kept out of the crash breaker too"
+      ;; Three uninterruptible timeouts in five minutes would otherwise trip
+      ;; the per-session breaker and halt the session.
+      (let ((retired (dead-worker))
+            (crashed (dead-worker)))
+        (setf (cl-mcp/src/worker-client::worker-last-crash-reason retired)
+              cl-mcp/src/worker-client::*retired-leaked-thread-reason*
+              (cl-mcp/src/worker-client::worker-last-crash-reason crashed)
+              "eof")
+        (ok (cl-mcp/src/pool::%retired-worker-p retired))
+        (ok (not (cl-mcp/src/pool::%retired-worker-p crashed)))))))
