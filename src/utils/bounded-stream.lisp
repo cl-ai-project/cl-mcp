@@ -20,7 +20,12 @@
 
 (defclass bounded-output-stream (sb-gray:fundamental-character-output-stream)
   ((sink :initform (make-string-output-stream) :reader %sink)
-   (limit :initarg :limit :initform 0 :reader %limit)
+   ;; Required, and loudly: a default of 0 would make a stream constructed
+   ;; without one silently discard everything written to it, which for a class
+   ;; whose whole job is deciding what to throw away is the worst failure
+   ;; available.
+   (limit :initarg :limit :reader %limit
+          :initform (error "BOUNDED-OUTPUT-STREAM requires a :LIMIT."))
    (kept :initform 0 :accessor %kept)
    (dropped :initform 0 :accessor %dropped)
    (column :initform 0 :accessor %column))
@@ -93,7 +98,11 @@ from a special's global value."))
 (defun bounded-output-string (stream)
   "Return what STREAM retained, noting the total when anything was dropped.
 Drains the stream, as GET-OUTPUT-STREAM-STRING does, so calling it twice
-yields the retained text once."
+yields the retained text once.
+
+The column survives a drain, unlike the kept and dropped counts.  Reading the
+text out does not move the writer's cursor, so a writer left mid-line is still
+mid-line afterwards and FRESH-LINE must still say so."
   (let ((kept (get-output-stream-string (%sink stream)))
         (dropped (%dropped stream)))
     (setf (%kept stream) 0

@@ -79,10 +79,11 @@
             ;; The same search unfiltered.  Showing it spans several form
             ;; types is what makes the single-form-type result below evidence
             ;; that the filter ran, rather than an accident of what the
-            ;; pattern happened to hit.  A small explicit limit keeps it cheap
-            ;; -- the default 200 is more than enough to see several types,
-            ;; and asking for it made the "small directory" pointless.
-            (unfiltered (clgrep-search "." :path "src/utils/"
+            ;; pattern happened to hit.  Deliberately sampled from src/ rather
+            ;; than a directory this suite's own subject matter lives in: the
+            ;; evidence should not come from a file the change under test
+            ;; happens to add.
+            (unfiltered (clgrep-search "." :path "src/"
                                        :recursive nil
                                        :limit 50)))
         (ok (listp results))

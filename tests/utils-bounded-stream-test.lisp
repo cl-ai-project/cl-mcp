@@ -36,7 +36,13 @@
     (let ((s (make-bounded-output-stream 0)))
       (write-string "dropped entirely" s)
       (ok (= 16 (bounded-output-dropped s)))
-      (ok (search "16 total chars" (bounded-output-string s))))))
+      (let ((text (bounded-output-string s)))
+        (ok (search "16 total chars" text))
+        ;; The note separates itself from retained text with a newline; with
+        ;; nothing retained there is nothing to separate from, and a leading
+        ;; blank line would read as output that was kept.
+        (ok (not (eql #\Newline (char text 0)))
+            "no leading blank line when nothing was kept")))))
 
 (deftest bounded-stream-bounds-every-write-path
   ;; WRITE-CHAR and WRITE-STRING reach different generic functions, and a
@@ -80,14 +86,35 @@
                         (render #'make-string-output-stream))))
         (ok (equal reference bounded)
             (format nil "bounded=~S reference=~S" bounded reference)))))
-  (testing "the column keeps tracking past the limit"
+  (testing "the column keeps tracking once nothing more is being kept"
     ;; Dropped writes still move the cursor the writer sees, so ~& has to make
-    ;; the same decision after the limit as before it.
+    ;; the same decision after the limit as before it.  A write that straddles
+    ;; the limit does not test this -- it still takes the keeping path -- so
+    ;; the writes below go on until nothing at all is being kept.
     (let ((s (make-bounded-output-stream 5)))
       (write-string "0123456789" s)
-      (ok (= 10 (sb-gray:stream-line-column s)))
+      (ok (= 10 (sb-gray:stream-line-column s)) "a straddling write")
+      (write-string "abcde" s)
+      (ok (= 15 (sb-gray:stream-line-column s))
+          "a write with nothing left to keep still advances the column")
+      (write-char #\x s)
+      (ok (= 16 (sb-gray:stream-line-column s))
+          "and so does a character with nothing left to keep")
       (write-char #\Newline s)
-      (ok (= 0 (sb-gray:stream-line-column s))))))
+      (ok (= 0 (sb-gray:stream-line-column s)))))
+  (testing "a single write carrying several newlines lands on the last one"
+    ;; Rove prints several lines per WRITE-STRING, so the column after such a
+    ;; write is measured from the final newline, not the first.
+    (let ((s (make-bounded-output-stream 1000)))
+      (write-string "one
+two
+three!" s)
+      (ok (= 6 (sb-gray:stream-line-column s)))))
+  (testing "consecutive partial writes accumulate rather than replace"
+    (let ((s (make-bounded-output-stream 1000)))
+      (write-string "abc" s)
+      (write-string "de" s)
+      (ok (= 5 (sb-gray:stream-line-column s))))))
 
 (deftest bounded-stream-does-not-retain-what-it-drops
   (testing "writing far past the limit costs a fraction of what keeping it would"
