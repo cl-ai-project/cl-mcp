@@ -161,24 +161,31 @@ DEFUN' lines are noise that drown real warnings."
               (progn
                 (setf result
                       (handler-bind ((warning #'handle-warning))
-                        (let ((*compile-verbose* nil)
-                              (*compile-print* nil)
-                              (*load-verbose* nil)
-                              (*load-print* nil)
-                              (*standard-output* (make-string-output-stream))
-                              (*trace-output* (make-string-output-stream))
-                              (*error-output* stderr)
-                              ;; log4cl's console appender writes to a synonym
-                              ;; stream for *DEBUG-IO*, which in a worker
-                              ;; resolves to the original stdout fd whose read
-                              ;; end the parent closed after the handshake --
-                              ;; any write there raises BROKEN-PIPE and aborts
-                              ;; the load.  Rebinding these interactive streams
-                              ;; keeps that output captured instead of hitting
-                              ;; the dead pipe.
-                              (*debug-io* stderr)
-                              (*terminal-io* stderr)
-                              (*query-io* stderr))
+                        (let* ((interactive
+                                 (make-two-way-stream
+                                  (make-concatenated-stream) stderr))
+                               (*compile-verbose* nil)
+                               (*compile-print* nil)
+                               (*load-verbose* nil)
+                               (*load-print* nil)
+                               (*standard-output* (make-string-output-stream))
+                               (*trace-output* (make-string-output-stream))
+                               (*error-output* stderr)
+                               ;; log4cl's console appender writes to a synonym
+                               ;; stream for *DEBUG-IO*, which in a worker
+                               ;; resolves to the original stdout fd whose read
+                               ;; end the parent closed after the handshake --
+                               ;; any write there raises BROKEN-PIPE and aborts
+                               ;; the load.  Rebinding these interactive streams
+                               ;; keeps that output captured instead of hitting
+                               ;; the dead pipe.  A two-way stream, because ANSI
+                               ;; requires these three to be bidirectional: a
+                               ;; system whose load-time code asks Y-OR-N-P
+                               ;; should read EOF, not fail on "not an input
+                               ;; stream".
+                               (*debug-io* interactive)
+                               (*terminal-io* interactive)
+                               (*query-io* interactive))
                           (if syms
                               (progv (nreverse syms) (nreverse vals)
                                 (with-compilation-unit (:override t)
@@ -200,16 +207,19 @@ DEFUN' lines are noise that drown real warnings."
             (progn
               (setf result
                     (handler-bind ((warning #'handle-warning))
-                      (let ((*compile-verbose* nil)
-                            (*compile-print* nil)
-                            (*load-verbose* nil)
-                            (*load-print* nil)
-                            (*standard-output* (make-string-output-stream))
-                            (*trace-output* (make-string-output-stream))
-                            (*error-output* stderr)
-                            (*debug-io* stderr)
-                            (*terminal-io* stderr)
-                            (*query-io* stderr))
+                      (let* ((interactive
+                               (make-two-way-stream
+                                (make-concatenated-stream) stderr))
+                             (*compile-verbose* nil)
+                             (*compile-print* nil)
+                             (*load-verbose* nil)
+                             (*load-print* nil)
+                             (*standard-output* (make-string-output-stream))
+                             (*trace-output* (make-string-output-stream))
+                             (*error-output* stderr)
+                             (*debug-io* interactive)
+                             (*terminal-io* interactive)
+                             (*query-io* interactive))
                         (funcall thunk))))
               (setf completed-p t)
               (values result warning-count

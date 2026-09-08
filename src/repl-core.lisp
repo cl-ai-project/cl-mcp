@@ -129,19 +129,27 @@ on large outputs)."
           (*print-array* t)
           (*print-pretty* t)
           (*read-default-float-format* 'single-float))
-      (let ((*standard-output* stdout)
-            (*error-output* stderr)
-            ;; log4cl's console appender writes to a synonym stream for
-            ;; *DEBUG-IO*, which in a worker resolves to the original stdout
-            ;; fd whose read end the parent closed after the handshake --
-            ;; any write there raises BROKEN-PIPE.  Rebinding these keeps
-            ;; log4cl / interactive output captured instead of hitting the
-            ;; dead pipe.
-            (*debug-io* stdout)
-            (*terminal-io* stdout)
-            (*query-io* stdout)
-            (*compile-verbose* nil)
-            (*compile-print* nil))
+      (let* ((interactive
+               (make-two-way-stream (make-concatenated-stream) stdout))
+             (*standard-output* stdout)
+             (*error-output* stderr)
+             ;; log4cl's console appender writes to a synonym stream for
+             ;; *DEBUG-IO*, which in a worker resolves to the original stdout
+             ;; fd whose read end the parent closed after the handshake --
+             ;; any write there raises BROKEN-PIPE.  Rebinding these keeps
+             ;; log4cl / interactive output captured instead of hitting the
+             ;; dead pipe.
+             ;;
+             ;; A two-way stream rather than STDOUT itself: ANSI requires
+             ;; these three to be bidirectional, and code that reads from
+             ;; them -- a stray Y-OR-N-P in evaluated code, say -- would
+             ;; otherwise get "not an input stream" rather than the empty
+             ;; input it should see in a non-interactive process.
+             (*debug-io* interactive)
+             (*terminal-io* interactive)
+             (*query-io* interactive)
+             (*compile-verbose* nil)
+             (*compile-print* nil))
         (%call-with-compiler-streams
          stdout
          stderr
