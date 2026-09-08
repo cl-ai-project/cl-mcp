@@ -7,11 +7,10 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
-  (:import-from #:bordeaux-threads
-                #:destroy-thread
-                #:make-thread
-                #:thread-alive-p)
+                #:make-ht
+                #:transient-error)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:export #:run-tests
            #:detect-test-framework
            #:make-load-failure-result
@@ -462,11 +461,18 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
      :test-name "SYSTEM-LOAD"
      :description (format nil "Could not load test system ~A" system-name)
      :reason
-     (format nil "~A~%~%Hint: the worker process may have a broken ~
-                  package state. Use pool-kill-worker to get a fresh ~
-                  worker, then retry run-tests."
-             (or (ignore-errors (princ-to-string condition))
-                 "unprintable condition"))))))
+     (let ((text (or (ignore-errors (princ-to-string condition))
+                     "unprintable condition")))
+       ;; The hint is withheld for a failure that left the image intact -- a
+       ;; concurrent load still holding the ASDF lock, say.  There it is
+       ;; actively harmful: following it aborts work about to finish, and
+       ;; such a condition carries its own, correct advice.
+       (if (typep condition 'transient-error)
+           text
+           (format nil "~A~%~%Hint: the worker process may have a broken ~
+                        package state. Use pool-kill-worker to get a fresh ~
+                        worker, then retry run-tests."
+                   text)))))))
 
 (defun make-resolution-failure-result (condition)
   "Convert a TEST-RESOLUTION-ERROR into a structured test-result so RUN-TESTS
@@ -495,11 +501,17 @@ representation covers both Rove and FiveAM target-resolution failures."
                    (format nil "~A~%~%Hint: ~A" detail hint)
                    detail))))))
 
-(defun make-timeout-result (seconds)
+(defun make-timeout-result (seconds &key thread-leaked)
   "Build the structured result for a test run that hit its SECONDS deadline.
 Returned in place of a test result so the caller always gets a
 machine-readable hash-table (failed:1, framework \"timeout\") rather than
-an opaque RPC-level error, mirroring MAKE-LOAD-FAILURE-RESULT."
+an opaque RPC-level error, mirroring MAKE-LOAD-FAILURE-RESULT.
+
+THREAD-LEAKED says whether the run thread could actually be stopped.  The two
+cases need different advice: a run that unwound left the worker healthy and
+can simply be retried with a longer timeout, whereas a leaked thread is still
+executing in the worker -- holding whatever locks it had -- and the session
+will not recover until the worker is replaced."
   (make-test-result
    :passed 0
    :failed 1
@@ -512,108 +524,109 @@ an opaque RPC-level error, mirroring MAKE-LOAD-FAILURE-RESULT."
      :test-name "TIMEOUT"
      :description (format nil "Tests timed out after ~A seconds" seconds)
      :reason
-     (format nil "The test run exceeded its ~A second deadline. A suite that ~
-                  leaves a server or thread running can outlive the deadline, ~
-                  so the worker may still be busy; use pool-kill-worker to get ~
-                  a fresh worker before retrying."
-             seconds)))))
+     (if thread-leaked
+         (format nil "The test run exceeded its ~A second deadline and could ~
+                      not be stopped: the run is still executing in this ~
+                      worker and may hold locks that block later loads. Use ~
+                      pool-kill-worker to get a fresh worker before retrying."
+                 seconds)
+         (format nil "The test run exceeded its ~A second deadline and its ~
+                      run thread was stopped. Threads the suite started of ~
+                      its own are not tracked and may still be running; ~
+                      retry with a larger timeout_seconds if the suite ~
+                      legitimately needs longer."
+                 seconds))))))
+
+(defun %parse-plain-decimal (text)
+  "Parse TEXT as a plain decimal number, or return NIL.
+Accepts an optional sign, digits, and at most one fractional part: \"60\",
+\"+60\", \"1.5\".  Nothing else -- no exponent, no ratio, no trailing unit.
+
+Deliberately avoids READ-FROM-STRING, which an earlier implementation used
+behind a character-set filter.  No filter makes the reader safe here: one
+permissive enough to admit \"1.5e2\" also admits \"e12\" and \"--\", which the
+reader INTERNS as symbols in this package, so a client controlling
+timeout_seconds could grow the package without bound in a long-lived process.
+The reader also honours the global *READ-BASE*, under which \"60\" reads as 96."
+  (let* ((len (length text))
+         (signed (and (plusp len) (find (char text 0) "+-")))
+         (start (if signed 1 0))
+         (dot (position #\. text :start start)))
+    (when (and (< start len)
+               ;; At most one fractional point.
+               (not (find #\. text :start (if dot (1+ dot) len))))
+      (let ((int-text (subseq text start (or dot len)))
+            (frac-text (if dot (subseq text (1+ dot)) "")))
+        (when (and (plusp (+ (length int-text) (length frac-text)))
+                   (every #'digit-char-p int-text)
+                   (every #'digit-char-p frac-text))
+          (let* ((int (if (plusp (length int-text))
+                          (parse-integer int-text)
+                          0))
+                 (frac (if (plusp (length frac-text))
+                           (/ (parse-integer frac-text)
+                              (expt 10 (length frac-text)))
+                           0))
+                 (magnitude (+ int frac))
+                 (value (if (eql signed #\-) (- magnitude) magnitude)))
+            ;; A ratio would print as "3/2" in the timeout messages built from
+            ;; this value; a float reads back the way the caller wrote it.
+            (if (zerop frac) value (float value 1.0))))))))
 
 (defun coerce-timeout-seconds (value)
   "Coerce VALUE to a positive number of seconds, or NIL when unusable.
-Accepts a number, or a string holding one.  JSON has a single number type,
-but not every client sends timeout_seconds as a number, and a string that
-reaches the (NUMBERP ...) guards in the worker handler and in
-PROXY-TO-WORKER is dropped there, silently widening a caller's 60 second
-deadline to the 300 second default.  NIL for a non-positive or unparseable
-value lets callers fall back to their own default."
+Accepts a real number, or a string holding a plain decimal one.
+
+The string case exists for values arriving over raw JSON-RPC, where nothing
+has validated them: the worker handlers read timeout_seconds straight out of
+the params hash, and a string there fails their (NUMBERP ...) guards, silently
+widening a caller's 60 second deadline to the 300 second default.  Tool
+arguments are a separate matter and stay strict -- DEFINE-TOOL's :type :number
+rejects a string outright, with a message naming the argument, before any of
+this runs.
+
+NIL for a non-positive or unparseable value lets callers fall back to their
+own default."
   (typecase value
-    (number (when (plusp value) value))
+    (real (when (plusp value) value))
     (string
-     (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) value)))
-       ;; Only pass text that can only be a number to READ-FROM-STRING: the
-       ;; reader interns symbols in the current package, so an arbitrary
-       ;; client string must never reach it.  The numeric-charset check
-       ;; keeps this to integers and simple decimals (plus exponents).
-       (when (and (plusp (length trimmed))
-                  (every (lambda (ch) (find ch "0123456789+-.eE"))
-                         trimmed))
-         (multiple-value-bind (parsed pos)
-             (ignore-errors
-              (let ((*read-eval* nil)) (read-from-string trimmed nil nil)))
-           (when (and (numberp parsed)
-                      (eql pos (length trimmed))
-                      (plusp parsed))
-             parsed)))))
+     (let ((parsed (%parse-plain-decimal
+                    (string-trim '(#\Space #\Tab #\Newline #\Return) value))))
+       (when (and parsed (plusp parsed)) parsed)))
     (t nil)))
 
 (defun call-with-test-run-deadline (thunk timeout-seconds)
   "Run THUNK (a test run) on a dedicated thread, answering by TIMEOUT-SECONDS.
-Returns two values: a result and a status keyword.
+Returns three values: a result, a status keyword, and whether the run thread
+was left behind.
 
   :OK       THUNK returned; the result is its value.
   :TIMEOUT  TIMEOUT-SECONDS elapsed first; the result is those seconds.
   :ERROR    THUNK signalled; the result is the condition object.
 
-THUNK also runs under SB-EXT:WITH-TIMEOUT, so the ordinary case -- a slow
-but well-behaved suite -- unwinds inside the run thread and releases its
-locks and UNWIND-PROTECT cleanups normally.  The polling wrapper only
-matters when that cannot happen.  A suite that leaves a blocking call
-running (a server accept loop, say) is invisible to SB-EXT:WITH-TIMEOUT,
-which cannot interrupt a blocking foreign call; run inline, such a suite
-pins the worker's single connection thread for as long as the call blocks,
-and every later tool call for that session hangs with it.  Answering from
-the polling thread bounds the wait no matter what the suite left running,
-so one wedged suite can no longer take the session down.
+Running off the caller's thread is what keeps one wedged suite from taking the
+session down.  A suite that leaves a blocking call running -- a server accept
+loop, say -- cannot be interrupted; run inline it pins the worker's single
+connection thread, and every later tool call for that session hangs with it.
+Here the caller is answered at the deadline no matter what the suite left
+running.
 
-The run thread is destroyed only on a wall-clock deadline it failed to
-observe, and a run that completes during the grace period still yields its
-real result -- completed work is never discarded as a timeout."
-  (let ((outcome nil)
-        (thread nil))
-    (flet ((finish ()
-             (let ((o (or outcome
-                          (cons :error "test run thread vanished"))))
-               (values (cdr o) (car o))))
-           (run ()
-             (setf outcome
-                   (handler-case
-                       (if timeout-seconds
-                           (sb-ext:with-timeout timeout-seconds
-                             (cons :ok (funcall thunk)))
-                           (cons :ok (funcall thunk)))
-                     (sb-ext:timeout () (cons :timeout timeout-seconds))
-                     (serious-condition (e) (cons :error e))))))
-      (setf thread (make-thread #'run :name "mcp-run-tests"))
-      (let ((deadline
-              (when timeout-seconds
-                (+ (get-internal-real-time)
-                   (round (* timeout-seconds
-                             internal-time-units-per-second))))))
-        (loop while (thread-alive-p thread)
-              do (when (and deadline (>= (get-internal-real-time) deadline))
-                   (return))
-                 (sleep 0.05d0))
-        (cond
-          ((not (thread-alive-p thread))
-           (finish))
-          (t
-           ;; Give the run a moment to observe its own WITH-TIMEOUT: a
-           ;; cooperative unwind is preferable to destroying the thread,
-           ;; because it releases the locks the run is holding.
-           (sleep 0.5d0)
-           (if (not (thread-alive-p thread))
-               (finish)
-               (progn
-                 (ignore-errors (destroy-thread thread))
-                 (loop repeat 20
-                       while (thread-alive-p thread)
-                       do (sleep 0.05d0))
-                 (ignore-errors
-                  (log-event :warn "test.runner.deadline"
-                             "timeout" timeout-seconds
-                             "thread_destroyed"
-                             (not (thread-alive-p thread))))
-                 (values timeout-seconds :timeout)))))))))
+The third value is true when the run thread outlived both the cooperative
+unwind and DESTROY-THREAD.  Such a thread is still executing: it may hold
+*ASDF-LOAD-LOCK* or a lock of the suite's own, so the caller should tell the
+user the worker needs replacing rather than present a plain timeout.
+
+See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced, and for why a
+run that completes while the deadline is being enforced still yields its real
+result instead of a timeout."
+  (multiple-value-bind (result status leaked)
+      (call-with-deadline-thread thunk timeout-seconds :name "mcp-run-tests")
+    (when leaked
+      (ignore-errors
+       (log-event :warn "test.runner.deadline.thread-leaked"
+                  "timeout" timeout-seconds
+                  "thread" "mcp-run-tests")))
+    (values (if (eq status :ok) (first result) result) status leaked)))
 
 (defun %extract-defpackage-names-from-file (pathname &optional scan-package)
   "Return a list of package names mentioned in `(defpackage ...)' forms
@@ -916,7 +929,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                 (/ (- end-time start-time) internal-time-units-per-second))))
            (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
            (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output (get-output-stream-string debug-stream)))
+           (debug-output
+            (%truncate-test-output (get-output-stream-string debug-stream))))
       (if rove-error
           ;; Rove crashed (e.g., direct assertions without testing wrapper)
           (let ((ht (make-test-result
@@ -1028,7 +1042,8 @@ detects test sub-systems from ASDF dependencies and runs each individually."
             (%truncate-test-output (get-output-stream-string stdout-stream)))
            (stderr
             (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output (get-output-stream-string debug-stream)))
+           (debug-output
+            (%truncate-test-output (get-output-stream-string debug-stream))))
       (if rove-error
           (let ((ht
                  (make-test-result :passed 0 :failed 1 :failed-tests
@@ -1202,7 +1217,8 @@ the surrounding passed/failed/pending/failure-details bindings."
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
-      (let ((debug-output (get-output-stream-string debug-stream)))
+      (let ((debug-output
+              (%truncate-test-output (get-output-stream-string debug-stream))))
         (when (plusp (length debug-output))
           (setf (gethash "debug_output" ht) debug-output)))
       ht)))
@@ -1483,21 +1499,30 @@ crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
 stream-capture, crash-handling, and result-assembly logic lives in one place.
 
-NOTE: *standard-output* and *error-output* are intentionally NOT redirected.
-Binding them (even to a broadcast stream) causes integration test suites that
-spawn real threads and sockets to hang inside the worker process.  Only
-*test-debug-output* (cl-mcp's own stream) is captured."
+Capture covers the thread the suite runs on.  Output from threads the suite
+spawns is not captured and reaches the process's own stdout: in SBCL a new
+thread starts from the GLOBAL value of a special, so these bindings are
+invisible to it.  The Rove backend has the same property."
   (let ((start-time (get-internal-real-time))
+        (stdout-stream (make-string-output-stream))
+        (stderr-stream (make-string-output-stream))
         (debug-stream (make-string-output-stream))
         all-results)
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
-           (debug-output () (get-output-stream-string debug-stream)))
+           (stdout () (%truncate-test-output
+                       (get-output-stream-string stdout-stream)))
+           (stderr () (%truncate-test-output
+                       (get-output-stream-string stderr-stream)))
+           (debug-output () (%truncate-test-output
+                             (get-output-stream-string debug-stream))))
       (handler-case
           (dolist (spec specs)
             (let ((results
-                    (let ((*test-debug-output* debug-stream))
+                    (let ((*test-debug-output* debug-stream)
+                          (*standard-output* stdout-stream)
+                          (*error-output* stderr-stream))
                       (%fiveam-run spec))))
               (when results
                 (setf all-results (append all-results results)))))
@@ -1514,7 +1539,7 @@ spawn real threads and sockets to hang inside the worker process.  Only
                                          (princ-to-string c))))
                       crash-test-names)
               :framework :fiveam :duration (duration-ms))
-             nil nil (debug-output)))))
+             (stdout) (stderr) (debug-output)))))
       (multiple-value-bind (passed failed pending failure-details)
           (%fiveam-extract-results all-results)
         (%fiveam-attach-output
@@ -1522,7 +1547,7 @@ spawn real threads and sockets to hang inside the worker process.  Only
           :passed passed :failed failed :pending pending
           :failed-tests failure-details
           :framework :fiveam :duration (duration-ms))
-         nil nil (debug-output))))))
+         (stdout) (stderr) (debug-output))))))
 
 (defun run-fiveam-tests (system-name)
   "Run the FiveAM suites belonging to SYSTEM-NAME and return results.

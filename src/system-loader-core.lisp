@@ -5,19 +5,19 @@
 
 (defpackage #:cl-mcp/src/system-loader-core
   (:use #:cl)
-  (:import-from #:bordeaux-threads
-                #:thread-alive-p
-                #:make-thread
-                #:destroy-thread)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht)
+                #:make-ht
+                #:transient-error)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:export #:load-system
+           #:*system-load-lock-wrapper*
            #:*last-compiler-stderr*))
 
 (in-package #:cl-mcp/src/system-loader-core)
@@ -25,50 +25,64 @@
 (declaim (ftype (function (function (or number null)) (values t &rest t))
                 %load-with-timeout))
 
+(defvar *system-load-lock-wrapper* ()
+  "Optional function of one argument (a thunk) wrapping the ASDF work.
+
+Bound by the worker handler to WITH-ASDF-LOAD-LOCK.  It is read on the
+caller's thread but applied INSIDE the deadline thread, which is the whole
+point: the thread that performs the ASDF work is then the thread that owns the
+lock.  A load that outlives its deadline keeps the lock it is still using, so
+the next load gets that lock's own timeout error instead of quietly starting a
+second ASDF operation alongside the first.  Wrapping outside the deadline
+thread would release the lock the moment the caller was answered, while ASDF
+was still running.
+
+It also puts the time spent waiting for the lock inside the caller's deadline,
+rather than ahead of it.")
+
 (defun %load-with-timeout (thunk timeout-seconds)
-  "Execute THUNK in a worker thread with TIMEOUT-SECONDS limit.
-Returns (values result-list timed-out-p errored-p).
+  "Execute THUNK under a TIMEOUT-SECONDS deadline on its own thread.
+Returns (values result-list timed-out-p errored-p leaked-p).
 RESULT-LIST is a list of the thunk's multiple return values on success,
 or a single-element list containing the error condition on failure.
-TIMED-OUT-P is T if the worker was still running when the deadline passed.
-ERRORED-P is T if the thunk signaled an error.
+TIMED-OUT-P is T if the load was still running when the deadline passed.
+ERRORED-P is T if the thunk signaled.
+LEAKED-P is T when the load thread outlived both the cooperative unwind and
+DESTROY-THREAD.  It matters to the caller: that thread is still inside ASDF,
+so the load this call gave up on keeps mutating the image's ASDF, package and
+compiler state while later requests run against it.
 
-NOTE: This is a polling-based safety net, not a strict deadline enforcer.
-The worker is polled every 50ms, so the effective granularity is 50ms.
-If the worker completes during the final polling interval, the result is
-returned as a success -- completed work is never discarded as a timeout."
-  (if (and timeout-seconds (plusp timeout-seconds))
-      (let* ((result-box nil)
-             (error-box nil)
-             (worker
-               (make-thread
-                (lambda ()
-                  (handler-case
-                      (setf result-box (multiple-value-list (funcall thunk)))
-                    (error (c)
-                      (setf error-box c))))
-                :name "mcp-load-system")))
-        (loop repeat (ceiling (/ timeout-seconds 0.05d0))
-              when (not (thread-alive-p worker))
-                do (return-from %load-with-timeout
-                     (if error-box
-                         (values (list error-box) nil t)
-                         (values result-box nil nil)))
-              do (sleep 0.05d0))
-        ;; Worker may have completed during the last sleep window.
-        ;; Re-check before declaring timeout.
-        (cond
-          ((not (thread-alive-p worker))
-           (if error-box
-               (values (list error-box) nil t)
-               (values result-box nil nil)))
-          (t
-           (ignore-errors (destroy-thread worker))
-           (values nil t nil))))
-      (handler-case
-          (values (multiple-value-list (funcall thunk)) nil nil)
-        (error (c)
-          (values (list c) nil t)))))
+*SYSTEM-LOAD-LOCK-WRAPPER*, when installed, is applied around THUNK on the
+deadline thread rather than around this call, so the lock and the work it
+protects share a thread.  See its docstring.
+
+If the load completes while the deadline is being enforced, the result is
+returned as a success -- completed work is never discarded as a timeout.
+See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced."
+  (let* ((wrapper *system-load-lock-wrapper*)
+         ;; Read here, on the caller's thread, and applied there, on the
+         ;; deadline thread: a dynamic binding made by the caller is not
+         ;; visible inside a thread it spawns.
+         (wrapped (if wrapper
+                      (lambda () (funcall wrapper thunk))
+                      thunk)))
+    (handler-case
+        (multiple-value-bind (result status leaked)
+            (call-with-deadline-thread wrapped timeout-seconds
+                                       :name "mcp-load-system")
+          (when leaked
+            (ignore-errors
+             (log-event :warn "load.timeout.thread-leaked"
+                        "name" "mcp-load-system"
+                        "timeout" timeout-seconds)))
+          (ecase status
+            (:ok (values result nil nil nil))
+            (:timeout (values nil t nil leaked))
+            (:error (values (list result) nil t nil))))
+      ;; Only reachable on the inline path (no deadline), where
+      ;; CALL-WITH-DEADLINE-THREAD lets conditions propagate.
+      (error (c)
+        (values (list c) nil t nil)))))
 
 (defvar *last-compiler-stderr* nil
   "Captured compiler stderr from the most recent %call-with-suppressed-output call.
@@ -179,24 +193,31 @@ DEFUN' lines are noise that drown real warnings."
               (progn
                 (setf result
                       (handler-bind ((warning #'handle-warning))
-                        (let ((*compile-verbose* nil)
-                              (*compile-print* nil)
-                              (*load-verbose* nil)
-                              (*load-print* nil)
-                              (*standard-output* (make-string-output-stream))
-                              (*trace-output* (make-string-output-stream))
-                              (*error-output* stderr)
-                              ;; log4cl's console appender writes to a synonym
-                              ;; stream for *DEBUG-IO*, which in a worker
-                              ;; resolves to the original stdout fd whose read
-                              ;; end the parent closed after the handshake --
-                              ;; any write there raises BROKEN-PIPE and aborts
-                              ;; the load.  Rebinding these interactive streams
-                              ;; keeps that output captured instead of hitting
-                              ;; the dead pipe.
-                              (*debug-io* stderr)
-                              (*terminal-io* stderr)
-                              (*query-io* stderr))
+                        (let* ((interactive
+                                 (make-two-way-stream
+                                  (make-concatenated-stream) stderr))
+                               (*compile-verbose* nil)
+                               (*compile-print* nil)
+                               (*load-verbose* nil)
+                               (*load-print* nil)
+                               (*standard-output* (make-string-output-stream))
+                               (*trace-output* (make-string-output-stream))
+                               (*error-output* stderr)
+                               ;; log4cl's console appender writes to a synonym
+                               ;; stream for *DEBUG-IO*, which in a worker
+                               ;; resolves to the original stdout fd whose read
+                               ;; end the parent closed after the handshake --
+                               ;; any write there raises BROKEN-PIPE and aborts
+                               ;; the load.  Rebinding these interactive streams
+                               ;; keeps that output captured instead of hitting
+                               ;; the dead pipe.  A two-way stream, because ANSI
+                               ;; requires these three to be bidirectional: a
+                               ;; system whose load-time code asks Y-OR-N-P
+                               ;; should read EOF, not fail on "not an input
+                               ;; stream".
+                               (*debug-io* interactive)
+                               (*terminal-io* interactive)
+                               (*query-io* interactive))
                           (if syms
                               (progv (nreverse syms) (nreverse vals)
                                 (with-compilation-unit (:override t)
@@ -218,16 +239,19 @@ DEFUN' lines are noise that drown real warnings."
             (progn
               (setf result
                     (handler-bind ((warning #'handle-warning))
-                      (let ((*compile-verbose* nil)
-                            (*compile-print* nil)
-                            (*load-verbose* nil)
-                            (*load-print* nil)
-                            (*standard-output* (make-string-output-stream))
-                            (*trace-output* (make-string-output-stream))
-                            (*error-output* stderr)
-                            (*debug-io* stderr)
-                            (*terminal-io* stderr)
-                            (*query-io* stderr))
+                      (let* ((interactive
+                               (make-two-way-stream
+                                (make-concatenated-stream) stderr))
+                             (*compile-verbose* nil)
+                             (*compile-print* nil)
+                             (*load-verbose* nil)
+                             (*load-print* nil)
+                             (*standard-output* (make-string-output-stream))
+                             (*trace-output* (make-string-output-stream))
+                             (*error-output* stderr)
+                             (*debug-io* interactive)
+                             (*terminal-io* interactive)
+                             (*query-io* interactive))
                         (funcall thunk))))
               (setf completed-p t)
               (values result warning-count
@@ -302,7 +326,7 @@ registering it."
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
-    (multiple-value-bind (result-list timed-out-p errored-p)
+    (multiple-value-bind (result-list timed-out-p errored-p leaked-p)
         (%load-with-timeout
          (lambda ()
            (flet ((%do-load ()
@@ -359,15 +383,28 @@ registering it."
           (timed-out-p (setf (gethash "status" ht) "timeout")
            (setf (gethash "duration_ms" ht) elapsed-ms)
            (setf (gethash "message" ht)
-                 (format nil "Load timed out after ~,2F seconds"
-                         timeout-seconds))
+                 (if leaked-p
+                     (format nil "Load timed out after ~,2F seconds and could ~
+                                  not be stopped: it is still running in this ~
+                                  worker and may hold the ASDF load lock. Use ~
+                                  pool-kill-worker to get a fresh worker."
+                             timeout-seconds)
+                     (format nil "Load timed out after ~,2F seconds"
+                             timeout-seconds)))
            (log-event :warn "load-system-timeout" "system" system-name
-                      "timeout" timeout-seconds))
+                      "timeout" timeout-seconds
+                      "thread_leaked" (if leaked-p "true" "false")))
           (errored-p
            (let ((err (first result-list))
                  (compiler-stderr *last-compiler-stderr*))
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
+             ;; Carried so the response builder can withhold its standing
+             ;; advice to replace the worker: for a failure that leaves the
+             ;; image intact -- another load still holding the lock -- that
+             ;; advice would destroy work about to finish.
+             (when (typep err 'transient-error)
+               (setf (gethash "worker_healthy" ht) t))
              (setf (gethash "message" ht)
                    (sanitize-for-json
                     (or (ignore-errors (princ-to-string err))

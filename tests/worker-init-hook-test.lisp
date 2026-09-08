@@ -55,6 +55,80 @@
         (bt:join-thread th)
         (ok finished "handler completed after the lock was released")))))
 
+(deftest asdf-load-lock-times-out-with-actionable-advice
+  (testing "a lock nobody releases ends in one error, not an endless block"
+    ;; A run-tests deadline that cannot stop its thread can leave this lock
+    ;; owned by a thread that never releases it.  SBCL has no dead-owner
+    ;; detection, so waiting forever would hang every later load in this
+    ;; worker with nothing to say why -- and the proxy would eventually kill
+    ;; the worker with a generic crash notice instead.
+    (let* ((held (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (holder (bt:make-thread
+                    (lambda ()
+                      (with-asdf-load-lock
+                        (bt:signal-semaphore held)
+                        (bt:wait-on-semaphore release)))
+                    :name "lock-holder")))
+      (unwind-protect
+           (progn
+             (bt:wait-on-semaphore held)
+             (let ((cl-mcp/src/worker/init-hook:*asdf-load-lock-timeout* 0.3)
+                   (message nil)
+                   (start (get-internal-real-time)))
+               (handler-case (with-asdf-load-lock :never-reached)
+                 (error (e) (setf message (princ-to-string e))))
+               (let ((elapsed (/ (- (get-internal-real-time) start)
+                                 internal-time-units-per-second)))
+                 (ok message "the wait ends in an error rather than blocking")
+                 (ok (search "pool-kill-worker" (or message ""))
+                     "and the message names the recovery")
+                 (ok (< elapsed 5)
+                     (format nil "gave up in ~,2Fs" elapsed)))))
+        (bt:signal-semaphore release)
+        (bt:join-thread holder))))
+  (testing "the lock still works normally once released"
+    (ok (eq :ran (with-asdf-load-lock :ran))
+        "a thunk's own return value survives the timeout plumbing")))
+
+(deftest asdf-load-lock-busy-does-not-advise-killing-a-healthy-worker
+  (testing "a caller blocked behind a running init is not told to kill it"
+    ;; The init hook holds this lock for a whole cold compile with no deadline
+    ;; of its own, so a large application system legitimately outlasts the
+    ;; timeout.  Telling that caller to run pool-kill-worker would abort a
+    ;; load that was about to finish.  The signaller distinguishes the two
+    ;; cases, but the advice is appended afterwards by the response builder,
+    ;; so suppressing it there is what actually reaches the client.
+    (let* ((held (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (holder (bt:make-thread
+                    (lambda ()
+                      (with-asdf-load-lock
+                        (bt:signal-semaphore held)
+                        (bt:wait-on-semaphore release)))
+                    ;; The thread name is what tells a running init apart from
+                    ;; a thread that outlived its deadline.
+                    :name "mcp-worker-init")))
+      (unwind-protect
+           (progn
+             (bt:wait-on-semaphore held)
+             (let ((params (make-hash-table :test 'equal)))
+               (setf (gethash "system" params) "alexandria"
+                     (gethash "force" params) nil
+                     (gethash "timeout_seconds" params) 2)
+               (let* ((resp (cl-mcp/src/worker/handlers::%handle-load-system
+                             params))
+                      (text (gethash "text"
+                                     (aref (gethash "content" resp) 0))))
+                 (ok (search "init hook is still loading" text)
+                     "the message names the real cause")
+                 (ok (search "worker/init-status" text)
+                     "and says what to wait for")
+                 (ok (null (search "pool-kill-worker" text))
+                     "and does not tell the caller to destroy a healthy worker"))))
+        (bt:signal-semaphore release)
+        (bt:join-thread holder)))))
+
 (deftest init-state-transitions
   (testing "state starts idle, moves to loading/running/failed, snapshots as a hash-table"
     (cl-mcp/src/worker/init-hook::%reset-init-state)

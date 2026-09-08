@@ -41,8 +41,6 @@ Returns:
 - framework (string)
 - duration_ms (integer)
 - stdout (string, present when non-empty) — captured test standard output
-  (Rove only: the FiveAM backend deliberately does not redirect the
-  standard streams, so it reports no stdout/stderr — use debug_output)
 - stderr (string, present when non-empty) — captured test error output
 - debug_output (string, present when non-empty) — output written to *test-debug-output* stream
 NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
@@ -79,7 +77,7 @@ Examples:
                                    "tests" tests
                                    "timeout_seconds" timeout-seconds))
     (let ((effective-timeout (or (coerce-timeout-seconds timeout-seconds) 300)))
-      (multiple-value-bind (test-result status)
+      (multiple-value-bind (test-result status thread-leaked)
           (call-with-test-run-deadline
            (lambda ()
              (run-tests system
@@ -91,7 +89,8 @@ Examples:
                 (build-run-tests-response
                  (ecase status
                    (:ok test-result)
-                   (:timeout (make-timeout-result test-result))
+                   (:timeout (make-timeout-result test-result
+                                                  :thread-leaked thread-leaked))
                    ;; Re-signal so real failures stay visible instead of
                    ;; being reported as a bogus test result.
                    (:error (error test-result)))))))))

@@ -6,10 +6,8 @@
 
 (defpackage #:cl-mcp/src/repl-core
   (:use #:cl)
-  (:import-from #:bordeaux-threads
-                #:thread-alive-p
-                #:make-thread
-                #:destroy-thread)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
@@ -131,19 +129,31 @@ on large outputs)."
           (*print-array* t)
           (*print-pretty* t)
           (*read-default-float-format* 'single-float))
-      (let ((*standard-output* stdout)
-            (*error-output* stderr)
-            ;; log4cl's console appender writes to a synonym stream for
-            ;; *DEBUG-IO*, which in a worker resolves to the original stdout
-            ;; fd whose read end the parent closed after the handshake --
-            ;; any write there raises BROKEN-PIPE.  Rebinding these keeps
-            ;; log4cl / interactive output captured instead of hitting the
-            ;; dead pipe.
-            (*debug-io* stdout)
-            (*terminal-io* stdout)
-            (*query-io* stdout)
-            (*compile-verbose* nil)
-            (*compile-print* nil))
+      (let* ((interactive
+               (make-two-way-stream (make-concatenated-stream) stdout))
+             (*standard-output* stdout)
+             (*error-output* stderr)
+             ;; log4cl's console appender writes to a synonym stream for
+             ;; *DEBUG-IO*, which in a worker resolves to the original stdout
+             ;; fd whose read end the parent closed after the handshake --
+             ;; any write there raises BROKEN-PIPE.  Rebinding these keeps
+             ;; log4cl / interactive output captured instead of hitting the
+             ;; dead pipe.
+             ;;
+             ;; A two-way stream rather than STDOUT itself: ANSI requires
+             ;; these three to be bidirectional, and code that reads from
+             ;; them -- a stray Y-OR-N-P in evaluated code, say -- would
+             ;; otherwise get "not an input stream" rather than the empty
+             ;; input it should see in a non-interactive process.
+             (*debug-io* interactive)
+             (*terminal-io* interactive)
+             (*query-io* interactive)
+             ;; (TIME ...) and TRACE write here, and its default is a synonym
+             ;; for the process's stdout.  Captured rather than redirected, so
+             ;; a caller who asks for timings gets them back in the result.
+             (*trace-output* stdout)
+             (*compile-verbose* nil)
+             (*compile-print* nil))
         (%call-with-compiler-streams
          stdout
          stderr
@@ -290,53 +300,55 @@ stdout, stderr, error-context."
                 :frames nil))))
 
 (defun %repl-eval-with-timeout (thunk timeout-seconds)
-  "Execute THUNK with a polling-based timeout (50ms granularity).
-If the worker completes during the final polling interval, returns
-the result as success -- completed work is never discarded as a timeout."
-  (if (and timeout-seconds (plusp timeout-seconds))
-      (let* ((result-box nil)
-             (worker (bordeaux-threads:make-thread
-                      (lambda ()
-                        ;; Nothing raised by THUNK -- evaluation *or* printing --
-                        ;; may reach the debugger hook: a worker process runs
-                        ;; under SB-EXT:DISABLE-DEBUGGER, where an unhandled
-                        ;; condition in this thread aborts the whole process and
-                        ;; destroys the session's state.  Degrade to an error
-                        ;; result instead.  Thread termination on timeout is a
-                        ;; THROW, not a condition, so this does not defeat it.
-                        (setf result-box
-                              (handler-case (multiple-value-list (funcall thunk))
-                                (serious-condition (e)
-                                  (ignore-errors
-                                   (cl-mcp/src/log:log-event
-                                    :warn "repl.eval.condition-escaped"
-                                    "type" (princ-to-string (type-of e))))
-                                  (%thunk-error-result e)))))
-                      :name "mcp-repl-eval")))
-        (loop repeat (ceiling (/ timeout-seconds 0.05d0))
-              when (not (bordeaux-threads:thread-alive-p worker))
-              do (return-from %repl-eval-with-timeout (values-list result-box))
-              do (sleep 0.05d0))
-        ;; Worker may have completed during the last sleep window.
-        ;; Re-check before declaring timeout.
-        (cond
-          ((not (bordeaux-threads:thread-alive-p worker))
-           (values-list result-box))
-          (t
-           (ignore-errors (bordeaux-threads:destroy-thread worker))
-           ;; Verify thread actually died; log if it leaked
-           (loop repeat 20
-                 while (bordeaux-threads:thread-alive-p worker)
-                 do (sleep 0.05d0))
-           (when (bordeaux-threads:thread-alive-p worker)
-             (ignore-errors
-              (cl-mcp/src/log:log-event :warn "repl.timeout.thread-leaked"
-                                        "name" "mcp-repl-eval"
-                                        "timeout" timeout-seconds)))
+  "Execute THUNK, enforcing TIMEOUT-SECONDS on a dedicated thread.
+Without a usable deadline THUNK runs inline, exactly as before: there is
+nothing to enforce, and the caller's handlers and backtrace stay intact.
+If the evaluation completes while the deadline is being enforced, its real
+result is returned -- completed work is never discarded as a timeout."
+  (if (not (and timeout-seconds (realp timeout-seconds) (plusp timeout-seconds)))
+      (funcall thunk)
+      (multiple-value-bind (result status leaked)
+          (call-with-deadline-thread
+           (lambda ()
+             ;; Nothing raised by THUNK -- evaluation *or* printing -- may
+             ;; reach the debugger hook: a worker process runs under
+             ;; SB-EXT:DISABLE-DEBUGGER, where an unhandled condition in this
+             ;; thread aborts the whole process and destroys the session's
+             ;; state.  Degrade to an error result instead.  The deadline
+             ;; unwind is a THROW, not a condition, so this does not defeat it.
+             (handler-case (funcall thunk)
+               (serious-condition (e)
+                 (ignore-errors
+                  (cl-mcp/src/log:log-event
+                   :warn "repl.eval.condition-escaped"
+                   "type" (princ-to-string (type-of e))))
+                 (values-list (%thunk-error-result e)))))
+           timeout-seconds
+           :name "mcp-repl-eval")
+        (when leaked
+          (ignore-errors
+           (cl-mcp/src/log:log-event :warn "repl.timeout.thread-leaked"
+                                     "name" "mcp-repl-eval"
+                                     "timeout" timeout-seconds)))
+        (ecase status
+          (:ok (values-list result))
+          ;; The wrapper above converts every SERIOUS-CONDITION, so :ERROR can
+          ;; only mean the conversion itself failed.  Report it the same way.
+          (:error (values-list (%thunk-error-result result)))
+          (:timeout
            (values
-            (format nil "Evaluation timed out after ~,2F seconds" timeout-seconds)
-            :timeout "" "" nil))))
-      (funcall thunk)))
+            (if leaked
+                ;; The evaluation is still running: it can still print, still
+                ;; consume CPU, and still mutate this session's state under
+                ;; later requests, so say so rather than implying it stopped.
+                (format nil "Evaluation timed out after ~,2F seconds and ~
+                             could not be stopped: it is still running in ~
+                             this worker. Use pool-kill-worker to get a ~
+                             fresh worker."
+                        timeout-seconds)
+                (format nil "Evaluation timed out after ~,2F seconds"
+                        timeout-seconds))
+            :timeout "" "" nil))))))
 
 (defun repl-eval (input &key (package *default-eval-package*)
                              (print-level nil) (print-length nil)

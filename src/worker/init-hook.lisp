@@ -13,9 +13,10 @@
   (:import-from #:cl-mcp/src/system-loader-core #:load-system)
   (:import-from #:cl-mcp/src/repl-core #:repl-eval)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
-  (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
+  (:import-from #:cl-mcp/src/tools/helpers #:make-ht #:transient-error)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*asdf-load-lock*
+           #:*asdf-load-lock-timeout*
            #:with-asdf-load-lock
            #:handle-init-start
            #:handle-init-status))
@@ -29,9 +30,95 @@ concurrent ASDF load-ops in one worker image, which the single-threaded
 dispatch loop does NOT prevent because load-system/repl-eval run their
 work on spawned helper threads.")
 
+(defparameter *asdf-load-lock-timeout* 240
+  "Seconds to wait for *ASDF-LOAD-LOCK* before giving up on it.
+
+The lock is normally held only for the duration of one load, so waiting this
+long already means something is wrong -- in practice, a run-tests deadline
+that could not stop its thread, leaving the load lock owned by a thread that
+will never release it.  Waiting forever there would hang this worker's single
+connection thread on every later load, with nothing to tell the user why.
+
+The value sits below the proxy's own budget on purpose: the proxy waits
+*PROXY-RPC-TIMEOUT* plus *PROXY-RPC-BUFFER*, and a timeout there kills the
+worker with a generic crash notice.  Giving up first means the caller gets
+this message, which names the cause and the fix, instead.")
+
 (defmacro with-asdf-load-lock (&body body)
-  "Evaluate BODY holding *ASDF-LOAD-LOCK*."
-  `(bt:with-lock-held (*asdf-load-lock*) ,@body))
+  "Evaluate BODY holding *ASDF-LOAD-LOCK*, waiting at most
+*ASDF-LOAD-LOCK-TIMEOUT* seconds to acquire it."
+  `(call-with-asdf-load-lock (lambda () ,@body)))
+
+(defun %signal-asdf-load-lock-timeout ()
+  "Signal that *ASDF-LOAD-LOCK* could not be acquired, naming the likely cause.
+
+Three situations reach here and they need different advice.  The init hook
+loads on its own thread, holding this lock for a whole cold compile with no
+deadline of its own, so a large application system legitimately keeps it past
+this timeout -- telling that caller to kill the worker would abort a healthy
+load that was about to finish.  The lock may also be free again by the time we
+look, which means the contention was transient and there is nothing to fix.
+Only a lock still held by some other thread means a run outlived its deadline
+and will never release it, and only there does the worker have to be replaced."
+  (let* ((owner (sb-thread:mutex-owner *asdf-load-lock*))
+         (owner-name (and owner (sb-thread:thread-name owner))))
+    (ignore-errors
+     (log-event :error "worker.asdf-load-lock.timeout"
+                "seconds" *asdf-load-lock-timeout*
+                "owner" (or owner-name "none")))
+    (cond
+      ;; Released between the wait expiring and this sample.  Reporting a
+      ;; wedged worker for a lock that is free again would send the caller to
+      ;; pool-kill-worker for nothing.
+      ((null owner)
+       (error 'transient-error
+              :format-control
+              "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock, which was released just as the wait expired. Nothing is ~
+               wrong with this worker; retry."
+              :format-arguments (list *asdf-load-lock-timeout*)))
+      ;; TRANSIENT-ERROR, so the response builders withhold their standing
+      ;; "replace the worker" advice.  Appending it here would undo the whole
+      ;; point of separating these cases: the caller would be told to run
+      ;; pool-kill-worker and would abort a healthy load.
+      ((equal owner-name "mcp-worker-init")
+       (error 'transient-error
+              :format-control
+              "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock: the init hook is still loading and holds it. That load ~
+               has no deadline of its own, so a cold compile of a large system ~
+               can legitimately take longer. Wait for worker/init-status to ~
+               report ready, or retry with a larger timeout_seconds."
+              :format-arguments (list *asdf-load-lock-timeout*)))
+      (t
+       (error "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock~@[, held by thread ~A~]. A previous run most likely left a ~
+               thread behind that never released it; this worker cannot load ~
+               systems again. Use pool-kill-worker to get a fresh worker."
+              *asdf-load-lock-timeout*
+              owner-name)))))
+
+(defun call-with-asdf-load-lock (thunk)
+  "Call THUNK holding *ASDF-LOAD-LOCK*, or signal if it cannot be acquired.
+Times out rather than blocking forever, so a lock left owned by a thread that
+outlived its deadline surfaces as one actionable error instead of hanging
+every later load in this worker.
+
+SB-THREAD:WITH-MUTEX rather than a GRAB-MUTEX/UNWIND-PROTECT pair: SBCL
+documents GRAB-MUTEX and RELEASE-MUTEX as not interrupt-safe, and this runs on
+the very thread a run-tests deadline interrupts.  An interrupt arriving
+between GRAB-MUTEX returning and the UNWIND-PROTECT being established would
+leak the lock outright -- the exact failure the timeout below exists to make
+survivable.  WITH-MUTEX returns NIL rather than signalling when the timeout
+expires, so RAN distinguishes that from a THUNK that returned NIL."
+  (let* ((ran nil)
+         (values (sb-thread:with-mutex (*asdf-load-lock*
+                                        :timeout *asdf-load-lock-timeout*)
+                   (setf ran t)
+                   (multiple-value-list (funcall thunk)))))
+    (if ran
+        (values-list values)
+        (%signal-asdf-load-lock-timeout))))
 
 (defvar *init-lock* (bt:make-lock "worker-init-state")
   "Protects *INIT-STATE*.")

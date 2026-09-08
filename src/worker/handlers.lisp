@@ -15,7 +15,8 @@
                 #:code-describe-symbol
                 #:code-find-references)
   (:import-from #:cl-mcp/src/system-loader-core
-                #:load-system)
+                #:load-system
+                #:*system-load-lock-wrapper*)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests
                 #:call-with-test-run-deadline
@@ -47,6 +48,7 @@
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
                 #:with-asdf-load-lock
+                #:*asdf-load-lock-timeout*
                 #:handle-init-start
                 #:handle-init-status)
   (:export #:register-all-handlers))
@@ -73,11 +75,17 @@ key-present-with-false (use NIL)."
   "Evaluate code and return the same response structure as define-tool
 \"repl-eval\": content, stdout, stderr, and optional result_object_id,
 result_preview, and error_context."
-  (let ((code (gethash "code" params))
+  (let* ((code (gethash "code" params))
          (package (gethash "package" params))
          (print-level (gethash "print_level" params))
          (print-length (gethash "print_length" params))
-         (timeout-seconds (gethash "timeout_seconds" params))
+         ;; Coerced for the same reason %HANDLE-LOAD-SYSTEM coerces: params
+         ;; arrive unvalidated here, and %REPL-EVAL-WITH-TIMEOUT treats a
+         ;; non-real value as "no deadline at all" -- so a string would run
+         ;; unbounded while the proxy, which does accept it, budgets for it
+         ;; and kills the worker when that budget runs out.
+         (raw-timeout (gethash "timeout_seconds" params))
+         (timeout-seconds (coerce-timeout-seconds raw-timeout))
          (max-output-length (gethash "max_output_length" params))
          (safe-read (gethash "safe_read" params))
          (include-result-preview (%bool-default params "include_result_preview" t))
@@ -89,12 +97,20 @@ result_preview, and error_context."
          (locals-preview-skip-internal (%bool-default params "locals_preview_skip_internal" t)))
     (unless code
       (error "code is required"))
+    (when (and raw-timeout (null timeout-seconds))
+      (error "timeout_seconds must be a positive number"))
     (multiple-value-bind (printed raw-value stdout stderr error-context)
         (repl-eval code
                    :package (or package *package*)
                    :print-level print-level
                    :print-length print-length
-                   :timeout-seconds timeout-seconds
+                   ;; Always a server-side deadline, as run-tests has: without
+                   ;; one an accidental (loop) pins this worker's single
+                   ;; connection thread, and the proxy -- which budgets for
+                   ;; this same default -- eventually gives up and kills the
+                   ;; worker, resetting the session for what should have been
+                   ;; a timeout report.
+                   :timeout-seconds (or timeout-seconds 300)
                    :max-output-length max-output-length
                    :safe-read safe-read
                    :locals-preview-frames locals-preview-frames
@@ -113,21 +129,50 @@ result_preview, and error_context."
 
 (defun %handle-load-system (params)
   "Load an ASDF system.  Returns the same structure as define-tool
-\"load-system\".  Holds *ASDF-LOAD-LOCK* so it cannot overlap a
-concurrent worker/init load or another load-system."
-  (let ((system (gethash "system" params))
+\"load-system\".  Serializes against every other cl-mcp-mediated ASDF load
+through *ASDF-LOAD-LOCK*.
+
+The lock is taken from inside LOAD-SYSTEM's own deadline thread rather than
+around the call, by way of *SYSTEM-LOAD-LOCK-WRAPPER*, so the thread doing the
+ASDF work is the thread holding the lock.  Wrapping the call instead would
+release the lock the moment this handler was answered -- and a load that
+outlived its deadline is still running inside ASDF, so the next load would
+start a second ASDF operation alongside the first.  It also keeps the wait for
+the lock inside the caller's timeout_seconds instead of ahead of it, which
+matters because the proxy only allows that timeout plus a small margin before
+it gives up and kills the worker."
+  (let* ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
-         (timeout-seconds (gethash "timeout_seconds" params)))
+         (raw-timeout (gethash "timeout_seconds" params))
+         ;; Params arrive straight off the wire here, so the value has had no
+         ;; type check: calling PLUSP on it directly turns a string into a raw
+         ;; TYPE-ERROR reported as "Internal error during load-system".
+         (timeout-seconds (coerce-timeout-seconds raw-timeout)))
     (unless system
       (error "system is required"))
-    (when (and timeout-seconds (not (plusp timeout-seconds)))
+    (when (and raw-timeout (null timeout-seconds))
       (error "timeout_seconds must be a positive number"))
-    (let ((ht (with-asdf-load-lock
-                (load-system system
-                             :force force
-                             :clear-fasls clear-fasls
-                             :timeout-seconds (or timeout-seconds 120)))))
+    (let* ((budget (or timeout-seconds 120))
+           (ht (let ((*system-load-lock-wrapper*
+                       (lambda (thunk)
+                         ;; Bound inside the lambda, not around it: this runs
+                         ;; on the deadline thread, which does not inherit
+                         ;; bindings made here.
+                         ;; A margin below the load's own budget, so which of
+                       ;; the two fires is settled by design rather than by
+                       ;; the deadline poller's 50 ms granularity.  The lock
+                       ;; message names the thread holding it and what to do;
+                       ;; the load's generic timeout does not.  Proportional
+                       ;; rather than "one second less": timeout_seconds
+                       ;; accepts fractions, and a fixed second inverts the
+                       ;; ordering for anything under two.
+                       (let ((*asdf-load-lock-timeout* (* budget 9/10)))
+                           (with-asdf-load-lock (funcall thunk))))))
+                 (load-system system
+                              :force force
+                              :clear-fasls clear-fasls
+                              :timeout-seconds budget))))
       (build-load-system-response system ht))))
 
 ;;; ---------------------------------------------------------------------------
@@ -166,17 +211,25 @@ caller is answered at the deadline even while the suite is still blocked."
                ;; docstring for why the test run itself must stay outside it.
                (let ((*load-lock-wrapper*
                        (lambda (thunk)
-                         (with-asdf-load-lock (funcall thunk)))))
+                         ;; Bound to the caller's budget, as %HANDLE-LOAD-SYSTEM
+                         ;; does, so the lock's own diagnostic can actually be
+                         ;; reached: left at the global default a caller asking
+                         ;; for less than that always meets the run deadline
+                         ;; first and never sees which thread held the lock.
+                         (let ((*asdf-load-lock-timeout*
+                                 (* effective-timeout 9/10)))
+                           (with-asdf-load-lock (funcall thunk))))))
                  (run-tests system
                             :framework framework
                             :test test
                             :tests tests))))
-        (multiple-value-bind (result status)
+        (multiple-value-bind (result status thread-leaked)
             (call-with-test-run-deadline #'do-run effective-timeout)
           (build-run-tests-response
            (ecase status
              (:ok result)
-             (:timeout (make-timeout-result result))
+             (:timeout (make-timeout-result result
+                                            :thread-leaked thread-leaked))
              ;; Re-signal so genuine failures still surface as JSON-RPC
              ;; errors instead of being reported as a bogus test result.
              (:error (error result)))))))))

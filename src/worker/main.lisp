@@ -201,8 +201,16 @@ Roswell REPL."
                        "swank_port" (or swank-port "none")
                        "pid" (%get-pid))
             (%output-handshake tcp-port swank-port)
-            (let ((devnull (open #P"/dev/null" :direction :output
-                                               :if-exists :append)))
+            (let* ((devnull (open #P"/dev/null" :direction :output
+                                                :if-exists :append))
+                   ;; ANSI requires the three interactive streams below to be
+                   ;; bidirectional.  Pointing them at an output-only stream
+                   ;; turns any read -- a Y-OR-N-P reached from a system's
+                   ;; load-time code, a restart prompt -- into "not an input
+                   ;; stream"; over an empty input side it reads EOF instead,
+                   ;; which is what a non-interactive process should see.
+                   (interactive (make-two-way-stream
+                                 (make-concatenated-stream) devnull)))
               (setf *standard-output* devnull)
               ;; Also redirect *DEBUG-IO* and the other interactive streams.
               ;; log4cl's console appender writes to a synonym stream for
@@ -215,9 +223,16 @@ Roswell REPL."
               ;; output-suppression helpers (%call-with-suppressed-output,
               ;; repl-eval) rebind them to capture streams, so logging inside
               ;; load-system/repl-eval is still returned in tool results.
-              (setf *debug-io* devnull
-                    *terminal-io* devnull
-                    *query-io* devnull))
+              ;; *TRACE-OUTPUT* is a synonym for the same descriptor, and it
+              ;; is where (TIME ...) and TRACE write -- evaluated code using
+              ;; either would otherwise hit the dead pipe exactly as log4cl
+              ;; did.  *STANDARD-INPUT* is the pipe's other half and has
+              ;; nothing left to read.
+              (setf *debug-io* interactive
+                    *terminal-io* interactive
+                    *query-io* interactive
+                    *trace-output* devnull
+                    *standard-input* (make-concatenated-stream)))
             (%start-parent-watchdog)
             (start-accept-loop server))))
     (serious-condition (e)

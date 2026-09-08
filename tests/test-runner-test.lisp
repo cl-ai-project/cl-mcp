@@ -1071,3 +1071,91 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
                   (remove :fiveam-detail-probe (symbol-value var))))
           (ignore-errors (asdf:clear-system system))
           (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest fiveam-captures-output-from-a-suite-with-threads-and-sockets
+  ;; The FiveAM backend's stdout/stderr capture was removed on the grounds
+  ;; that binding the standard streams -- "even to a broadcast stream" --
+  ;; hangs suites that spawn real threads and sockets.  That mechanism cannot
+  ;; hold: in SBCL a new thread starts from the GLOBAL value of a special, so
+  ;; a binding made on the run thread is invisible to any thread the suite
+  ;; spawns and cannot be what blocked them.  This suite does both of the
+  ;; things named -- printing threads and a real accept loop -- so a
+  ;; regression to the reported behaviour fails here rather than silently
+  ;; costing every FiveAM user their stdout and stderr again.
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed; the FiveAM backend cannot run here")
+      (let* ((tmp-dir (uiop:ensure-directory-pathname
+                       (uiop:merge-pathnames*
+                        (format nil "cl-mcp-fiveam-threads-~A-~A/"
+                                (get-universal-time) (random 100000))
+                        (uiop:temporary-directory))))
+             (system "fiveam-thread-probe")
+             (asd-path (uiop:merge-pathnames*
+                        (format nil "~A.asd" system) tmp-dir)))
+        (asdf:load-system "fiveam")
+        (unwind-protect
+             (progn
+               (ensure-directories-exist tmp-dir)
+               (with-open-file (s asd-path :direction :output
+                                           :if-exists :supersede)
+                 (write-string
+                  "(asdf:defsystem \"fiveam-thread-probe\"
+  :depends-on (\"fiveam\" \"usocket\" \"bordeaux-threads\")
+  :components ((:file \"suite\")))
+"
+                  s))
+               (with-open-file (s (uiop:merge-pathnames* "suite.lisp" tmp-dir)
+                                  :direction :output :if-exists :supersede)
+                 (write-string
+                  "(defpackage #:fiveam-thread-probe-suite (:use #:cl #:fiveam))
+(in-package #:fiveam-thread-probe-suite)
+(def-suite :fiveam-thread-probe)
+(in-suite :fiveam-thread-probe)
+
+(test spawns-threads-that-print
+  (format t \"parent-line~%\")
+  (let ((threads (loop repeat 8
+                       collect (bordeaux-threads:make-thread
+                                (lambda ()
+                                  (dotimes (i 20)
+                                    (format t \"child-line ~A~%\" i)))))))
+    (dolist (th threads) (bordeaux-threads:join-thread th)))
+  (is (= 1 1)))
+
+(test opens-a-real-socket
+  (let* ((server (usocket:socket-listen \"127.0.0.1\" 0 :reuse-address t))
+         (port (usocket:get-local-port server)))
+    (unwind-protect
+         (let ((acceptor (bordeaux-threads:make-thread
+                          (lambda ()
+                            (let ((c (usocket:socket-accept server)))
+                              (format t \"accepted~%\")
+                              (usocket:socket-close c))))))
+           (usocket:socket-close (usocket:socket-connect \"127.0.0.1\" port))
+           (bordeaux-threads:join-thread acceptor))
+      (usocket:socket-close server))
+    (is (= 2 2))))
+"
+                  s))
+               (let ((asdf:*central-registry*
+                       (cons tmp-dir asdf:*central-registry*)))
+                 (asdf:load-asd asd-path)
+                 ;; Bound so a regression shows up as a failure here instead
+                 ;; of hanging the whole suite.
+                 (let ((result (sb-ext:with-timeout 120
+                                 (run-tests system))))
+                   (testing "the run completes rather than blocking"
+                     (ok (equal "fiveam" (gethash "framework" result))
+                         (format nil "framework=~A" (gethash "framework" result)))
+                     (ok (= 2 (gethash "passed" result)))
+                     (ok (= 0 (gethash "failed" result))))
+                   (testing "and its standard output is captured"
+                     (let ((stdout (gethash "stdout" result)))
+                       (ok (stringp stdout) "stdout is reported")
+                       (ok (search "parent-line" (or stdout ""))
+                           "output written by the test itself is captured"))))))
+          (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+            (setf (symbol-value var)
+                  (remove :fiveam-thread-probe (symbol-value var))))
+          (ignore-errors (asdf:clear-system system))
+          (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))

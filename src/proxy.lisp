@@ -48,15 +48,36 @@ Set MCP_NO_WORKER_POOL=1 to disable.")
     (setf *use-worker-pool* nil)))
 
 (defvar *proxy-rpc-timeout* 300
-  "Default timeout (seconds) for proxy-to-worker RPC calls.
-Prevents requests from hanging indefinitely when a worker handler
-is stuck.  300 seconds (5 minutes) accommodates long-running
-operations like system compilation.
+  "Deadline (seconds) the proxy assumes the worker enforces when the caller
+names none.
 
-When the caller provides a timeout_seconds parameter (e.g. for
-run-tests), the effective proxy timeout is clamped to the smaller
-of this value and (caller_timeout + 10), so the proxy does not
-outlive the worker's own deadline by a wide margin.")
+The tools that take a timeout_seconds argument all default to a server-side
+deadline of their own: run-tests and repl-eval to this same 300, load-system
+to 120.  Anything smaller than this figure is covered by waiting for it, so
+one number is enough here -- but a tool that ever ran without a deadline would
+not be, since the proxy would give up on a worker that is merely still
+working, and a proxy timeout kills the worker rather than reporting a
+timeout.")
+
+(defvar *proxy-rpc-buffer* 30
+  "Seconds the proxy waits beyond the deadline the worker enforces.
+
+The worker owns the deadline; this is only the margin for its answer to
+arrive.  The margin has to cover everything that happens *after* the worker's
+own timer fires -- the cooperative unwind, DESTROY-THREAD's grace period,
+building the response, and serializing it across the socket, which for
+repl-eval can be max_output_length bytes.  Too small a margin and the proxy
+gives up first, and a proxy timeout is not a timeout report: WORKER-RPC marks
+the worker crashed and kills it, so the session's whole Lisp state is reset
+for what was merely a slow answer.")
+
+(defconstant +max-proxy-rpc-timeout+ 86400
+  "Upper bound (seconds) on how long the proxy will wait for one worker call.
+SB-EXT:WITH-TIMEOUT converts its argument to internal time units in a
+(SIGNED-BYTE 64), so an unclamped caller-supplied value -- JSON's 1e20 reads
+as a double -- becomes a bignum and a TYPE-ERROR, which WORKER-RPC reports as
+a protocol error and kills the worker for.  A day is far beyond any legitimate
+call.")
 
 (defvar *active-requests* (make-hash-table :test 'equal)
   "Maps MCP request-id (as string) to session-id for in-flight
@@ -230,6 +251,52 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-last-exit-status% nil
         %cached-worker-last-exit-code% nil))
 
+(defun %requested-worker-deadline (params)
+  "The deadline the worker will enforce for a call carrying PARAMS, clamped.
+The caller's timeout_seconds when it names one, the shared default otherwise."
+  (min +max-proxy-rpc-timeout+
+       (or (coerce-timeout-seconds
+            (and (hash-table-p params)
+                 (gethash "timeout_seconds" params)))
+           *proxy-rpc-timeout*)))
+
+(defun %effective-rpc-timeout (params)
+  "Seconds to wait for the worker's answer to a call carrying PARAMS.
+
+One rule, with no per-method knowledge: wait out the deadline the worker will
+enforce, then the margin for its answer to arrive.  The caller's
+timeout_seconds is that deadline when given; when the caller is silent the
+worker falls back to a default of its own, and *PROXY-RPC-TIMEOUT* is the
+largest of those.
+
+Adding the margin in BOTH cases is what keeps the two from expiring together.
+With the caller silent, worker and proxy would otherwise both sit on 300 s,
+the proxy would give up a moment before the worker finished building its own
+timeout result, and the graceful timeout report that path exists to deliver
+would be replaced by a killed worker and a reset session.
+
+A request beyond +MAX-PROXY-RPC-TIMEOUT+ is clamped in PARAMS as well, by
+%CLAMP-TIMEOUT-PARAM, so the worker enforces the same figure this budget is
+built on.  Clamping only here would invert the very ordering above: the proxy
+would wait less than the worker's own deadline and kill it for still working."
+  (ceiling (+ (%requested-worker-deadline params) *proxy-rpc-buffer*)))
+
+(defun %clamp-timeout-param (params)
+  "Lower PARAMS' timeout_seconds to +MAX-PROXY-RPC-TIMEOUT+ when it exceeds it.
+
+The worker reads that key to set its own deadline, so clamping the proxy's
+wait without clamping this would leave the worker enforcing the larger figure
+and the proxy giving up first -- killing a worker that is still legitimately
+working, which is the one outcome this whole budget exists to avoid.  PARAMS
+is built fresh per call by WITH-PROXY-DISPATCH, so rewriting it is local to
+this request."
+  (let ((requested (and (hash-table-p params)
+                        (coerce-timeout-seconds
+                         (gethash "timeout_seconds" params)))))
+    (when (and requested (> requested +max-proxy-rpc-timeout+))
+      (setf (gethash "timeout_seconds" params) +max-proxy-rpc-timeout+))
+    params))
+
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
@@ -280,34 +347,9 @@ TOCTOU race with concurrent requests for the same session."
                (log-event :debug "proxy.forward"
                           "session" session-id
                           "method" method)
-               (let* ((user-timeout
-                       (coerce-timeout-seconds
-                        (and (hash-table-p params)
-                             (gethash "timeout_seconds" params))))
-                      (effective-timeout
-                       (if user-timeout
-                           ;; Respect the user's timeout intent.  The
-                           ;; worker enforces the same value, so the
-                           ;; proxy should wait only slightly longer
-                           ;; (small buffer for the response to arrive)
-                           ;; rather than the old
-                           ;; (max *proxy-rpc-timeout* …), which let
-                           ;; the proxy wait up to 300 s even when the
-                           ;; user asked for 90 s.
-                           ;;
-                           ;; COERCE-TIMEOUT-SECONDS also accepts a
-                           ;; numeric string: a client that sends
-                           ;; timeout_seconds as "60" would otherwise
-                           ;; fail the (NUMBERP …) guard here and fall
-                           ;; through to the 300 s default, widening
-                           ;; the window in which a wedged suite can
-                           ;; outlive the client's own deadline.
-                           ;; No cap on *proxy-rpc-timeout*: a caller may
-                           ;; legitimately ask for more than 300 s, and the
-                           ;; worker enforces that same deadline, so the
-                           ;; small buffer below is all the margin needed.
-                           (ceiling (+ user-timeout 10))
-                           *proxy-rpc-timeout*)))
+               (let ((effective-timeout
+                       (%effective-rpc-timeout
+                        (%clamp-timeout-param params))))
                  (handler-case
                      (funcall %cached-worker-rpc% worker method params
                               :timeout effective-timeout)

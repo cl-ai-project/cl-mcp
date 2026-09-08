@@ -768,3 +768,28 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
           "the condition report reaches the caller as text")
       (ok (search "layer-two-probe-boom" (or (getf (fifth result) :message) ""))
           "error-context carries the same message"))))
+
+(deftest repl-eval-keeps-the-interactive-streams-bidirectional
+  ;; The three interactive streams are redirected away from the worker's dead
+  ;; stdout pipe, but ANSI requires them to be bidirectional.  Bound to an
+  ;; output-only stream, any read reached from evaluated code -- a stray
+  ;; Y-OR-N-P, a restart prompt -- fails with "not an input stream" rather
+  ;; than seeing the empty input a non-interactive process should present.
+  (testing "*query-io* and its siblings accept input operations"
+    (multiple-value-bind (printed value)
+        (repl-eval "(list (input-stream-p *query-io*)
+                          (input-stream-p *terminal-io*)
+                          (input-stream-p *debug-io*))")
+      (declare (ignore printed))
+      (ok (equal '(t t t) value)
+          "all three are readable as well as writable")))
+  (testing "reading from them yields EOF rather than an error"
+    (multiple-value-bind (printed value)
+        (repl-eval "(read-char *query-io* nil :eof)")
+      (declare (ignore printed))
+      (ok (eq :eof value))))
+  (testing "and they still carry output into the captured stdout"
+    (multiple-value-bind (printed value stdout)
+        (repl-eval "(write-string \"via-query-io\" *query-io*)")
+      (declare (ignore printed value))
+      (ok (search "via-query-io" (or stdout ""))))))
