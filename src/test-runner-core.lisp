@@ -522,9 +522,11 @@ will not recover until the worker is replaced."
                       worker and may hold locks that block later loads. Use ~
                       pool-kill-worker to get a fresh worker before retrying."
                  seconds)
-         (format nil "The test run exceeded its ~A second deadline and was ~
-                      stopped. The worker is healthy; retry with a larger ~
-                      timeout_seconds if the suite legitimately needs longer."
+         (format nil "The test run exceeded its ~A second deadline and its ~
+                      run thread was stopped. Threads the suite started of ~
+                      its own are not tracked and may still be running; ~
+                      retry with a larger timeout_seconds if the suite ~
+                      legitimately needs longer."
                  seconds))))))
 
 (defun %parse-plain-decimal (text)

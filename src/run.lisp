@@ -26,7 +26,8 @@
                           (values boolean &optional))
                 run))
 
-(defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
+(defun run (&key (transport :stdio) (in *standard-input*)
+                 (out *standard-output* out-supplied-p)
                  (host "127.0.0.1") (port 0) (accept-once t) on-listening
                  (worker-pool nil worker-pool-supplied-p))
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
@@ -40,6 +41,17 @@ NIL runs all tools in-process.  When not supplied, the current value of
   (%warn-if-init-without-pool *use-worker-pool*)
   (ecase transport
     (:stdio
+     ;; When the process's own stdout is the protocol channel, nothing else in
+     ;; this image may write to it: with the worker pool disabled every tool
+     ;; runs here, and a stray (FORMAT T ...) -- from an inline tool, or from a
+     ;; thread a test suite spawned, which sees only the global value -- puts
+     ;; raw text between JSON-RPC lines and desynchronizes the client.  Move
+     ;; the global aside; responses keep going to OUT, which still names the
+     ;; real stream.  Logging is unaffected: *LOG-STREAM* follows
+     ;; *ERROR-OUTPUT*.  Skipped when the caller supplied its own OUT, where
+     ;; the process's stdout is not the channel and is not ours to redirect.
+     (unless out-supplied-p
+       (setf *standard-output* (make-broadcast-stream)))
      (when *use-worker-pool* (initialize-pool))
      (unwind-protect
          (let ((state (make-state))

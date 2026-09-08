@@ -16,12 +16,28 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:export #:load-system
+           #:*system-load-lock-wrapper*
            #:*last-compiler-stderr*))
 
 (in-package #:cl-mcp/src/system-loader-core)
 
 (declaim (ftype (function (function (or number null)) (values t &rest t))
                 %load-with-timeout))
+
+(defvar *system-load-lock-wrapper* ()
+  "Optional function of one argument (a thunk) wrapping the ASDF work.
+
+Bound by the worker handler to WITH-ASDF-LOAD-LOCK.  It is read on the
+caller's thread but applied INSIDE the deadline thread, which is the whole
+point: the thread that performs the ASDF work is then the thread that owns the
+lock.  A load that outlives its deadline keeps the lock it is still using, so
+the next load gets that lock's own timeout error instead of quietly starting a
+second ASDF operation alongside the first.  Wrapping outside the deadline
+thread would release the lock the moment the caller was answered, while ASDF
+was still running.
+
+It also puts the time spent waiting for the lock inside the caller's deadline,
+rather than ahead of it.")
 
 (defun %load-with-timeout (thunk timeout-seconds)
   "Execute THUNK under a TIMEOUT-SECONDS deadline on its own thread.
@@ -35,26 +51,37 @@ DESTROY-THREAD.  It matters to the caller: that thread is still inside ASDF,
 so the load this call gave up on keeps mutating the image's ASDF, package and
 compiler state while later requests run against it.
 
+*SYSTEM-LOAD-LOCK-WRAPPER*, when installed, is applied around THUNK on the
+deadline thread rather than around this call, so the lock and the work it
+protects share a thread.  See its docstring.
+
 If the load completes while the deadline is being enforced, the result is
 returned as a success -- completed work is never discarded as a timeout.
 See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced."
-  (handler-case
-      (multiple-value-bind (result status leaked)
-          (call-with-deadline-thread thunk timeout-seconds
-                                     :name "mcp-load-system")
-        (when leaked
-          (ignore-errors
-           (log-event :warn "load.timeout.thread-leaked"
-                      "name" "mcp-load-system"
-                      "timeout" timeout-seconds)))
-        (ecase status
-          (:ok (values result nil nil nil))
-          (:timeout (values nil t nil leaked))
-          (:error (values (list result) nil t nil))))
-    ;; Only reachable on the inline path (no deadline), where
-    ;; CALL-WITH-DEADLINE-THREAD lets conditions propagate.
-    (error (c)
-      (values (list c) nil t nil))))
+  (let* ((wrapper *system-load-lock-wrapper*)
+         ;; Read here, on the caller's thread, and applied there, on the
+         ;; deadline thread: a dynamic binding made by the caller is not
+         ;; visible inside a thread it spawns.
+         (wrapped (if wrapper
+                      (lambda () (funcall wrapper thunk))
+                      thunk)))
+    (handler-case
+        (multiple-value-bind (result status leaked)
+            (call-with-deadline-thread wrapped timeout-seconds
+                                       :name "mcp-load-system")
+          (when leaked
+            (ignore-errors
+             (log-event :warn "load.timeout.thread-leaked"
+                        "name" "mcp-load-system"
+                        "timeout" timeout-seconds)))
+          (ecase status
+            (:ok (values result nil nil nil))
+            (:timeout (values nil t nil leaked))
+            (:error (values (list result) nil t nil))))
+      ;; Only reachable on the inline path (no deadline), where
+      ;; CALL-WITH-DEADLINE-THREAD lets conditions propagate.
+      (error (c)
+        (values (list c) nil t nil)))))
 
 (defvar *last-compiler-stderr* nil
   "Captured compiler stderr from the most recent %call-with-suppressed-output call.

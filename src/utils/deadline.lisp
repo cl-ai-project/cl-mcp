@@ -52,6 +52,7 @@ Returns three values:
           cooperative unwind nor DESTROY-THREAD could stop it.  The caller is
           answered either way, but a leaked thread is still running: it may
           hold locks and it will contend with later work in this image.
+          Threads THUNK spawns are not tracked -- only the run thread is.
 
 Without a usable TIMEOUT-SECONDS the thunk runs inline on the caller's thread
 and any condition propagates -- a thread buys nothing when there is no
@@ -76,28 +77,21 @@ the throw land after the thunk returned but before its result was stored.  And
 the interrupt function re-reads OUTCOME in the interrupted thread before
 throwing, where publication cannot be half-done, so a run that finished just
 as the deadline expired is left to return normally instead of being unwound
-out of its own result."
+out of its own result.
+
+A thread that dies before the deadline without publishing anything -- THUNK
+called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
+:TIMEOUT, so a deadline that never elapsed is not blamed for it."
   (if (not (and timeout-seconds (realp timeout-seconds) (plusp timeout-seconds)))
       (values (multiple-value-list (funcall thunk)) :ok nil)
-      (let* ((tag (list :deadline))
-             (outcome nil)
-             (thread (make-thread
-                      (lambda ()
-                        (catch tag
-                          (sb-sys:without-interrupts
-                            (handler-case
-                                (setf outcome
-                                      (cons :ok
-                                            (multiple-value-list
-                                             (sb-sys:with-local-interrupts
-                                               (funcall thunk)))))
-                              (serious-condition (e)
-                                (setf outcome (cons :error e)))))))
-                      :name name)))
+      (let ((tag (list :deadline))
+            (outcome nil)
+            (thread nil)
+            (answered nil))
         (flet ((stop ()
                  ;; Cooperative unwind first: it runs the thread's
                  ;; UNWIND-PROTECT cleanups and releases the locks it holds.
-                 (when (thread-alive-p thread)
+                 (when (and thread (thread-alive-p thread))
                    (ignore-errors
                     (interrupt-thread
                      thread
@@ -109,23 +103,50 @@ out of its own result."
                      ;; of being unwound out of its own result.
                      (lambda () (unless outcome (throw tag :deadline)))))
                    (%wait-until-dead thread *unwind-grace-seconds*))
-                 (when (thread-alive-p thread)
+                 (when (and thread (thread-alive-p thread))
                    (ignore-errors (destroy-thread thread))
                    (%wait-until-dead thread *destroy-grace-seconds*)))
-               (finish (leaked)
+               (finish (timed-out leaked)
                  (let ((settled outcome))
-                   (if settled
-                       (values (cdr settled) (car settled) leaked)
-                       (values timeout-seconds :timeout leaked)))))
-          (let ((answered nil))
-            (unwind-protect
-                 (progn
-                   (%wait-until-dead thread timeout-seconds)
+                   (cond
+                     (settled (values (cdr settled) (car settled) leaked))
+                     (timed-out (values timeout-seconds :timeout leaked))
+                     (t (values (make-condition
+                                 'simple-error
+                                 :format-control
+                                 "the ~A thread exited without a result"
+                                 :format-arguments (list name))
+                                :error leaked))))))
+          (unwind-protect
+               (progn
+                 ;; Spawned with interrupts deferred, and inside the
+                 ;; UNWIND-PROTECT, so no asynchronous exit can land between
+                 ;; the thread existing and THREAD naming it -- the cleanup
+                 ;; would then have nothing to stop and the thread would run
+                 ;; on unnoticed.
+                 (sb-sys:without-interrupts
+                   (setf thread
+                         (make-thread
+                          (lambda ()
+                            (catch tag
+                              (sb-sys:without-interrupts
+                                (handler-case
+                                    (setf outcome
+                                          (cons :ok
+                                                (multiple-value-list
+                                                 (sb-sys:with-local-interrupts
+                                                   (funcall thunk)))))
+                                  (serious-condition (e)
+                                    (setf outcome (cons :error e)))))))
+                          :name name)))
+                 (%wait-until-dead thread timeout-seconds)
+                 (let ((timed-out (thread-alive-p thread)))
                    (stop)
-                   (multiple-value-prog1 (finish (thread-alive-p thread))
-                     (setf answered t)))
-              ;; A non-local exit from the caller -- an outer deadline, a
-              ;; kill -- must not leave the run thread executing unnoticed.
-              ;; Guarded so the normal path does not pay for a second
-              ;; interrupt-and-destroy cycle it has already completed.
-              (unless answered (stop))))))))
+                   (multiple-value-prog1 (finish timed-out
+                                                 (thread-alive-p thread))
+                     (setf answered t))))
+            ;; A non-local exit from the caller -- an outer deadline, a
+            ;; kill -- must not leave the run thread executing unnoticed.
+            ;; Guarded so the normal path does not pay for a second
+            ;; interrupt-and-destroy cycle it has already completed.
+            (unless answered (stop)))))))

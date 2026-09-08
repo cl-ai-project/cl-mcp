@@ -15,7 +15,8 @@
                 #:code-describe-symbol
                 #:code-find-references)
   (:import-from #:cl-mcp/src/system-loader-core
-                #:load-system)
+                #:load-system
+                #:*system-load-lock-wrapper*)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests
                 #:call-with-test-run-deadline
@@ -114,16 +115,18 @@ result_preview, and error_context."
 
 (defun %handle-load-system (params)
   "Load an ASDF system.  Returns the same structure as define-tool
-\"load-system\".  Holds *ASDF-LOAD-LOCK* so it cannot overlap a
-concurrent worker/init load or another load-system.
+\"load-system\".  Serializes against every other cl-mcp-mediated ASDF load
+through *ASDF-LOAD-LOCK*.
 
-The caller's timeout_seconds bounds the whole call, waiting for that lock
-included.  Acquisition happens outside LOAD-SYSTEM's own deadline, so leaving
-it unbounded let a request with a small timeout sit far past the budget the
-proxy allows it -- and a proxy timeout kills the worker instead of reporting
-anything.  What the wait consumes is therefore subtracted from the deadline
-given to the load itself.  RUN-TESTS needs none of this: it takes the lock
-from inside its own deadline thread, which bounds the wait already."
+The lock is taken from inside LOAD-SYSTEM's own deadline thread rather than
+around the call, by way of *SYSTEM-LOAD-LOCK-WRAPPER*, so the thread doing the
+ASDF work is the thread holding the lock.  Wrapping the call instead would
+release the lock the moment this handler was answered -- and a load that
+outlived its deadline is still running inside ASDF, so the next load would
+start a second ASDF operation alongside the first.  It also keeps the wait for
+the lock inside the caller's timeout_seconds instead of ahead of it, which
+matters because the proxy only allows that timeout plus a small margin before
+it gives up and kills the worker."
   (let* ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
@@ -137,17 +140,17 @@ from inside its own deadline thread, which bounds the wait already."
     (when (and raw-timeout (null timeout-seconds))
       (error "timeout_seconds must be a positive number"))
     (let* ((budget (or timeout-seconds 120))
-           (started (get-internal-real-time))
-           (ht (let ((*asdf-load-lock-timeout* budget))
-                 (with-asdf-load-lock
-                   (let ((remaining
-                           (- budget
-                              (/ (- (get-internal-real-time) started)
-                                 internal-time-units-per-second))))
-                     (load-system system
-                                  :force force
-                                  :clear-fasls clear-fasls
-                                  :timeout-seconds (max 1 remaining)))))))
+           (ht (let ((*system-load-lock-wrapper*
+                       (lambda (thunk)
+                         ;; Bound inside the lambda, not around it: this runs
+                         ;; on the deadline thread, which does not inherit
+                         ;; bindings made here.
+                         (let ((*asdf-load-lock-timeout* budget))
+                           (with-asdf-load-lock (funcall thunk))))))
+                 (load-system system
+                              :force force
+                              :clear-fasls clear-fasls
+                              :timeout-seconds budget))))
       (build-load-system-response system ht))))
 
 ;;; ---------------------------------------------------------------------------

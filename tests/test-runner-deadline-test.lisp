@@ -152,6 +152,24 @@
       (ok (eq :error status) "the suite's own timeout surfaces as an error")
       (ok (typep result 'sb-ext:timeout)))))
 
+(deftest deadline-reports-a-vanished-thread-as-an-error
+  (testing "a run that exits its own thread is not blamed on the deadline"
+    ;; SB-THREAD:ABORT-THREAD leaves the thread without unwinding to the
+    ;; handler that records the outcome, so nothing is published and the
+    ;; thread is simply gone.  Calling that a timeout would name a deadline
+    ;; that never elapsed -- the run died in the first milliseconds of a
+    ;; thirty second budget -- and would report duration_ms 30000 for it.
+    (let ((start (get-internal-real-time)))
+      (multiple-value-bind (result status)
+          (call-with-test-run-deadline (lambda () (sb-thread:abort-thread)) 30)
+        (let ((elapsed (/ (- (get-internal-real-time) start)
+                          internal-time-units-per-second)))
+          (ok (eq :error status))
+          (ok (typep result 'condition))
+          (ok (search "without a result" (princ-to-string result)))
+          (ok (< elapsed 10)
+              (format nil "answered in ~,2Fs, not at the deadline" elapsed)))))))
+
 (deftest deadline-reports-a-signalling-run-as-error
   (testing "a run that signals yields :ERROR and the condition"
     (multiple-value-bind (result status)
