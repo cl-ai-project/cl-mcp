@@ -79,7 +79,7 @@ Examples:
                                    "tests" tests
                                    "timeout_seconds" timeout-seconds))
     (let ((effective-timeout (or (coerce-timeout-seconds timeout-seconds) 300)))
-      (multiple-value-bind (test-result status)
+      (multiple-value-bind (test-result status thread-leaked)
           (call-with-test-run-deadline
            (lambda ()
              (run-tests system
@@ -91,7 +91,8 @@ Examples:
                 (build-run-tests-response
                  (ecase status
                    (:ok test-result)
-                   (:timeout (make-timeout-result test-result))
+                   (:timeout (make-timeout-result test-result
+                                                  :thread-leaked thread-leaked))
                    ;; Re-signal so real failures stay visible instead of
                    ;; being reported as a bogus test result.
                    (:error (error test-result)))))))))

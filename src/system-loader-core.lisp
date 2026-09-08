@@ -5,10 +5,8 @@
 
 (defpackage #:cl-mcp/src/system-loader-core
   (:use #:cl)
-  (:import-from #:bordeaux-threads
-                #:thread-alive-p
-                #:make-thread
-                #:destroy-thread)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -26,49 +24,33 @@
                 %load-with-timeout))
 
 (defun %load-with-timeout (thunk timeout-seconds)
-  "Execute THUNK in a worker thread with TIMEOUT-SECONDS limit.
+  "Execute THUNK under a TIMEOUT-SECONDS deadline on its own thread.
 Returns (values result-list timed-out-p errored-p).
 RESULT-LIST is a list of the thunk's multiple return values on success,
 or a single-element list containing the error condition on failure.
-TIMED-OUT-P is T if the worker was still running when the deadline passed.
-ERRORED-P is T if the thunk signaled an error.
+TIMED-OUT-P is T if the load was still running when the deadline passed.
+ERRORED-P is T if the thunk signaled.
 
-NOTE: This is a polling-based safety net, not a strict deadline enforcer.
-The worker is polled every 50ms, so the effective granularity is 50ms.
-If the worker completes during the final polling interval, the result is
-returned as a success -- completed work is never discarded as a timeout."
-  (if (and timeout-seconds (plusp timeout-seconds))
-      (let* ((result-box nil)
-             (error-box nil)
-             (worker
-               (make-thread
-                (lambda ()
-                  (handler-case
-                      (setf result-box (multiple-value-list (funcall thunk)))
-                    (error (c)
-                      (setf error-box c))))
-                :name "mcp-load-system")))
-        (loop repeat (ceiling (/ timeout-seconds 0.05d0))
-              when (not (thread-alive-p worker))
-                do (return-from %load-with-timeout
-                     (if error-box
-                         (values (list error-box) nil t)
-                         (values result-box nil nil)))
-              do (sleep 0.05d0))
-        ;; Worker may have completed during the last sleep window.
-        ;; Re-check before declaring timeout.
-        (cond
-          ((not (thread-alive-p worker))
-           (if error-box
-               (values (list error-box) nil t)
-               (values result-box nil nil)))
-          (t
-           (ignore-errors (destroy-thread worker))
-           (values nil t nil))))
-      (handler-case
-          (values (multiple-value-list (funcall thunk)) nil nil)
-        (error (c)
-          (values (list c) nil t)))))
+If the load completes while the deadline is being enforced, the result is
+returned as a success -- completed work is never discarded as a timeout.
+See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced."
+  (handler-case
+      (multiple-value-bind (result status leaked)
+          (call-with-deadline-thread thunk timeout-seconds
+                                     :name "mcp-load-system")
+        (when leaked
+          (ignore-errors
+           (log-event :warn "load.timeout.thread-leaked"
+                      "name" "mcp-load-system"
+                      "timeout" timeout-seconds)))
+        (ecase status
+          (:ok (values result nil nil))
+          (:timeout (values nil t nil))
+          (:error (values (list result) nil t))))
+    ;; Only reachable on the inline path (no deadline), where
+    ;; CALL-WITH-DEADLINE-THREAD lets conditions propagate.
+    (error (c)
+      (values (list c) nil t))))
 
 (defvar *last-compiler-stderr* nil
   "Captured compiler stderr from the most recent %call-with-suppressed-output call.

@@ -29,9 +29,46 @@ concurrent ASDF load-ops in one worker image, which the single-threaded
 dispatch loop does NOT prevent because load-system/repl-eval run their
 work on spawned helper threads.")
 
+(defparameter *asdf-load-lock-timeout* 240
+  "Seconds to wait for *ASDF-LOAD-LOCK* before giving up on it.
+
+The lock is normally held only for the duration of one load, so waiting this
+long already means something is wrong -- in practice, a run-tests deadline
+that could not stop its thread, leaving the load lock owned by a thread that
+will never release it.  Waiting forever there would hang this worker's single
+connection thread on every later load, with nothing to tell the user why.
+
+The value sits below the proxy's own budget on purpose: the proxy waits
+*PROXY-RPC-TIMEOUT* plus *PROXY-RPC-BUFFER*, and a timeout there kills the
+worker with a generic crash notice.  Giving up first means the caller gets
+this message, which names the cause and the fix, instead.")
+
 (defmacro with-asdf-load-lock (&body body)
-  "Evaluate BODY holding *ASDF-LOAD-LOCK*."
-  `(bt:with-lock-held (*asdf-load-lock*) ,@body))
+  "Evaluate BODY holding *ASDF-LOAD-LOCK*, waiting at most
+*ASDF-LOAD-LOCK-TIMEOUT* seconds to acquire it."
+  `(call-with-asdf-load-lock (lambda () ,@body)))
+
+(defun call-with-asdf-load-lock (thunk)
+  "Call THUNK holding *ASDF-LOAD-LOCK*, or signal if it cannot be acquired.
+Times out rather than blocking forever, so a lock left owned by a thread that
+outlived its deadline surfaces as one actionable error instead of hanging
+every later load in this worker."
+  (if (sb-thread:grab-mutex *asdf-load-lock*
+                            :timeout *asdf-load-lock-timeout*)
+      (unwind-protect (funcall thunk)
+        (sb-thread:release-mutex *asdf-load-lock*))
+      (let ((owner (sb-thread:mutex-owner *asdf-load-lock*)))
+        (ignore-errors
+         (log-event :error "worker.asdf-load-lock.timeout"
+                    "seconds" *asdf-load-lock-timeout*
+                    "owner" (if owner (sb-thread:thread-name owner) "none")))
+        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
+                load lock~@[, held by thread ~A~]. A previous run most likely ~
+                left a thread behind that never released it; this worker ~
+                cannot load systems again. Use pool-kill-worker to get a ~
+                fresh worker."
+               *asdf-load-lock-timeout*
+               (and owner (sb-thread:thread-name owner))))))
 
 (defvar *init-lock* (bt:make-lock "worker-init-state")
   "Protects *INIT-STATE*.")
