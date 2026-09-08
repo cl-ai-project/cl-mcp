@@ -919,7 +919,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
                 (/ (- end-time start-time) internal-time-units-per-second))))
            (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
            (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output (get-output-stream-string debug-stream)))
+           (debug-output
+            (%truncate-test-output (get-output-stream-string debug-stream))))
       (if rove-error
           ;; Rove crashed (e.g., direct assertions without testing wrapper)
           (let ((ht (make-test-result
@@ -1031,7 +1032,8 @@ detects test sub-systems from ASDF dependencies and runs each individually."
             (%truncate-test-output (get-output-stream-string stdout-stream)))
            (stderr
             (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output (get-output-stream-string debug-stream)))
+           (debug-output
+            (%truncate-test-output (get-output-stream-string debug-stream))))
       (if rove-error
           (let ((ht
                  (make-test-result :passed 0 :failed 1 :failed-tests
@@ -1205,7 +1207,8 @@ the surrounding passed/failed/pending/failure-details bindings."
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
-      (let ((debug-output (get-output-stream-string debug-stream)))
+      (let ((debug-output
+              (%truncate-test-output (get-output-stream-string debug-stream))))
         (when (plusp (length debug-output))
           (setf (gethash "debug_output" ht) debug-output)))
       ht)))
@@ -1486,21 +1489,30 @@ crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
 stream-capture, crash-handling, and result-assembly logic lives in one place.
 
-NOTE: *standard-output* and *error-output* are intentionally NOT redirected.
-Binding them (even to a broadcast stream) causes integration test suites that
-spawn real threads and sockets to hang inside the worker process.  Only
-*test-debug-output* (cl-mcp's own stream) is captured."
+Capture covers the thread the suite runs on.  Output from threads the suite
+spawns is not captured and reaches the process's own stdout: in SBCL a new
+thread starts from the GLOBAL value of a special, so these bindings are
+invisible to it.  The Rove backend has the same property."
   (let ((start-time (get-internal-real-time))
+        (stdout-stream (make-string-output-stream))
+        (stderr-stream (make-string-output-stream))
         (debug-stream (make-string-output-stream))
         all-results)
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
-           (debug-output () (get-output-stream-string debug-stream)))
+           (stdout () (%truncate-test-output
+                       (get-output-stream-string stdout-stream)))
+           (stderr () (%truncate-test-output
+                       (get-output-stream-string stderr-stream)))
+           (debug-output () (%truncate-test-output
+                             (get-output-stream-string debug-stream))))
       (handler-case
           (dolist (spec specs)
             (let ((results
-                    (let ((*test-debug-output* debug-stream))
+                    (let ((*test-debug-output* debug-stream)
+                          (*standard-output* stdout-stream)
+                          (*error-output* stderr-stream))
                       (%fiveam-run spec))))
               (when results
                 (setf all-results (append all-results results)))))
@@ -1517,7 +1529,7 @@ spawn real threads and sockets to hang inside the worker process.  Only
                                          (princ-to-string c))))
                       crash-test-names)
               :framework :fiveam :duration (duration-ms))
-             nil nil (debug-output)))))
+             (stdout) (stderr) (debug-output)))))
       (multiple-value-bind (passed failed pending failure-details)
           (%fiveam-extract-results all-results)
         (%fiveam-attach-output
@@ -1525,7 +1537,7 @@ spawn real threads and sockets to hang inside the worker process.  Only
           :passed passed :failed failed :pending pending
           :failed-tests failure-details
           :framework :fiveam :duration (duration-ms))
-         nil nil (debug-output))))))
+         (stdout) (stderr) (debug-output))))))
 
 (defun run-fiveam-tests (system-name)
   "Run the FiveAM suites belonging to SYSTEM-NAME and return results.

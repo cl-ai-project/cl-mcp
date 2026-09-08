@@ -41,8 +41,6 @@ Returns:
 - framework (string)
 - duration_ms (integer)
 - stdout (string, present when non-empty) — captured test standard output
-  (Rove only: the FiveAM backend deliberately does not redirect the
-  standard streams, so it reports no stdout/stderr — use debug_output)
 - stderr (string, present when non-empty) — captured test error output
 - debug_output (string, present when non-empty) — output written to *test-debug-output* stream
 NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
