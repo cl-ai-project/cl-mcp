@@ -251,6 +251,15 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-last-exit-status% nil
         %cached-worker-last-exit-code% nil))
 
+(defun %requested-worker-deadline (params)
+  "The deadline the worker will enforce for a call carrying PARAMS, clamped.
+The caller's timeout_seconds when it names one, the shared default otherwise."
+  (min +max-proxy-rpc-timeout+
+       (or (coerce-timeout-seconds
+            (and (hash-table-p params)
+                 (gethash "timeout_seconds" params)))
+           *proxy-rpc-timeout*)))
+
 (defun %effective-rpc-timeout (params)
   "Seconds to wait for the worker's answer to a call carrying PARAMS.
 
@@ -266,17 +275,27 @@ the proxy would give up a moment before the worker finished building its own
 timeout result, and the graceful timeout report that path exists to deliver
 would be replaced by a killed worker and a reset session.
 
-Clamped at the top because the result is handed to SB-EXT:WITH-TIMEOUT, which
-takes a (SIGNED-BYTE 64) of internal time units: a caller sending 1e20 would
-otherwise produce a bignum, a TYPE-ERROR on the read, and a worker killed for
-a protocol error it did not commit.  A day is far past any legitimate call and
-well inside the range."
-  (let ((requested (or (coerce-timeout-seconds
-                        (and (hash-table-p params)
-                             (gethash "timeout_seconds" params)))
-                       *proxy-rpc-timeout*)))
-    (min +max-proxy-rpc-timeout+
-         (ceiling (+ requested *proxy-rpc-buffer*)))))
+A request beyond +MAX-PROXY-RPC-TIMEOUT+ is clamped in PARAMS as well, by
+%CLAMP-TIMEOUT-PARAM, so the worker enforces the same figure this budget is
+built on.  Clamping only here would invert the very ordering above: the proxy
+would wait less than the worker's own deadline and kill it for still working."
+  (ceiling (+ (%requested-worker-deadline params) *proxy-rpc-buffer*)))
+
+(defun %clamp-timeout-param (params)
+  "Lower PARAMS' timeout_seconds to +MAX-PROXY-RPC-TIMEOUT+ when it exceeds it.
+
+The worker reads that key to set its own deadline, so clamping the proxy's
+wait without clamping this would leave the worker enforcing the larger figure
+and the proxy giving up first -- killing a worker that is still legitimately
+working, which is the one outcome this whole budget exists to avoid.  PARAMS
+is built fresh per call by WITH-PROXY-DISPATCH, so rewriting it is local to
+this request."
+  (let ((requested (and (hash-table-p params)
+                        (coerce-timeout-seconds
+                         (gethash "timeout_seconds" params)))))
+    (when (and requested (> requested +max-proxy-rpc-timeout+))
+      (setf (gethash "timeout_seconds" params) +max-proxy-rpc-timeout+))
+    params))
 
 (defun proxy-to-worker (id method params)
   "Proxy a tool call to the session's dedicated worker process.
@@ -328,7 +347,9 @@ TOCTOU race with concurrent requests for the same session."
                (log-event :debug "proxy.forward"
                           "session" session-id
                           "method" method)
-               (let ((effective-timeout (%effective-rpc-timeout params)))
+               (let ((effective-timeout
+                       (%effective-rpc-timeout
+                        (%clamp-timeout-param params))))
                  (handler-case
                      (funcall %cached-worker-rpc% worker method params
                               :timeout effective-timeout)

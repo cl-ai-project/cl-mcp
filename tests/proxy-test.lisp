@@ -113,4 +113,23 @@
            (effective-timeout-for 3600))))
   (testing "an unusable value falls back to the default rather than erroring"
     (ok (= (effective-timeout-for) (effective-timeout-for "not-a-number")))
-    (ok (= (effective-timeout-for) (effective-timeout-for -5)))))
+    (ok (= (effective-timeout-for) (effective-timeout-for -5))))
+  (testing "an out-of-range request is clamped in the params too, not just here"
+    ;; Clamping only the proxy's own wait would invert the ordering this whole
+    ;; calculation exists to keep: the worker reads timeout_seconds to set its
+    ;; deadline, so it would enforce the larger figure while the proxy gave up
+    ;; first and killed it for still working.  1e20 is also what makes
+    ;; SB-EXT:WITH-TIMEOUT signal a TYPE-ERROR, since it takes a
+    ;; (SIGNED-BYTE 64).
+    (let ((params (make-hash-table :test 'equal))
+          (cap cl-mcp/src/proxy::+max-proxy-rpc-timeout+))
+      (setf (gethash "timeout_seconds" params) 1d20)
+      (cl-mcp/src/proxy::%clamp-timeout-param params)
+      (ok (= cap (gethash "timeout_seconds" params))
+          "the worker is told the clamped deadline")
+      (ok (= (+ cap cl-mcp/src/proxy::*proxy-rpc-buffer*)
+             (cl-mcp/src/proxy::%effective-rpc-timeout params))
+          "and the proxy still waits the margin beyond it")
+      (ok (typep (cl-mcp/src/proxy::%effective-rpc-timeout params)
+                 '(signed-byte 64))
+          "within the range SB-EXT:WITH-TIMEOUT accepts"))))

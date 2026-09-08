@@ -100,13 +100,15 @@
     ;; loop around a flaky operation, say -- would swallow a signalled
     ;; deadline and run on; run inline it wedges the worker's single
     ;; connection thread and every later tool call for the session with it.
-    ;; A throw is not a condition and this HANDLER-CASE cannot see it, so the
-    ;; thread dies on the first interrupt.
     ;;
-    ;; Which is also why this test does NOT reach the leaked-thread branch:
-    ;; DEADLINE-REPORTS-A-THREAD-IT-COULD-NOT-STOP covers the genuinely
-    ;; uninterruptible case, where interrupts are deferred outright.
-    (let ((start (get-internal-real-time)))
+    ;; The unwind grace is stretched so the assertion can tell which of the
+    ;; two shutdown stages did the work.  DESTROY-THREAD would also stop this
+    ;; sleep loop, and it runs after the grace -- so with the grace at five
+    ;; seconds, finishing in under three proves the cooperative throw is what
+    ;; ended it.  At the default half-second grace the two are only 0.5 s
+    ;; apart and the timing proves nothing.
+    (let ((cl-mcp/src/utils/deadline:*unwind-grace-seconds* 5.0d0)
+          (start (get-internal-real-time)))
       (multiple-value-bind (result status leaked)
           (call-with-test-run-deadline
            (lambda ()
@@ -121,10 +123,10 @@
                           internal-time-units-per-second)))
           (ok (eq :timeout status))
           (ok (eql 1 result))
-          (ok (not leaked)
-              "the throw stopped it, so no thread was left behind")
-          (ok (< elapsed 10)
-              (format nil "answered in ~,2Fs despite the run still blocking"
+          (ok (not leaked) "and nothing was left running")
+          (ok (< elapsed 3)
+              (format nil "stopped in ~,2Fs, inside the grace rather than by ~
+                           the destroy that follows it"
                       elapsed)))))))
 
 (deftest deadline-reports-a-thread-it-could-not-stop

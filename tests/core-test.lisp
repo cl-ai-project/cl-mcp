@@ -52,7 +52,20 @@
          (make-synonym-stream 'sb-sys:*stdout*))
         "through a synonym stream, which is what *standard-output* normally is")
     (ok (not (cl-mcp/src/run::%process-stdout-p (make-string-output-stream)))
-        "a caller's own stream is not the process channel"))
+        "a caller's own stream is not the process channel")
+    ;; Every composite the standard defines, not just the two SBCL happens to
+    ;; use for *STANDARD-OUTPUT*: a broadcast stream reaches the descriptor if
+    ;; any component does, and missing that leaves the image writing to the
+    ;; protocol channel.
+    (ok (cl-mcp/src/run::%process-stdout-p
+         (make-broadcast-stream (make-string-output-stream) sb-sys:*stdout*))
+        "through a broadcast stream that includes it")
+    (ok (cl-mcp/src/run::%process-stdout-p
+         (make-echo-stream (make-concatenated-stream) sb-sys:*stdout*))
+        "through an echo stream")
+    (ok (not (cl-mcp/src/run::%process-stdout-p
+              (make-broadcast-stream (make-string-output-stream))))
+        "and a broadcast stream with no component on it is left alone"))
   (testing "every stream on that descriptor moves while the session runs"
     ;; *TRACE-OUTPUT* matters as much as *STANDARD-OUTPUT* here: it is a
     ;; synonym for the same descriptor by default, and it is where (TIME ...)

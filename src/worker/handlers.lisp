@@ -163,9 +163,11 @@ it gives up and kills the worker."
                        ;; the two fires is settled by design rather than by
                        ;; the deadline poller's 50 ms granularity.  The lock
                        ;; message names the thread holding it and what to do;
-                       ;; the load's generic timeout does not.
-                       (let ((*asdf-load-lock-timeout*
-                               (max 1 (- budget 1))))
+                       ;; the load's generic timeout does not.  Proportional
+                       ;; rather than "one second less": timeout_seconds
+                       ;; accepts fractions, and a fixed second inverts the
+                       ;; ordering for anything under two.
+                       (let ((*asdf-load-lock-timeout* (* budget 9/10)))
                            (with-asdf-load-lock (funcall thunk))))))
                  (load-system system
                               :force force
@@ -215,7 +217,7 @@ caller is answered at the deadline even while the suite is still blocked."
                          ;; for less than that always meets the run deadline
                          ;; first and never sees which thread held the lock.
                          (let ((*asdf-load-lock-timeout*
-                                 (max 1 (- effective-timeout 1))))
+                                 (* effective-timeout 9/10)))
                            (with-asdf-load-lock (funcall thunk))))))
                  (run-tests system
                             :framework framework

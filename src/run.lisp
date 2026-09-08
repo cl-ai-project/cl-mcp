@@ -26,23 +26,37 @@
                           (values boolean &optional))
                 run))
 
-(defun %resolve-output-stream (stream)
-  "Follow synonym and two-way streams down to the stream that really writes."
-  (typecase stream
-    (synonym-stream (%resolve-output-stream
-                     (symbol-value (synonym-stream-symbol stream))))
-    (two-way-stream (%resolve-output-stream
-                     (two-way-stream-output-stream stream)))
-    (t stream)))
-
 (defun %process-stdout-p (stream)
   "True when STREAM ultimately writes to this process's own stdout (fd 1).
+
 Asked of the stream itself rather than of how RUN was called: a caller that
 passes :OUT *STANDARD-OUTPUT* explicitly is using the same descriptor as one
-that passes nothing, and both need the same protection."
-  (let ((base (%resolve-output-stream stream)))
-    (and (typep base 'sb-sys:fd-stream)
-         (eql 1 (sb-sys:fd-stream-fd base)))))
+that passes nothing, and both need the same protection.
+
+Every composite the standard defines is followed, not just the two SBCL
+happens to use for *STANDARD-OUTPUT*.  A broadcast stream reaches fd 1 if any
+of its components does, so RUN over (MAKE-BROADCAST-STREAM SB-SYS:*STDOUT*
+log) is the protocol channel just as much as the bare stream is -- and missing
+that leaves the image writing to it."
+  (labels ((fd1-p (s depth)
+             ;; The depth bound is only against a pathological cycle -- a
+             ;; synonym stream naming a variable holding itself.  Nothing here
+             ;; builds one, and without the bound such a stream would hang the
+             ;; server at startup rather than fail.
+             (when (and s (< depth 32))
+               (typecase s
+                 (synonym-stream
+                  (fd1-p (symbol-value (synonym-stream-symbol s)) (1+ depth)))
+                 (two-way-stream
+                  (fd1-p (two-way-stream-output-stream s) (1+ depth)))
+                 (echo-stream
+                  (fd1-p (echo-stream-output-stream s) (1+ depth)))
+                 (broadcast-stream
+                  (some (lambda (component) (fd1-p component (1+ depth)))
+                        (broadcast-stream-streams s)))
+                 (t (and (typep s 'sb-sys:fd-stream)
+                         (eql 1 (sb-sys:fd-stream-fd s))))))))
+    (and (fd1-p stream 0) t)))
 
 (defun %call-with-stdout-isolated (out thunk)
   "Call THUNK with this image's global standard streams kept off OUT.

@@ -52,42 +52,51 @@ this message, which names the cause and the fix, instead.")
 (defun %signal-asdf-load-lock-timeout ()
   "Signal that *ASDF-LOAD-LOCK* could not be acquired, naming the likely cause.
 
-Two very different situations reach here and they need opposite advice.  The
-init hook loads on its own thread, holding this lock for a whole cold compile
-with no deadline of its own, so a large application system legitimately keeps
-it past this timeout -- telling that caller to kill the worker would abort a
-healthy load that was about to finish.  Any other owner is a thread that
-outlived its deadline and will never release the lock, and there the worker
-really does have to be replaced."
+Three situations reach here and they need different advice.  The init hook
+loads on its own thread, holding this lock for a whole cold compile with no
+deadline of its own, so a large application system legitimately keeps it past
+this timeout -- telling that caller to kill the worker would abort a healthy
+load that was about to finish.  The lock may also be free again by the time we
+look, which means the contention was transient and there is nothing to fix.
+Only a lock still held by some other thread means a run outlived its deadline
+and will never release it, and only there does the worker have to be replaced."
   (let* ((owner (sb-thread:mutex-owner *asdf-load-lock*))
-         (owner-name (and owner (sb-thread:thread-name owner)))
-         (init-in-progress (equal owner-name "mcp-worker-init")))
+         (owner-name (and owner (sb-thread:thread-name owner))))
     (ignore-errors
      (log-event :error "worker.asdf-load-lock.timeout"
                 "seconds" *asdf-load-lock-timeout*
-                "owner" (or owner-name "none")
-                "init_in_progress" (if init-in-progress "true" "false")))
-    (if init-in-progress
-        ;; TRANSIENT-ERROR, so the response builders withhold their standing
-        ;; "replace the worker" advice.  Appending it here would undo the
-        ;; whole point of separating these two cases: the caller would be told
-        ;; to run pool-kill-worker and would abort a healthy load.
-        (error 'transient-error
-               :format-control
-               "Timed out after ~A seconds waiting for this worker's ASDF ~
-                load lock: the init hook is still loading and holds it. That ~
-                load has no deadline of its own, so a cold compile of a large ~
-                system can legitimately take longer. Wait for ~
-                worker/init-status to report ready, or retry with a larger ~
-                timeout_seconds."
-               :format-arguments (list *asdf-load-lock-timeout*))
-        (error "Timed out after ~A seconds waiting for this worker's ASDF ~
-                load lock~@[, held by thread ~A~]. A previous run most likely ~
-                left a thread behind that never released it; this worker ~
-                cannot load systems again. Use pool-kill-worker to get a ~
-                fresh worker."
-               *asdf-load-lock-timeout*
-               owner-name))))
+                "owner" (or owner-name "none")))
+    (cond
+      ;; Released between the wait expiring and this sample.  Reporting a
+      ;; wedged worker for a lock that is free again would send the caller to
+      ;; pool-kill-worker for nothing.
+      ((null owner)
+       (error 'transient-error
+              :format-control
+              "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock, which was released just as the wait expired. Nothing is ~
+               wrong with this worker; retry."
+              :format-arguments (list *asdf-load-lock-timeout*)))
+      ;; TRANSIENT-ERROR, so the response builders withhold their standing
+      ;; "replace the worker" advice.  Appending it here would undo the whole
+      ;; point of separating these cases: the caller would be told to run
+      ;; pool-kill-worker and would abort a healthy load.
+      ((equal owner-name "mcp-worker-init")
+       (error 'transient-error
+              :format-control
+              "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock: the init hook is still loading and holds it. That load ~
+               has no deadline of its own, so a cold compile of a large system ~
+               can legitimately take longer. Wait for worker/init-status to ~
+               report ready, or retry with a larger timeout_seconds."
+              :format-arguments (list *asdf-load-lock-timeout*)))
+      (t
+       (error "Timed out after ~A seconds waiting for this worker's ASDF load ~
+               lock~@[, held by thread ~A~]. A previous run most likely left a ~
+               thread behind that never released it; this worker cannot load ~
+               systems again. Use pool-kill-worker to get a fresh worker."
+              *asdf-load-lock-timeout*
+              owner-name)))))
 
 (defun call-with-asdf-load-lock (thunk)
   "Call THUNK holding *ASDF-LOAD-LOCK*, or signal if it cannot be acquired.
