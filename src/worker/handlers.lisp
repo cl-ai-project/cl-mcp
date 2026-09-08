@@ -115,13 +115,17 @@ result_preview, and error_context."
   "Load an ASDF system.  Returns the same structure as define-tool
 \"load-system\".  Holds *ASDF-LOAD-LOCK* so it cannot overlap a
 concurrent worker/init load or another load-system."
-  (let ((system (gethash "system" params))
+  (let* ((system (gethash "system" params))
          (force (%bool-default params "force" t))
          (clear-fasls (gethash "clear_fasls" params))
-         (timeout-seconds (gethash "timeout_seconds" params)))
+         (raw-timeout (gethash "timeout_seconds" params))
+         ;; Params arrive straight off the wire here, so the value has had no
+         ;; type check: calling PLUSP on it directly turns a string into a raw
+         ;; TYPE-ERROR reported as "Internal error during load-system".
+         (timeout-seconds (coerce-timeout-seconds raw-timeout)))
     (unless system
       (error "system is required"))
-    (when (and timeout-seconds (not (plusp timeout-seconds)))
+    (when (and raw-timeout (null timeout-seconds))
       (error "timeout_seconds must be a positive number"))
     (let ((ht (with-asdf-load-lock
                 (load-system system
@@ -171,12 +175,13 @@ caller is answered at the deadline even while the suite is still blocked."
                             :framework framework
                             :test test
                             :tests tests))))
-        (multiple-value-bind (result status)
+        (multiple-value-bind (result status thread-leaked)
             (call-with-test-run-deadline #'do-run effective-timeout)
           (build-run-tests-response
            (ecase status
              (:ok result)
-             (:timeout (make-timeout-result result))
+             (:timeout (make-timeout-result result
+                                            :thread-leaked thread-leaked))
              ;; Re-signal so genuine failures still surface as JSON-RPC
              ;; errors instead of being reported as a bogus test result.
              (:error (error result)))))))))

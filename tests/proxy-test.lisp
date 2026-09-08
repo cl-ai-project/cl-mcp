@@ -84,3 +84,33 @@
     (ok (search "crashed" text))
     (ok (search "load-system again" text)
      "guidance about reloading is always present"))))
+
+(defun effective-timeout-for (&optional timeout-seconds)
+  "Run the proxy's RPC budget calculation for a call carrying TIMEOUT-SECONDS."
+  (let ((params (make-hash-table :test 'equal)))
+    (when timeout-seconds
+      (setf (gethash "timeout_seconds" params) timeout-seconds))
+    (cl-mcp/src/proxy::%effective-rpc-timeout params)))
+
+(deftest proxy-budget-outlasts-the-deadline-the-worker-enforces
+  (testing "with no timeout_seconds the proxy waits past the worker's default"
+    ;; The worker defaults run-tests to this same figure and only then builds
+    ;; its timeout result.  A proxy budget equal to that default expires
+    ;; first, and a proxy timeout is not a timeout report: WORKER-RPC marks
+    ;; the worker crashed and kills it, so the graceful answer never lands
+    ;; and the session's Lisp state is reset instead.
+    (ok (> (effective-timeout-for) cl-mcp/src/proxy:*proxy-rpc-timeout*)
+        "the silent-caller budget leaves room for the worker to answer"))
+  (testing "the caller's own deadline is honoured, plus the margin"
+    (ok (= (+ 60 cl-mcp/src/proxy::*proxy-rpc-buffer*)
+           (effective-timeout-for 60))))
+  (testing "a numeric string is not dropped back to the default"
+    ;; Params reach the proxy unvalidated on this path; a string that failed
+    ;; the old (NUMBERP ...) guard silently widened a 60 s deadline to 300 s.
+    (ok (= (effective-timeout-for 60) (effective-timeout-for "60"))))
+  (testing "a caller may ask for more than the default"
+    (ok (= (+ 3600 cl-mcp/src/proxy::*proxy-rpc-buffer*)
+           (effective-timeout-for 3600))))
+  (testing "an unusable value falls back to the default rather than erroring"
+    (ok (= (effective-timeout-for) (effective-timeout-for "not-a-number")))
+    (ok (= (effective-timeout-for) (effective-timeout-for -5)))))
