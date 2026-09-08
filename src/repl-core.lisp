@@ -79,10 +79,14 @@ what was reported while the heap paid for the rest -- and the form here is
 whatever the client sent.  Measured, `(dotimes (i 500000) (write-string ...))'
 cost 313 MB of heap to report 50 KB of it, and under a 256 MB dynamic space it
 died with HEAP-EXHAUSTED-ERROR while materialising the string, in a quarter of
-a second.  The evaluation deadline is no protection at that speed."
-  (make-bounded-output-stream (if (and max-output-length
-                                       (integerp max-output-length)
-                                       (plusp max-output-length))
+a second.  The evaluation deadline is no protection at that speed.
+
+Zero is a limit, not a missing one: max_output_length is declared (integer 0)
+and asking for zero asks for the output to be suppressed, which the stream
+does exactly.  Only a value that is not a usable limit at all falls back to
+the default."
+  (make-bounded-output-stream (if (and (integerp max-output-length)
+                                       (not (minusp max-output-length)))
                                   max-output-length
                                   *default-max-output-length*)))
 
@@ -90,11 +94,17 @@ a second.  The evaluation deadline is no protection at that speed."
   "Drain STREAM's bounded capture and sanitize it for JSON.
 
 The bounding already happened on the way in, so only the sanitizing half of
-%TRUNCATE-OUTPUT is left to do here.  The note the stream appends differs from
-that function's \"...(truncated)\": the stream counted what it discarded and
-says how much, which is worth more to a caller than knowing only that
-something was lost."
-  (%sanitize-control-chars (bounded-output-string stream)))
+%TRUNCATE-OUTPUT is left to do here.  Sanitizing runs on the retained text
+alone, before the stream appends its note: capture cut mid-escape-sequence
+ends in an introducer whose terminator was dropped, and SANITIZE-FOR-JSON then
+consumes everything after it -- which, applied to the composed string, is the
+note saying output went missing.  The client would be handed silently
+shortened output with nothing to say so.
+
+The note the stream appends differs from %TRUNCATE-OUTPUT's \"...(truncated)\":
+the stream counted what it discarded and says how much, which is worth more to
+a caller than knowing only that something was lost."
+  (bounded-output-string stream :transform #'%sanitize-control-chars))
 
 (define-condition %package-not-found-error (package-error)
   ()

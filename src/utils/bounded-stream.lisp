@@ -95,16 +95,27 @@ from a special's global value."))
   "Number of characters STREAM discarded for exceeding its limit."
   (%dropped stream))
 
-(defun bounded-output-string (stream)
+(defun bounded-output-string (stream &key (transform #'identity))
   "Return what STREAM retained, noting the total when anything was dropped.
 Drains the stream, as GET-OUTPUT-STREAM-STRING does, so calling it twice
 yields the retained text once.
 
+TRANSFORM is applied to the retained text before the note is appended, and
+exists because the note must not be exposed to it.  A caller that rewrites the
+captured text -- sanitizing escape sequences out of it, say -- would otherwise
+have the rewriting swallow its own note: retained text cut mid-sequence ends
+in an introducer whose terminator was dropped, and a sanitizer then consumes
+everything after it, including the note saying that output went missing.  The
+reported total is taken from the text as captured, so a transform that changes
+the length cannot understate it.
+
 The column survives a drain, unlike the kept and dropped counts.  Reading the
 text out does not move the writer's cursor, so a writer left mid-line is still
 mid-line afterwards and FRESH-LINE must still say so."
-  (let ((kept (get-output-stream-string (%sink stream)))
-        (dropped (%dropped stream)))
+  (let* ((raw (get-output-stream-string (%sink stream)))
+         (dropped (%dropped stream))
+         (total (+ (length raw) dropped))
+         (kept (funcall transform raw)))
     (setf (%kept stream) 0
           (%dropped stream) 0)
     (cond
@@ -112,7 +123,6 @@ mid-line afterwards and FRESH-LINE must still say so."
       ;; No separating newline when nothing was kept: the note would otherwise
       ;; start with a blank line, which reads as retained output.
       ((zerop (length kept))
-       (format nil "... (truncated, ~D total chars)" dropped))
+       (format nil "... (truncated, ~D total chars)" total))
       (t
-       (format nil "~A~%... (truncated, ~D total chars)"
-               kept (+ (length kept) dropped))))))
+       (format nil "~A~%... (truncated, ~D total chars)" kept total)))))

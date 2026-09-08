@@ -842,3 +842,38 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
         (ok (< bounding (floor retaining 4))
             (format nil "~D bytes to bound 1 000 000 characters, against ~D to retain them"
                     bounding retaining))))))
+
+(deftest repl-eval-capture-limit-edges
+  (testing "a zero limit suppresses the output rather than falling back"
+    ;; max_output_length is declared (integer 0), and zero asks for the output
+    ;; to be suppressed.  Treating it as "no limit given" hands back up to the
+    ;; 50 000 character default instead -- the opposite of what was asked.
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(write-string \"secret\")" :max-output-length 0)
+      (declare (ignore printed value stderr))
+      (ok (null (search "secret" stdout))
+          (format nil "nothing of the output survives: ~S" stdout))
+      (ok (search "truncated" stdout)
+          "and the caller is told output was suppressed")))
+  (testing "an escape sequence cut by the limit cannot eat the note"
+    ;; Capture that stops mid-sequence leaves an introducer whose terminator
+    ;; was dropped.  Sanitizing the composed string then consumes everything
+    ;; after it -- including the note -- and the caller gets shortened output
+    ;; with nothing saying so.  Sanitizing has to run on the retained text
+    ;; alone, before the note is attached.
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(progn (write-string \"abc\")
+                           (write-char (code-char 27))
+                           (write-string \"]\")
+                           (dotimes (i 100) (write-string \"xxxxxxxxxx\")))"
+                   :max-output-length 5)
+      (declare (ignore printed value stderr))
+      (let ((marker (search "(truncated, " stdout)))
+        (ok marker
+            (format nil "the note survives sanitizing: ~S" stdout))
+        (ok (= 1005 (and marker (parse-integer stdout :start (+ marker 12)
+                                                      :junk-allowed t)))
+            "and still reports the true total")
+        (ok (notany (lambda (c) (< (char-code c) 32))
+                    (remove #\Newline stdout))
+            "while the escape itself is still stripped")))))
