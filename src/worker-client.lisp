@@ -18,6 +18,9 @@
   (:import-from #:usocket)
   (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:*retired-leaked-thread-reason*
+                #:+leaked-thread-exit-code+)
   (:export #:worker
            #:make-worker
            #:spawn-worker
@@ -38,8 +41,6 @@
            #:kill-worker
            #:worker-crashed
            #:worker-crashed-reason
-           #:*retired-leaked-thread-reason*
-           #:+leaked-thread-exit-code+
            #:worker-spawn-failed
            #:+max-json-line-bytes+
            #:%read-line-limited
@@ -100,23 +101,6 @@ Each thread terminates and self-removes after reaping its process.")
   (:report (lambda (c s)
              (format s "Failed to spawn worker: ~A"
                      (worker-spawn-failed-message c)))))
-
-(defconstant +leaked-thread-exit-code+ 70
-  "Exit code a worker uses when it retires for carrying a leaked thread.
-
-Lives here rather than with the worker server that uses it because the parent
-is the other half of the contract: this is what it reads to tell a deliberate
-retirement from a crash, and a worker cannot depend on the parent's side.")
-
-(defparameter *retired-leaked-thread-reason* "retired-leaked-thread"
-  "Crash reason for a worker that exited rather than serve a request while
-carrying a thread a deadline could not stop.
-
-It reaches the parent as EOF like any other death, so this is what the reason
-is set to when the worker's last answer said it was carrying one.  Callers
-that treat a crash as evidence about something else -- %MONITOR-INIT, which
-disables runtime initialization when the init owner crashes -- check for it
-rather than blaming an unrelated subsystem for a deliberate retirement.")
 
 (define-condition worker-rpc-error (error)
   ((code :initarg :code :reader worker-rpc-error-code)
@@ -679,7 +663,7 @@ Returns nothing."
   ;; Timeout of 1 second prevents blocking if something goes wrong.
   (let ((th (worker-stderr-thread worker)))
     (when (and th (bt:thread-alive-p th))
-      (ignore-errors (bt:join-thread th :timeout 1))
+      (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))
       (when (bt:thread-alive-p th)
         (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
@@ -740,21 +724,36 @@ Returns nothing."
 (defun %retired-for-leaked-thread-p (worker)
   "True when WORKER's death was a deliberate retirement, not a crash.
 
-Decided on the exit code, which the worker sets on its way out and which is
-the only signal that describes the death itself.  The leaked-thread count from
-its last answer is a fallback: it is a proxy, and a stale one -- a worker can
-report a leak, have the thread finish, and then genuinely die on the next
-call, which the count alone would misread as a retirement and so hide a real
-crash from the callers that draw conclusions from one."
+The exit code decides, in both directions: a worker sets it on its way out,
+and it describes the death itself.  The leaked-thread count from the last
+answer is only consulted when the exit status is not yet knowable, because it
+is a proxy and a stale one -- a worker can report a leak, have the thread
+finish, and then genuinely crash, which the count alone reads as a retirement
+and so hides a real crash from the callers that draw conclusions from one.
+
+The status is not terminal the instant the parent reads EOF: SBCL updates the
+process struct from its SIGCHLD handler, which has not run yet.  Measured, it
+settles within a few tens of milliseconds, so this waits briefly for it rather
+than falling back to the count on essentially every real retirement."
   (let ((process (worker-process-info worker)))
-    (or (ignore-errors
-         (and process
-              (member (sb-ext:process-status process) '(:exited))
-              (eql +leaked-thread-exit-code+
-                   (sb-ext:process-exit-code process))))
-        ;; The process may not have been reaped yet, or may be gone entirely.
-        (and (integerp (worker-leaked-threads worker))
-             (plusp (worker-leaked-threads worker))))))
+    (flet ((terminal-status ()
+             (loop repeat 40
+                   for status = (ignore-errors (sb-ext:process-status process))
+                   when (member status '(:exited :signaled))
+                     return status
+                   do (sleep 0.01))))
+      (let ((status (and process (terminal-status))))
+        (cond
+          ;; Known: the code answers, whichever way it answers.
+          ((eq status :exited)
+           (eql +leaked-thread-exit-code+
+                (ignore-errors (sb-ext:process-exit-code process))))
+          ;; Killed by a signal, so not a retirement -- a retiring worker
+          ;; exits under its own power.
+          ((eq status :signaled) nil)
+          ;; Unknowable: no process, already reaped, or still not settled.
+          (t (and (integerp (worker-leaked-threads worker))
+                  (plusp (worker-leaked-threads worker)))))))))
 
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.

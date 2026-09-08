@@ -18,7 +18,7 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/worker-client
+  (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:coerce-timeout-seconds)

@@ -20,6 +20,7 @@
   (:import-from #:cl-mcp/src/worker/server)
   (:import-from #:cl-mcp/src/worker-client)
   (:import-from #:cl-mcp/src/pool)
+  (:import-from #:cl-mcp/src/proxy)
   (:import-from #:yason))
 
 (in-package #:cl-mcp/tests/worker-leaked-thread-test)
@@ -251,7 +252,7 @@ and makes the assertions depend on the runner being fast enough to observe it."
                  (cl-mcp/src/worker-client:worker-crashed-reason c)))))
     (testing "a worker that died carrying one is reported as retired"
       (let ((reason (reason-of (dead-worker :leaked 1))))
-        (ok (equal cl-mcp/src/worker-client::*retired-leaked-thread-reason*
+        (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
                    reason)
             (format nil "reason was ~S" reason))))
     (testing "a worker that died carrying nothing is reported as a crash"
@@ -263,7 +264,7 @@ and makes the assertions depend on the runner being fast enough to observe it."
       (let ((retired (make-condition
                       'cl-mcp/src/worker-client:worker-crashed
                       :worker nil
-                      :reason cl-mcp/src/worker-client::*retired-leaked-thread-reason*))
+                      :reason cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
             (crashed (make-condition
                       'cl-mcp/src/worker-client:worker-crashed
                       :worker nil :reason "eof")))
@@ -277,8 +278,135 @@ and makes the assertions depend on the runner being fast enough to observe it."
       (let ((retired (dead-worker))
             (crashed (dead-worker)))
         (setf (cl-mcp/src/worker-client::worker-last-crash-reason retired)
-              cl-mcp/src/worker-client::*retired-leaked-thread-reason*
+              cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
               (cl-mcp/src/worker-client::worker-last-crash-reason crashed)
               "eof")
         (ok (cl-mcp/src/pool::%retired-worker-p retired))
-        (ok (not (cl-mcp/src/pool::%retired-worker-p crashed)))))))
+        (ok (not (cl-mcp/src/pool::%retired-worker-p crashed)))
+        ;; The decision both push sites actually make.  Asserting only
+        ;; %RETIRED-WORKER-P leaves the exclusion deletable from either site
+        ;; without a test noticing.
+        (ok (not (cl-mcp/src/pool::%breaker-countable-crash-p retired))
+            "a retirement is not counted against the session")
+        (ok (cl-mcp/src/pool::%breaker-countable-crash-p crashed)
+            "a real crash still is")
+        ;; One caller has to sample the reason before the surrounding function
+        ;; overwrites it, so the predicate takes it as an argument -- and that
+        ;; path needs its own assertion.
+        (ok (not (cl-mcp/src/pool::%breaker-countable-crash-p
+                  crashed :retired t))
+            "including when the caller had to capture it early")))))
+
+(deftest a-real-exit-code-decides-over-the-reported-count
+  ;; The count is a proxy taken from the worker's *previous* answer.  A worker
+  ;; can report a leak, have the thread finish, and then genuinely crash --
+  ;; and reading the count alone files that as a retirement, which suppresses
+  ;; both the init-failure attribution and the circuit breaker for a real
+  ;; crash.  The exit code describes the death itself, so it decides, in both
+  ;; directions.
+  (labels ((exited-with (code)
+             ;; A real process, because the classification asks SB-EXT for its
+             ;; status and code -- and at the moment the parent sees EOF that
+             ;; status has not settled yet, which is what made the first
+             ;; version of this fall back to the count every time.
+             (sb-ext:run-program "/bin/sh" (list "-c" (format nil "exit ~D" code))
+                                 :wait nil :search nil))
+           (classify (&key code leaked)
+             (cl-mcp/src/worker-client::%retired-for-leaked-thread-p
+              (cl-mcp/src/worker-client::make-worker
+               :state :bound
+               :leaked-threads leaked
+               :process-info (exited-with code)))))
+    (testing "the retirement exit code says retirement, whatever the count"
+      (ok (classify :code 70 :leaked 0)
+          "even with no count, an exit 70 is a retirement"))
+    (testing "any other exit code says crash, whatever the count"
+      (ok (not (classify :code 1 :leaked 1))
+          "a genuine crash is not hidden by a count left over from earlier"))
+    (testing "with no process at all the count is what is left to go on"
+      (ok (cl-mcp/src/worker-client::%retired-for-leaked-thread-p
+           (cl-mcp/src/worker-client::make-worker :state :bound
+                                                  :leaked-threads 1))
+          "reported a leak")
+      (ok (not (cl-mcp/src/worker-client::%retired-for-leaked-thread-p
+                (cl-mcp/src/worker-client::make-worker :state :bound
+                                                       :leaked-threads 0)))
+          "reported none"))))
+
+(deftest retirement-is-visible-where-it-has-to-be
+  (testing "real work retires; only observation is exempt"
+    ;; The exemption exists so an init-status poll -- sent every fraction of a
+    ;; second while a load runs -- cannot throw away that load on a request
+    ;; that asks for nothing.  Putting a working method on that list would
+    ;; produce a worker that carries a leaked thread forever, which is the
+    ;; worst regression this feature can suffer and the cheapest to make.
+    (dolist (method '("worker/eval" "worker/run-tests" "worker/load-system"
+                      "worker/set-project-root"))
+      (ok (not (member method
+                       cl-mcp/src/worker/server::*methods-exempt-from-retirement*
+                       :test #'string=))
+          (format nil "~A retires" method)))
+    (dolist (method '("worker/init-status"))
+      (ok (member method
+                  cl-mcp/src/worker/server::*methods-exempt-from-retirement*
+                  :test #'string=)
+          (format nil "~A does not" method))))
+  (testing "an exempt method is served rather than retiring the worker"
+    (with-clean-leak-record
+      (leak-one-thread)
+      (let* ((served nil)
+             (retired nil)
+             (server (cl-mcp/src/worker/server::%make-worker-server))
+             (cl-mcp/src/worker/server::*retire-action*
+               (lambda (leaked) (declare (ignore leaked)) (setf retired t))))
+        (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t)
+        (cl-mcp/src/worker/server:register-method
+         server "worker/init-status"
+         (lambda (params) (declare (ignore params)) (setf served t) "status"))
+        (cl-mcp/src/worker/server::%dispatch-request
+         server 1 "worker/init-status" (make-hash-table :test 'equal))
+        (ok (null retired) "a poll does not retire the worker")
+        (ok served "and is answered"))))
+  (testing "a non-string method cannot take the worker down"
+    ;; The exemption check runs on every authenticated request; reaching
+    ;; STRING= with a non-string would unwind to the worker's toplevel and
+    ;; kill the session on one malformed line.
+    (with-clean-leak-record
+      (let ((server (cl-mcp/src/worker/server::%make-worker-server)))
+        (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t)
+        (ok (search "Method not found"
+                    (cl-mcp/src/worker/server::%dispatch-request
+                     server 1 5 (make-hash-table :test 'equal)))
+            "it is answered, not fatal"))))
+  (testing "an unauthenticated peer is told nothing about the worker's state"
+    ;; The retirement gate sits after authentication on purpose; reporting the
+    ;; count before it gives away exactly what that placement withholds.
+    (with-clean-leak-record
+      (leak-one-thread)
+      ;; Driven through %DISPATCH-REQUEST with the gate actually armed, not by
+      ;; calling the builder with NIL by hand: the latter passes even when the
+      ;; call site stops passing it.
+      (let ((had (sb-posix:getenv "MCP_WORKER_SECRET")))
+        (unwind-protect
+             (let ((server (cl-mcp/src/worker/server::%make-worker-server)))
+               (sb-posix:setenv "MCP_WORKER_SECRET" "probe-secret" 1)
+               (let ((json (yason:parse
+                            (cl-mcp/src/worker/server::%dispatch-request
+                             server 1 "worker/eval"
+                             (make-hash-table :test 'equal)))))
+                 (ok (gethash "error" json) "the request is refused")
+                 (ok (null (nth-value 1 (gethash "leaked_threads" json)))
+                     "and says nothing about the worker's internal state")))
+          (if had
+              (sb-posix:setenv "MCP_WORKER_SECRET" had 1)
+              (sb-posix:unsetenv "MCP_WORKER_SECRET"))))))
+  (testing "the user is told a worker was replaced, not that it crashed"
+    (let ((retired (cl-mcp/src/proxy::%crash-notification-result
+                    :reason cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
+          (crashed (cl-mcp/src/proxy::%crash-notification-result :reason "eof")))
+      (flet ((text-of (ht)
+               (gethash "text" (aref (gethash "content" ht) 0))))
+        (ok (search "left a thread that could not be stopped" (text-of retired))
+            "a retirement says what actually happened")
+        (ok (search "crashed" (text-of crashed))
+            "and a crash still reads as one")))))

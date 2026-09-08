@@ -31,7 +31,6 @@
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
                 #:worker-leaked-threads
-                #:*retired-leaked-thread-reason*
                 #:worker-tcp-port
                 #:worker-pid #:worker-id
                 #:worker-process-info
@@ -43,6 +42,8 @@
                 #:worker-crashed-reason
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:*retired-leaked-thread-reason*)
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings
                 #:%invalidate-proxy-cache
@@ -334,6 +335,25 @@ inert.  A TYPEP costs the same and cannot hide that."
 The same distinction as %RETIREMENT-CRASH-P, asked of the worker struct after
 the fact rather than of the condition at the time."
   (equal *retired-leaked-thread-reason* (worker-last-crash-reason worker)))
+
+(defun %breaker-countable-crash-p (worker &key (retired (%retired-worker-p worker)))
+  "True when WORKER's death should count toward its session's circuit breaker.
+
+Both push sites ask this rather than each spelling the exclusions out, because
+they had drifted: one of them consulted the crash reason after the surrounding
+function had already overwritten it, so the guard read as effective and could
+never fire.
+
+A deliberate retirement is excluded.  Three uninterruptible timeouts in five
+minutes would otherwise trip the breaker and halt the session, where the same
+three before this behaviour existed returned three timeouts and left the user
+working.  RETIRED is a parameter because one caller has to sample it before
+that overwrite.
+
+An init-attributable crash is excluded for the reason it always was: the pool
+counts those separately, against initialization rather than the session."
+  (and (not retired)
+       (not (%init-attributable-crash-p worker))))
 
 (defun %monitor-init (worker session-id max-failures)
   "Poll worker/init-status until terminal, updating failure/disable state.
@@ -691,7 +711,8 @@ to prevent recovery threads from spawning orphan workers."
   (let ((session-id nil)
         (was-bound nil)
         (was-standby nil)
-        (was-already-crashed nil))
+        (was-already-crashed nil)
+        (retired-p nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (case (worker-state crashed-worker)
         (:bound
@@ -725,6 +746,11 @@ to prevent recovery threads from spawning orphan workers."
                  "was_standby" was-standby
                  "exit_status" (or exit-status "unknown")
                  "exit_code" (or exit-code "unknown"))
+      ;; Captured before the slot is overwritten: %RETIRED-WORKER-P below
+      ;; reads it, and setting it to "process-died" first made that guard
+      ;; unreachable -- the same shape of inert guard this branch already had
+      ;; to fix once.
+      (setf retired-p (%retired-worker-p crashed-worker))
       (setf (worker-last-crash-reason crashed-worker) "process-died"
             (worker-last-exit-status crashed-worker) (or exit-status "unknown")
             (worker-last-exit-code crashed-worker) (or exit-code "unknown")))
@@ -740,8 +766,7 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (unless (or (%retired-worker-p crashed-worker)
-                         (%init-attributable-crash-p crashed-worker))
+             (when (%breaker-countable-crash-p crashed-worker :retired retired-p)
                (setf history
                      (remove-if (lambda (ts) (< ts window-start)) history))
                (push now history)
@@ -1130,8 +1155,7 @@ cannot be created."
          ;; unstable pool.
          (when (and (eq :crashed (worker-state entry))
                     (not (worker-crash-history-pushed-p entry))
-                    (not (%retired-worker-p entry))
-                    (not (%init-attributable-crash-p entry)))
+                    (%breaker-countable-crash-p entry))
            (let* ((now (get-universal-time))
                   (window-start (- now *crash-breaker-window*))
                   (history (gethash session-id *crash-history*)))

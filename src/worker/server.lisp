@@ -9,7 +9,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
-  (:import-from #:cl-mcp/src/utils/deadline #:leaked-threads)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:leaked-threads
+                #:+leaked-thread-exit-code+)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited
                 #:+max-json-line-bytes+)
@@ -103,8 +105,9 @@ work is asked for.")
   "Retire this worker when a deadline left a thread running that is still alive.
 METHOD is logged so the request that found the condition is identifiable.
 Returns normally, and cheaply, when there is nothing to retire for."
-  (let ((leaked (unless (member method *methods-exempt-from-retirement*
-                                :test #'string=)
+  (let ((leaked (unless (and (stringp method)
+                             (member method *methods-exempt-from-retirement*
+                                     :test #'string=))
                   (leaked-threads))))
     (when leaked
       (ignore-errors
@@ -120,28 +123,36 @@ Returns normally, and cheaply, when there is nothing to retire for."
       (ignore-errors (finish-output *error-output*))
       (funcall *retire-action* leaked))))
 
-(defun %note-leaked-threads (ht)
+(defun %note-leaked-threads (ht &optional (authenticated t))
   "Add the count of threads this worker could not stop, when there are any.
+
+Withheld from an unauthenticated peer: the retirement gate is placed after the
+auth check on purpose, and telling a peer about this worker's internal state
+before it has authenticated gives away exactly what that placement withholds.
+It has to be a parameter rather than a special case at one call site -- a
+parse error, an invalid request and a failed authentication are all answered
+before or during the gate, and singling out one of them protects nothing.
 
 Reported alongside every response so the parent can show the condition in
 pool-status during the window between a deadline giving up on a thread and the
 next request, which is exactly when someone is likely to be asking what went
 wrong.  Absent from ordinary responses rather than reported as zero, so the
 common case is unchanged on the wire."
-  (let ((leaked (length (leaked-threads))))
-    (when (plusp leaked)
-      (setf (gethash "leaked_threads" ht) leaked)))
+  (when authenticated
+    (let ((leaked (length (leaked-threads))))
+      (when (plusp leaked)
+        (setf (gethash "leaked_threads" ht) leaked))))
   ht)
 
-(defun %make-result (id payload)
+(defun %make-result (id payload &optional (authenticated t))
   "Build a JSON-RPC 2.0 success response hash-table."
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "jsonrpc" ht) "2.0"
           (gethash "id" ht) id
           (gethash "result" ht) payload)
-    (%note-leaked-threads ht)))
+    (%note-leaked-threads ht authenticated)))
 
-(defun %make-error (id code message)
+(defun %make-error (id code message &optional (authenticated t))
   "Build a JSON-RPC 2.0 error response hash-table."
   (let ((err (make-hash-table :test 'equal))
         (ht (make-hash-table :test 'equal)))
@@ -155,7 +166,7 @@ common case is unchanged on the wire."
     ;; on success would keep reporting the count it last saw -- stale in both
     ;; directions, missing a leak that just happened and holding on to one
     ;; that has since ended.
-    (%note-leaked-threads ht)))
+    (%note-leaked-threads ht authenticated)))
 
 (defun %dispatch-request (server id method params)
   "Dispatch a JSON-RPC request to the registered handler.
@@ -165,25 +176,13 @@ the shared secret."
   ;; Auth gate: reject non-authentication requests before handshake.
   ;; Only enforce when MCP_WORKER_SECRET is configured (pool mode).
   (unless (or (worker-server-authenticated-p server)
-              (string= method "worker/authenticate")
+              (equal method "worker/authenticate")
               (null (uiop/os:getenv "MCP_WORKER_SECRET")))
     (return-from %dispatch-request
       (%encode-response
-       ;; Built without the leaked-thread note.  The retirement gate is
-       ;; deliberately placed after this point, and telling an unauthenticated
-       ;; peer anything about the worker's internal state before it has
-       ;; authenticated would give away before the gate what the gate exists
-       ;; to withhold.
-       (let ((err (make-hash-table :test 'equal))
-             (ht (make-hash-table :test 'equal)))
-         (setf (gethash "code" err) -32600
-               (gethash "message" err) "Not authenticated")
-         (setf (gethash "jsonrpc" ht) "2.0"
-               (gethash "id" ht) id
-               (gethash "error" ht) err)
-         ht))))
+       (%make-error id -32600 "Not authenticated" nil))))
   ;; Handle authentication as a built-in method
-  (when (string= method "worker/authenticate")
+  (when (equal method "worker/authenticate")
     (let ((expected (uiop/os:getenv "MCP_WORKER_SECRET"))
            (provided (and params (gethash "secret" params))))
       (cond
@@ -208,7 +207,7 @@ the shared secret."
          (log-event :warn "worker.auth.failed")
          (return-from %dispatch-request
            (%encode-response
-            (%make-error id -32600 "Authentication failed")))))))
+            (%make-error id -32600 "Authentication failed" nil)))))))
   ;; A deadline that could not stop its thread leaves that thread running in
   ;; this image: holding locks it took, mutating the state later work reads,
   ;; and competing for the CPU.  The caller that hit the deadline was answered
@@ -255,11 +254,13 @@ Returns a JSON string response, or NIL for notifications."
                               "error" (princ-to-string e))
                    (return-from %process-line
                      (%encode-response
-                      (%make-error nil -32700 "Parse error")))))))
+                      (%make-error nil -32700 "Parse error"
+                                  (worker-server-authenticated-p server))))))))
       (unless (hash-table-p msg)
         (return-from %process-line
           (%encode-response
-           (%make-error nil -32600 "Invalid Request"))))
+           (%make-error nil -32600 "Invalid Request"
+                        (worker-server-authenticated-p server)))))
       (let ((id (gethash "id" msg))
             (method (gethash "method" msg))
             (params (gethash "params" msg)))
@@ -271,7 +272,8 @@ Returns a JSON string response, or NIL for notifications."
            nil)
           (t
            (%encode-response
-            (%make-error id -32600 "Invalid Request"))))))))
+            (%make-error id -32600 "Invalid Request"
+                         (worker-server-authenticated-p server)))))))))
 
 (defun %handle-connection (server stream)
   "Read JSON-RPC lines from STREAM and write responses until EOF.

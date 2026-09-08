@@ -17,6 +17,8 @@
                 #:with-lock-held)
   (:export #:call-with-deadline-thread
            #:leaked-threads
+           #:*retired-leaked-thread-reason*
+           #:+leaked-thread-exit-code+
            #:forget-leaked-threads
            #:*poll-interval*
            #:*unwind-grace-seconds*
@@ -35,6 +37,26 @@ cleanups, so it is always preferable to DESTROY-THREAD.")
 (defparameter *destroy-grace-seconds* 1.0d0
   "Seconds allowed for DESTROY-THREAD to take effect before the thread is
 reported as leaked.")
+
+(defparameter *retired-leaked-thread-reason* "retired-leaked-thread"
+  "Crash reason for a worker that exited rather than serve a request while
+carrying a thread a deadline could not stop.
+
+It reaches the parent as EOF like any other death, so this is what the reason
+is set to once the parent has established that is what happened.  Callers that
+treat a crash as evidence about something else -- the pool's init monitor,
+which disables runtime initialization when the init owner crashes, and its
+per-session circuit breaker -- check for it rather than blaming an unrelated
+subsystem for a deliberate retirement.")
+
+(defconstant +leaked-thread-exit-code+ 70
+  "Exit code a worker uses when it retires for carrying a leaked thread.
+The parent reads it to tell a deliberate retirement from a crash.
+
+Both of these live here, with the deadline machinery that creates the
+condition, rather than with either half of the worker protocol: the parent and
+the worker are the two ends of this contract and neither can own it without
+the other depending on it.")
 
 (defvar %leaked-threads% ()
   "Threads a deadline could not stop, still running in this image.
