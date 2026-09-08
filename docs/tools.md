@@ -11,7 +11,12 @@ Input schema (JSON):
 - `print_level` (integer|null): binds `*print-level*`
 - `print_length` (integer|null): binds `*print-length*`
 - `timeout_seconds` (number|null): abort evaluation after this many seconds
-- `max_output_length` (integer|null): truncate `content`/`stdout`/`stderr` to this many characters
+- `max_output_length` (optional integer, non-negative): keep at most this many characters of
+  `content`/`stdout`/`stderr`. `stdout` and `stderr` are bounded as the form
+  writes them, so output past the limit is never held in memory, and a short
+  note saying how many characters there were in total is appended past that
+  limit. `0` suppresses the output. `content` is truncated after the fact and
+  marked `...(truncated)`.
 - `safe_read` (boolean|null): when `true`, disables `*read-eval*` while reading forms
 Output fields:
 - `content`: last value as text

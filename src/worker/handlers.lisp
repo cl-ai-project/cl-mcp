@@ -99,6 +99,14 @@ result_preview, and error_context."
       (error "code is required"))
     (when (and raw-timeout (null timeout-seconds))
       (error "timeout_seconds must be a positive number"))
+    ;; Checked for the same reason timeout_seconds is: params arrive
+    ;; unvalidated here, and REPL-EVAL's declaimed ftype would turn a bad one
+    ;; into a raw TYPE-ERROR naming an internal type, rather than a message
+    ;; naming the argument the client got wrong.
+    (when (and max-output-length
+               (not (and (integerp max-output-length)
+                         (not (minusp max-output-length)))))
+      (error "max_output_length must be a non-negative integer"))
     (multiple-value-bind (printed raw-value stdout stderr error-context)
         (repl-eval code
                    :package (or package *package*)

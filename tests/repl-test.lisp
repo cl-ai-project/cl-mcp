@@ -793,3 +793,94 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
         (repl-eval "(write-string \"via-query-io\" *query-io*)")
       (declare (ignore printed value))
       (ok (search "via-query-io" (or stdout ""))))))
+
+(deftest repl-eval-does-not-retain-output-it-will-not-report
+  ;; max_output_length governs what is reported; it has to govern what is held
+  ;; too.  Captured into a STRING-OUTPUT-STREAM and truncated afterwards, a
+  ;; form printing 40 million characters cost 313 MB of heap to report 50 KB,
+  ;; and under a 256 MB dynamic space it died with HEAP-EXHAUSTED-ERROR in a
+  ;; quarter of a second -- so the evaluation deadline was no protection.
+  ;; repl-eval runs whatever the client sends, which makes this one request
+  ;; rather than a suite someone had to write first.
+  (testing "a form printing far past the limit is capped, and says how far"
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(dotimes (i 100000) (write-string \"0123456789\"))"
+                   :max-output-length 1000)
+      (declare (ignore printed value stderr))
+      ;; Room for the note and nothing more.  A looser bound lets a stream
+      ;; that quietly keeps extra characters past the limit pass.
+      (ok (<= (length stdout) 1040)
+          (format nil "reported ~D chars for a limit of 1000" (length stdout)))
+      (let ((marker (search "(truncated, " stdout)))
+        (ok marker "the note is present")
+        ;; The true total, not the retained length: that number is the only
+        ;; signal the caller gets about how much was lost.  Exact rather than
+        ;; a lower bound -- the form writes exactly a million characters, and
+        ;; >= would accept an overstated count as readily as the right one.
+        (let ((total (and marker (parse-integer stdout :start (+ marker 12)
+                                                       :junk-allowed t))))
+          (ok (eql 1000000 total)
+              (format nil "the note reports the real total (~A)" total))))))
+  (testing "and holds a fraction of what retaining it would cost"
+    ;; The assertion above passes on a stream that keeps everything and
+    ;; truncates at the end -- it is a guard on reporting shape.  This one is
+    ;; the memory property, calibrated against the stream this replaced rather
+    ;; than a fixed byte count.
+    (flet ((consed (thunk)
+             (sb-ext:gc :full t)
+             (let ((before (sb-ext:get-bytes-consed)))
+               (funcall thunk)
+               (- (sb-ext:get-bytes-consed) before))))
+      (let ((bounding (consed
+                       (lambda ()
+                         (repl-eval "(dotimes (i 100000) (write-string \"0123456789\"))"
+                                    :max-output-length 1000))))
+            (retaining (consed
+                        (lambda ()
+                          (let ((s (make-string-output-stream)))
+                            (dotimes (i 100000) (write-string "0123456789" s))
+                            (get-output-stream-string s))))))
+        ;; A clear margin rather than a bare <: the bounded run still conses
+        ;; for reading and evaluating the form, so the assertion has to say
+        ;; "a fraction of", not merely "less than".
+        (ok (< bounding (floor retaining 4))
+            (format nil "~D bytes to bound 1 000 000 characters, against ~D to retain them"
+                    bounding retaining))))))
+
+(deftest repl-eval-capture-limit-edges
+  (testing "a zero limit suppresses the output rather than falling back"
+    ;; max_output_length is declared (integer 0), and zero asks for the output
+    ;; to be suppressed.  Treating it as "no limit given" hands back up to the
+    ;; 50 000 character default instead -- the opposite of what was asked.
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(write-string \"secret\")" :max-output-length 0)
+      (declare (ignore printed value stderr))
+      (ok (null (search "secret" stdout))
+          (format nil "nothing of the output survives: ~S" stdout))
+      (ok (search "truncated" stdout)
+          "and the caller is told output was suppressed")))
+  (testing "an escape sequence cut by the limit cannot eat the note"
+    ;; Capture that stops mid-sequence leaves an introducer whose terminator
+    ;; was dropped.  Sanitizing the composed string then consumes everything
+    ;; after it -- including the note -- and the caller gets shortened output
+    ;; with nothing saying so.  Sanitizing has to run on the retained text
+    ;; alone, before the note is attached.
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(progn (write-string \"abc\")
+                           (write-char (code-char 27))
+                           (write-string \"]\")
+                           (dotimes (i 100) (write-string \"xxxxxxxxxx\")))"
+                   :max-output-length 5)
+      (declare (ignore printed value stderr))
+      (let ((marker (search "(truncated, " stdout)))
+        (ok marker
+            (format nil "the note survives sanitizing: ~S" stdout))
+        ;; EQL against the parse, not =: when the note is gone MARKER is NIL
+        ;; and = would fail with a type error rather than for the reason the
+        ;; assertion names.
+        (ok (eql 1005 (and marker (parse-integer stdout :start (+ marker 12)
+                                                        :junk-allowed t)))
+            "and still reports the true total")
+        (ok (notany (lambda (c) (< (char-code c) 32))
+                    (remove #\Newline stdout))
+            "while the escape itself is still stripped")))))
