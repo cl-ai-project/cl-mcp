@@ -68,7 +68,7 @@ read in the original package. Use separate repl-eval calls or specify the
   (timeout-seconds :type :number :json-name "timeout_seconds" :description
    "Seconds to wait before timing out evaluation")
   (max-output-length :type :integer :json-name "max_output_length" :description
-   "Maximum characters for printed result/stdout/stderr")
+   "Maximum characters for printed result/stdout/stderr; non-negative, and 0 suppresses output")
   (safe-read :type :boolean :json-name "safe_read" :description
    "When true, disables #. reader evaluation for safety")
   (include-result-preview :type :boolean :json-name "include_result_preview"
@@ -116,6 +116,16 @@ read in the original package. Use separate repl-eval calls or specify the
      (error 'arg-validation-error
             :arg-name "timeout_seconds"
             :message "timeout_seconds must be a positive number"))
+   ;; Likewise: the worker rejects a negative max_output_length with a message
+   ;; naming the argument, while the inline path would hand it to repl-eval
+   ;; and get a raw TYPE-ERROR off its declaimed ftype instead.  The JSON
+   ;; schema can only say "integer", so the range has to be checked here.
+   (when (and max-output-length
+              (not (and (integerp max-output-length)
+                        (not (minusp max-output-length)))))
+     (error 'arg-validation-error
+            :arg-name "max_output_length"
+            :message "max_output_length must be a non-negative integer"))
    (multiple-value-bind (printed raw-value stdout stderr error-context)
        (repl-eval code :package (or package *package*) :print-level print-level
         :print-length print-length

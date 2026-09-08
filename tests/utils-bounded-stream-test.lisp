@@ -173,7 +173,10 @@ three!" s)
                    s :transform (lambda (raw) (subseq raw 0 2)))))
         (ok (search "truncated" text)
             (format nil "the note survived the transform: ~S" text))
-        (ok (string= "ab" (subseq text 0 2))
+        ;; The whole retained part, not its first two characters: a stream
+        ;; that ignored the transform would keep "abc" here and still start
+        ;; with "ab", so checking a prefix proves nothing about the transform.
+        (ok (string= "ab" (subseq text 0 (position #\Newline text)))
             "and the transform still applied to the retained text"))))
   (testing "the total counts what was captured, not what the transform left"
     ;; A transform that shortens the text must not shrink the reported total:

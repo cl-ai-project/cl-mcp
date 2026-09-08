@@ -807,15 +807,19 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
         (repl-eval "(dotimes (i 100000) (write-string \"0123456789\"))"
                    :max-output-length 1000)
       (declare (ignore printed value stderr))
-      (ok (<= (length stdout) 1100)
+      ;; Room for the note and nothing more.  A looser bound lets a stream
+      ;; that quietly keeps extra characters past the limit pass.
+      (ok (<= (length stdout) 1040)
           (format nil "reported ~D chars for a limit of 1000" (length stdout)))
       (let ((marker (search "(truncated, " stdout)))
         (ok marker "the note is present")
         ;; The true total, not the retained length: that number is the only
-        ;; signal the caller gets about how much was lost.
+        ;; signal the caller gets about how much was lost.  Exact rather than
+        ;; a lower bound -- the form writes exactly a million characters, and
+        ;; >= would accept an overstated count as readily as the right one.
         (let ((total (and marker (parse-integer stdout :start (+ marker 12)
                                                        :junk-allowed t))))
-          (ok (and total (>= total 1000000))
+          (ok (eql 1000000 total)
               (format nil "the note reports the real total (~A)" total))))))
   (testing "and holds a fraction of what retaining it would cost"
     ;; The assertion above passes on a stream that keeps everything and
