@@ -117,14 +117,19 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                                  "the ~A thread exited without a result"
                                  :format-arguments (list name))
                                 :error leaked))))))
-          (unwind-protect
-               (progn
-                 ;; Spawned with interrupts deferred, and inside the
-                 ;; UNWIND-PROTECT, so no asynchronous exit can land between
-                 ;; the thread existing and THREAD naming it -- the cleanup
-                 ;; would then have nothing to stop and the thread would run
-                 ;; on unnoticed.
-                 (sb-sys:without-interrupts
+          ;; The whole UNWIND-PROTECT sits under WITHOUT-INTERRUPTS, with only
+          ;; the waiting re-enabled: SBCL requires that for a cleanup to be
+          ;; safe against an asynchronous unwind.  Nested calls make it
+          ;; concrete -- a run thread may itself run a deadline of its own --
+          ;; and an outer DESTROY-THREAD landing mid-cleanup would drop the
+          ;; inner one, leaving its thread running with nobody tracking it.
+          (sb-sys:without-interrupts
+            (unwind-protect
+                 (progn
+                   ;; Spawned with interrupts deferred, so no asynchronous
+                   ;; exit can land between the thread existing and THREAD
+                   ;; naming it -- the cleanup would then have nothing to stop
+                   ;; and the thread would run on unnoticed.
                    (setf thread
                          (make-thread
                           (lambda ()
@@ -138,15 +143,16 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                                                    (funcall thunk)))))
                                   (serious-condition (e)
                                     (setf outcome (cons :error e)))))))
-                          :name name)))
-                 (%wait-until-dead thread timeout-seconds)
-                 (let ((timed-out (thread-alive-p thread)))
-                   (stop)
-                   (multiple-value-prog1 (finish timed-out
-                                                 (thread-alive-p thread))
-                     (setf answered t))))
-            ;; A non-local exit from the caller -- an outer deadline, a
-            ;; kill -- must not leave the run thread executing unnoticed.
-            ;; Guarded so the normal path does not pay for a second
-            ;; interrupt-and-destroy cycle it has already completed.
-            (unless answered (stop)))))))
+                          :name name))
+                   (sb-sys:with-local-interrupts
+                     (%wait-until-dead thread timeout-seconds)
+                     (let ((timed-out (thread-alive-p thread)))
+                       (stop)
+                       (multiple-value-prog1 (finish timed-out
+                                                     (thread-alive-p thread))
+                         (setf answered t)))))
+              ;; A non-local exit from the caller -- an outer deadline, a
+              ;; kill -- must not leave the run thread executing unnoticed.
+              ;; Guarded so the normal path does not pay for a second
+              ;; interrupt-and-destroy cycle it has already completed.
+              (unless answered (stop))))))))

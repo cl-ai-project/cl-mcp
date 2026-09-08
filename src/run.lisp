@@ -26,8 +26,65 @@
                           (values boolean &optional))
                 run))
 
-(defun run (&key (transport :stdio) (in *standard-input*)
-                 (out *standard-output* out-supplied-p)
+(defun %resolve-output-stream (stream)
+  "Follow synonym and two-way streams down to the stream that really writes."
+  (typecase stream
+    (synonym-stream (%resolve-output-stream
+                     (symbol-value (synonym-stream-symbol stream))))
+    (two-way-stream (%resolve-output-stream
+                     (two-way-stream-output-stream stream)))
+    (t stream)))
+
+(defun %process-stdout-p (stream)
+  "True when STREAM ultimately writes to this process's own stdout (fd 1).
+Asked of the stream itself rather than of how RUN was called: a caller that
+passes :OUT *STANDARD-OUTPUT* explicitly is using the same descriptor as one
+that passes nothing, and both need the same protection."
+  (let ((base (%resolve-output-stream stream)))
+    (and (typep base 'sb-sys:fd-stream)
+         (eql 1 (sb-sys:fd-stream-fd base)))))
+
+(defun %call-with-stdout-isolated (out thunk)
+  "Call THUNK with this image's global output streams kept off OUT.
+
+Only when OUT really is the process's own stdout.  That descriptor is then the
+JSON-RPC channel, and nothing else in the image may write to it: with the
+worker pool disabled every tool runs in this process, and a thread a tool or a
+test suite spawns sees only the GLOBAL value of a special -- so a stray
+(FORMAT T ...) there lands between JSON-RPC lines and desynchronizes the
+client.  Being invisible to spawned threads is exactly why these are SETF and
+not bound.
+
+*DEBUG-IO*, *TERMINAL-IO* and *QUERY-IO* move with it: they default to the
+terminal, which is the same descriptor.  They get a two-way stream so they
+keep the bidirectional contract ANSI requires of them, the same shape the
+worker process uses.  Logging is untouched -- *LOG-STREAM* follows
+*ERROR-OUTPUT* on fd 2.
+
+The globals are restored on the way out, so a second RUN in this image does
+not pick the sink up as its own OUT and silently discard every response."
+  (if (not (%process-stdout-p out))
+      (funcall thunk)
+      (let ((saved-output *standard-output*)
+            (saved-debug *debug-io*)
+            (saved-terminal *terminal-io*)
+            (saved-query *query-io*)
+            (sink (make-broadcast-stream)))
+        (flet ((interactive ()
+                 (make-two-way-stream (make-concatenated-stream) sink)))
+          (unwind-protect
+               (progn
+                 (setf *standard-output* sink
+                       *debug-io* (interactive)
+                       *terminal-io* (interactive)
+                       *query-io* (interactive))
+                 (funcall thunk))
+            (setf *standard-output* saved-output
+                  *debug-io* saved-debug
+                  *terminal-io* saved-terminal
+                  *query-io* saved-query))))))
+
+(defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
                  (host "127.0.0.1") (port 0) (accept-once t) on-listening
                  (worker-pool nil worker-pool-supplied-p))
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
@@ -41,60 +98,55 @@ NIL runs all tools in-process.  When not supplied, the current value of
   (%warn-if-init-without-pool *use-worker-pool*)
   (ecase transport
     (:stdio
-     ;; When the process's own stdout is the protocol channel, nothing else in
-     ;; this image may write to it: with the worker pool disabled every tool
-     ;; runs here, and a stray (FORMAT T ...) -- from an inline tool, or from a
-     ;; thread a test suite spawned, which sees only the global value -- puts
-     ;; raw text between JSON-RPC lines and desynchronizes the client.  Move
-     ;; the global aside; responses keep going to OUT, which still names the
-     ;; real stream.  Logging is unaffected: *LOG-STREAM* follows
-     ;; *ERROR-OUTPUT*.  Skipped when the caller supplied its own OUT, where
-     ;; the process's stdout is not the channel and is not ours to redirect.
-     (unless out-supplied-p
-       (setf *standard-output* (make-broadcast-stream)))
-     (when *use-worker-pool* (initialize-pool))
-     (unwind-protect
-         (let ((state (make-state))
-               (cl-mcp/src/protocol:*current-session-id* "stdio"))
-           (log-event :info "stdio.start")
-           (loop for line = (handler-case
-                                 (%read-line-limited in :eof +max-json-line-bytes+)
-                               (line-too-long (e)
-                                 (log-event :warn "stdio.read.line-too-long"
-                                            "error" (princ-to-string e))
-                                 ;; Drain remaining bytes on the current line
-                                 ;; so the next read-line starts fresh.
-                                 (loop for ch = (read-char in nil nil)
-                                       while (and ch (not (char= ch #\Newline))))
-                                 :read-error))
-                 until (eq line :eof)
-                 do (cond
-                      ((eq line :read-error)
-                       ;; Return JSON-RPC error for the oversized line
-                       (handler-case
-                           (progn
-                             (write-line
-                              "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
-                              out)
-                             (force-output out))
-                         (stream-error (e)
-                           (log-event :warn "stdio.write.error"
-                                      "error" (princ-to-string e))
-                           (return))))
-                      (t
-                       (let ((resp (process-json-line line state)))
-                         (when resp
+     (%call-with-stdout-isolated
+      out
+      (lambda ()
+        (when *use-worker-pool* (initialize-pool))
+        (unwind-protect
+             (let ((state (make-state))
+                   (cl-mcp/src/protocol:*current-session-id* "stdio"))
+               (log-event :info "stdio.start")
+               (loop for line = (handler-case
+                                    (%read-line-limited in :eof
+                                                        +max-json-line-bytes+)
+                                  (line-too-long (e)
+                                    (log-event :warn "stdio.read.line-too-long"
+                                               "error" (princ-to-string e))
+                                    ;; Drain remaining bytes on the current line
+                                    ;; so the next read-line starts fresh.
+                                    (loop for ch = (read-char in nil nil)
+                                          while (and ch
+                                                     (not (char= ch #\Newline))))
+                                    :read-error))
+                     until (eq line :eof)
+                     do (cond
+                          ((eq line :read-error)
+                           ;; Return JSON-RPC error for the oversized line
                            (handler-case
                                (progn
-                                 (write-line resp out)
+                                 (write-line
+                                  "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
+                                  out)
                                  (force-output out))
                              (stream-error (e)
                                (log-event :warn "stdio.write.error"
                                           "error" (princ-to-string e))
-                               (return))))))))
-           (log-event :info "stdio.stop")
-           t)
-       (when *use-worker-pool* (ignore-errors (shutdown-pool)))))
+                               (return))))
+                          (t
+                           (let ((resp (process-json-line line state)))
+                             (when resp
+                               (handler-case
+                                   (progn
+                                     (write-line resp out)
+                                     (force-output out))
+                                 (stream-error (e)
+                                   (log-event :warn "stdio.write.error"
+                                              "error" (princ-to-string e))
+                                   (return))))))))
+               (log-event :info "stdio.stop")
+               t)
+          (when *use-worker-pool* (ignore-errors (shutdown-pool)))))))
     (:tcp
      (log-event :info "tcp.start" "host" host "port" port)
-     (serve-tcp :host host :port port :accept-once accept-once :on-listening on-listening))))
+     (serve-tcp :host host :port port :accept-once accept-once
+                :on-listening on-listening))))
