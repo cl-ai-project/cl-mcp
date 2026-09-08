@@ -200,8 +200,13 @@ DEFUN' lines are noise that drown real warnings."
                                (*compile-print* nil)
                                (*load-verbose* nil)
                                (*load-print* nil)
-                               (*standard-output* (make-string-output-stream))
-                               (*trace-output* (make-string-output-stream))
+                               ;; Discarded rather than collected: these two
+                               ;; are bound purely to suppress, and nothing
+                               ;; ever reads them back.  A string stream would
+                               ;; hold every character a noisy compile emits
+                               ;; for output no one will ever see.
+                               (*standard-output* (make-broadcast-stream))
+                               (*trace-output* (make-broadcast-stream))
                                (*error-output* stderr)
                                ;; log4cl's console appender writes to a synonym
                                ;; stream for *DEBUG-IO*, which in a worker
@@ -246,8 +251,8 @@ DEFUN' lines are noise that drown real warnings."
                              (*compile-print* nil)
                              (*load-verbose* nil)
                              (*load-print* nil)
-                             (*standard-output* (make-string-output-stream))
-                             (*trace-output* (make-string-output-stream))
+                             (*standard-output* (make-broadcast-stream))
+                             (*trace-output* (make-broadcast-stream))
                              (*error-output* stderr)
                              (*debug-io* interactive)
                              (*terminal-io* interactive)

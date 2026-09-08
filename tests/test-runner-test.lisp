@@ -172,6 +172,42 @@
          (ok (search "DEBUG-MARKER-12345" stdout)
           "stdout should contain the debug output from the test")))))))
 
+(deftest run-tests-bounds-what-a-chatty-suite-costs
+  (testing "a suite printing far past the limit is capped, and says so"
+    ;; The limit governs what is *held*, not only what is reported.  Captured
+    ;; into a STRING-OUTPUT-STREAM and truncated afterwards, a suite emitting
+    ;; 40 million characters cost 367 MB of heap to report 50 KB of it, and
+    ;; under a 256 MB dynamic space the run died with HEAP-EXHAUSTED-ERROR
+    ;; while materialising the string -- in a fifth of a second, so the run
+    ;; deadline was no protection either.
+    (let ((result (run-tests "cl-mcp/tests/test-runner-test-chatty")))
+      (ok (= 0 (gethash "failed" result)) "the helper test itself passes")
+      (let ((stdout (gethash "stdout" result)))
+        (cond
+          ;; Same nested-rove caveat as RUN-TESTS-CAPTURES-STDOUT above.
+          ((null stdout)
+           (rove:skip "stdout not captured (nested rove:run limitation)"))
+          (t
+           (ok (<= (length stdout)
+                   (+ cl-mcp/src/test-runner-core:*max-test-output-length*
+                      100))
+               (format nil "reported ~D chars for a limit of ~D"
+                       (length stdout)
+                       cl-mcp/src/test-runner-core:*max-test-output-length*))
+           ;; The note has to carry the true total, not the retained length:
+           ;; that number is the only evidence the caller gets about how much
+           ;; was dropped, and reporting the kept size would read as "nothing
+           ;; was lost".  The fixture emits 400 000 characters of its own.
+           (let ((marker (search "(truncated, " stdout)))
+             (ok marker "the note is present")
+             (let ((total (and marker
+                               (parse-integer stdout
+                                              :start (+ marker 12)
+                                              :junk-allowed t))))
+               (ok (and total (>= total 400000))
+                   (format nil "the note reports the real total (~A)"
+                           total))))))))))
+
 (deftest run-tests-selected-captures-stdout
  (testing "run-tests with :test captures stdout"
   (let ((result

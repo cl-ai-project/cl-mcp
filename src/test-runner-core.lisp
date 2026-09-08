@@ -11,6 +11,9 @@
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/bounded-stream
+                #:make-bounded-output-stream
+                #:bounded-output-string)
   (:export #:run-tests
            #:detect-test-framework
            #:make-load-failure-result
@@ -48,13 +51,17 @@ worker dispatches handlers on the calling thread.")
       (funcall *load-lock-wrapper* thunk)
       (funcall thunk)))
 
-(defun %truncate-test-output (string)
-  "Truncate STRING to *max-test-output-length* if it exceeds the limit."
-  (if (> (length string) *max-test-output-length*)
-      (format nil "~A~%... (truncated, ~D total chars)"
-              (subseq string 0 *max-test-output-length*)
-              (length string))
-      string))
+(defun %make-capture-stream ()
+  "Return a stream for capturing test output, bounded by
+*MAX-TEST-OUTPUT-LENGTH*.
+
+Bounded while writing rather than truncated afterwards: a STRING-OUTPUT-STREAM
+holds everything the suite produced, so the limit governed what was reported
+while the heap paid for the rest.  Measured, a suite emitting 40 million
+characters cost 367 MB to report 50 KB of it, and under a smaller dynamic
+space the run died with HEAP-EXHAUSTED-ERROR while materializing the string --
+in a fifth of a second, so the run deadline was no protection."
+  (make-bounded-output-stream *max-test-output-length*))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Detection
@@ -901,9 +908,9 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          (_ (unless report-stream-sym
               (error "Rove internal symbol *REPORT-STREAM* not found; incompatible Rove version?")))
          (start-time (get-internal-real-time))
-         (stdout-stream (make-string-output-stream))
-         (stderr-stream (make-string-output-stream))
-         (debug-stream (make-string-output-stream))
+         (stdout-stream (%make-capture-stream))
+         (stderr-stream (%make-capture-stream))
+         (debug-stream (%make-capture-stream))
          successp
          results
          rove-error)
@@ -927,10 +934,9 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
             (round
              (* 1000
                 (/ (- end-time start-time) internal-time-units-per-second))))
-           (stdout (%truncate-test-output (get-output-stream-string stdout-stream)))
-           (stderr (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output
-            (%truncate-test-output (get-output-stream-string debug-stream))))
+           (stdout (bounded-output-string stdout-stream))
+           (stderr (bounded-output-string stderr-stream))
+           (debug-output (bounded-output-string debug-stream)))
       (if rove-error
           ;; Rove crashed (e.g., direct assertions without testing wrapper)
           (let ((ht (make-test-result
@@ -1012,9 +1018,9 @@ detects test sub-systems from ASDF dependencies and runs each individually."
               (error "Rove internal symbols not found (~A ~A); incompatible Rove version?"
                      report-stream-sym last-report-sym)))
          (start-time (get-internal-real-time))
-         (stdout-stream (make-string-output-stream))
-         (stderr-stream (make-string-output-stream))
-         (debug-stream (make-string-output-stream))
+         (stdout-stream (%make-capture-stream))
+         (stderr-stream (%make-capture-stream))
+         (debug-stream (%make-capture-stream))
          successp
          results
          rove-error)
@@ -1038,12 +1044,9 @@ detects test sub-systems from ASDF dependencies and runs each individually."
             (round
              (* 1000
                 (/ (- end-time start-time) internal-time-units-per-second))))
-           (stdout
-            (%truncate-test-output (get-output-stream-string stdout-stream)))
-           (stderr
-            (%truncate-test-output (get-output-stream-string stderr-stream)))
-           (debug-output
-            (%truncate-test-output (get-output-stream-string debug-stream))))
+           (stdout (bounded-output-string stdout-stream))
+           (stderr (bounded-output-string stderr-stream))
+           (debug-output (bounded-output-string debug-stream)))
       (if rove-error
           (let ((ht
                  (make-test-result :passed 0 :failed 1 :failed-tests
@@ -1177,9 +1180,9 @@ the surrounding passed/failed/pending/failure-details bindings."
 (defun run-asdf-fallback (system-name)
   "Run tests using asdf:test-system with text output capture."
   (log-event :info "test.runner" "framework" "asdf-fallback" "system" system-name)
-  (let ((output (make-string-output-stream))
-        (error-output (make-string-output-stream))
-        (debug-stream (make-string-output-stream))
+  (let ((output (%make-capture-stream))
+        (error-output (%make-capture-stream))
+        (debug-stream (%make-capture-stream))
         (start-time (get-internal-real-time))
         (success nil)
         (condition-message nil))
@@ -1196,8 +1199,8 @@ the surrounding passed/failed/pending/failure-details bindings."
     (let* ((end-time (get-internal-real-time))
            (duration-ms (round (* 1000 (/ (- end-time start-time)
                                           internal-time-units-per-second))))
-           (stdout (%truncate-test-output (get-output-stream-string output)))
-           (stderr (%truncate-test-output (get-output-stream-string error-output)))
+           (stdout (bounded-output-string output))
+           (stderr (bounded-output-string error-output))
            (failure-reason (or condition-message
                                (and (plusp (length stderr)) stderr)
                                "asdf:test-system failed"))
@@ -1217,8 +1220,7 @@ the surrounding passed/failed/pending/failure-details bindings."
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
-      (let ((debug-output
-              (%truncate-test-output (get-output-stream-string debug-stream))))
+      (let ((debug-output (bounded-output-string debug-stream)))
         (when (plusp (length debug-output))
           (setf (gethash "debug_output" ht) debug-output)))
       ht)))
@@ -1504,19 +1506,16 @@ spawns is not captured and reaches the process's own stdout: in SBCL a new
 thread starts from the GLOBAL value of a special, so these bindings are
 invisible to it.  The Rove backend has the same property."
   (let ((start-time (get-internal-real-time))
-        (stdout-stream (make-string-output-stream))
-        (stderr-stream (make-string-output-stream))
-        (debug-stream (make-string-output-stream))
+        (stdout-stream (%make-capture-stream))
+        (stderr-stream (%make-capture-stream))
+        (debug-stream (%make-capture-stream))
         all-results)
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
-           (stdout () (%truncate-test-output
-                       (get-output-stream-string stdout-stream)))
-           (stderr () (%truncate-test-output
-                       (get-output-stream-string stderr-stream)))
-           (debug-output () (%truncate-test-output
-                             (get-output-stream-string debug-stream))))
+           (stdout () (bounded-output-string stdout-stream))
+           (stderr () (bounded-output-string stderr-stream))
+           (debug-output () (bounded-output-string debug-stream)))
       (handler-case
           (dolist (spec specs)
             (let ((results
