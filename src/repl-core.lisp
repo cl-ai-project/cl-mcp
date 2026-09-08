@@ -83,8 +83,10 @@ a second.  The evaluation deadline is no protection at that speed.
 
 Zero is a limit, not a missing one: max_output_length is declared (integer 0)
 and asking for zero asks for the output to be suppressed, which the stream
-does exactly.  Only a value that is not a usable limit at all falls back to
-the default."
+does exactly.  That is the case this guard exists for -- REPL-EVAL's declaimed
+ftype already rejects everything else that is not NIL, so in practice only NIL
+reaches the fallback.  The rest of the test is defence for a caller reaching
+this helper directly."
   (make-bounded-output-stream (if (and (integerp max-output-length)
                                        (not (minusp max-output-length)))
                                   max-output-length

@@ -871,8 +871,11 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
       (let ((marker (search "(truncated, " stdout)))
         (ok marker
             (format nil "the note survives sanitizing: ~S" stdout))
-        (ok (= 1005 (and marker (parse-integer stdout :start (+ marker 12)
-                                                      :junk-allowed t)))
+        ;; EQL against the parse, not =: when the note is gone MARKER is NIL
+        ;; and = would fail with a type error rather than for the reason the
+        ;; assertion names.
+        (ok (eql 1005 (and marker (parse-integer stdout :start (+ marker 12)
+                                                        :junk-allowed t)))
             "and still reports the true total")
         (ok (notany (lambda (c) (< (char-code c) 32))
                     (remove #\Newline stdout))

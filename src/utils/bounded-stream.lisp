@@ -44,6 +44,12 @@ pretty-printed lines at the wrong places, silently rewriting the output it
 was only supposed to be bounding.  Counting past the limit as well keeps
 those decisions matching what the writer would have seen.
 
+One inherited limitation: CL:STREAM-EXTERNAL-FORMAT signals on this stream
+where a STRING-OUTPUT-STREAM answers NIL.  SBCL implements that as an ordinary
+function rather than a generic, so no method can be added for it, and every
+Gray stream in SBCL behaves this way.  Evaluated code asking its own
+*STANDARD-OUTPUT* that question gets an error naming this class.
+
 Not synchronized, and neither was the STRING-OUTPUT-STREAM it replaces:
 concurrent writers can overshoot the limit by roughly one write each, where
 the string stream instead lost characters outright.  Suites that spawn
@@ -106,23 +112,27 @@ captured text -- sanitizing escape sequences out of it, say -- would otherwise
 have the rewriting swallow its own note: retained text cut mid-sequence ends
 in an introducer whose terminator was dropped, and a sanitizer then consumes
 everything after it, including the note saying that output went missing.  The
-reported total is taken from the text as captured, so a transform that changes
-the length cannot understate it.
+reported total is taken from the text as captured, so a transform that empties
+or shortens it cannot understate what there was.
+
+The counters are reset before TRANSFORM runs.  It is arbitrary caller code at
+that point, and a transform that signals would otherwise leave the stream
+drained but still counting its old total against the limit.
 
 The column survives a drain, unlike the kept and dropped counts.  Reading the
 text out does not move the writer's cursor, so a writer left mid-line is still
 mid-line afterwards and FRESH-LINE must still say so."
   (let* ((raw (get-output-stream-string (%sink stream)))
          (dropped (%dropped stream))
-         (total (+ (length raw) dropped))
-         (kept (funcall transform raw)))
+         (total (+ (length raw) dropped)))
     (setf (%kept stream) 0
           (%dropped stream) 0)
-    (cond
-      ((zerop dropped) kept)
-      ;; No separating newline when nothing was kept: the note would otherwise
-      ;; start with a blank line, which reads as retained output.
-      ((zerop (length kept))
-       (format nil "... (truncated, ~D total chars)" total))
-      (t
-       (format nil "~A~%... (truncated, ~D total chars)" kept total)))))
+    (let ((kept (funcall transform raw)))
+      (cond
+        ((zerop dropped) kept)
+        ;; No separating newline when nothing was kept: the note would
+        ;; otherwise start with a blank line, which reads as retained output.
+        ((zerop (length kept))
+         (format nil "... (truncated, ~D total chars)" total))
+        (t
+         (format nil "~A~%... (truncated, ~D total chars)" kept total))))))

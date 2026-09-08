@@ -157,3 +157,60 @@ three!" s)
       (let ((text (bounded-output-string s)))
         (ok (equal "bb" text))
         (ok (null (search "truncated" text)))))))
+
+(deftest bounded-stream-transform-cannot-consume-its-own-note
+  ;; TRANSFORM exists so a caller that rewrites the captured text cannot have
+  ;; the rewriting swallow the note that says output went missing.  repl-eval
+  ;; passes SANITIZE-FOR-JSON, and capture cut mid-escape-sequence leaves an
+  ;; introducer whose terminator was dropped -- a sanitizer applied to the
+  ;; composed string then eats everything after it, note included.
+  (testing "the note is composed after the transform, not passed through it"
+    (let ((s (make-bounded-output-stream 3)))
+      (write-string "abcdefghij" s)
+      ;; Stands in for a sanitizer that consumes a trailing introducer and
+      ;; whatever follows it.
+      (let ((text (bounded-output-string
+                   s :transform (lambda (raw) (subseq raw 0 2)))))
+        (ok (search "truncated" text)
+            (format nil "the note survived the transform: ~S" text))
+        (ok (string= "ab" (subseq text 0 2))
+            "and the transform still applied to the retained text"))))
+  (testing "the total counts what was captured, not what the transform left"
+    ;; A transform that shortens the text must not shrink the reported total:
+    ;; that number is the caller's only measure of how much was lost.
+    (let ((s (make-bounded-output-stream 5)))
+      (write-string (make-string 100 :initial-element #\x) s)
+      (let* ((text (bounded-output-string
+                    s :transform (lambda (raw) (declare (ignore raw)) "Z")))
+             (marker (search "(truncated, " text))
+             (total (and marker (parse-integer text :start (+ marker 12)
+                                                    :junk-allowed t))))
+        (ok (eql 100 total)
+            (format nil "reported ~A, captured 100" total)))))
+  (testing "and still counts it when the transform empties the text entirely"
+    ;; Reachable from repl-eval: everything retained was an escape sequence,
+    ;; so sanitizing leaves nothing.  Counting only the dropped characters
+    ;; here understates the total by exactly what was retained.
+    (let ((s (make-bounded-output-stream 5)))
+      (write-string (make-string 100 :initial-element #\x) s)
+      (let* ((text (bounded-output-string
+                    s :transform (lambda (raw) (declare (ignore raw)) "")))
+             (marker (search "(truncated, " text))
+             (total (and marker (parse-integer text :start (+ marker 12)
+                                                    :junk-allowed t))))
+        (ok (eql 100 total)
+            (format nil "reported ~A, captured 100" total))
+        (ok (not (eql #\Newline (char text 0)))
+            "with no leading blank line where the text would have been"))))
+  (testing "the counters are reset before the transform runs"
+    ;; TRANSFORM is arbitrary caller code.  One that signals must not leave the
+    ;; stream drained but still counting its old total against the limit.
+    (let ((s (make-bounded-output-stream 5)))
+      (write-string "abcdefghij" s)
+      (ignore-errors
+       (bounded-output-string s :transform (lambda (raw)
+                                             (declare (ignore raw))
+                                             (error "transform failed"))))
+      (write-string "xy" s)
+      (ok (equal "xy" (bounded-output-string s))
+          "the stream still accepts and retains after a failed transform"))))
