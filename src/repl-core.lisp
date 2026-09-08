@@ -8,6 +8,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/bounded-stream
+                #:make-bounded-output-stream
+                #:bounded-output-string)
   (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
@@ -65,6 +68,33 @@ on large outputs)."
                    (%sanitize-control-chars (subseq string 0 max-output-length))
                    "...(truncated)")
       (%sanitize-control-chars string)))
+
+(defun %make-capture-stream (max-output-length)
+  "Return a stream for capturing evaluated code's output, bounded by
+MAX-OUTPUT-LENGTH.
+
+Bounded while writing rather than truncated afterwards.  A
+STRING-OUTPUT-STREAM holds everything the form produced, so the limit governed
+what was reported while the heap paid for the rest -- and the form here is
+whatever the client sent.  Measured, `(dotimes (i 500000) (write-string ...))'
+cost 313 MB of heap to report 50 KB of it, and under a 256 MB dynamic space it
+died with HEAP-EXHAUSTED-ERROR while materialising the string, in a quarter of
+a second.  The evaluation deadline is no protection at that speed."
+  (make-bounded-output-stream (if (and max-output-length
+                                       (integerp max-output-length)
+                                       (plusp max-output-length))
+                                  max-output-length
+                                  *default-max-output-length*)))
+
+(defun %captured-output (stream)
+  "Drain STREAM's bounded capture and sanitize it for JSON.
+
+The bounding already happened on the way in, so only the sanitizing half of
+%TRUNCATE-OUTPUT is left to do here.  The note the stream appends differs from
+that function's \"...(truncated)\": the stream counted what it discarded and
+says how much, which is worth more to a caller than knowing only that
+something was lost."
+  (%sanitize-control-chars (bounded-output-string stream)))
 
 (define-condition %package-not-found-error (package-error)
   ()
@@ -189,8 +219,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
   (let ((last-value nil)
         (error-context nil)
         (eval-package nil)
-        (stdout (make-string-output-stream))
-        (stderr (make-string-output-stream)))
+        (stdout (%make-capture-stream max-output-length))
+        (stderr (%make-capture-stream max-output-length)))
     (handler-bind ((warning (lambda (w)
                               (format stderr "~&Warning: ~A~%" w)
                               (when (find-restart 'muffle-warning)
@@ -201,8 +231,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                              (msg (%truncate-output raw-msg max-output-length)))
                         (return-from %do-repl-eval
                           (values msg msg
-                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                  (%captured-output stdout)
+                                  (%captured-output stderr)
                                   (list :condition-type (princ-to-string (type-of e))
                                         :message msg
                                         :restarts nil
@@ -213,8 +243,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                              (msg (%truncate-output raw-msg max-output-length)))
                         (return-from %do-repl-eval
                           (values msg msg
-                                  (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                  (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                  (%captured-output stdout)
+                                  (%captured-output stderr)
                                   (list :condition-type (princ-to-string (type-of e))
                                         :message msg
                                         :restarts nil
@@ -239,8 +269,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                             (return-from %do-repl-eval
                               (values (%truncate-output last-value max-output-length)
                                       last-value
-                                      (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                      (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                      (%captured-output stdout)
+                                      (%captured-output stderr)
                                       error-context)))))
       (let ((pkg (%resolve-eval-package package)))
         (setf eval-package pkg)
@@ -254,8 +284,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                          (let ((msg "Reader error: unexpected end of file -- check for unbalanced parentheses"))
                            (return-from %do-repl-eval
                              (values msg msg
-                                     (%truncate-output (get-output-stream-string stdout) max-output-length)
-                                     (%truncate-output (get-output-stream-string stderr) max-output-length)
+                                     (%captured-output stdout)
+                                     (%captured-output stderr)
                                      (list :condition-type "END-OF-FILE"
                                            :message msg
                                            :restarts nil
@@ -281,8 +311,8 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
           (*print-circle* t))
       (values (%truncate-output (%safe-prin1-to-string last-value) max-output-length)
               last-value
-              (%truncate-output (get-output-stream-string stdout) max-output-length)
-              (%truncate-output (get-output-stream-string stderr) max-output-length)
+              (%captured-output stdout)
+              (%captured-output stderr)
               nil))))
 
 (defun %thunk-error-result (condition)

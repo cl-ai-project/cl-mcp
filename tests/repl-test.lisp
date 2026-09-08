@@ -793,3 +793,52 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
         (repl-eval "(write-string \"via-query-io\" *query-io*)")
       (declare (ignore printed value))
       (ok (search "via-query-io" (or stdout ""))))))
+
+(deftest repl-eval-does-not-retain-output-it-will-not-report
+  ;; max_output_length governs what is reported; it has to govern what is held
+  ;; too.  Captured into a STRING-OUTPUT-STREAM and truncated afterwards, a
+  ;; form printing 40 million characters cost 313 MB of heap to report 50 KB,
+  ;; and under a 256 MB dynamic space it died with HEAP-EXHAUSTED-ERROR in a
+  ;; quarter of a second -- so the evaluation deadline was no protection.
+  ;; repl-eval runs whatever the client sends, which makes this one request
+  ;; rather than a suite someone had to write first.
+  (testing "a form printing far past the limit is capped, and says how far"
+    (multiple-value-bind (printed value stdout stderr)
+        (repl-eval "(dotimes (i 100000) (write-string \"0123456789\"))"
+                   :max-output-length 1000)
+      (declare (ignore printed value stderr))
+      (ok (<= (length stdout) 1100)
+          (format nil "reported ~D chars for a limit of 1000" (length stdout)))
+      (let ((marker (search "(truncated, " stdout)))
+        (ok marker "the note is present")
+        ;; The true total, not the retained length: that number is the only
+        ;; signal the caller gets about how much was lost.
+        (let ((total (and marker (parse-integer stdout :start (+ marker 12)
+                                                       :junk-allowed t))))
+          (ok (and total (>= total 1000000))
+              (format nil "the note reports the real total (~A)" total))))))
+  (testing "and holds a fraction of what retaining it would cost"
+    ;; The assertion above passes on a stream that keeps everything and
+    ;; truncates at the end -- it is a guard on reporting shape.  This one is
+    ;; the memory property, calibrated against the stream this replaced rather
+    ;; than a fixed byte count.
+    (flet ((consed (thunk)
+             (sb-ext:gc :full t)
+             (let ((before (sb-ext:get-bytes-consed)))
+               (funcall thunk)
+               (- (sb-ext:get-bytes-consed) before))))
+      (let ((bounding (consed
+                       (lambda ()
+                         (repl-eval "(dotimes (i 100000) (write-string \"0123456789\"))"
+                                    :max-output-length 1000))))
+            (retaining (consed
+                        (lambda ()
+                          (let ((s (make-string-output-stream)))
+                            (dotimes (i 100000) (write-string "0123456789" s))
+                            (get-output-stream-string s))))))
+        ;; A clear margin rather than a bare <: the bounded run still conses
+        ;; for reading and evaluating the form, so the assertion has to say
+        ;; "a fraction of", not merely "less than".
+        (ok (< bounding (floor retaining 4))
+            (format nil "~D bytes to bound 1 000 000 characters, against ~D to retain them"
+                    bounding retaining))))))
