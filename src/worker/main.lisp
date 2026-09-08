@@ -203,7 +203,21 @@ Roswell REPL."
             (%output-handshake tcp-port swank-port)
             (let ((devnull (open #P"/dev/null" :direction :output
                                                :if-exists :append)))
-              (setf *standard-output* devnull))
+              (setf *standard-output* devnull)
+              ;; Also redirect *DEBUG-IO* and the other interactive streams.
+              ;; log4cl's console appender writes to a synonym stream for
+              ;; *DEBUG-IO*, which in this pipe-spawned worker resolves to
+              ;; the ORIGINAL stdout fd -- whose read end the parent closed
+              ;; after reading the handshake.  Any write there raises
+              ;; BROKEN-PIPE and aborts the load/eval in progress.  Bordeaux
+              ;; threads inherit these values as their defaults, so this one
+              ;; redirect covers every thread the worker later spawns.  The
+              ;; output-suppression helpers (%call-with-suppressed-output,
+              ;; repl-eval) rebind them to capture streams, so logging inside
+              ;; load-system/repl-eval is still returned in tool results.
+              (setf *debug-io* devnull
+                    *terminal-io* devnull
+                    *query-io* devnull))
             (%start-parent-watchdog)
             (start-accept-loop server))))
     (serious-condition (e)

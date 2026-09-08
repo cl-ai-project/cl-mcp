@@ -18,6 +18,9 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests
+                #:call-with-test-run-deadline
+                #:coerce-timeout-seconds
+                #:make-timeout-result
                 #:*load-lock-wrapper*)
   (:import-from #:cl-mcp/src/inspect
                 #:inspect-object-by-id)
@@ -136,42 +139,47 @@ concurrent worker/init load or another load-system."
 \"run-tests\".  Honors timeout_seconds to limit test execution time.
 Holds *ASDF-LOAD-LOCK* only for RUN-TESTS' force-reload phase, by binding
 *LOAD-LOCK-WRAPPER*, so a load here cannot overlap a concurrent load.  The
-test run itself must NOT hold the lock: the worker dispatches handlers on
-its connection thread and Rove runs deftests on that same thread, so a
-suite whose tests touch *ASDF-LOAD-LOCK* (tests/worker-init-hook-test)
-would deadlock or trip SBCL's recursive-lock check."
+test run itself must NOT hold the lock: the suite may take a lock of its
+own or block on one, and a test that blocked on *ASDF-LOAD-LOCK* while the
+lock sat with its holder waiting for the run would deadlock.
+
+The run executes on its own thread under CALL-WITH-TEST-RUN-DEADLINE, so
+it cannot pin this worker's single connection thread.  That matters for a
+suite that leaves something blocking behind -- a server accept loop, say:
+SB-EXT:WITH-TIMEOUT cannot interrupt a blocking foreign call, so run
+inline such a suite would wedge the connection thread and every later tool
+call for this session with it.  Polling bounds the wait regardless, and the
+caller is answered at the deadline even while the suite is still blocked."
   (let ((system (gethash "system" params))
-         (framework (gethash "framework" params))
-         (test (gethash "test" params))
-         (tests (gethash "tests" params))
-         (timeout (let ((v (gethash "timeout_seconds" params)))
-                    (and v (numberp v) (plusp v) v))))
+        (framework (gethash "framework" params))
+        (test (gethash "test" params))
+        (tests (gethash "tests" params))
+        (timeout (coerce-timeout-seconds (gethash "timeout_seconds" params))))
     (unless system
       (error "system is required"))
-    (flet ((do-run ()
-             ;; The lock covers RUN-TESTS' force-reload only; see the
-             ;; docstring for why the test run itself must stay outside it.
-             (let ((*load-lock-wrapper*
-                     (lambda (thunk)
-                       (with-asdf-load-lock (funcall thunk)))))
-               (run-tests system
-                          :framework framework
-                          :test test
-                          :tests tests))))
-      (let ((test-result (if timeout
-                             (handler-case
-                                 (sb-ext:with-timeout timeout
-                                   (do-run))
-                               (sb-ext:timeout ()
-                                 (make-ht "passed" 0
-                                          "failed" 1
-                                          "framework" "timeout"
-                                          "duration_ms" (round (* timeout 1000))
-                                          "failed_tests" (vector
-                                                          (make-ht "test_name" "TIMEOUT"
-                                                                   "reason" (format nil "Tests timed out after ~A seconds" timeout))))))
-                             (do-run))))
-        (build-run-tests-response test-result)))))
+    ;; Always enforce a server-side deadline so the worker's connection
+    ;; thread is never blocked indefinitely.  Use the documented default
+    ;; (300 s) when the client omits timeout_seconds.
+    (let ((effective-timeout (or timeout 300)))
+      (flet ((do-run ()
+               ;; The lock covers RUN-TESTS' force-reload only; see the
+               ;; docstring for why the test run itself must stay outside it.
+               (let ((*load-lock-wrapper*
+                       (lambda (thunk)
+                         (with-asdf-load-lock (funcall thunk)))))
+                 (run-tests system
+                            :framework framework
+                            :test test
+                            :tests tests))))
+        (multiple-value-bind (result status)
+            (call-with-test-run-deadline #'do-run effective-timeout)
+          (build-run-tests-response
+           (ecase status
+             (:ok result)
+             (:timeout (make-timeout-result result))
+             ;; Re-signal so genuine failures still surface as JSON-RPC
+             ;; errors instead of being reported as a bogus test result.
+             (:error (error result)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find

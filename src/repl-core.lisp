@@ -133,6 +133,15 @@ on large outputs)."
           (*read-default-float-format* 'single-float))
       (let ((*standard-output* stdout)
             (*error-output* stderr)
+            ;; log4cl's console appender writes to a synonym stream for
+            ;; *DEBUG-IO*, which in a worker resolves to the original stdout
+            ;; fd whose read end the parent closed after the handshake --
+            ;; any write there raises BROKEN-PIPE.  Rebinding these keeps
+            ;; log4cl / interactive output captured instead of hitting the
+            ;; dead pipe.
+            (*debug-io* stdout)
+            (*terminal-io* stdout)
+            (*query-io* stdout)
             (*compile-verbose* nil)
             (*compile-print* nil))
         (%call-with-compiler-streams
