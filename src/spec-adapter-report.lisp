@@ -938,6 +938,15 @@ while listing the properties about this symbol: ~A" condition)))))))
                                   (list +contract-not-selected-note+))))
                   nil)))))
 
+(defparameter +trials-needs-a-contract-message+
+  (concatenate 'string
+               "trials applies to a contract run (function=...) only. A "
+               "property's trial count comes from its own :trials table, "
+               "selected by profile; cl-spec's run-property takes no override, "
+               "so honouring trials here would report a budget the run did not "
+               "use.")
+  "Said when trials is given for a property selection.")
+
 (defun %target-argument-error (property symbol function)
   "Return the plist for a bad target selection, or NIL when it is fine.
 
@@ -1066,8 +1075,13 @@ the caveat."
           (definition-digest api name registry))
     (list :value value :complete (and value complete t))))
 
-(defun %trials-budget (api facts profile backend)
+(defun %trials-budget (api facts profile backend &optional requested)
   "Return the trial budget plist for a property described by FACTS under PROFILE.
+
+REQUESTED, when given, is the caller's explicit trial count for a contract run.
+A contract has no :TRIALS table for a profile to select from, so without this
+the only reachable budget is the backend's default -- and a contract whose
+failing region is a boundary needs more trials than that to reach it.
 
 cl-spec resolves this internally in RESOLVE-TRIALS and neither exports that
 function nor records the figure on a PROPERTY-RESULT, so it is derived here
@@ -1083,8 +1097,9 @@ computed from one backend and the run executed under another."
                        (handler-case
                            (funcall (api-fn api :backend-default-trials) backend)
                          (error () nil)))))
-    (list :budget (or from-profile default)
-          :budget-source (cond (from-profile "property-profile")
+    (list :budget (or requested from-profile default)
+          :budget-source (cond (requested "requested")
+                               (from-profile "property-profile")
                                (default "backend-default")
                                (t "unknown"))
           :property-trials (when table (printed-for-display table))
@@ -1444,7 +1459,7 @@ let a property budgeted zero trials report itself verified."
        t))
 
 (defun check-report (api api-status &key property symbol function package profile
-                                         seed expect-definition-digest
+                                         seed trials expect-definition-digest
                                          timeout-seconds
                                          (max-value-chars 2000))
   "Return the plist behind the spec-check tool.
@@ -1473,6 +1488,12 @@ anything holds."
         (list :status :backend-not-loaded
               :verified nil
               :message +backend-missing-message+
+              :environment environment)))
+    (when (and trials (not function))
+      (return-from check-report
+        (list :status :invalid-arguments
+              :verified nil
+              :message +trials-needs-a-contract-message+
               :environment environment)))
     (when (and function (not (and (api-has-p api :check-function)
                                   (api-has-p api :function-spec-data))))
@@ -1539,13 +1560,14 @@ anything holds."
               (let* ((facts (if (eq kind :contract)
                                 (%contract-facts api name registry)
                                 (%property-facts api name registry)))
-                     (trials (%trials-budget api facts profile-keyword backend))
+                     (budget-plist (%trials-budget api facts profile-keyword
+                                                   backend trials))
                      (digest (%digest-facts api name registry facts))
                      (remaining (- budget (%elapsed-since start)))
                      (result (%run-one api name registry kind profile-keyword seed
-                                       trials digest expect-definition-digest
-                                       remaining max-value-chars backend
-                                       facts)))
+                                       budget-plist digest
+                                       expect-definition-digest remaining
+                                       max-value-chars backend facts)))
                 (when (getf result :thread-leaked) (setf thread-leaked t))
                 (push result results)))
             (setf results (nreverse results))

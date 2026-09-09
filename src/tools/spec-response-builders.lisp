@@ -333,14 +333,20 @@ renders only content[].text is the same as not reaching it at all."
                 (getf node :predicate)
                 (getf node :class-name))
             (getf (getf node :target) :qualified))
-    (let ((minimum (getf node :min))
-          (maximum (getf node :max))
-          (values* (getf node :values))
-          (base (getf node :base-type)))
-      (when (or minimum maximum)
-        (format stream " [~A, ~A]" (or minimum "*") (or maximum "*")))
-      (when base (format stream "  base: ~A" base))
-      (when values* (format stream "  values: ~A" values*)))
+    (flet ((bound (value)
+             ;; cl-spec spells an open end :UNBOUNDED. Printing the keyword
+             ;; puts an IR detail in front of a reader who wrote "*" and will
+             ;; read "*" back; and a bound of 0 is a bound, so OR is not the
+             ;; test for whether one is there.
+             (if (or (null value) (eq :unbounded value)) "*" value)))
+      (let ((minimum (getf node :min))
+            (maximum (getf node :max))
+            (values* (getf node :values))
+            (base (getf node :base-type)))
+        (when (or minimum maximum)
+          (format stream " [~A, ~A]" (bound minimum) (bound maximum)))
+        (when base (format stream "  base: ~A" base))
+        (when values* (format stream "  values: ~A" values*))))
     ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
     ;; where :CHILDREN is a list, while the payload carries a vector.  ACROSS
     ;; signalled a type error on the list, and the deadline wrapper above

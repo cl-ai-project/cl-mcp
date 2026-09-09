@@ -16,7 +16,8 @@
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:spec-symbol-response
                 #:spec-describe-response
-                #:spec-check-response)
+                #:spec-check-response
+                #:spec-list-response)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht))
 
@@ -82,6 +83,17 @@ two paths agreeing whichever one a test exercises."
 (defun %first-result (response)
   "Return the first per-property result of a spec-check RESPONSE."
   (aref (gethash "results" response) 0))
+
+(defun %text (response)
+  "Return the text an MCP client would show for RESPONSE.
+
+Asserted on rather than only the payload: a client that renders content[].text
+sees this and nothing else, so a fact that reaches the payload alone has not
+reached the caller."
+  (let ((content (gethash "content" response)))
+    (if (and content (plusp (length content)))
+        (gethash "text" (aref content 0))
+        "")))
 
 (deftest cl-spec-adapter-discovers-and-describes
   (if (not (%cl-spec-available-p))
@@ -212,3 +224,110 @@ two paths agreeing whichever one a test exercises."
                 (testing "and the digest moved, so an old seed is not faithful"
                   (ok (not (string= before-digest
                                     (gethash "definition_digest" after-result))))))))))))
+
+(deftest cl-spec-adapter-reads-a-contract
+  (if (not (%cl-spec-available-p))
+      (skip +skip-reason+)
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (testing "spec-symbol says a contract exists and how to reach it"
+            (let ((response (spec-symbol-response
+                             (make-ht "symbol" (%fixture-name "CLAMP")))))
+              (ok (string= "CLAMP"
+                           (gethash "name"
+                                    (gethash "function_spec"
+                                             (gethash "registry" response)))))
+              (ok (search "spec-describe kind=function-spec" (%text response)))))
+
+          (testing "spec-describe projects which inputs it takes and what it returns"
+            (let* ((response (spec-describe-response
+                              (make-ht "kind" "function-spec"
+                                       "name" (%fixture-name "CLAMP"))))
+                   (text (%text response)))
+              (ok (string= "ok" (gethash "status" response)))
+              (ok (= 3 (length (gethash "arguments" response))))
+              (ok (gethash "returns" response))
+              (ok (search "SMALL-INT" text))
+              (testing "and the :pre and :post forms are shown, not only stored"
+                (ok (search ":pre" text))
+                (ok (search ":post" text))
+                (ok (search "RESULT" text)))))))))
+
+(deftest cl-spec-adapter-runs-a-contract
+  (if (not (%cl-spec-available-p))
+      (skip +skip-reason+)
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (testing "a contract that holds is verified, with its rejections counted"
+            (let* ((response (spec-check-response
+                              (make-ht "function" (%fixture-name "CLAMP")
+                                       "trials" 200)))
+                   (result (%first-result response))
+                   (contract (gethash "contract" result)))
+              (ok (string= "completed" (gethash "status" response)))
+              (ok (eq t (gethash "verified" response)))
+              (ok (string= "contract" (gethash "kind" result)))
+              (ok (= 200 (gethash "budget" (gethash "trials" result))))
+              (ok (string= "requested" (gethash "budget_source"
+                                                (gethash "trials" result))))
+              (testing "the run says how many inputs :pre refused"
+                (ok (eq t (gethash "rejected_measured" contract)))
+                (ok (integerp (gethash "rejected" contract)))
+                (ok (plusp (gethash "rejected" contract)))
+                (ok (= (gethash "effective_trials" contract)
+                       (- (gethash "executed" (gethash "trials" result))
+                          (gethash "rejected" contract)))))
+              (testing "and does not claim rejections are unmeasured"
+                (ok (not (find "rejection-counts-unmeasured"
+                               (gethash "verification_gaps" response)
+                               :test #'string=))))))
+
+          (testing "a contract that is broken names which half broke"
+            (let* ((response (spec-check-response
+                              (make-ht "function" (%fixture-name "WIDEN")
+                                       "trials" 300)))
+                   (result (%first-result response))
+                   (contract (gethash "contract" result)))
+              (ok (eq yason:false (gethash "verified" response)))
+              (ok (string= "failed" (gethash "status" result)))
+              (ok (plusp (length (gethash "counterexample" result))))
+              (ok (string= "return-spec" (gethash "failure_reason" contract)))
+              (testing "with cl-spec's account of the value that missed its spec"
+                (ok (stringp (gethash "explanation" contract))))))
+
+          (testing "a contract nothing could call is skipped, never verified"
+            ;; The zero-count success: every generated input refused, so the
+            ;; function was never called and there is nothing to have verified.
+            (let* ((response (spec-check-response
+                              (make-ht "function" (%fixture-name "NEVER-CALLABLE")
+                                       "trials" 30)))
+                   (result (%first-result response)))
+              (ok (eq yason:false (gethash "verified" response)))
+              (ok (string= "skipped" (gethash "status" result)))
+              (ok (= 30 (gethash "rejected" (gethash "contract" result))))
+              (ok (eql 0 (gethash "effective_trials" (gethash "contract" result))))))
+
+          (testing "an :about selection does not quietly run the contract"
+            (let ((response (spec-check-response
+                             (make-ht "symbol" (%fixture-name "CLAMP")))))
+              (ok (every (lambda (result) (string= "property" (gethash "kind" result)))
+                         (gethash "results" response)))
+              (ok (search "was NOT run" (%text response)))))
+
+          (testing "trials without a contract is refused rather than ignored"
+            (let ((response (spec-check-response
+                             (make-ht "symbol" (%fixture-name "CLAMP")
+                                      "trials" 10))))
+              (ok (string= "invalid-arguments" (gethash "status" response)))
+              (ok (search "function=" (%text response)))))
+
+          (testing "spec-list enumerates contracts as their own kind"
+            (let* ((response (spec-list-response (make-ht "kind" "function-specs")))
+                   (text (%text response)))
+              (ok (string= "ok" (gethash "status" response)))
+              (ok (eq t (gethash "function_specs_listable" response)))
+              (ok (= 3 (gethash "function_specs" (gethash "counts" response))))
+              (ok (search "function specs:" text))
+              (ok (search "CLAMP" text))))))))

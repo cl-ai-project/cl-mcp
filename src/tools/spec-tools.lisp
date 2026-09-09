@@ -257,6 +257,12 @@ calls the function, then checks :returns and :post. results[].contract carries:
 Because rejections are counted here, verification_gaps does not claim they are
 unmeasured for a contract run.
 
+A contract has no :trials table for profile to select from, so its budget is
+the backend default unless you pass trials. Raise it when effective_trials
+comes back small: a :pre that refuses most of what is generated leaves the
+interesting inputs unreached, and cl-spec does not yet reflect a precondition
+into the generator (its specification 19).
+
 REPRODUCING A RUN
 Every result carries seed (decimal TEXT, because a cl-spec seed can exceed
 what JSON holds exactly as a number), profile, and definition_digest.  Re-run
@@ -311,6 +317,10 @@ symbol's function spec; the response names it when one exists.")
     :description
     "One registered function spec to run against its function. Exclusive with
 property and symbol.")
+   (trials :type :integer
+    :description
+    "Trial count for a contract run. Contract runs only: a property takes its
+count from its own :trials table, selected by profile.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string
@@ -331,6 +341,7 @@ property and symbol.")
   (let ((params (make-ht "property" property
                          "symbol" symbol
                          "function" function
+                         "trials" trials
                          "package" package
                          "profile" profile
                          "seed" seed

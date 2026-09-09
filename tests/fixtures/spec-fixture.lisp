@@ -14,6 +14,8 @@
 (defpackage #:cl-mcp/tests/fixtures/spec-fixture
   (:use #:cl)
   (:export #:clamp
+           #:widen
+           #:never-callable
            #:small-int
            #:clamp-is-within-bounds
            #:clamp-is-idempotent
@@ -74,3 +76,33 @@ exactly what loading an edited file produces."
     (:kind :invariant)
     (= (clamp (clamp value 10 90) 10 90)
        (clamp value 10 90))))
+
+(cl-spec:defspec-function clamp
+  "CLAMP returns a value inside the interval it was given."
+  (:args (value small-int) (low small-int) (high small-int))
+  (:pre (<= low high))
+  (:returns small-int)
+  (:post (and (<= low result) (<= result high))))
+
+(defun widen (value)
+  "Return VALUE moved one step away from zero.
+
+Written to break its own contract at the top of SMALL-INT's range, so a test
+can see a contract failure that is not a property failure."
+  (1+ value))
+
+(cl-spec:defspec-function widen
+  "WIDEN stays inside SMALL-INT, which it does not."
+  (:args (value small-int))
+  (:returns small-int)
+  (:post (> result value)))
+
+(defun never-callable (value)
+  "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
+  value)
+
+(cl-spec:defspec-function never-callable
+  "A contract whose precondition no generated value can satisfy."
+  (:args (value small-int))
+  (:pre (> value 1000))
+  (:returns small-int))

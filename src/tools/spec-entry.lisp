@@ -208,6 +208,7 @@ seed the caller did not mean is a run whose result means nothing."
                              :property (%string-arg params "property")
                              :symbol (%string-arg params "symbol")
                              :function (%string-arg params "function")
+                             :trials (gethash "trials" params)
                              :package (%string-arg params "package")
                              :profile (%string-arg params "profile")
                              :seed seed
