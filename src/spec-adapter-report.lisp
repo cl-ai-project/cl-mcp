@@ -1,0 +1,788 @@
+;;;; src/spec-adapter-report.lisp
+;;;;
+;;;; The three operations the cl-spec tools expose, as plists.
+;;;;
+;;;; Everything here answers with a plist headed by :STATUS rather than by
+;;;; signalling.  cl-spec signals UNKNOWN-PROPERTY for a name it does not
+;;;; know, and an agent asking "is there a contract for this symbol?" must be
+;;;; told "no" rather than handed a condition -- "not registered", "cl-spec is
+;;;; not loaded" and "this cl-spec cannot do that" are three different answers
+;;;; and none of them is an error in the caller.
+
+(defpackage #:cl-mcp/src/spec-adapter-report
+  (:use #:cl)
+  (:import-from #:cl-mcp/src/spec-adapter-core
+                #:cl-spec-api-version
+                #:cl-spec-api-system-directory
+                #:cl-spec-api-missing
+                #:api-fn
+                #:api-has-p
+                #:api-class
+                #:api-backend-available-p
+                #:resolve-symbol-designator
+                #:symbol-data
+                #:externalize-value
+                #:definition-digest
+                #:printed-for-digest)
+  (:import-from #:cl-mcp/src/code-core
+                #:code-describe-symbol)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
+  (:export #:environment-data
+           #:unavailable-report
+           #:symbol-report
+           #:describe-report
+           #:check-report
+           #:*default-check-timeout-seconds*))
+
+(in-package #:cl-mcp/src/spec-adapter-report)
+
+;;; ---------------------------------------------------------------------------
+;;; Environment
+;;; ---------------------------------------------------------------------------
+
+(defun %backend-name (api)
+  "Return the installed generator backend's class name, or NIL."
+  (handler-case
+      (let ((backend (and (api-has-p api :generator-backend)
+                          (funcall (api-fn api :generator-backend)))))
+        (when backend
+          (if (symbolp backend)
+              (princ-to-string backend)
+              (let ((name (class-name (class-of backend))))
+                (format nil "~A:~A"
+                        (package-name (symbol-package name))
+                        (symbol-name name))))))
+    (error () nil)))
+
+(defun %registry-description (api)
+  "Return a short printed description of the registry in effect, or NIL."
+  (handler-case
+      (let ((registry (and (api-has-p api :registry)
+                           (funcall (api-fn api :registry)))))
+        (when registry
+          (let ((*print-level* 1) (*print-length* 2) (*print-readably* nil))
+            (princ-to-string registry))))
+    (error () nil)))
+
+(defun environment-data (api api-status)
+  "Return what this image can say about the cl-spec it is talking to.
+
+Attached to every response.  An agent that cannot tell a missing system from a
+missing registration will read an empty answer as a clean bill of health, and
+that is the single most expensive mistake available here."
+  (list :cl-spec-loaded (eq api-status :ok)
+        :cl-spec-status api-status
+        :cl-spec-version (and api (cl-spec-api-version api))
+        :cl-spec-system-directory (and api (cl-spec-api-system-directory api))
+        :generator-backend (and api (%backend-name api))
+        :backend-available (and api (api-backend-available-p api))
+        :registry (and api (%registry-description api))
+        :missing (and api (cl-spec-api-missing api))
+        :lisp (format nil "~A ~A"
+                      (lisp-implementation-type)
+                      (lisp-implementation-version))))
+
+(defparameter +not-loaded-message+
+  "cl-spec is not loaded in this session's worker. Run load-system with system \
+\"cl-spec/check-it\" to get introspection and property execution, or \
+\"cl-spec\" for introspection only. Until then this tool cannot tell whether \
+anything is registered: an empty answer here is NOT evidence that the symbol \
+has no contract."
+  "Said when the CL-SPEC package is absent.")
+
+(defparameter +incomplete-message+
+  "cl-spec is loaded but does not provide every name this adapter needs; see \
+the missing list in environment. This is a version mismatch between cl-mcp and \
+cl-spec, not a statement about the symbol."
+  "Said when cl-spec is present but a required name is missing.")
+
+(defun unavailable-report (api-status environment)
+  "Return the plist answering a call cl-spec cannot serve at all."
+  (list :status (if (eq api-status :not-loaded)
+                    :cl-spec-not-loaded
+                    :cl-spec-incomplete)
+        :verified nil
+        :message (if (eq api-status :not-loaded)
+                     +not-loaded-message+
+                     +incomplete-message+)
+        :environment environment))
+
+;;; ---------------------------------------------------------------------------
+;;; Shared helpers
+;;; ---------------------------------------------------------------------------
+
+(defun %print-bounded-form (form max-chars)
+  "Return (values TEXT COMPLETE-P OMITTED-CHARS) for FORM at MAX-CHARS.
+
+Uses the digest printer so a body reads the same way it is hashed, which is
+what lets a caller compare the two by eye."
+  (let ((text (printed-for-digest form)))
+    (if (<= (length text) max-chars)
+        (values text t 0)
+        (values (subseq text 0 max-chars) nil (- (length text) max-chars)))))
+
+(defun %runtime-data (symbol)
+  "Return (values RUNTIME REASON) for SYMBOL from cl-mcp's own introspection.
+
+This is the half of specification 28's describe_symbol that cl-spec's registry
+does not hold: the signature, the docstring and where the definition lives.
+A symbol with no binding at all is not an error here -- a property may be
+registered about a symbol that is not yet defined -- so the reason is
+reported and the caller carries on."
+  (handler-case
+      (let ((package (symbol-package symbol)))
+        (unless package
+          (return-from %runtime-data
+            (values nil "symbol is uninterned and has no source to look up")))
+        (multiple-value-bind (name type arglist documentation path line)
+            (code-describe-symbol (format nil "~A::~A"
+                                          (package-name package)
+                                          (symbol-name symbol)))
+          (declare (ignore name))
+          (values (list :type type
+                        :arglist arglist
+                        :documentation documentation
+                        :source-file path
+                        :source-line line)
+                  nil)))
+    (error (condition)
+      (values nil (princ-to-string condition)))))
+
+(defun %spec-summary (spec-plist)
+  "Return the one-line summary of an argument's spec used in a listing.
+
+The whole spec tree belongs in spec-describe; here a caller needs only enough
+to see which spec generates the argument."
+  (list :kind (getf spec-plist :kind)
+        :name (let ((name (getf spec-plist :name)))
+                (when name (symbol-data name)))
+        :target (let ((target (getf spec-plist :target)))
+                  (when target (symbol-data target)))))
+
+(defun %property-summary (api name registry)
+  "Return the listing entry for property NAME, with its body omitted.
+
+The body and the source form are deliberately left out: PROPERTY-DATA carries
+the author's whole DEFPROPERTY form, and inlining that for every property a
+symbol has would make one response's size depend on how much its author
+wrote.  BODY-OMITTED says so rather than leaving a reader to infer it."
+  (handler-case
+      (let ((data (funcall (api-fn api :property-data) name :registry registry)))
+        (list :name (symbol-data name)
+              :kind (getf data :kind)
+              :tags (getf data :tags)
+              :targets (mapcar #'symbol-data (getf data :targets))
+              :documentation (getf data :documentation)
+              :arguments (loop for argument in (getf data :arguments)
+                               collect (list :variable
+                                             (symbol-data (getf argument :variable))
+                                             :spec (%spec-summary
+                                                    (getf argument :spec))))
+              :trials-table (let ((table (getf data :trials)))
+                              (when table (printed-for-digest table)))
+              :shrink-enabled (getf (getf data :metadata) :shrink)
+              :source-location (getf data :source-location)
+              :definition-digest (definition-digest api name registry)
+              :body-forms (length (getf data :body))
+              :body-omitted t
+              :detail-via "spec-describe kind=property"))
+    (error (condition)
+      (list :name (symbol-data name)
+            :unavailable-reason (princ-to-string condition)))))
+
+;;; ---------------------------------------------------------------------------
+;;; spec-symbol
+;;; ---------------------------------------------------------------------------
+
+(defun symbol-report (api api-status designator &key package (include-runtime t))
+  "Return the plist behind the spec-symbol tool.
+
+Joins what cl-spec's registry knows about DESIGNATOR with what this image
+knows about it (specification 27-28: describe_symbol is a join, and the half
+that is a signature and a source location belongs to cl-mcp)."
+  (let ((environment (environment-data api api-status)))
+    (unless (eq api-status :ok)
+      (return-from symbol-report (unavailable-report api-status environment)))
+    (multiple-value-bind (symbol reason)
+        (resolve-symbol-designator designator :package package)
+      (unless symbol
+        (return-from symbol-report
+          (list :status :unresolved-symbol
+                :reason reason
+                :input designator
+                :environment environment)))
+      (let* ((registry (funcall (api-fn api :registry)))
+             (routing (funcall (api-fn api :semantic-data) symbol
+                               :registry registry))
+             (about (getf routing :properties-about)))
+        (multiple-value-bind (runtime runtime-reason)
+            (if include-runtime (%runtime-data symbol) (values nil nil))
+          (list :status :ok
+                :symbol (symbol-data symbol)
+                :runtime runtime
+                :runtime-unavailable-reason
+                (cond (runtime nil)
+                      ((not include-runtime) "include_runtime was false")
+                      (t runtime-reason))
+                :registry
+                (list :spec (let ((name (getf routing :spec)))
+                              (when name (symbol-data name)))
+                      :function-spec (let ((name (getf routing :function-spec)))
+                                       (when name (symbol-data name)))
+                      :property (let ((name (getf routing :property)))
+                                  (when name (symbol-data name)))
+                      :properties-about (mapcar #'symbol-data about))
+                :properties (loop for name in about
+                                  collect (%property-summary api name registry))
+                :nothing-registered (not (or about
+                                             (getf routing :spec)
+                                             (getf routing :function-spec)
+                                             (getf routing :property)))
+                :notes (append
+                        (list "properties_about lists direct (:about ...) registrations only")
+                        (when (getf routing :property)
+                          (list "this symbol is itself a registered property; run it with property=")))
+                :environment environment))))))
+
+;;; ---------------------------------------------------------------------------
+;;; spec-describe
+;;; ---------------------------------------------------------------------------
+
+(defparameter +function-spec-unsupported-message+
+  "cl-spec provides no function-spec-data projection in this revision, and \
+defspec-function is still a stub, so there is nothing to describe. cl-mcp will \
+not assemble one out of the individual readers: that would duplicate cl-spec's \
+introspection responsibility on this side of the boundary."
+  "Said when spec-describe is asked for a function spec.")
+
+(defun %spec-tree (spec-plist)
+  "Return SPEC-PLIST with its symbols externalized, children included.
+
+Kept as a projection of cl-spec's own SPEC-DATA rather than a re-derivation:
+every key here comes straight across, and nothing is computed on this side."
+  (when (listp spec-plist)
+    (list :kind (getf spec-plist :kind)
+          :name (let ((name (getf spec-plist :name)))
+                  (when name (symbol-data name)))
+          :target (let ((target (getf spec-plist :target)))
+                    (when target (symbol-data target)))
+          :type (let ((type (getf spec-plist :type)))
+                  (when type (printed-for-digest type)))
+          :predicate (let ((predicate (getf spec-plist :predicate)))
+                       (when predicate (printed-for-digest predicate)))
+          :values (let ((values (getf spec-plist :values)))
+                    (when values (printed-for-digest values)))
+          :base-type (let ((base (getf spec-plist :base-type)))
+                       (when base (printed-for-digest base)))
+          :min (let ((minimum (getf spec-plist :min)))
+                 (when minimum (printed-for-digest minimum)))
+          :max (let ((maximum (getf spec-plist :max)))
+                 (when maximum (printed-for-digest maximum)))
+          :class-name (let ((name (getf spec-plist :class-name)))
+                        (when name (symbol-data name)))
+          :source-form (printed-for-digest (getf spec-plist :source-form))
+          :source-location (getf spec-plist :source-location)
+          :children (mapcar #'%spec-tree (getf spec-plist :children)))))
+
+(defun %describe-property (api name registry max-chars)
+  "Return the detail plist for property NAME."
+  (let ((data (funcall (api-fn api :property-data) name :registry registry)))
+    (multiple-value-bind (body complete omitted)
+        (%print-bounded-form (getf data :body) max-chars)
+      (multiple-value-bind (source source-complete source-omitted)
+          (%print-bounded-form (getf data :source-form) max-chars)
+        (list :status :ok
+              :kind "property"
+              :name (symbol-data name)
+              :property-kind (getf data :kind)
+              :tags (getf data :tags)
+              :targets (mapcar #'symbol-data (getf data :targets))
+              :documentation (getf data :documentation)
+              :trials-table (let ((table (getf data :trials)))
+                              (when table (printed-for-digest table)))
+              :shrink-enabled (getf (getf data :metadata) :shrink)
+              :arguments (loop for argument in (getf data :arguments)
+                               collect (list :variable
+                                             (symbol-data (getf argument :variable))
+                                             :spec (%spec-tree (getf argument :spec))))
+              :body body
+              :body-complete complete
+              :body-omitted-chars omitted
+              :source-form source
+              :source-form-complete source-complete
+              :source-form-omitted-chars source-omitted
+              :source-location (getf data :source-location)
+              :definition-digest (definition-digest api name registry))))))
+
+(defun %describe-spec (api name registry max-chars)
+  "Return the detail plist for spec NAME."
+  (let ((data (funcall (api-fn api :spec-data) name :registry registry)))
+    (multiple-value-bind (source complete omitted)
+        (%print-bounded-form (getf data :source-form) max-chars)
+      (list :status :ok
+            :kind "spec"
+            :name (symbol-data name)
+            :spec (%spec-tree data)
+            :source-form source
+            :source-form-complete complete
+            :source-form-omitted-chars omitted
+            :source-location (getf data :source-location)))))
+
+(defun describe-report (api api-status kind name &key package (max-chars 8000))
+  "Return the plist behind the spec-describe tool.
+
+KIND is \"property\", \"spec\" or \"function-spec\"."
+  (let ((environment (environment-data api api-status)))
+    (unless (eq api-status :ok)
+      (return-from describe-report (unavailable-report api-status environment)))
+    (unless (and (stringp kind)
+                 (member kind '("property" "spec" "function-spec") :test #'string=))
+      (return-from describe-report
+        (list :status :invalid-arguments
+              :message (format nil "kind must be one of property, spec or ~
+function-spec; got ~S" kind)
+              :environment environment)))
+    (multiple-value-bind (symbol reason)
+        (resolve-symbol-designator name :package package)
+      (unless symbol
+        (return-from describe-report
+          (list :status :unresolved-symbol :reason reason :input name
+                :environment environment)))
+      (when (string= kind "function-spec")
+        (return-from describe-report
+          (list :status :unsupported
+                :name (symbol-data symbol)
+                :message +function-spec-unsupported-message+
+                :environment environment)))
+      (let ((registry (funcall (api-fn api :registry))))
+        (handler-case
+            (append (if (string= kind "property")
+                        (%describe-property api symbol registry max-chars)
+                        (%describe-spec api symbol registry max-chars))
+                    (list :environment environment))
+          (error (condition)
+            (list :status :not-registered
+                  :kind kind
+                  :name (symbol-data symbol)
+                  :message (princ-to-string condition)
+                  :environment environment)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; spec-check
+;;; ---------------------------------------------------------------------------
+
+(defvar *default-check-timeout-seconds* 60
+  "Whole-call budget a spec-check uses when the caller names none.
+
+Whole-call rather than per-property because the proxy reads the same
+timeout_seconds to decide how long to wait for the worker's answer
+(SRC/PROXY.LISP, %EFFECTIVE-RPC-TIMEOUT).  A per-property figure would let a
+selection of five properties outlive the proxy's patience, and a proxy timeout
+is not a timeout report: it kills the worker and resets the session.")
+
+(defparameter *minimum-run-budget-seconds* 0.05
+  "Budget below which a property is reported as not run rather than started.
+
+Starting a run with a few milliseconds left produces a timeout that says
+nothing about the property, and costs a thread to say it.")
+
+(defparameter +backend-missing-message+
+  "No cl-spec generator backend is installed, so no property can be executed. \
+Run load-system with system \"cl-spec/check-it\". Nothing was executed: this \
+is NOT a successful verification."
+  "Said when execution is requested with *GENERATOR-BACKEND* unset.")
+
+(defparameter +about-coverage-note+
+  "Direct (:about ...) registrations only. Callers, generic-function methods, \
+macro users and shared mutable state are NOT analysed. This is not a change \
+impact analysis (cl-spec specification 31 and 72.5)."
+  "The limit of what the :about reverse index can be said to cover.")
+
+(defparameter +explicit-coverage-note+
+  "Only the property named. Nothing else was selected, and nothing else was \
+checked."
+  "The limit of what an explicit single-property run covers.")
+
+(defparameter +shrink-note+
+  "Backend-searched reduction. NOT a guaranteed global minimum, and the \
+backend does not report whether shrinking completed, exhausted its budget or \
+was interrupted (cl-spec specification 16 and 72.4)."
+  "What a shrunk counterexample does and does not mean.")
+
+(defparameter +reproduce-scope-note+
+  "Regenerates the trial sequence from this seed under the same definitions, \
+backend, profile and image. It does NOT reproduce the code revision, external \
+I/O, the clock, or shared mutable state. This is regeneration, not replay of a \
+saved counterexample against a fixed implementation (cl-spec specification 15 \
+and 72.3)."
+  "What a seed does and does not fix.")
+
+(defparameter +zero-properties-message+
+  "0 properties selected -- this is NOT a successful verification. Nothing was \
+executed, and a registry with no property registered about this symbol says \
+nothing about whether it is correct."
+  "Said when a selection comes back empty.")
+
+(defparameter +options-note+
+  "cl-mcp passes no backend options, so a re-run under the same seed and \
+profile cannot silently differ in them."
+  "Why the options field is always null.")
+
+(defun %resolve-profile (profile)
+  "Return (values KEYWORD NIL) for the profile named by PROFILE.
+
+PROFILE arrives as text from outside the image, so the keyword is looked up
+rather than interned.  A profile no loaded code mentions cannot be interned
+either, which means no property's :TRIALS table can name it -- running under
+it would silently fall back to the backend default while the response claimed
+the requested profile.  Refusing is the honest answer."
+  (let* ((name (string-upcase (or profile "normal")))
+         (keyword (find-symbol name "KEYWORD")))
+    (if keyword
+        (values keyword nil)
+        (values nil
+                (format nil
+                        "profile ~S names no keyword present in this image, so ~
+no registered property can select a trial count for it. Use a profile that ~
+appears in the property's trials table (see spec-describe)."
+                        profile)))))
+
+(defun %registered-property-p (api name registry)
+  "Return (values FOUND-P MESSAGE) for property NAME in REGISTRY."
+  (handler-case
+      (progn (funcall (api-fn api :property-data) name :registry registry)
+             (values t nil))
+    (error (condition) (values nil (princ-to-string condition)))))
+
+(defun %select-explicit (api property package registry)
+  "Return (values NAMES SELECTION ERROR) for an explicit property request."
+  (multiple-value-bind (name reason)
+      (resolve-symbol-designator property :package package)
+    (if (null name)
+        (values nil nil (list :status :unresolved-symbol :reason reason
+                              :input property))
+        (multiple-value-bind (found-p message)
+            (%registered-property-p api name registry)
+          (if (not found-p)
+              (values nil nil (list :status :not-registered
+                                    :name (symbol-data name)
+                                    :message message))
+              (values (list name)
+                      (list :mode "explicit"
+                            :requested (list :property (symbol-data name))
+                            :selected (list (symbol-data name))
+                            :count 1
+                            :source "explicit property argument"
+                            :coverage +explicit-coverage-note+)
+                      nil))))))
+
+(defun %select-about (api symbol package registry)
+  "Return (values NAMES SELECTION ERROR) for an :ABOUT reverse-index request."
+  (multiple-value-bind (name reason)
+      (resolve-symbol-designator symbol :package package)
+    (if (null name)
+        (values nil nil (list :status :unresolved-symbol :reason reason
+                              :input symbol))
+        (let* ((routing (funcall (api-fn api :semantic-data) name
+                                 :registry registry))
+               (about (getf routing :properties-about)))
+          (values about
+                  (list :mode "about"
+                        :requested (list :symbol (symbol-data name))
+                        :selected (mapcar #'symbol-data about)
+                        :count (length about)
+                        :source "cl-spec:semantic-data -> :properties-about (registry :about reverse index)"
+                        :coverage +about-coverage-note+
+                        :notes (when (getf routing :property)
+                                 (list "this symbol is itself a registered property; it was NOT selected -- run it with property=")))
+                  nil)))))
+
+(defun %target-argument-error (property symbol)
+  "Return the plist for a bad property/symbol pair, or NIL when it is fine.
+
+Checked before cl-spec is consulted.  Naming both or neither is a mistake in
+the call itself, and answering \"cl-spec is not loaded\" would send the caller
+to fix the wrong thing -- the same reason SPEC-ENTRY validates the seed before
+it resolves the API."
+  (cond
+    ((and property symbol)
+     (list :status :invalid-arguments
+           :message "give either property or symbol, not both"))
+    ((not (or property symbol))
+     (list :status :invalid-arguments
+           :message "give one of property or symbol"))))
+
+(defun %select-properties (api property symbol package registry)
+  "Return (values NAMES SELECTION ERROR) for the requested selection.
+
+Exactly one of PROPERTY and SYMBOL is supplied; %TARGET-ARGUMENT-ERROR has
+already rejected the other two shapes.  A symbol that is itself a registered
+property is deliberately not added to an :ABOUT selection: that is a different
+relationship, and quietly widening what gets executed would make the reported
+coverage wrong."
+  (if property
+      (%select-explicit api property package registry)
+      (%select-about api symbol package registry)))
+
+(defun %trials-budget (api name registry profile)
+  "Return the trial budget plist for property NAME under PROFILE.
+
+cl-spec resolves this internally in RESOLVE-TRIALS and neither exports that
+function nor records the figure on a PROPERTY-RESULT, so it is derived here
+from the two exported readers.  BUDGET-DERIVATION says so: a number a consumer
+cannot trace back is worse than one it can question."
+  (let* ((data (handler-case
+                   (funcall (api-fn api :property-data) name :registry registry)
+                 (error () nil)))
+         (table (getf data :trials))
+         (from-profile (and table (getf table profile)))
+         (backend (handler-case (funcall (api-fn api :generator-backend))
+                    (error () nil)))
+         (default (and backend
+                       (handler-case
+                           (funcall (api-fn api :backend-default-trials) backend)
+                         (error () nil)))))
+    (list :budget (or from-profile default)
+          :budget-source (cond (from-profile "property-profile")
+                               (default "backend-default")
+                               (t "unknown"))
+          :property-trials (when table (printed-for-digest table))
+          :backend-default default
+          :budget-derivation "derived by cl-mcp from cl-spec:property-trials and cl-spec:backend-default-trials; cl-spec does not expose the resolved budget")))
+
+(defun %classify-condition (api condition)
+  "Return the adapter status keyword for CONDITION.
+
+The condition classes are looked up on the API rather than named here, so an
+image whose cl-spec predates one of them degrades to a coarser status instead
+of failing to load."
+  (flet ((is-a (key)
+           (let ((class (api-class api key)))
+             (and class (typep condition class)))))
+    (cond
+      ((or (is-a :no-generator-backend) (is-a :generator-unavailable))
+       :generator-error)
+      ((is-a :unknown-property) :not-registered)
+      ((is-a :cl-spec-error) :backend-error)
+      ;; A cl-spec that predates the condition hierarchy, or a condition from
+      ;; somewhere else entirely.  The message is the only evidence available,
+      ;; and it is reported rather than interpreted -- except for the one
+      ;; phrase the backend-missing condition is guaranteed to carry.
+      ((search "generator backend" (princ-to-string condition)) :generator-error)
+      (t :internal-error))))
+
+(defun %condition-data (condition &key (max-chars 2000))
+  "Return CONDITION as the plist a response carries for it."
+  (list :type (princ-to-string (type-of condition))
+        :message (let ((text (handler-case (princ-to-string condition)
+                               (error () "#<unprintable condition>"))))
+                   (if (<= (length text) max-chars)
+                       text
+                       (subseq text 0 max-chars)))
+        :object-id (getf (externalize-value condition :max-chars 1) :object-id)))
+
+(defun %named-values (plist max-value-chars)
+  "Return cl-spec's {variable value} counterexample PLIST as a list of plists."
+  (loop for (variable value) on plist by #'cddr
+        collect (list :variable (symbol-data variable)
+                      :value (externalize-value value
+                                                :max-chars max-value-chars))))
+
+(defun %result-plist (api result name trials digest expected-digest max-value-chars)
+  "Return the per-property plist for a cl-spec RESULT."
+  (let ((counterexample (funcall (api-fn api :result-counterexample) result))
+        (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
+        (condition (funcall (api-fn api :result-condition) result))
+        (seed (funcall (api-fn api :result-seed) result)))
+    (list :property (symbol-data name)
+          :status (funcall (api-fn api :result-status) result)
+          :trials (list* :executed (funcall (api-fn api :result-trials) result)
+                         trials)
+          ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
+          ;; consumer holding it as a number would round it, which turns a
+          ;; reproducible failure into one that cannot be reproduced.
+          :seed (when seed (format nil "~D" seed))
+          :profile (funcall (api-fn api :result-profile) result)
+          :counterexample (%named-values counterexample max-value-chars)
+          :shrunk-counterexample (%named-values shrunk max-value-chars)
+          :shrink-note (when shrunk +shrink-note+)
+          :condition (when condition (%condition-data condition))
+          :elapsed (funcall (api-fn api :result-elapsed) result)
+          :definition-digest digest
+          :definition-match (cond ((null expected-digest) :not-checked)
+                                  ((and digest (string-equal digest expected-digest))
+                                   :true)
+                                  (t :false)))))
+
+(defun %elapsed-since (start)
+  "Return the seconds elapsed since internal real time START."
+  (/ (float (- (get-internal-real-time) start))
+     internal-time-units-per-second))
+
+(defun %run-one (api name registry profile seed trials digest expected-digest
+                 remaining max-value-chars)
+  "Run property NAME within REMAINING seconds and return its result plist."
+  (if (< remaining *minimum-run-budget-seconds*)
+      (list :property (symbol-data name)
+            :status :not-run
+            :reason :budget-exhausted
+            :trials trials
+            :definition-digest digest
+            :definition-match :not-checked
+            :message "the whole-call timeout_seconds budget was spent before \
+this property started; nothing about it was checked")
+      (multiple-value-bind (value status leaked)
+          (call-with-deadline-thread
+           (lambda ()
+             (funcall (api-fn api :run-property) name
+                      :profile profile :seed seed :registry registry))
+           remaining
+           :name "mcp-spec-check")
+        (ecase status
+          (:ok (%result-plist api (first value) name trials digest
+                              expected-digest max-value-chars))
+          (:timeout
+           (list :property (symbol-data name)
+                 :status :timeout
+                 :timeout-seconds value
+                 :thread-leaked leaked
+                 :trials trials
+                 :definition-digest digest
+                 :definition-match :not-checked
+                 :message
+                 (if leaked
+                     "the property run exceeded its deadline and could not be \
+stopped: it is still executing in this worker and may hold locks. Use \
+pool-kill-worker to get a fresh worker before retrying."
+                     "the property run exceeded its deadline and its run thread \
+was stopped. Nothing was proved or disproved; retry with a larger \
+timeout_seconds if the property legitimately needs longer.")))
+          (:error
+           (list :property (symbol-data name)
+                 :status (%classify-condition api value)
+                 :trials trials
+                 :definition-digest digest
+                 :definition-match :not-checked
+                 :condition (%condition-data value)))))))
+
+(defun %terminal-status-p (status)
+  "Return true when STATUS is a verdict about the property rather than about
+the run's own machinery."
+  (member status '(:passed :failed :error :skipped :pending)))
+
+(defun %counts (results)
+  "Return the per-status tally of RESULTS."
+  (flet ((tally (status)
+           (count status results :key (lambda (result) (getf result :status)))))
+    (list :selected (length results)
+          :passed (tally :passed)
+          :failed (tally :failed)
+          :errored (tally :error)
+          :timed-out (tally :timeout)
+          :not-run (tally :not-run))))
+
+(defun check-report (api api-status &key property symbol package profile seed
+                                         expect-definition-digest
+                                         timeout-seconds
+                                         (max-value-chars 2000))
+  "Return the plist behind the spec-check tool.
+
+Runs either the property named by PROPERTY or every property registered
+:ABOUT the symbol named by SYMBOL.  TIMEOUT-SECONDS is the budget for the
+whole call, spent across the selection in order.
+
+:VERIFIED is true only when at least one property was selected and every one
+of them passed.  A selection of zero, a timeout, a generator failure and a
+skipped run are each reported as themselves: none of them is evidence that
+anything holds."
+  (let ((environment (environment-data api api-status))
+        (argument-error (%target-argument-error property symbol)))
+    ;; Before the availability check, deliberately: an argument that is wrong
+    ;; is wrong whatever cl-spec is doing, and reporting the load state first
+    ;; would send the caller to fix the wrong thing.
+    (when argument-error
+      (return-from check-report
+        (append argument-error (list :verified nil :environment environment))))
+    (unless (eq api-status :ok)
+      (return-from check-report (unavailable-report api-status environment)))
+    (unless (api-backend-available-p api)
+      (return-from check-report
+        (list :status :backend-not-loaded
+              :verified nil
+              :message +backend-missing-message+
+              :environment environment)))
+    (multiple-value-bind (profile-keyword profile-error) (%resolve-profile profile)
+      (when profile-error
+        (return-from check-report
+          (list :status :invalid-arguments :verified nil
+                :message profile-error :environment environment)))
+      (let ((registry (funcall (api-fn api :registry))))
+        (multiple-value-bind (names selection selection-error)
+            (%select-properties api property symbol package registry)
+          (when selection-error
+            (return-from check-report
+              (append selection-error
+                      (list :verified nil :environment environment))))
+          (when (null names)
+            (return-from check-report
+              (list :status :no-properties
+                    :verified nil
+                    :selection selection
+                    :results nil
+                    :counts (%counts nil)
+                    :message +zero-properties-message+
+                    :environment environment)))
+          (when (and seed (rest names))
+            (return-from check-report
+              (list :status :invalid-arguments
+                    :verified nil
+                    :selection selection
+                    :message "seed reproduces a single property run; the \
+selection holds more than one property. Name one with property= instead."
+                    :environment environment)))
+          (let ((budget (or timeout-seconds *default-check-timeout-seconds*))
+                (start (get-internal-real-time))
+                (results '())
+                (thread-leaked nil))
+            (dolist (name names)
+              (let* ((trials (%trials-budget api name registry profile-keyword))
+                     (digest (definition-digest api name registry))
+                     (remaining (- budget (%elapsed-since start)))
+                     (result (%run-one api name registry profile-keyword seed
+                                       trials digest expect-definition-digest
+                                       remaining max-value-chars)))
+                (when (getf result :thread-leaked) (setf thread-leaked t))
+                (push result results)))
+            (setf results (nreverse results))
+            (list :status (if (every (lambda (result)
+                                       (%terminal-status-p (getf result :status)))
+                                     results)
+                              :completed
+                              :incomplete)
+                  :verified (and results
+                                 (every (lambda (result)
+                                          (eq :passed (getf result :status)))
+                                        results)
+                                 t)
+                  :selection selection
+                  :results results
+                  :counts (%counts results)
+                  :profile profile-keyword
+                  :timeout-seconds budget
+                  :thread-leaked thread-leaked
+                  :elapsed (%elapsed-since start)
+                  :options nil
+                  :options-note +options-note+
+                  :reproduce-scope +reproduce-scope-note+
+                  ;; Kept apart from :VERIFIED on purpose.  A run whose
+                  ;; definitions moved can still pass; what it cannot claim
+                  ;; is to have reproduced the earlier run.
+                  :reproduction-faithful
+                  (cond ((null expect-definition-digest) :not-checked)
+                        ((every (lambda (result)
+                                  (eq :true (getf result :definition-match)))
+                                results)
+                         t)
+                        (t nil))
+                  :environment environment)))))))
