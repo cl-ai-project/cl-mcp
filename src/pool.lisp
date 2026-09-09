@@ -356,6 +356,33 @@ counts those separately, against initialization rather than the session."
   (and (not (worker-retired-p worker))
        (not (%init-attributable-crash-p worker))))
 
+(defun %record-worker-death (worker exit-status exit-code)
+  "Record what killed WORKER and return whether it was a deliberate retirement.
+
+Must be called under *POOL-LOCK*, in the same critical section that moves the
+worker to :CRASHED.  GET-OR-ASSIGN-WORKER takes that lock before asking the
+breaker about a crashed worker, so publishing the state first would let a
+request arriving in between count an unclassified retirement -- three of those
+halt the session, which is the failure this whole exclusion exists to prevent.
+
+The exit code is recorded before it is consulted because on this path -- the
+health monitor reaching a dead worker before any RPC has seen the EOF --
+nothing has classified the death and the code the worker left is the only
+witness there is.  The answer is stored rather than left to be re-derived,
+because the reason below is copied onto the replacement worker and a question
+asked of that copy is answered about the wrong death.
+
+A retirement keeps its marker rather than being flattened into
+\"process-died\": the notification the user is shown reads this slot too."
+  (setf (worker-last-exit-status worker) (or exit-status "unknown")
+        (worker-last-exit-code worker) (or exit-code "unknown"))
+  (let ((retired (or (worker-retired-p worker)
+                     (exit-code-says-retired-p worker))))
+    (setf (worker-retired-p worker) retired
+          (worker-last-crash-reason worker)
+          (if retired *retired-leaked-thread-reason* "process-died"))
+    retired))
+
 (defun %monitor-init (worker session-id max-failures)
   "Poll worker/init-status until terminal, updating failure/disable state.
 Runs on a short-lived background thread with backoff (0.1s -> 2s cap; no
@@ -713,59 +740,56 @@ to prevent recovery threads from spawning orphan workers."
         (was-bound nil)
         (was-standby nil)
         (was-already-crashed nil)
-        (retired-p nil))
+        (retired-p nil)
+        (exit-code nil)
+        (exit-status nil))
+    ;; Read before the lock and recorded inside it: SB-EXT:PROCESS-STATUS is
+    ;; only a struct read, but *POOL-LOCK* is the lock every session's next
+    ;; request goes through, and there is nothing here it needs to see.
+    (ignore-errors
+      (let* ((proc (worker-process-info crashed-worker))
+             (status (and proc (sb-ext:process-status proc))))
+        (when status
+          (setf exit-status (string-downcase (symbol-name status))))
+        (when (member status '(:exited :signaled))
+          (setf exit-code (sb-ext:process-exit-code proc)))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (case (worker-state crashed-worker)
         (:bound
          (setf was-bound t
                session-id (worker-session-id crashed-worker))
+         ;; Recorded before the state says there was a death, and under the
+         ;; same lock: GET-OR-ASSIGN-WORKER asks the breaker about any
+         ;; :CRASHED worker it finds, and between the two writes a
+         ;; retirement is indistinguishable from a crash.
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code))
          (setf (worker-state crashed-worker) :crashed))
         (:standby
          (setf was-standby t)
          (setf *standby-workers* (remove crashed-worker *standby-workers*))
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code))
          (setf (worker-state crashed-worker) :crashed))
         (:crashed
-         ;; Already marked crashed (e.g. by worker-rpc EOF detection).
-         ;; Clean up pool tracking and trigger replenishment.
+         ;; Already marked crashed (e.g. by worker-rpc EOF detection), so the
+         ;; classification is already published; this adds the exit details
+         ;; the RPC path could not see and keeps whatever it concluded.
          (setf was-already-crashed t
                session-id (worker-session-id crashed-worker))
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code))
          (when (eql (gethash session-id *affinity-map*) crashed-worker)
            (remhash session-id *affinity-map*)
            (setf was-bound t))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
         (otherwise (return-from %handle-worker-crash))))
-    (let (exit-code exit-status)
-      (ignore-errors
-        (let* ((proc (worker-process-info crashed-worker))
-               (status (and proc (sb-ext:process-status proc))))
-          (when status
-            (setf exit-status (string-downcase (symbol-name status))))
-          (when (member status '(:exited :signaled))
-            (setf exit-code (sb-ext:process-exit-code proc)))))
-      (log-event :warn "pool.worker.crashed" "worker_id"
-                 (worker-id crashed-worker) "session" session-id
-                 "was_standby" was-standby
-                 "exit_status" (or exit-status "unknown")
-                 "exit_code" (or exit-code "unknown"))
-      ;; The exit code is recorded before it is consulted: on this path --
-      ;; the health monitor reaching a dead worker before any RPC has seen
-      ;; the EOF -- nothing has classified the death, and the code this
-      ;; worker left is the only witness there is.  Recording the answer
-      ;; rather than leaving it to be re-derived later is what keeps it
-      ;; attached to the worker it is about, since the reason below is
-      ;; copied onto the replacement.
-      (setf (worker-last-exit-status crashed-worker) (or exit-status "unknown")
-            (worker-last-exit-code crashed-worker) (or exit-code "unknown"))
-      (setf retired-p (or (worker-retired-p crashed-worker)
-                          (exit-code-says-retired-p crashed-worker))
-            (worker-retired-p crashed-worker) retired-p)
-      ;; A retirement keeps its marker rather than being flattened into
-      ;; "process-died".  Everything that reads this slot afterwards --
-      ;; GET-OR-ASSIGN-WORKER's own breaker push when it meets the same
-      ;; worker, the notification the user is shown -- would otherwise see a
-      ;; generic crash, which is how this exclusion has failed before.
-      (setf (worker-last-crash-reason crashed-worker)
-            (if retired-p *retired-leaked-thread-reason* "process-died")))
+    (log-event :warn "pool.worker.crashed" "worker_id"
+               (worker-id crashed-worker) "session" session-id
+               "was_standby" was-standby
+               "retired" retired-p
+               "exit_status" (or exit-status "unknown")
+               "exit_code" (or exit-code "unknown"))
     (ignore-errors (kill-worker crashed-worker))
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.

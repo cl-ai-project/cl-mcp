@@ -783,12 +783,17 @@ would otherwise be reported to that user as an earlier timeout leaving a
 thread behind, and excused from the circuit breaker.
 
 The count is what the exit code cannot be: evidence that this worker was in
-the condition the exit code claims.  It is also all there is to go on when the
-status cannot be read at all.
+the condition the exit code claims.  It is not proof -- it comes from the
+previous answer, so a worker that reported a leak, had the thread finish, and
+was then told by its user to exit with this very code would still be read as
+retiring.  What it rules out is the accident: an exit 70 from a worker that
+never reported carrying anything.
 
 Where the two cannot both be had the answer is \"crash\", which is the
 direction that loses least: a retirement misfiled as a crash costs a breaker
-tick and an init attribution, exactly as it did before any of this existed.
+tick and an init attribution, exactly as it did before any of this existed,
+where a crash misfiled as a retirement suppresses both for something that
+really was one.
 
 The status is not terminal the instant the parent reads EOF: SBCL updates the
 process struct from its SIGCHLD handler, which has not run yet.  Measured, it
@@ -812,8 +817,15 @@ than falling back to the count on essentially every real retirement."
           ;; Killed by a signal, so not a retirement -- a retiring worker
           ;; exits under its own power.
           ((eq status :signaled) nil)
-          ;; Unknowable: no process, already reaped, or still not settled.
-          (t (%reported-a-leak-p worker)))))))
+          ;; Unknowable: no process, already reaped, or still not settled
+          ;; after the wait.  The count alone would answer here, and it is
+          ;; the witness that can be stale -- a worker that reported a leak,
+          ;; had the thread finish, and then genuinely crashed reads as a
+          ;; retirement, which excuses a real crash from the breaker and
+          ;; from init attribution.  Answering \"crash\" instead costs a
+          ;; retirement one breaker tick, exactly as it did before any of
+          ;; this existed.
+          (t nil))))))
 
 (defun exit-code-says-retired-p (worker)
   "True when WORKER's recorded exit code and leak count both say it retired.
@@ -854,16 +866,32 @@ without marking the worker as crashed."
       ;; behind the first RPC used to be told "already-dead", which reads as
       ;; an ordinary crash.  The init monitor is not a rare straggler here: it
       ;; polls the same worker every fraction of a second while a load runs.
-      ;; Only a worker that actually crashed has a reason of its own to
-      ;; report.  One that was killed deliberately, or a replacement still
-      ;; carrying the crash details it inherited to show the user, has
-      ;; nothing to say here -- and reporting the inherited string would
-      ;; describe its predecessor's death as its own, which for "timeout"
-      ;; means telling the user an operation they never ran took too long.
-      (error 'worker-crashed :worker worker
-                             :reason (or (and (eq :crashed (worker-state worker))
-                                              (worker-last-crash-reason worker))
-                                         "already-dead")))
+      ;; What this worker's own death was, for a caller that arrives after
+      ;; someone else established it.
+      ;;
+      ;; The retirement slot answers whatever the state has since become.
+      ;; The pool kills a crashed worker as part of replacing it, which
+      ;; leaves it :DEAD, and the callers that arrive after that are the ones
+      ;; that most need the answer: the init monitor, still polling the
+      ;; worker it was watching, disables initialization for every later
+      ;; worker in the pool when it reads a crash.  The slot is recorded per
+      ;; worker and never copied to a replacement, so it is safe to trust
+      ;; here in a way the reason string is not.
+      ;;
+      ;; The reason string is trusted only while the worker is :CRASHED,
+      ;; because a replacement carries its predecessor's reason so the user
+      ;; can be told why the session was reset.  Reporting that for a worker
+      ;; killed deliberately would describe someone else's death as this
+      ;; one's -- for "timeout", telling the user an operation they never ran
+      ;; took too long.
+      (error 'worker-crashed
+             :worker worker
+             :reason (cond ((worker-retired-p worker)
+                            *retired-leaked-thread-reason*)
+                           ((eq :crashed (worker-state worker))
+                            (or (worker-last-crash-reason worker)
+                                "already-dead"))
+                           (t "already-dead"))))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn

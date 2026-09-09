@@ -17,6 +17,13 @@
   (:import-from #:cl-mcp/tests/test-helpers
                 #:spawn-available-p
                 #:with-pool)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:get-tool-handler)
+  ;; Named for the dependency alone: the tool registers itself when its file
+  ;; is loaded, and the registry is empty without it.
+  (:import-from #:cl-mcp/src/tools/pool-status)
+  (:import-from #:cl-mcp/src/state
+                #:make-state)
   ;; Named without importing: the worker server's side of this is internal, so
   ;; the tests reach it with ::, but the dependency still has to be declared
   ;; for the package-inferred system to load it.
@@ -318,13 +325,18 @@ running -- the condition the worker retires for."
   ;; version of this guard was inert -- the reader it called was not imported
   ;; and IGNORE-ERRORS swallowed the undefined-function error -- and shipped
   ;; because no test asked the question.
-  (labels ((dead-worker (&key leaked)
-             ;; No process, so classification falls back to the count the
-             ;; worker last reported, which is the path that runs when the
-             ;; process is gone or not yet reaped.
+  (labels ((dead-worker (&key leaked exit-code)
+             ;; A real process when the exit code matters: the classifier
+             ;; asks SB-EXT for it, and with no process to ask there is
+             ;; nothing to go on and the answer is "crash".
              (cl-mcp/src/worker-client::make-worker
               :state :bound
               :leaked-threads (or leaked 0)
+              :process-info
+              (when exit-code
+                (sb-ext:run-program "/bin/sh"
+                                    (list "-c" (format nil "exit ~D" exit-code))
+                                    :wait nil :search nil))
               :stream (make-two-way-stream (make-string-input-stream "")
                                            (make-broadcast-stream))))
            (reason-of (worker)
@@ -335,12 +347,14 @@ running -- the condition the worker retires for."
                (cl-mcp/src/worker-client:worker-crashed (c)
                  (cl-mcp/src/worker-client:worker-crashed-reason c)))))
     (testing "a worker that died carrying one is reported as retired"
-      (let ((reason (reason-of (dead-worker :leaked 1))))
+      (let ((reason (reason-of (dead-worker :leaked 1 :exit-code 70))))
         (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
                    reason)
             (format nil "reason was ~S" reason))))
     (testing "a worker that died carrying nothing is reported as a crash"
-      (ok (equal "eof" (reason-of (dead-worker)))))
+      (ok (equal "eof" (reason-of (dead-worker :exit-code 70))))
+      (ok (equal "eof" (reason-of (dead-worker :leaked 1)))
+          "and so is one with nothing to read an exit code from"))
     (testing "and the pool tells the two apart"
       ;; The predicate the init monitor consults.  Asserted through a real
       ;; WORKER-CRASHED condition, because what broke before was the reader
@@ -435,6 +449,20 @@ initialization pool-wide for")
                (make-condition 'cl-mcp/src/worker-client:worker-crashed
                                :worker worker :reason reason))
               "and the exclusion that reads it recognizes what it gets"))))
+    (testing "and still reads it after the worker has been killed and reaped"
+      ;; The pool kills a crashed worker as part of replacing it, which
+      ;; leaves it :DEAD.  The callers that arrive after that are the ones
+      ;; that most need the answer -- the init monitor is still polling the
+      ;; worker it was watching, and reads a crash there as init's fault for
+      ;; every later worker in the pool.
+      (let ((worker (dead-worker :leaked 1)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed
+         worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+        (setf (cl-mcp/src/worker-client::worker-stream worker) nil
+              (cl-mcp/src/worker-client:worker-state worker) :dead)
+        (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                   (reason-of worker))
+            "a retirement is still reported as one once the worker is :dead")))
     (testing "but a worker that did not crash reports no reason of its own"
       ;; A replacement carries the details of the death that produced it,
       ;; and one killed deliberately -- pool-kill-worker, a cancellation,
@@ -470,10 +498,78 @@ initialization pool-wide for")
              (ok (< (/ (- (get-internal-real-time) start)
                        internal-time-units-per-second)
                     0.5)
-                 "it returns without serving out the join timeout"))
+                 "it returns without serving out the join timeout")
+             ;; Not waiting is not the same as not cleaning up: the thread
+             ;; still has to be stopped and the slot cleared, or the worker
+             ;; leaves a thread of its own behind on every timeout.
+             ;; Polled: DESTROY-THREAD asks the thread to die rather than
+             ;; killing it where it stands, so reading the flag immediately
+             ;; is a race with the scheduler, not a test of anything.
+             (ok (loop repeat 100
+                       thereis (not (bt:thread-alive-p drain))
+                       do (sleep 0.02))
+                 "the drain thread is stopped rather than left running")
+             (ok (null (cl-mcp/src/worker-client::worker-stderr-thread worker))
+                 "and the slot no longer points at it"))
         (ignore-errors (bt:destroy-thread drain))
         (ignore-errors (sb-ext:process-kill process 9))
         (ignore-errors (sb-ext:process-wait process))))))
+
+(deftest killing-a-worker-lets-its-last-words-through
+  ;; KILL-WORKER closes the worker's pipe by killing it, so the drain thread
+  ;; ends on its own with whatever the worker said last -- after a SIGKILL,
+  ;; the part that says why.  The wait for it was written as
+  ;; (BT:JOIN-THREAD th :timeout 1), which that function does not accept, so
+  ;; IGNORE-ERRORS swallowed a program-error and the thread was destroyed
+  ;; mid-line instead.
+  (testing "the drain thread is joined rather than destroyed mid-line"
+    ;; The process is already gone, so KILL-WORKER goes straight to the join
+    ;; rather than spending an unpredictable amount of time on SIGTERM: the
+    ;; wait is what is under test, and it has to be the thing the drain
+    ;; thread outlives.
+    (let* ((finished nil)
+           ;; The process first, and the thread after it: spawning is the
+           ;; slow part here, and a drain thread that finishes during it
+           ;; would look joined whether or not anything waited.
+           (process (sb-ext:run-program "/bin/sh" (list "-c" "exit 0")
+                                        :wait t :search nil))
+           (drain (bt:make-thread (lambda () (sleep 0.5) (setf finished t))
+                                  :name "probe-drain"))
+           (worker (cl-mcp/src/worker-client::make-worker
+                    :state :bound
+                    :process-info process
+                    :stderr-thread drain)))
+      (unwind-protect
+           (progn
+             (cl-mcp/src/worker-client:kill-worker worker)
+             (ok finished "it ran to the end instead of being cut off")
+             (ok (null (cl-mcp/src/worker-client::worker-stderr-thread worker))
+                 "and the slot no longer points at it"))
+        (ignore-errors (bt:destroy-thread drain))))))
+
+(deftest pool-status-shows-a-worker-that-is-carrying-one
+  ;; Between a deadline giving up on a thread and the next request arriving,
+  ;; the worker is still serving and nothing else says so.  pool-status is
+  ;; where someone asking what just went wrong looks, which is the whole
+  ;; reason the count is reported on every response rather than only when
+  ;; the worker finally retires.
+  (testing "the count reaches the tool's data and its summary"
+    (let* ((worker (cl-mcp/src/worker-client::make-worker
+                    :id 99 :state :bound :leaked-threads 2))
+           (cl-mcp/src/pool::*pool-running* t)
+           (cl-mcp/src/pool::*all-workers* (list worker))
+           (cl-mcp/src/pool::*standby-workers* ())
+           (info (cl-mcp/src/pool::pool-worker-info)))
+      (ok (eql 2 (gethash "leaked_threads" (aref info 0)))
+          "the per-worker data carries it")
+      (let* ((response (funcall (get-tool-handler "pool-status")
+                                (make-state) 1 nil))
+             (text (gethash "text"
+                            (aref (gethash "content"
+                                           (gethash "result" response))
+                                  0))))
+        (ok (search "leaked_threads=2" text)
+            "and the summary the user actually reads says so")))))
 
 (deftest a-real-exit-code-decides-over-the-reported-count
   ;; The count is a proxy taken from the worker's *previous* answer.  A worker
@@ -522,15 +618,17 @@ timeout leaving a thread behind, and excused from the circuit breaker"))
       ;; excused from the circuit breaker, and explained to the user as a
       ;; timeout of their own from earlier.
       (ok (not (classify-signaled :leaked 1))))
-    (testing "with no process at all the count is what is left to go on"
-      (ok (cl-mcp/src/worker-client::%retired-for-leaked-thread-p
-           (cl-mcp/src/worker-client::make-worker :state :bound
-                                                  :leaked-threads 1))
-          "reported a leak")
+    (testing "with no exit code to read at all the answer is crash"
+      ;; The count is the witness that can be stale: a worker that reported a
+      ;; leak, had the thread finish, and then genuinely crashed reads as a
+      ;; retirement on the count alone -- excusing a real crash from the
+      ;; breaker and from init attribution.  A retirement misfiled the other
+      ;; way costs one breaker tick, which is what it cost before any of this
+      ;; existed.
       (ok (not (cl-mcp/src/worker-client::%retired-for-leaked-thread-p
                 (cl-mcp/src/worker-client::make-worker :state :bound
-                                                       :leaked-threads 0)))
-          "reported none"))))
+                                                       :leaked-threads 1)))
+          "a reported leak is not on its own a retirement"))))
 
 (deftest a-real-worker-retires-and-the-parent-reads-it-as-a-retirement
   ;; End to end against a real worker process.  Three joints are covered
@@ -638,6 +736,12 @@ retirement, against a threshold of one")
               ;; this session's breaker off for as long as the session lived,
               ;; since every later replacement inherits them again.  A crash
               ;; loop is the thing the breaker exists for.
+              (ok (equal
+                   cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                   (cl-mcp/src/worker-client:worker-last-crash-reason
+                    replacement))
+                  "it carries the reason forward, which is how the user's
+next call learns why the session was reset")
               (ok (not (cl-mcp/src/worker-client::worker-retired-p replacement))
                   "the fresh worker has not retired")
               (sb-posix:kill (cl-mcp/src/worker-client:worker-pid replacement)
@@ -850,4 +954,36 @@ retirement, against a threshold of one")
                    cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
           "a retirement says what actually happened")
       (ok (search "crashed" (text-for "eof"))
-          "and a crash still reads as one"))))
+          "and a crash still reads as one"))
+    ;; The other way the message is delivered, and the one production
+    ;; usually takes: the worker died between requests, the pool replaced it,
+    ;; and the next call gets the one-time notification from the replacement
+    ;; -- which is why the pool copies the dead worker's reason onto it.
+    (flet ((text-after-reset (reason)
+             (let* ((worker (cl-mcp/src/worker-client::make-worker
+                             :state :bound))
+                    (cl-mcp/src/proxy::*current-session-id* "leak-probe-reset")
+                    (cl-mcp/src/proxy::%cached-get-or-assign%
+                      (lambda (session) (declare (ignore session)) worker))
+                    (cl-mcp/src/proxy::%cached-check-and-clear%
+                      (lambda (w) (declare (ignore w)) t))
+                    (cl-mcp/src/proxy::%cached-worker-last-crash-reason%
+                      #'cl-mcp/src/worker-client:worker-last-crash-reason)
+                    (cl-mcp/src/proxy::%cached-worker-last-exit-status%
+                      #'cl-mcp/src/worker-client:worker-last-exit-status)
+                    (cl-mcp/src/proxy::%cached-worker-last-exit-code%
+                      #'cl-mcp/src/worker-client:worker-last-exit-code))
+               (setf (cl-mcp/src/worker-client:worker-last-crash-reason worker)
+                     reason)
+               (gethash "text"
+                        (aref (gethash "content"
+                                       (cl-mcp/src/proxy:proxy-to-worker
+                                        "leak-probe-reset-request"
+                                        "repl-eval" nil))
+                              0)))))
+      (ok (search "left a thread that could not be stopped"
+                  (text-after-reset
+                   cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
+          "the replacement's one-time notification says it too")
+      (ok (search "crashed" (text-after-reset "eof"))
+          "and still reads as a crash when it was one"))))
