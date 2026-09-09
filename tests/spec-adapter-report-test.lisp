@@ -406,6 +406,23 @@ thread sees the value the caller captured rather than the global one.")
       (ok (null (getf report :specs)))
       (ok (null (getf report :properties))))))
 
+(deftest list-report-does-not-count-a-kind-it-was-not-asked-for
+  (testing "a kind that was not requested has no count, not a count of zero"
+    ;; "0 specs" for kind=properties reads as "this registry has no specs",
+    ;; which is the reading every other zero in these tools is careful to
+    ;; rule out.
+    (let ((properties-only (list-report (%listing-api) :ok :kind "properties"))
+          (specs-only (list-report (%listing-api) :ok :kind "specs")))
+      (ok (null (getf (getf properties-only :counts) :specs)))
+      (ok (= 1 (getf (getf properties-only :counts) :properties)))
+      (ok (null (getf (getf specs-only :counts) :properties)))
+      (ok (= 1 (getf (getf specs-only :counts) :specs)))))
+  (testing "and a requested kind that matched nothing still counts zero"
+    (let ((report (list-report (%listing-api) :ok :kind "both"
+                               :package "KEYWORD")))
+      (ok (eql 0 (getf (getf report :counts) :specs)))
+      (ok (eql 0 (getf (getf report :counts) :properties))))))
+
 (deftest list-report-separates-an-absent-tag-from-an-unmatched-one
   (testing "a tag that exists but matches nothing is resolved and empty"
     (let ((report (list-report (%listing-api) :ok :kind "properties"

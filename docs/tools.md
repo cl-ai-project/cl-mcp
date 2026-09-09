@@ -691,6 +691,9 @@ call time and report `cl-spec-not-loaded` when it is absent.
     carries this tag" and "this tag does not exist here" are different answers.
   - An empty listing is not evidence that a project has no contracts: it shows
     what is registered in *this worker*.
+  - `counts` is `null` for a kind that was not requested, and the text omits
+    its line. A `0` there would read as "the registry holds none" when it
+    means "this call did not look".
 - `spec-symbol` — what is registered about a symbol, joined with this image's
   signature, docstring and source location. Property bodies are summarized,
   not inlined.

@@ -463,8 +463,15 @@ both; got ~S" kind)
               :specs (mapcar #'symbol-data (%take spec-names limit))
               :properties (loop for name in (%take property-names limit)
                                 collect (%property-listing api name registry))
-              :counts (list :specs (length spec-names)
-                            :properties (length property-names))
+              ;; NIL, not 0, for a kind that was not asked for.  The count
+              ;; is a fact about the registry and the list is what this
+              ;; response carries; not looking leaves the first unknown, and
+              ;; reporting it as zero says the registry holds none -- the
+              ;; same conflation the tag and no-properties answers go out of
+              ;; their way to avoid.
+              :counts (list :specs (when want-specs (length spec-names))
+                            :properties (when want-properties
+                                          (length property-names)))
               :truncated (or (> (length spec-names) limit)
                              (> (length property-names) limit))
               :limit limit

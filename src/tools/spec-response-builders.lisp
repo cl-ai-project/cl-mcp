@@ -782,8 +782,17 @@ was learned either way."
   (with-output-to-string (stream)
     (let ((counts (getf report :counts))
           (filters (getf report :filters)))
-      (format stream "~D spec~:P, ~D propert~:@P"
-              (getf counts :specs) (getf counts :properties))
+      ;; Only the kinds that were asked for.  A "0 specs" printed for
+      ;; kind=properties reads as "this registry has no specs" when it means
+      ;; "specs were not counted", and nothing in the line says which.
+      (format stream "~{~A~^, ~}"
+              (or (remove nil
+                          (list (when (getf counts :specs)
+                                  (format nil "~D spec~:P" (getf counts :specs)))
+                                (when (getf counts :properties)
+                                  (format nil "~D propert~:@P"
+                                          (getf counts :properties)))))
+                  (list "nothing counted")))
       (when (getf filters :package)
         (format stream "  in package ~A" (getf filters :package)))
       (when (getf filters :tag)
@@ -839,6 +848,9 @@ has not been loaded into this worker is not here."))
                 "properties" (coerce (mapcar #'%listing-entry-ht
                                              (getf report :properties))
                                      'vector)
+                ;; NIL for a kind that was not requested, which yason
+                ;; encodes as null: a consumer reading counts.specs as 0
+                ;; would take it for evidence that none are registered.
                 "counts" (make-ht "specs" (getf counts :specs)
                                   "properties" (getf counts :properties))
                 "truncated" (json-bool (getf report :truncated))

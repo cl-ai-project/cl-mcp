@@ -306,6 +306,10 @@ tool 入力の symbol 文字列を解決するために任意の reader 評価�
   「誰も持っていない」と「そのタグ自体が存在しない」は別の答えである。
 - **空の一覧を「契約が無い」と読ませない。** 表示しているのはこの worker の
   registry であり、system 未ロードの定義はここに無い。
+- **要求しなかった種別を 0 件として数えない。** `counts` は `null`、text は
+  その行を省く。`kind=properties` で「0 specs」と出すと「この registry に
+  spec は無い」と読めるが、意味は「数えていない」である。件数は registry に
+  ついての事実、配列はこの応答が運ぶもので、見ていない以上前者は不明である。
 - cl-spec 側の listing API は **optional** として解決する。無い revision では
   この 1 操作が `unsupported` になるだけで、他の tool は動く。
 

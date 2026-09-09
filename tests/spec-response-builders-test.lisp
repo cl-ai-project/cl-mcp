@@ -13,6 +13,7 @@
   (:import-from #:yason
                 #:false)
   (:import-from #:cl-mcp/src/tools/spec-response-builders
+                #:build-spec-list-response
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response))
@@ -533,3 +534,41 @@
       (ok (eq yason:false (gethash "body_complete" response)))
       (ok (search "truncated" text))
       (ok (search "31" text)))))
+
+(deftest list-response-omits-a-kind-that-was-not-requested
+  (testing "the header names only what was counted"
+    (flet ((text-for (kind specs properties)
+             (first-text
+              (build-spec-list-response
+               (list :status :ok :kind kind
+                     :specs (when specs (list (%symbol-data "PROBE" "S")))
+                     :properties nil
+                     :counts (list :specs specs :properties properties)
+                     :truncated nil :limit 200
+                     :filters (list :tag-resolved :not-requested)
+                     :coverage "coverage note"
+                     :environment *environment*)))))
+      (let ((properties-only (text-for "properties" nil 3)))
+        (ok (search "3 properties" properties-only))
+        (ok (not (search "spec" (subseq properties-only 0
+                                        (position #\Newline properties-only))))))
+      (let ((specs-only (text-for "specs" 2 nil)))
+        (ok (search "2 specs" specs-only))
+        (ok (not (search "propert" (subseq specs-only 0
+                                           (position #\Newline specs-only))))))
+      (testing "while a requested kind that matched nothing still says zero"
+        (let ((both (text-for "both" 0 0)))
+          (ok (search "0 specs" both))
+          (ok (search "0 properties" both))))))
+  (testing "the payload leaves an uncounted kind null rather than zero"
+    (let* ((response (build-spec-list-response
+                      (list :status :ok :kind "properties"
+                            :specs nil :properties nil
+                            :counts (list :specs nil :properties 0)
+                            :truncated nil :limit 200
+                            :filters (list :tag-resolved :not-requested)
+                            :coverage "coverage note"
+                            :environment *environment*)))
+           (counts (gethash "counts" response)))
+      (ok (null (gethash "specs" counts)))
+      (ok (eql 0 (gethash "properties" counts))))))
