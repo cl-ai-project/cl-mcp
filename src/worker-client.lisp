@@ -1099,7 +1099,15 @@ Robust against already-dead processes."
           ;; never happened and the thread was destroyed mid-line, losing the
           ;; worker's last log output -- which after a SIGKILL is the part
           ;; that says why.
-          (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))
+          ;;
+          ;; Waited for only once the process is actually gone, as in
+          ;; %MARK-WORKER-CRASHED: the drain thread ends when the pipe's
+          ;; write end closes, so with the process still up there is nothing
+          ;; to wait for.  %REPLENISH-STANDBYS calls this under *POOL-LOCK*,
+          ;; which every session's next request goes through.
+          (when (or (null process)
+                    (not (ignore-errors (sb-ext:process-alive-p process))))
+            (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil)))
           (when (bt:thread-alive-p th)
             (ignore-errors (bt:destroy-thread th)))
           (setf (worker-stderr-thread worker) nil)))

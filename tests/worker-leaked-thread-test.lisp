@@ -179,7 +179,26 @@ running -- the condition the worker retires for."
                                     :name (format nil "leak-driver-~D" i)))))
         (mapc (lambda (th) (bt:join-thread th)) drivers)
         (ok (= 4 (length (leaked-threads)))
-            "every thread that could not be stopped is on the record")))))
+            "every thread that could not be stopped is on the record"))))
+  (testing "and the record is pruned as it is written, not only as it is read"
+    ;; LEAKED-THREADS prunes, and the worker calls it on every request.  The
+    ;; same deadline machinery runs inline in the parent when the pool is
+    ;; disabled, where nothing ever asks -- so a record only pruned on read
+    ;; holds every finished thread for the life of the process.  Read
+    ;; through the raw list, because reading it the usual way would prune it
+    ;; and prove nothing.
+    (with-clean-leak-record
+      (let ((first (nth-value 1 (leak-one-thread))))
+        ;; Ended without asking the record anything -- RELEASE-PROBE-THREADS
+        ;; and LEAK-ONE-THREAD both read it, and reading is what prunes, so
+        ;; either would do the work under test and prove nothing.
+        (setf *probe-release* t)
+        (loop repeat 200 while (bt:thread-alive-p first) do (sleep 0.02))
+        (setf *probe-release* nil)
+        (call-with-deadline-thread #'unstoppable-probe 0.3
+                                   :name "leak-probe-second")
+        (ok (= 1 (length cl-mcp/src/utils/deadline::%leaked-threads%))
+            "the thread that finished is gone without anyone asking")))))
 
 (deftest worker-retires-rather-than-serve-a-request-while-carrying-one
   ;; Driven through %DISPATCH-REQUEST, the function a real request goes
@@ -693,6 +712,32 @@ parent waited long enough for the status to settle to read it"))
       (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
                  (cl-mcp/src/worker-client:worker-last-crash-reason worker))
           "with the reason the user is shown intact")))
+  (testing "nor the exit details it read while the process was still there"
+    ;; The reaper closes the process out from under the pool, so its second
+    ;; look often reads nothing at all.  What the RPC read has to survive
+    ;; that: the exit code is what tells the user the death was deliberate,
+    ;; and it is the pool's only witness if it has to classify again.
+    (let* ((process (sb-ext:run-program
+                     "/bin/sh"
+                     (list "-c"
+                           (format nil "exit ~D"
+                                   cl-mcp/src/utils/deadline::+leaked-thread-exit-code+))
+                     :wait t :search nil))
+           (worker (cl-mcp/src/worker-client::make-worker
+                    :state :bound :leaked-threads 1 :process-info process)))
+      (cl-mcp/src/worker-client::%mark-worker-crashed
+       worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+      (ok (eql cl-mcp/src/utils/deadline::+leaked-thread-exit-code+
+               (cl-mcp/src/worker-client:worker-last-exit-code worker))
+          "the RPC recorded what the worker left")
+      ;; The pool's second look, with nothing of its own to read.
+      (cl-mcp/src/pool::%record-worker-death worker nil nil
+                                             :already-classified t)
+      (ok (eql cl-mcp/src/utils/deadline::+leaked-thread-exit-code+
+               (cl-mcp/src/worker-client:worker-last-exit-code worker))
+          "and it is still there to explain the reset")
+      (ok (equal "exited"
+                 (cl-mcp/src/worker-client:worker-last-exit-status worker)))))
   (testing "and neither does a reason the RPC that met the death recorded"
     ;; The pool's own RPCs die on timeouts, and it only ever knows that a
     ;; process is gone.  "process-died" tells the user less than the
