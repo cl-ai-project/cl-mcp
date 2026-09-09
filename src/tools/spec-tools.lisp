@@ -9,6 +9,13 @@
 ;;;; happen there too, or a tool would answer from a registry nobody wrote to.
 ;;;; It is also what makes "edit, load-system, re-check" work: the definition
 ;;;; that runs is the one the last load put in this worker.
+;;;;
+;;;; All three belong to the optional :CL-SPEC tool group and are hidden until
+;;;; it is switched on.  cl-mcp does not depend on cl-spec and most of its
+;;;; users have never heard of it; showing them three tools they cannot use --
+;;;; and three long descriptions in every model context -- is a cost with no
+;;;; return.  Enable with MCP_ENABLE_TOOL_GROUPS=cl-spec or
+;;;; (cl-mcp:run :tool-groups (list :cl-spec)).
 
 (defpackage #:cl-mcp/src/tools/spec-tools
   (:use #:cl)
@@ -29,6 +36,7 @@
 (in-package #:cl-mcp/src/tools/spec-tools)
 
 (define-tool "spec-symbol"
+  :group :cl-spec
   :description
   "Find the cl-spec contracts registered about a symbol, joined with this
 image's own knowledge of it (signature, docstring, source location).
@@ -77,6 +85,7 @@ Examples:
       (result id (spec-symbol-response params)))))
 
 (define-tool "spec-describe"
+  :group :cl-spec
   :description
   "Read one registered cl-spec definition in full: a property's body and
 source form, or a spec's normalized tree.
@@ -119,6 +128,7 @@ Examples:
       (result id (spec-describe-response params)))))
 
 (define-tool "spec-check"
+  :group :cl-spec
   :description
   "Run cl-spec properties and return structured results and counterexamples.
 

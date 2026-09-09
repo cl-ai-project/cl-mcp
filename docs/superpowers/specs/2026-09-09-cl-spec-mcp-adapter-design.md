@@ -148,6 +148,35 @@ worker  src/worker/handlers.lisp           3 メソッド追加
   `%ensure-sb-introspect` が既に採っているパターンである。
   cl-spec を使わないプロジェクトでも既存 tool は無変更で動く。
 
+### 3.1b オプトイン(既定で無効)
+
+**3 つの tool は既定で無効**とし、オプショナルな tool group `cl-spec` に属させる。
+cl-mcp は cl-spec に依存せず、大半の利用者は cl-spec を使わない。使えない tool を
+3 つ `tools/list` に出し、長い説明文をモデルのコンテキストに載せるのは、
+その利用者にとって費用だけで見返りがない。
+
+gating は registry 側の**汎用機構**として実装する。cl-spec 専用フラグにすると
+`registry.lisp` が cl-spec を知ることになり(層の逆転)、それを避けようとすると
+結局同じ汎用機構になる。
+
+| 要素 | 内容 |
+|---|---|
+| `define-tool` の `:group` | tool をオプショナルグループに属させる |
+| `*enabled-tool-groups*` | 有効なグループ名(大文字文字列)。既定は空 |
+| `MCP_ENABLE_TOOL_GROUPS` | ロード時に読む。カンマ/空白区切り。**MCP クライアントは command + env で起動するので実用上こちらが主** |
+| `cl-mcp:run` の `:tool-groups` | `(list :cl-spec)`。`worker-pool` と同じ supplied-p 意味論 |
+
+- **登録は無条件**に行い、表示と呼び出しの時点で絞る。ロード後に有効化しても
+  届くようにするため。
+- グループ名は**文字列で突き合わせる**。keyword と環境変数の文字列がどこかで
+  出会う必要があるが、設定値を根拠に image へ symbol を intern しない。
+  未登録のグループ名は「何にも一致しない名前」で済む。
+- 無効な tool を呼んだ場合は `Tool ~A not found` ではなく、
+  **グループ名と有効化方法**を返す。tool は実在し、足りないのは設定である。
+- worker 側の `worker/spec-*` メソッドは無条件に登録したままにする。
+  parent が tool を隠している以上到達しないので、二重に gate しても
+  失敗経路が増えるだけである。
+
 ### 3.2 実行場所
 
 registry は `load-system` を実行した worker image に載る。

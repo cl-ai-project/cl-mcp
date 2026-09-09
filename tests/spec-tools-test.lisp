@@ -15,6 +15,9 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/spec-entry #:parse-seed-string)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:*enabled-tool-groups*
+                #:disabled-tool-group)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/spec-tools-test)
@@ -28,6 +31,14 @@
     (asdf:load-system "cl-mcp/main")
     (setf *tools-loaded* t)))
 
+(defmacro with-cl-spec-group (&body body)
+  "Run BODY with the optional :CL-SPEC tool group switched on.
+
+The group is off by default, which is what most of these tests are about; the
+ones that drive a spec tool have to turn it on the way a deployment would."
+  `(let ((*enabled-tool-groups* (list "CL-SPEC")))
+     ,@body))
+
 (defun %call (name arguments-json)
   "Call tool NAME with ARGUMENTS-JSON and return the parsed JSON-RPC object.
 
@@ -36,6 +47,7 @@ older than 2025-11-25 answers with a JSON-RPC error rather than a result, and
 a helper that returned only the result would hide exactly those messages."
   (%ensure-tools)
   (let ((*use-worker-pool* nil)
+        (*enabled-tool-groups* (list "CL-SPEC"))
         (line (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
 \"params\":{\"name\":\"~A\",\"arguments\":~A}}" name arguments-json)))
     (parse (process-json-line line))))
@@ -56,10 +68,47 @@ are what a test about the message has to look at."
                     "")))
       (t ""))))
 
-(deftest spec-tools-are-registered
-  (testing "all three tools appear in tools/list"
+(deftest spec-tools-are-hidden-until-the-group-is-enabled
+  (testing "the optional group is off by default"
     (%ensure-tools)
     (let* ((*use-worker-pool* nil)
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response))))
+           (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
+      (dolist (name '("spec-symbol" "spec-describe" "spec-check"))
+        (ok (not (member name names :test #'string=))))
+      (testing "and the tools that are not optional are still there"
+        (ok (member "repl-eval" names :test #'string=)))))
+  (testing "calling one says which group to enable, not that it does not exist"
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"spec-check\",\"arguments\":{}}}"))
+           (message (gethash "message" (gethash "error" (parse response)))))
+      (ok (search "cl-spec" message))
+      (ok (search "MCP_ENABLE_TOOL_GROUPS" message))
+      (ok (not (search "not found" message)))))
+  (testing "an unknown tool is still reported as unknown"
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}"))
+           (message (gethash "message" (gethash "error" (parse response)))))
+      (ok (search "not found" message))))
+  (testing "disabled-tool-group names the group for a registered tool only"
+    (%ensure-tools)
+    (ok (eq :cl-spec (disabled-tool-group "spec-check")))
+    (ok (null (disabled-tool-group "repl-eval")))
+    (ok (null (disabled-tool-group "no-such-tool")))
+    (with-cl-spec-group
+      (ok (null (disabled-tool-group "spec-check"))))))
+
+(deftest spec-tools-are-registered
+  (testing "all three tools appear in tools/list once the group is on"
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response))))
@@ -135,6 +184,7 @@ are what a test about the message has to look at."
   (testing "spec-symbol and spec-describe take timeout_seconds"
     (%ensure-tools)
     (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response)))))

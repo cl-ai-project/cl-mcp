@@ -638,3 +638,68 @@ Response (excerpt):
                          "To test: run run-tests with {\"system\": \"demo-lib/tests\"}",
                          "To edit: use lisp-edit-form with paths under scaffolds/demo-lib/"]}}
 ```
+
+## Optional tool groups
+
+A tool may belong to an optional group. Grouped tools are registered like any
+other but stay out of `tools/list` and refuse calls until the group is switched
+on, so a tool that only makes sense alongside another system does not cost
+every other user a line in the tool list and a description in the model's
+context.
+
+Enable a group in the server's environment, which is how an MCP client
+normally launches cl-mcp:
+
+```json
+{ "mcpServers": { "cl-mcp": {
+    "command": "ros", "args": ["run", "--", "..."],
+    "env": { "MCP_ENABLE_TOOL_GROUPS": "cl-spec" } } } }
+```
+
+Several groups are comma or space separated (`"cl-spec, other"`). For embedded
+use, `cl-mcp:run` takes the same setting:
+
+```lisp
+(cl-mcp:run :transport :stdio :tool-groups (list :cl-spec))
+```
+
+Calling a tool whose group is off returns a JSON-RPC error naming the group and
+how to enable it, rather than "tool not found" — the tool is real, the setting
+is what is missing.
+
+### Group `cl-spec` — `spec-symbol`, `spec-describe`, `spec-check`
+
+Fetch the [cl-spec](https://github.com/cl-ai-project/cl-spec) Spec/Property
+registered about a symbol, read one in full, and run it for a structured
+counterexample. cl-mcp does not depend on cl-spec: these tools resolve it at
+call time and report `cl-spec-not-loaded` when it is absent.
+
+- `spec-symbol` — what is registered about a symbol, joined with this image's
+  signature, docstring and source location. Property bodies are summarized,
+  not inlined.
+  - `symbol` (string, required), `package`, `include_runtime` (boolean,
+    default true), `timeout_seconds` (number, default 30)
+- `spec-describe` — one definition in full.
+  - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
+    `package`, `max_chars` (positive integer, default 8000),
+    `timeout_seconds` (number, default 30)
+  - `function-spec` answers `unsupported`: the cl-spec revision this was built
+    against has no `function-spec-data`.
+- `spec-check` — run one property, or every property registered `(:about
+  <symbol>)`.
+  - `property` **or** `symbol` (exactly one), `package`, `profile` (default
+    `normal`), `seed` (decimal digits **as a string**),
+    `expect_definition_digest`, `timeout_seconds` (number, default 60 — the
+    budget for the whole call), `max_value_chars` (positive integer, default
+    2000)
+  - `verified` is true only when at least one property was selected, all of
+    them passed, and each evaluated at least one trial. Zero properties,
+    a timeout, a generator failure and a zero-trial budget are each reported
+    as themselves.
+  - The seed is text because a cl-spec seed exceeds JSON's safe integer range;
+    a JSON number is refused rather than silently ignored.
+
+Prerequisite: `load-system` with `cl-spec/check-it` (execution) or `cl-spec`
+(introspection only), plus the system defining the specs and properties. All
+three tools run in the session's worker, so the definitions a `load-system`
+put there are the ones they see.
