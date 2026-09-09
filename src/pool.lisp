@@ -30,6 +30,8 @@
                 #:signal-worker-terminate
                 #:worker-state #:worker-session-id
                 #:worker-needs-reset-notification
+                #:worker-owes-reset-p
+                #:worker-leaked-threads
                 #:worker-tcp-port
                 #:worker-pid #:worker-id
                 #:worker-process-info
@@ -38,8 +40,14 @@
                 #:worker-last-exit-status
                 #:worker-last-exit-code
                 #:worker-crashed
+                #:worker-crashed-reason
+                #:worker-retired-p
+                #:worker-retirement-recorded
+                #:exit-code-says-retired-p
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:*retired-leaked-thread-reason*)
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings
                 #:%invalidate-proxy-cache
@@ -216,6 +224,22 @@ Enable the pool to use it.")))
   "Maps session-id to list of crash timestamps (universal-time).
 Used by the circuit breaker to detect repeated crash loops.")
 
+(defvar *owed-resets* (make-hash-table :test 'equal)
+  "Sessions owed a state-reset notification nobody has delivered, mapped to
+the crash details to explain it by: (REASON EXIT-STATUS EXIT-CODE).
+Guarded by *POOL-LOCK*.
+
+The debt belongs to the session because the worker that incurred it is being
+thrown away, and not every path that throws one away has a replacement in
+hand to pass it to: the health monitor can find a worker another thread has
+already marked crashed and simply drop it, and a replacement spawn can fail.
+Both lost the debt, and the user's next call then landed in a fresh image --
+systems unloaded, definitions gone -- with nothing said about it.
+
+Carrying the details rather than a bare flag is what lets the replacement say
+*why*.  Without them a worker that retired for a leaked thread is announced
+as an ordinary crash, which is the one thing this branch exists to stop.")
+
 (defparameter *crash-breaker-window* 300
   "Time window in seconds for the crash circuit breaker.")
 
@@ -310,6 +334,131 @@ init cannot brick a session's repl-eval/load-system."
           (gethash "package" ht) (getf config :package))
     ht))
 
+(defun %retirement-crash-p (condition)
+  "True when CONDITION is a worker that retired deliberately rather than died.
+
+A worker exits when it finds it is still carrying a thread a deadline could
+not stop, and that reaches the parent as a crash like any other.  It is not
+evidence about whatever the worker happened to be doing at the time, so
+callers that draw conclusions from a crash have to exclude it.
+
+Typed rather than wrapped in IGNORE-ERRORS: the first version of this guarded
+the reader that way, and when the reader turned out not to be imported here
+the swallowed undefined-function error made the whole exclusion silently
+inert.  A TYPEP costs the same and cannot hide that."
+  (and (typep condition 'worker-crashed)
+       (equal *retired-leaked-thread-reason*
+              (worker-crashed-reason condition))))
+
+(defun %breaker-countable-crash-p (worker)
+  "True when WORKER's death should count toward its session's circuit breaker.
+
+Both push sites ask this rather than each spelling the exclusions out, because
+they had drifted: one of them consulted the crash reason after the surrounding
+function had already overwritten it, so the guard read as effective and could
+never fire.
+
+A deliberate retirement is excluded.  Three uninterruptible timeouts in five
+minutes would otherwise trip the breaker and halt the session, where the same
+three before this behaviour existed returned three timeouts and left the user
+working.  WORKER-RETIRED-P is a slot recorded by whoever classified the death
+rather than a question asked of the crash reason: the reason is copied onto
+the replacement worker so the user can be told why it was reset, and deriving
+the answer from it made a healthy worker report its predecessor's retirement
+as its own -- which would have disabled this breaker for the rest of the
+session, re-inherited by every later replacement, exactly where a crash loop
+is what the breaker is for.
+
+An init-attributable crash is excluded for the reason it always was: the pool
+counts those separately, against initialization rather than the session."
+  (and (not (worker-retired-p worker))
+       (not (%init-attributable-crash-p worker))))
+
+(defun %record-worker-death (worker exit-status exit-code
+                             &key already-classified)
+  "Record what killed WORKER and return whether it was a deliberate retirement.
+
+Must be called under *POOL-LOCK*, in the same critical section that moves the
+worker to :CRASHED.  GET-OR-ASSIGN-WORKER takes that lock before asking the
+breaker about a crashed worker, so publishing the state first would let a
+request arriving in between count an unclassified retirement -- three of those
+halt the session, which is the failure this whole exclusion exists to prevent.
+
+The exit code is recorded before it is consulted because on this path -- the
+health monitor reaching a dead worker before any RPC has seen the EOF --
+nothing has classified the death and the code the worker left is the only
+witness there is.  The answer is stored rather than left to be re-derived,
+because the reason below is copied onto the replacement worker and a question
+asked of that copy is answered about the wrong death.
+
+ALREADY-CLASSIFIED says the caller found this worker already marked crashed,
+so its reason describes this worker's own death and is kept: an RPC that met
+the death knows it was a \"timeout\" or a \"stream-error\", where this
+function only ever knows the process is gone, and \"process-died\" tells the
+user less than the truth it would overwrite.  Without that, any reason
+present was inherited from the predecessor whose replacement this worker is,
+and keeping it would report someone else's death as this one's.
+
+The exit details work the same way round: a fresh reading wins, since it is
+about this worker, and only where there is none is an existing one kept."
+  (let ((status (or exit-status
+                    (and already-classified (worker-last-exit-status worker))))
+        (code (or exit-code
+                  (and already-classified (worker-last-exit-code worker)))))
+    (setf (worker-last-exit-status worker) (or status "unknown")
+          (worker-last-exit-code worker) (or code "unknown")))
+  (let ((retired (or (worker-retired-p worker)
+                     (exit-code-says-retired-p worker))))
+    (setf (worker-retirement-recorded worker) retired
+          (worker-last-crash-reason worker)
+          (cond (retired *retired-leaked-thread-reason*)
+                ((and already-classified (worker-last-crash-reason worker)))
+                (t "process-died")))
+    retired))
+
+(defun %owed-reset-of (worker)
+  "The reset WORKER owes and nobody has delivered, as (REASON STATUS CODE),
+or NIL when it owes nothing.
+
+Read rather than claimed.  Claiming it -- CHECK-AND-CLEAR-RESET-NOTIFICATION,
+which is atomic against the proxy's own claim -- would make delivery
+at-most-once across the two, but it takes the worker's stream lock, and the
+callers here run under *POOL-LOCK*.  An RPC holds that stream lock for as
+long as its call takes, which for a load-system is minutes; the pool would
+stop serving every session until it returned.  A duplicate is the cheaper of
+the two, and it is not clearly a duplicate: the two messages go to two
+different requests, both of which really were answered by a worker that had
+been replaced.
+
+Read once, early, and passed along: KILL-WORKER sets this flag on anything it
+kills, and the pool kills a worker before the arms that decide what to do
+about it, so a later reading would find a debt the proxy had already
+delivered and settled."
+  (when (and worker (worker-owes-reset-p worker))
+    (list (worker-last-crash-reason worker)
+          (worker-last-exit-status worker)
+          (worker-last-exit-code worker))))
+
+(defun %leave-owed-reset (session-id owed)
+  "Leave OWED -- a reset nobody has delivered -- with SESSION-ID.
+Call under *POOL-LOCK*, wherever a worker is dropped without a replacement in
+hand to give it to.  Nothing owed changes nothing, and an existing debt is
+not replaced by a later one: the first is the one the user has been waiting
+to hear about."
+  (when (and session-id owed (null (gethash session-id *owed-resets*)))
+    (setf (gethash session-id *owed-resets*) owed)))
+
+(defun %hand-reset-to (worker debt)
+  "Put DEBT -- an owed reset and the details that explain it -- onto WORKER.
+Returns WORKER.  Call before the worker becomes visible in the affinity map,
+so a concurrent request cannot find it without the debt."
+  (when debt
+    (setf (worker-needs-reset-notification worker) t
+          (worker-last-crash-reason worker) (first debt)
+          (worker-last-exit-status worker) (second debt)
+          (worker-last-exit-code worker) (third debt)))
+  worker)
+
 (defun %monitor-init (worker session-id max-failures)
   "Poll worker/init-status until terminal, updating failure/disable state.
 Runs on a short-lived background thread with backoff (0.1s -> 2s cap; no
@@ -362,9 +511,13 @@ further init."
                    (%release-runtime-owner-if worker)))
                (return))
               (t nil)))))
-    (worker-crashed ()
+    (worker-crashed (c)
+      ;; A worker that retired for carrying a leaked thread is not evidence
+      ;; about init: it exited deliberately, and blaming init for it disables
+      ;; initialization for every later worker in the pool.
       (bt:with-lock-held (*pool-lock*)
-        (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+        (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker)
+                   (not (%retirement-crash-p c)))
           (setf (gethash (worker-id worker) *init-attributable-crashes*) t
                 *runtime-init-disabled* t)
           (log-event :warn "pool.init.hard-crash"
@@ -402,13 +555,16 @@ worker before the init monitor does."
               (bt:make-thread
                (lambda () (%monitor-init worker session-id max-failures))
                :name (format nil "pool-init-monitor-~A" (worker-id worker)))))
-        (worker-crashed ()
+        (worker-crashed (c)
+          ;; See %MONITOR-INIT: a deliberate retirement is not an init failure.
           (bt:with-lock-held (*pool-lock*)
-            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker))
+            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker)
+                       (not (%retirement-crash-p c)))
               (setf (gethash (worker-id worker) *init-attributable-crashes*) t
                     *runtime-init-disabled* t)))
-          (log-event :warn "pool.init.hard-crash"
-                     "session" session-id "worker_id" (worker-id worker))
+          (unless (%retirement-crash-p c)
+            (log-event :warn "pool.init.hard-crash"
+                       "session" session-id "worker_id" (worker-id worker)))
           (%release-runtime-owner-if worker))
         (error (e)
           ;; A non-crash init-start failure means init never ran; drop the
@@ -462,9 +618,11 @@ Must be called with *pool-lock* held."
 (defun %spawn-and-bind (session-id placeholder &key need-reset)
   "Spawn a worker, bind it to SESSION-ID, and notify waiting threads.
 On failure, clean up the affinity map entry and notify waiters of
-the failure.  When NEED-RESET is true, sets the worker's
-needs-reset-notification flag BEFORE making the worker visible in
-the affinity map to prevent concurrent threads from missing the flag.
+the failure.  NEED-RESET, when given, is the session's owed reset and the
+crash details that explain it; it is placed on the worker BEFORE the worker
+becomes visible in the affinity map, so no concurrent thread can find it
+without the debt, and the session's copy is dropped only once this worker is
+registered, so a failed spawn leaves the debt for the next attempt.
 Returns the worker on success.  Signals an error if the spawn was
 cancelled (e.g. release-session during spawn) or failed."
   (let ((new-worker nil))
@@ -473,8 +631,12 @@ cancelled (e.g. release-session during spawn) or failed."
           (setf new-worker (spawn-worker))
           (setf (worker-state new-worker) :bound)
           (setf (worker-session-id new-worker) session-id)
-          (when need-reset
-            (setf (worker-needs-reset-notification new-worker) t))
+          ;; Before the worker is visible in the affinity map: a concurrent
+          ;; request must not be able to find it without the debt.  The
+          ;; session's copy is dropped only once this one is registered, so a
+          ;; spawn that fails leaves the debt for the next attempt rather
+          ;; than resetting the user's session in silence.
+          (%hand-reset-to new-worker need-reset)
           (let ((cancelled nil))
             (bt:with-lock-held (*pool-lock*)
               (cond
@@ -483,7 +645,11 @@ cancelled (e.g. release-session during spawn) or failed."
                  (setf (worker-state new-worker) :released))
                 (t
                  (setf (gethash session-id *affinity-map*) new-worker)
-                 (push new-worker *all-workers*))))
+                 (push new-worker *all-workers*)
+                 ;; The debt is on a bound, visible worker now; anything
+                 ;; still here would be delivered a second time.
+                 (when need-reset
+                   (remhash session-id *owed-resets*)))))
             (cond
               (cancelled
                (bt:with-lock-held ((worker-placeholder-lock placeholder))
@@ -659,43 +825,74 @@ to prevent recovery threads from spawning orphan workers."
   (let ((session-id nil)
         (was-bound nil)
         (was-standby nil)
-        (was-already-crashed nil))
+        (was-already-crashed nil)
+        (retired-p nil)
+        (owed nil)
+        (exit-code nil)
+        (exit-status nil))
+    ;; Read before the lock and recorded inside it: SB-EXT:PROCESS-STATUS is
+    ;; only a struct read, but *POOL-LOCK* is the lock every session's next
+    ;; request goes through, and there is nothing here it needs to see.
+    (ignore-errors
+      (let* ((proc (worker-process-info crashed-worker))
+             (status (and proc (sb-ext:process-status proc))))
+        (when status
+          (setf exit-status (string-downcase (symbol-name status))))
+        (when (member status '(:exited :signaled))
+          (setf exit-code (sb-ext:process-exit-code proc)))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (case (worker-state crashed-worker)
         (:bound
          (setf was-bound t
                session-id (worker-session-id crashed-worker))
+         ;; Recorded before the state says there was a death, and under the
+         ;; same lock: GET-OR-ASSIGN-WORKER asks the breaker about any
+         ;; :CRASHED worker it finds, and between the two writes a
+         ;; retirement is indistinguishable from a crash.
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code))
+         ;; Discovered here rather than by an RPC, so nobody has told the
+         ;; user their session was reset, and the debt is recorded the same
+         ;; way any other death records it.  That way every later step --
+         ;; handing it to the replacement, or leaving it with the session
+         ;; when there is no replacement -- reads one flag rather than
+         ;; guessing from which arm it arrived in.
+         (setf (worker-needs-reset-notification crashed-worker) t)
+         (setf owed (%owed-reset-of crashed-worker))
          (setf (worker-state crashed-worker) :crashed))
         (:standby
          (setf was-standby t)
          (setf *standby-workers* (remove crashed-worker *standby-workers*))
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code))
          (setf (worker-state crashed-worker) :crashed))
         (:crashed
-         ;; Already marked crashed (e.g. by worker-rpc EOF detection).
-         ;; Clean up pool tracking and trigger replenishment.
+         ;; Already marked crashed (e.g. by worker-rpc EOF detection), so the
+         ;; classification is already published; this adds the exit details
+         ;; the RPC path could not see and keeps whatever it concluded.
          (setf was-already-crashed t
                session-id (worker-session-id crashed-worker))
+         (setf retired-p (%record-worker-death crashed-worker
+                                               exit-status exit-code
+                                               :already-classified t))
+         (setf owed (%owed-reset-of crashed-worker))
          (when (eql (gethash session-id *affinity-map*) crashed-worker)
+           ;; Dropped here with no replacement in hand -- this arm only
+           ;; schedules replenishment -- so an undelivered reset has to be
+           ;; left with the session or it goes with the worker.  The RPC that
+           ;; marked this one crashed may have been the pool's own, and
+           ;; swallowed the error.
+           (%leave-owed-reset session-id owed)
            (remhash session-id *affinity-map*)
            (setf was-bound t))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
         (otherwise (return-from %handle-worker-crash))))
-    (let (exit-code exit-status)
-      (ignore-errors
-        (let* ((proc (worker-process-info crashed-worker))
-               (status (and proc (sb-ext:process-status proc))))
-          (when status
-            (setf exit-status (string-downcase (symbol-name status))))
-          (when (member status '(:exited :signaled))
-            (setf exit-code (sb-ext:process-exit-code proc)))))
-      (log-event :warn "pool.worker.crashed" "worker_id"
-                 (worker-id crashed-worker) "session" session-id
-                 "was_standby" was-standby
-                 "exit_status" (or exit-status "unknown")
-                 "exit_code" (or exit-code "unknown"))
-      (setf (worker-last-crash-reason crashed-worker) "process-died"
-            (worker-last-exit-status crashed-worker) (or exit-status "unknown")
-            (worker-last-exit-code crashed-worker) (or exit-code "unknown")))
+    (log-event :warn "pool.worker.crashed" "worker_id"
+               (worker-id crashed-worker) "session" session-id
+               "was_standby" was-standby
+               "retired" retired-p
+               "exit_status" (or exit-status "unknown")
+               "exit_code" (or exit-code "unknown"))
     (ignore-errors (kill-worker crashed-worker))
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.
@@ -708,7 +905,7 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (unless (%init-attributable-crash-p crashed-worker)
+             (when (%breaker-countable-crash-p crashed-worker)
                (setf history
                      (remove-if (lambda (ts) (< ts window-start)) history))
                (push now history)
@@ -725,7 +922,17 @@ to prevent recovery threads from spawning orphan workers."
                  ;; Clear crash history to prevent stale data if session
                  ;; ID is reused or session reconnects later.
                  (remhash session-id *crash-history*)
+                 ;; The recovery stops here, so this is another drop with no
+                 ;; replacement to hand the debt to.  The session is not
+                 ;; halted for good -- the history is cleared above, so the
+                 ;; next request is served -- and it would be served by a
+                 ;; fresh image with neither the breaker's error nor a word
+                 ;; about the reset.
                  (when (eql (gethash session-id *affinity-map*) crashed-worker)
+                   ;; Only while this worker is still the session's: another
+                   ;; thread may have replaced it already, and it recorded
+                   ;; whatever was owed when it did.
+                   (%leave-owed-reset session-id owed)
                    (remhash session-id *affinity-map*))
                  (setf *all-workers* (remove crashed-worker *all-workers*))
                  (return-from %handle-worker-crash))))))
@@ -742,12 +949,18 @@ to prevent recovery threads from spawning orphan workers."
                    (setf (worker-state new-worker) :bound)
                    (setf (worker-session-id new-worker) session-id)
                    (setf (worker-needs-reset-notification new-worker) t)
-                   (setf (worker-last-crash-reason new-worker)
-                           (worker-last-crash-reason crashed-worker)
-                         (worker-last-exit-status new-worker)
-                           (worker-last-exit-status crashed-worker)
-                         (worker-last-exit-code new-worker)
-                           (worker-last-exit-code crashed-worker))
+                   ;; The same snapshot every other path hands over, taken
+                   ;; under the lock that classified this death rather than
+                   ;; re-read here, where the reaper may already have closed
+                   ;; the process out from under it.
+                   (%hand-reset-to new-worker
+                                   (or owed
+                                       (list (worker-last-crash-reason
+                                              crashed-worker)
+                                             (worker-last-exit-status
+                                              crashed-worker)
+                                             (worker-last-exit-code
+                                              crashed-worker))))
                    (bordeaux-threads:with-lock-held (*pool-lock*)
                      (cond
                        ((not *pool-running*)
@@ -759,6 +972,10 @@ to prevent recovery threads from spawning orphan workers."
                         (setf *all-workers*
                               (remove crashed-worker *all-workers*))
                         (push new-worker *all-workers*)
+                        ;; This worker carries the reset now -- it was
+                        ;; flagged above -- so a copy left with the session
+                        ;; would be delivered a second time.
+                        (remhash session-id *owed-resets*)
                         (setf registered t))
                        (t
                         (setf (worker-state new-worker) :released)
@@ -789,6 +1006,10 @@ to prevent recovery threads from spawning orphan workers."
                       "error" (princ-to-string e))
            (bordeaux-threads:with-lock-held (*pool-lock*)
              (when (eql (gethash session-id *affinity-map*) crashed-worker)
+               ;; The replacement never happened, so nothing carries the
+               ;; reset this death owes.  Left with the session, the next
+               ;; request to get a worker delivers it.
+               (%leave-owed-reset session-id owed)
                (remhash session-id *affinity-map*))
              (setf *all-workers* (remove crashed-worker *all-workers*))))))
       (was-standby
@@ -1035,7 +1256,9 @@ snapshotting and killing workers."
       (setf workers (copy-list *all-workers*))
       (setf *all-workers* nil
             *standby-workers* nil)
-      (clrhash *affinity-map*))
+      (clrhash *affinity-map*)
+      ;; Nothing survives a shutdown to be told anything.
+      (clrhash *owed-resets*))
     (dolist (w workers) (ignore-errors (kill-worker w))))
   (log-event :info "pool.shutdown-complete"))
 
@@ -1089,9 +1312,15 @@ cannot be created."
          ;; Skip push if %handle-worker-crash already pushed for this
          ;; worker (prevents double-counting in the race window where
          ;; the health monitor detects the crash first).
+         ;; A deliberate retirement is excluded: a user calling something
+         ;; uninterruptible three times in five minutes would otherwise trip
+         ;; the breaker and halt the session, where before this branch they
+         ;; got three timeouts and kept working.  The worker is replaced each
+         ;; time and the replacement starts clean, so it is not evidence of an
+         ;; unstable pool.
          (when (and (eq :crashed (worker-state entry))
                     (not (worker-crash-history-pushed-p entry))
-                    (not (%init-attributable-crash-p entry)))
+                    (%breaker-countable-crash-p entry))
            (let* ((now (get-universal-time))
                   (window-start (- now *crash-breaker-window*))
                   (history (gethash session-id *crash-history*)))
@@ -1113,16 +1342,35 @@ cannot be created."
              (setf (gethash session-id *crash-history*) history)
              (when (>= (length history) *crash-breaker-threshold*)
                (setf circuit-breaker-tripped t))))
-         ;; Avoid double crash notification: when %mark-worker-crashed
-         ;; (called by worker-rpc on EOF) set needs-reset-notification
-         ;; on the old worker, the proxy's worker-crashed handler
-         ;; already returned a notification to the client.
-         (setf entry nil
-               need-reset (not (worker-needs-reset-notification
-                                old-worker-to-kill))))
+         ;; The flag on the dead worker is an owed reset that nobody has
+         ;; delivered: %MARK-WORKER-CRASHED and KILL-WORKER set it, and the
+         ;; proxy clears it when it returns the notification itself, so a
+         ;; death reported mid-request does not produce a second one here.
+         ;;
+         ;; It used to be read the other way round, as "the flag is set,
+         ;; therefore the proxy already told them".  That holds only for a
+         ;; death during a user's own request.  The pool makes RPCs of its
+         ;; own -- the project-root sync after fs-set-project-root, the init
+         ;; monitor's polling -- and those swallow the error, so a worker
+         ;; dying on one left the flag set with nobody told.  The user's next
+         ;; call then landed in a fresh image with their systems unloaded and
+         ;; nothing said about it.  A retirement makes that reachable
+         ;; deliberately rather than by chance: the root sync is a request
+         ;; like any other, and a worker carrying a leaked thread retires on
+         ;; it.
+         (%leave-owed-reset session-id (%owed-reset-of old-worker-to-kill))
+         (setf entry nil))
         ;; Path 2: Placeholder — another thread is spawning
         ((and entry (typep entry 'worker-placeholder))
          nil))
+      ;; Asked of the session, and after the paths above have had their say,
+      ;; because a debt reaches here by more routes than the worker this call
+      ;; happens to find.  Recovery can drop a dead worker with no
+      ;; replacement to hand it to, and a replacement spawn can fail; both
+      ;; leave the debt on the session with no worker to read it from, and
+      ;; both used to lose it -- the user's next call landing in a fresh
+      ;; image with nothing said about it.
+      (setf need-reset (gethash session-id *owed-resets*))
       ;; Phase 2: assign standby or spawn
       ;; Skip when circuit breaker tripped — the error is raised after
       ;; the lock, but we must not leave a placeholder that nobody resolves.
@@ -1133,11 +1381,15 @@ cannot be created."
               for w = (pop *standby-workers*)
               do (cond
                    ((%worker-process-alive-p w)
+                    (%hand-reset-to w need-reset)
                     (setf (worker-state w) :bound
                           (worker-session-id w) session-id
                           (gethash session-id *affinity-map*) w)
+                    ;; After the worker is registered, not before: the debt
+                    ;; is only safely somewhere else once someone else can
+                    ;; find it there.
                     (when need-reset
-                      (setf (worker-needs-reset-notification w) t))
+                      (remhash session-id *owed-resets*))
                     (setf assigned-from-standby w)
                     (return))
                    (t
@@ -1197,7 +1449,18 @@ cannot be created."
                      "session" session-id
                      "worker_id" (worker-id worker))
           (bordeaux-threads:with-lock-held (*pool-lock*)
+            ;; The last place a worker is dropped with no replacement.  This
+            ;; one may be carrying a debt handed to it moments ago -- the
+            ;; session's copy was dropped when it took it on -- so without
+            ;; this the reset is gone from both places at once and the user
+            ;; is never told their session was reset, twice over.
+            ;;
+            ;; Only while this worker is still the session's, like every
+            ;; other site: recovery may have replaced it already and given
+            ;; the debt to the replacement, and a copy left here would
+            ;; outlive its consumer and later explain a different death.
             (when (eql (gethash session-id *affinity-map*) worker)
+              (%leave-owed-reset session-id (%owed-reset-of worker))
               (remhash session-id *affinity-map*))
             (setf *all-workers* (remove worker *all-workers*)))
           (ignore-errors (kill-worker worker))
@@ -1226,6 +1489,13 @@ then checks state outside it) will skip it and not treat the
 impending kill as a crash."
   (let ((worker-to-kill nil))
     (bt:with-lock-held (*pool-lock*)
+      ;; Outside the branches below, because a debt can outlive the affinity
+      ;; entry: recovery that dropped the worker, or a replacement spawn that
+      ;; failed, leaves one behind with nothing in the map.  The session is
+      ;; going away, so a reset owed to it is owed to nobody -- and left
+      ;; here it would greet a later session that reused the id with someone
+      ;; else's crash.
+      (remhash session-id *owed-resets*)
       (let ((entry (gethash session-id *affinity-map*)))
         (cond
           ((and entry (typep entry 'worker))
@@ -1392,7 +1662,13 @@ unrestricted REPL access bypassing MCP security policies."
                 (gethash "tcp_port" ht) (worker-tcp-port w)
                 (gethash "pid" ht) (worker-pid w)
                 (gethash "state" ht) (string-downcase
-                                       (symbol-name (worker-state w))))
+                                       (symbol-name (worker-state w)))
+                ;; Threads a deadline could not stop, as of this worker's last
+                ;; answer.  It retires itself before serving another request
+                ;; while carrying one, so a non-zero count here means the
+                ;; condition arose and the worker has not been asked for
+                ;; anything since.
+                (gethash "leaked_threads" ht) (worker-leaked-threads w))
           (vector-push-extend ht result))))
     result))
 

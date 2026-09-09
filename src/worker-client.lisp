@@ -18,6 +18,9 @@
   (:import-from #:usocket)
   (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:*retired-leaked-thread-reason*
+                #:+leaked-thread-exit-code+)
   (:export #:worker
            #:make-worker
            #:spawn-worker
@@ -30,6 +33,7 @@
            #:worker-session-id
            #:worker-id
            #:worker-needs-reset-notification
+           #:worker-leaked-threads
            #:worker-stream-lock
            #:clear-reset-notification
            #:check-and-clear-reset-notification
@@ -47,7 +51,11 @@
            #:signal-worker-terminate
            #:worker-last-crash-reason
            #:worker-last-exit-status
-           #:worker-last-exit-code))
+           #:worker-last-exit-code
+           #:worker-retired-p
+           #:worker-retirement-recorded
+           #:worker-owes-reset-p
+           #:exit-code-says-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -100,7 +108,12 @@ Each thread terminates and self-removes after reaping its process.")
 
 (define-condition worker-rpc-error (error)
   ((code :initarg :code :reader worker-rpc-error-code)
-   (message :initarg :message :reader worker-rpc-error-message))
+   (message :initarg :message :reader worker-rpc-error-message)
+   ;; Carried on the condition because the count rides the same envelope as
+   ;; the error, and the reader signals before it can return anything.  Its
+   ;; only consumer is WORKER-RPC, which records it before re-signalling.
+   (leaked-threads :initarg :leaked-threads :initform nil
+                   :reader worker-rpc-error-leaked-threads))
   (:report (lambda (c s)
              (format s "JSON-RPC error ~A: ~A"
                      (worker-rpc-error-code c)
@@ -167,6 +180,25 @@ Handles both LF and CRLF line endings."
   (session-id nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
+  ;; Count of threads the worker last reported a deadline could not stop.
+  ;; Shown by pool-status, and load-bearing besides: it is the corroborating
+  ;; witness in %RETIRED-FOR-LEAKED-THREAD-P, without which an exit code any
+  ;; evaluated form can produce would be taken as proof of a retirement.
+  (leaked-threads 0 :type integer)
+  ;; Whether this worker's *own* death was a deliberate retirement.  Recorded
+  ;; by whoever classified it -- the RPC that saw the EOF, or the pool's
+  ;; health monitor -- and deliberately not derived on demand from
+  ;; LAST-CRASH-REASON: a replacement worker inherits those crash details from
+  ;; its predecessor so the user can be told why it was replaced, and a
+  ;; healthy worker carrying an inherited reason would answer this question
+  ;; about a death that was not its own.  That answer disables the session's
+  ;; circuit breaker, so it would stay disabled for as long as the session
+  ;; lived, re-inherited by every later replacement.
+  ;;
+  ;; Read through WORKER-RETIRED-P rather than directly: the writer and the
+  ;; readers hold different locks, so the pairing that makes this visible is
+  ;; a barrier rather than a lock.
+  (retirement-recorded nil :type boolean)
   (crash-history-pushed-p nil :type boolean)
   (last-crash-reason nil)
   (last-exit-status nil)
@@ -438,9 +470,15 @@ corruption."
                  (when err
                    (error 'worker-rpc-error
                           :code (gethash "code" err)
-                          :message (gethash "message" err))))
-               ;; Return the result
-               (gethash "result" json)))))
+                          :message (gethash "message" err)
+                          :leaked-threads (gethash "leaked_threads" json))))
+               ;; Return the result, and alongside it the count of threads the
+               ;; worker says a deadline could not stop.  The worker retires
+               ;; itself before serving another request when it is carrying
+               ;; one, so this exists to make the condition visible in
+               ;; pool-status during the window before that happens.
+               (values (gethash "result" json)
+                       (gethash "leaked_threads" json))))))
     (if timeout
         (sb-ext:with-timeout timeout
           (do-read))
@@ -627,8 +665,55 @@ stream to prevent further use, and log the event.
 Process reaping (waitpid) is deferred to a background thread to
 avoid blocking the caller, which typically holds stream-lock.
 Returns nothing."
-  (setf (worker-state worker) :crashed)
+  ;; The reason is published first, before the state that makes other threads
+  ;; look for it and before the stream that makes them stop using this worker.
+  ;; Everything downstream reads the two together -- the pool's circuit
+  ;; breaker asks whether a :CRASHED worker retired, and a concurrent RPC
+  ;; blocked on the stream lock asks what killed it -- and publishing the
+  ;; state first left a window in which a deliberate retirement reads as an
+  ;; ordinary crash.  It is also set unconditionally now: it used to be set
+  ;; alongside the exit code, inside the branch that needs a process object,
+  ;; so a worker without one recorded no reason at all.
+  ;; Read before anything is published, so the whole account of this death
+  ;; is written together.  The pool copies these three onto the replacement
+  ;; worker to explain the reset to the user, and it can read them the
+  ;; instant the state below says there was a death -- so a status recorded
+  ;; afterwards is one the message never gets, and "exit_code=70" is the
+  ;; part that says a retirement was deliberate.
+  (let ((process (worker-process-info worker))
+        (exit-status nil)
+        (exit-code nil))
+    (when process
+      (ignore-errors
+        (let ((status (sb-ext:process-status process)))
+          (setf exit-status (string-downcase (symbol-name status)))
+          (when (member status '(:exited :signaled))
+            (setf exit-code (sb-ext:process-exit-code process))))))
+    (setf (worker-last-exit-status worker) (or exit-status "unknown")
+          (worker-last-exit-code worker) (or exit-code "unknown")))
+  (setf (worker-last-crash-reason worker) reason
+        ;; Recorded as a fact about this worker rather than left to be
+        ;; re-derived from the reason later: the reason is copied onto a
+        ;; replacement worker, and a question asked of the string would
+        ;; then be answered about a death that was not this worker's.
+        (worker-retirement-recorded worker) (equal
+                                             *retired-leaked-thread-reason*
+                                             reason))
+  ;; Everything a reader will want to know about this death is written
+  ;; before the state that tells it there was one -- the reset this death
+  ;; owes the user included.  The pool reads the flag in the same breath as
+  ;; the state, and writing it afterwards left a window in which a
+  ;; replacement was made carrying no debt, so the user's session was reset
+  ;; without their being told.
   (setf (worker-needs-reset-notification worker) t)
+  ;; The state is the flag that publishes all of the above, and the threads
+  ;; that read it hold a different lock than this one -- so the ordering has
+  ;; to be asked for.  Without it a pool thread can see :CRASHED while still
+  ;; seeing what it replaced, and count a retirement against the session's
+  ;; breaker or drop the reset it owes.  WORKER-RETIRED-P and
+  ;; WORKER-OWES-RESET-P pay the reader's half.
+  (sb-thread:barrier (:write))
+  (setf (worker-state worker) :crashed)
   ;; Close the stream/socket to prevent stale-response corruption.
   ;; The next RPC attempt will see :crashed state before trying I/O.
   (ignore-errors
@@ -637,32 +722,34 @@ Returns nothing."
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
   ;; Wait for the stderr drain thread to finish forwarding remaining
-  ;; log output (including worker.fatal crash messages).  The worker
-  ;; process is dead so the pipe's write end is closed, causing
-  ;; read-line to return NIL and the thread to exit naturally.
-  ;; Timeout of 1 second prevents blocking if something goes wrong.
+  ;; log output (including worker.fatal crash messages).  When the worker
+  ;; process is dead its pipe's write end is closed, so read-line returns
+  ;; NIL and the thread exits on its own; the timeout is there in case
+  ;; something goes wrong.
+  ;;
+  ;; Only worth waiting for when the process is actually gone.  Not every
+  ;; caller here has lost one: "timeout" and "stream-error" abandon a worker
+  ;; that is still running, its pipe still open and its drain thread still
+  ;; blocked on read-line, so the wait would run its full second -- with
+  ;; WORKER-STREAM-LOCK held, which is what KILL-WORKER and a cancellation
+  ;; have to take.
   (let ((th (worker-stderr-thread worker)))
     (when (and th (bt:thread-alive-p th))
-      (ignore-errors (bt:join-thread th :timeout 1))
+      (let ((process (worker-process-info worker)))
+        (when (and process
+                   (not (ignore-errors (sb-ext:process-alive-p process))))
+          (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))))
       (when (bt:thread-alive-p th)
         (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
-  ;; Collect the exit code before reaping.  process-status is
-  ;; non-blocking; if the process already exited (typical for crashes)
-  ;; the exit code is immediately available.
+  ;; Read again for the log line below.  The worker's own record was
+  ;; written above, before the death was published, because a reader can be
+  ;; copying it the moment it is.
   (let ((process (worker-process-info worker))
         (wid (worker-id worker))
-        (exit-code nil)
-        (exit-status nil))
+        (exit-code (worker-last-exit-code worker))
+        (exit-status (worker-last-exit-status worker)))
     (when process
-      (ignore-errors
-        (let ((status (sb-ext:process-status process)))
-          (setf exit-status (string-downcase (symbol-name status)))
-          (when (member status '(:exited :signaled))
-            (setf exit-code (sb-ext:process-exit-code process)))))
-      (setf (worker-last-crash-reason worker) reason
-            (worker-last-exit-status worker) (or exit-status "unknown")
-            (worker-last-exit-code worker) (or exit-code "unknown"))
       ;; Reap the OS process in a background thread to avoid blocking
       ;; the caller.  process-close calls waitpid internally, which
       ;; blocks if the worker process is still alive.
@@ -701,6 +788,134 @@ Returns nothing."
                "exit_code" (or exit-code "unknown")
                "reason" reason)))
 
+(defun %reported-a-leak-p (worker)
+  "True when WORKER's last answer said it was still carrying a leaked thread.
+
+A worker retires on the request *after* the one that leaked, so by the time it
+exits the parent has already been told: the count rides on every response,
+including the one that reported the deadline.  That makes it a witness the
+worker cannot produce by accident."
+  ;; Behind the same read barrier as the other two slots this publication
+  ;; writes: it is written under the worker's stream lock and read under the
+  ;; pool's.  A stale read here fails safe -- zero reads as "crash" -- but
+  ;; the three are written together and should be read the same way.
+  (sb-thread:barrier (:read))
+  (let ((count (worker-leaked-threads worker)))
+    (and (integerp count) (plusp count))))
+
+(defun %retired-for-leaked-thread-p (worker)
+  "True when WORKER's death was a deliberate retirement, not a crash.
+
+Two witnesses have to agree, because neither is sound alone.
+
+The exit code describes the death itself, and it is the one that can say a
+death was *not* a retirement: a worker can report a leak, have the thread
+finish, and then genuinely crash, and the count alone reads that as a
+retirement -- hiding a real crash from the callers that draw conclusions from
+one.  But WORKER/EVAL runs whatever the user asks, so any exit code is
+reachable from a REPL: (SB-EXT:EXIT :CODE 70) in an otherwise healthy worker
+would otherwise be reported to that user as an earlier timeout leaving a
+thread behind, and excused from the circuit breaker.
+
+The count is what the exit code cannot be: evidence that this worker was in
+the condition the exit code claims.  It is not proof -- it comes from the
+previous answer, so a worker that reported a leak, had the thread finish, and
+was then told by its user to exit with this very code would still be read as
+retiring.  What it rules out is the accident: an exit 70 from a worker that
+never reported carrying anything.
+
+Where the two cannot both be had the answer is \"crash\", which is the
+direction that loses least: a retirement misfiled as a crash costs a breaker
+tick and an init attribution, exactly as it did before any of this existed,
+where a crash misfiled as a retirement suppresses both for something that
+really was one.
+
+The status is not terminal the instant the parent reads EOF: SBCL updates the
+process struct from its SIGCHLD handler, which has not run yet.  Measured, it
+settles within a few tens of milliseconds, so this waits briefly for it rather
+than falling back to the count on essentially every real retirement."
+  ;; Asked before anything is waited for.  Every answer below requires it --
+  ;; the exit code is only ever half of one -- and this runs under the
+  ;; worker's stream lock, which KILL-WORKER and a cancellation have to take.
+  ;; A worker that never reported a leak is the overwhelmingly common death,
+  ;; and it used to pay the whole wait to be told what a struct read knew.
+  (unless (%reported-a-leak-p worker)
+    (return-from %retired-for-leaked-thread-p nil))
+  (let ((process (worker-process-info worker)))
+    (flet ((terminal-status ()
+             (loop repeat 40
+                   for status = (ignore-errors (sb-ext:process-status process))
+                   when (member status '(:exited :signaled))
+                     return status
+                   do (sleep 0.01))))
+      (let ((status (and process (terminal-status))))
+        (cond
+          ;; Known: the code answers, whichever way it answers -- but only a
+          ;; worker that had said it was carrying one can retire for it.
+          ((eq status :exited)
+           (and (eql +leaked-thread-exit-code+
+                     (ignore-errors (sb-ext:process-exit-code process)))
+                (%reported-a-leak-p worker)))
+          ;; Killed by a signal, so not a retirement -- a retiring worker
+          ;; exits under its own power.
+          ((eq status :signaled) nil)
+          ;; Unknowable: no process, already reaped, or still not settled
+          ;; after the wait.  The count alone would answer here, and it is
+          ;; the witness that can be stale -- a worker that reported a leak,
+          ;; had the thread finish, and then genuinely crashed reads as a
+          ;; retirement, which excuses a real crash from the breaker and
+          ;; from init attribution.  Answering \"crash\" instead costs a
+          ;; retirement one breaker tick, exactly as it did before any of
+          ;; this existed.
+          (t nil))))))
+
+(defun worker-retired-p (worker)
+  "True when WORKER's own death was recorded as a deliberate retirement.
+
+Reads the slot behind a read barrier, which is the half the reader owes.
+
+The writers publish this under WORKER-STREAM-LOCK, or under the pool's own
+lock; the readers that matter are on the other side of a different one --
+GET-OR-ASSIGN-WORKER asks it about a worker it found :CRASHED while holding
+*POOL-LOCK*, and an RPC blocked behind the stream lock asks what killed the
+worker it was holding.  Two threads that never take the same lock have no
+ordering between them from the locks alone, and on a weakly ordered machine
+-- SBCL runs on several -- a reader can see the :CRASHED that publishes this
+answer without yet seeing the answer.  It would then count a deliberate
+retirement against the session's circuit breaker, which is the failure this
+whole exclusion exists to prevent.
+
+Taking *POOL-LOCK* to close that is not available: the stream lock is held
+across the write, and the pool takes its own lock before the stream lock."
+  (sb-thread:barrier (:read))
+  (worker-retirement-recorded worker))
+
+(defun worker-owes-reset-p (worker)
+  "True when a state-reset notification for WORKER is owed and undelivered.
+
+Behind the same read barrier as WORKER-RETIRED-P, and for the same reason:
+this is published by the writer's state change under a lock the pool does
+not hold, and a pool thread that saw :CRASHED without seeing this would give
+the replacement no debt -- resetting the user's session silently."
+  (sb-thread:barrier (:read))
+  (worker-needs-reset-notification worker))
+
+(defun exit-code-says-retired-p (worker)
+  "True when WORKER's recorded exit code and leak count both say it retired.
+
+For the path where nothing has classified the death yet: the pool's health
+monitor can reach a dead worker before any RPC has seen the EOF, and there the
+exit code it records on its way past is the only witness there is.
+
+Read only by a caller that is looking at a worker's own death, and never as a
+standing property of the worker: a replacement inherits its predecessor's exit
+code along with the rest of the crash details it shows the user.  The count is
+not inherited, which is what keeps that inherited code from answering here --
+but the caller is what keeps the question from being asked about the wrong
+worker in the first place."
+  (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
+       (%reported-a-leak-p worker)))
+
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
@@ -716,15 +931,65 @@ the worker handler (e.g. \"symbol not found\").  These are re-signaled
 without marking the worker as crashed."
   (bt:with-lock-held ((worker-stream-lock worker))
     (unless (worker-stream worker)
-      (error 'worker-crashed :worker worker :reason "already-dead"))
+      ;; Whoever got here first has already worked out what killed this
+      ;; worker; say that, rather than a second and weaker answer.  Callers
+      ;; act on the reason -- the init monitor decides whether to disable
+      ;; initialization for every later worker in the pool, and the proxy
+      ;; decides what to tell the user -- and every one of them that arrives
+      ;; behind the first RPC used to be told "already-dead", which reads as
+      ;; an ordinary crash.  The init monitor is not a rare straggler here: it
+      ;; polls the same worker every fraction of a second while a load runs.
+      ;; What this worker's own death was, for a caller that arrives after
+      ;; someone else established it.
+      ;;
+      ;; The retirement slot answers whatever the state has since become.
+      ;; The pool kills a crashed worker as part of replacing it, which
+      ;; leaves it :DEAD, and the callers that arrive after that are the ones
+      ;; that most need the answer: the init monitor, still polling the
+      ;; worker it was watching, disables initialization for every later
+      ;; worker in the pool when it reads a crash.  The slot is recorded per
+      ;; worker and never copied to a replacement, so it is safe to trust
+      ;; here in a way the reason string is not.
+      ;;
+      ;; The reason string is trusted only while the worker is :CRASHED,
+      ;; because a replacement carries its predecessor's reason so the user
+      ;; can be told why the session was reset.  Reporting that for a worker
+      ;; killed deliberately would describe someone else's death as this
+      ;; one's -- for "timeout", telling the user an operation they never ran
+      ;; took too long.
+      (error 'worker-crashed
+             :worker worker
+             :reason (cond ((worker-retired-p worker)
+                            *retired-leaked-thread-reason*)
+                           ((eq :crashed (worker-state worker))
+                            (or (worker-last-crash-reason worker)
+                                "already-dead"))
+                           (t "already-dead"))))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn
             (%send-json-rpc (worker-stream worker) id method params)
-            (%read-json-rpc-response (worker-stream worker) id timeout))
+            (multiple-value-bind (result leaked)
+                (%read-json-rpc-response (worker-stream worker) id timeout)
+              ;; Recorded for pool-status.  Nothing here acts on it: the
+              ;; worker retires itself rather than waiting to be told, since
+              ;; only it can see whether the thread is still running now.
+              (setf (worker-leaked-threads worker)
+                    (if (integerp leaked) leaked 0))
+              result))
         (end-of-file ()
-          (%mark-worker-crashed worker "eof")
-          (error 'worker-crashed :worker worker :reason "eof"))
+          ;; A worker that retired for carrying a leaked thread exits without
+          ;; answering, which arrives here as EOF like any other death.  The
+          ;; count it reported on its last answer is what tells the two apart,
+          ;; and the distinction matters: %MONITOR-INIT treats a crash by the
+          ;; runtime-init owner as init-attributable and disables
+          ;; initialization for every later worker.  A deliberate retirement
+          ;; is not an init failure.
+          (let ((reason (if (%retired-for-leaked-thread-p worker)
+                            *retired-leaked-thread-reason*
+                            "eof")))
+            (%mark-worker-crashed worker reason)
+            (error 'worker-crashed :worker worker :reason reason)))
         (sb-ext:timeout ()
           (%mark-worker-crashed worker "timeout")
           (error 'worker-crashed :worker worker :reason "timeout"))
@@ -733,7 +998,13 @@ without marking the worker as crashed."
           (error 'worker-crashed :worker worker :reason "stream-error"))
         (worker-rpc-error (e)
           ;; Legitimate worker-side error (e.g. "symbol not found").
-          ;; Re-signal without marking the worker as crashed.
+          ;; Re-signal without marking the worker as crashed -- but record the
+          ;; count first: a handler can leak its deadline's thread and then
+          ;; return an error, and updating only on success leaves the parent
+          ;; reporting whatever it last saw, stale in both directions.
+          (let ((leaked (worker-rpc-error-leaked-threads e)))
+            (setf (worker-leaked-threads worker)
+                  (if (integerp leaked) leaked 0)))
           (error e))
         (error (e)
           ;; Protocol error (parse failure, ID mismatch, etc.).
@@ -781,6 +1052,20 @@ Robust against already-dead processes."
           (ignore-errors (usocket:socket-close socket))
           (setf (worker-socket worker) nil
                 (worker-stream worker) nil)))
+      ;; A kill resets the session's Lisp state exactly as a crash does, and
+      ;; the flag is what carries that owed notification to the replacement.
+      ;; It is cleared by whoever actually delivers it.
+      ;;
+      ;; Read in one place: GET-OR-ASSIGN-WORKER, when it finds the killed
+      ;; worker still bound to the session.  That is the cancellation path --
+      ;; RELEASE-SESSION and KILL-SESSION-WORKER unbind before killing, and
+      ;; the pool reads what a crashed worker owed before it gets here.
+      ;;
+      ;; Written before the state, behind the same barrier %MARK-WORKER-CRASHED
+      ;; uses and for the same reason: the pool reads the two together, under
+      ;; a different lock than this one.
+      (setf (worker-needs-reset-notification worker) t)
+      (sb-thread:barrier (:write))
       (setf (worker-state worker) :dead))
     ;; Terminate the OS process outside the lock (may block up to ~2.2s)
     (when process
@@ -809,7 +1094,20 @@ Robust against already-dead processes."
       ;; and the thread exits naturally within the timeout.
       (let ((th (worker-stderr-thread worker)))
         (when (and th (bt:thread-alive-p th))
-          (ignore-errors (bt:join-thread th :timeout 1))
+          ;; BT:JOIN-THREAD takes no :TIMEOUT, so this used to signal a
+          ;; program-error that IGNORE-ERRORS swallowed: the documented wait
+          ;; never happened and the thread was destroyed mid-line, losing the
+          ;; worker's last log output -- which after a SIGKILL is the part
+          ;; that says why.
+          ;;
+          ;; Waited for only once the process is actually gone, as in
+          ;; %MARK-WORKER-CRASHED: the drain thread ends when the pipe's
+          ;; write end closes, so with the process still up there is nothing
+          ;; to wait for.  %REPLENISH-STANDBYS calls this under *POOL-LOCK*,
+          ;; which every session's next request goes through.
+          (when (or (null process)
+                    (not (ignore-errors (sb-ext:process-alive-p process))))
+            (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil)))
           (when (bt:thread-alive-p th)
             (ignore-errors (bt:destroy-thread th)))
           (setf (worker-stderr-thread worker) nil)))

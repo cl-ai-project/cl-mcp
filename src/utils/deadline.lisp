@@ -12,8 +12,14 @@
                 #:make-thread
                 #:thread-alive-p
                 #:destroy-thread
-                #:interrupt-thread)
+                #:interrupt-thread
+                #:make-lock
+                #:with-lock-held)
   (:export #:call-with-deadline-thread
+           #:leaked-threads
+           #:*retired-leaked-thread-reason*
+           #:+leaked-thread-exit-code+
+           #:forget-leaked-threads
            #:*poll-interval*
            #:*unwind-grace-seconds*
            #:*destroy-grace-seconds*))
@@ -31,6 +37,57 @@ cleanups, so it is always preferable to DESTROY-THREAD.")
 (defparameter *destroy-grace-seconds* 1.0d0
   "Seconds allowed for DESTROY-THREAD to take effect before the thread is
 reported as leaked.")
+
+(defparameter *retired-leaked-thread-reason* "retired-leaked-thread"
+  "Crash reason for a worker that exited rather than serve a request while
+carrying a thread a deadline could not stop.
+
+It reaches the parent as EOF like any other death, so this is what the reason
+is set to once the parent has established that is what happened.  Callers that
+treat a crash as evidence about something else -- the pool's init monitor,
+which disables runtime initialization when the init owner crashes, and its
+per-session circuit breaker -- check for it rather than blaming an unrelated
+subsystem for a deliberate retirement.")
+
+(defconstant +leaked-thread-exit-code+ 70
+  "Exit code a worker uses when it retires for carrying a leaked thread.
+The parent reads it to tell a deliberate retirement from a crash.
+
+Both of these live here, with the deadline machinery that creates the
+condition, rather than with either half of the worker protocol: the parent and
+the worker are the two ends of this contract and neither can own it without
+the other depending on it.")
+
+(defvar %leaked-threads% ()
+  "Threads a deadline could not stop, still running in this image.
+
+Recorded centrally so every deadline call site contributes without plumbing
+one through, and so the process can ask whether it is still carrying any.  A
+thread stays on this list only while it is alive: LEAKED-THREADS prunes, which
+is what lets a run that was given up on but finished later stop counting
+against the image.")
+
+(defvar %leaked-lock% (make-lock "deadline-leaked-threads")
+  "Protects %LEAKED-THREADS%.  Deadlines can be enforced from several threads
+at once -- one per session in a worker, and nested within a run.")
+
+(defun leaked-threads ()
+  "Return the threads a deadline could not stop that are still running.
+
+Pruned on every call, so a run that was given up on and then finished on its
+own stops being reported.  That is the difference between \"this image was
+compromised at some point\" and \"this image is compromised now\": the first
+would retire a worker that had recovered, and the state a session loses to
+that is the very thing the deadline machinery exists to protect."
+  (with-lock-held (%leaked-lock%)
+    (setf %leaked-threads% (remove-if-not #'thread-alive-p %leaked-threads%))))
+
+(defun forget-leaked-threads ()
+  "Drop the record of leaked threads without stopping them.
+For tests, which need to leak a thread deliberately and then leave the image
+as they found it."
+  (with-lock-held (%leaked-lock%)
+    (setf %leaked-threads% ())))
 
 (defun %wait-until-dead (thread seconds)
   "Poll until THREAD is gone or SECONDS elapse.  Returns true when it is gone."
@@ -122,7 +179,24 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (%wait-until-dead thread *unwind-grace-seconds*))
                  (when (and thread (thread-alive-p thread))
                    (ignore-errors (destroy-thread thread))
-                   (%wait-until-dead thread *destroy-grace-seconds*)))
+                   (%wait-until-dead thread *destroy-grace-seconds*))
+                 ;; Recorded here rather than on the way out, because STOP is
+                 ;; also what the UNWIND-PROTECT cleanup runs.  A nested
+                 ;; deadline unwound by an outer one never reaches its normal
+                 ;; return, and registering only there would let the thread it
+                 ;; could not stop go unrecorded -- leaving the image looking
+                 ;; clean while still carrying it.
+                 (when (and thread (thread-alive-p thread))
+                   (with-lock-held (%leaked-lock%)
+                     ;; Pruned as well as added, because in this image
+                     ;; nothing else may ever ask.  LEAKED-THREADS prunes,
+                     ;; and the worker calls it on every request -- but the
+                     ;; same deadline machinery runs inline in the parent
+                     ;; when the pool is disabled, where there is no gate to
+                     ;; ask and finished threads would be held forever.
+                     (setf %leaked-threads%
+                           (remove-if-not #'thread-alive-p %leaked-threads%))
+                     (pushnew thread %leaked-threads%))))
                (finish (timed-out leaked)
                  (let ((settled outcome))
                    (cond
@@ -165,6 +239,9 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                      (%wait-until-dead thread timeout-seconds)
                      (let ((timed-out (thread-alive-p thread)))
                        (stop)
+                       ;; STOP has already recorded the thread if it survived;
+                       ;; the caller is told here so it can say so in its own
+                       ;; result.
                        (multiple-value-prog1 (finish timed-out
                                                      (thread-alive-p thread))
                          (setf answered t)))))

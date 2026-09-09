@@ -22,7 +22,11 @@ max_pool_size, warmup_target, and a workers array.
 
 Each entry in the workers array is an object with keys:
 id (integer), session (string or null, truncated to 8 chars),
-tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
+tcp_port (integer), pid (integer), state (\"bound\" or \"standby\"),
+leaked_threads (integer): threads a deadline could not stop, as of that
+worker's last answer.  A non-zero count means a run exceeded its timeout and
+could not be interrupted; the worker retires rather than serve its next
+request while one is still running, and the session's state is reset."
   :args ()
   :body
   (let ((info (pool-status-info)))
@@ -49,10 +53,14 @@ tcp_port (integer), pid (integer), state (\"bound\" or \"standby\")."
                (when (and workers (plusp (length workers)))
                  (format s "~&~%Workers:")
                  (loop for w across workers
-                       do (format s "~&  #~A [~A] pid=~A port=~A~@[ session=~A~]"
+                       do (format s "~&  #~A [~A] pid=~A port=~A~@[ session=~A~]~
+                                     ~[~:;~:* leaked_threads=~D as of its last ~
+                                     answer; if still running it retires on ~
+                                     its next request~]"
                                   (gethash "id" w)
                                   (gethash "state" w)
                                   (gethash "pid" w)
                                   (gethash "tcp_port" w)
-                                  (gethash "session" w))))))))
+                                  (gethash "session" w)
+                                  (or (gethash "leaked_threads" w) 0))))))))
     (result id info)))
