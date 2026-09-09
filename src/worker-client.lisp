@@ -51,7 +51,8 @@
            #:signal-worker-terminate
            #:worker-last-crash-reason
            #:worker-last-exit-status
-           #:worker-last-exit-code))
+           #:worker-last-exit-code
+           #:worker-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -647,6 +648,16 @@ stream to prevent further use, and log the event.
 Process reaping (waitpid) is deferred to a background thread to
 avoid blocking the caller, which typically holds stream-lock.
 Returns nothing."
+  ;; The reason is published first, before the state that makes other threads
+  ;; look for it and before the stream that makes them stop using this worker.
+  ;; Everything downstream reads the two together -- the pool's circuit
+  ;; breaker asks whether a :CRASHED worker retired, and a concurrent RPC
+  ;; blocked on the stream lock asks what killed it -- and publishing the
+  ;; state first left a window in which a deliberate retirement reads as an
+  ;; ordinary crash.  It is also set unconditionally now: it used to be set
+  ;; alongside the exit code, inside the branch that needs a process object,
+  ;; so a worker without one recorded no reason at all.
+  (setf (worker-last-crash-reason worker) reason)
   (setf (worker-state worker) :crashed)
   (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
@@ -680,8 +691,7 @@ Returns nothing."
           (setf exit-status (string-downcase (symbol-name status)))
           (when (member status '(:exited :signaled))
             (setf exit-code (sb-ext:process-exit-code process)))))
-      (setf (worker-last-crash-reason worker) reason
-            (worker-last-exit-status worker) (or exit-status "unknown")
+      (setf (worker-last-exit-status worker) (or exit-status "unknown")
             (worker-last-exit-code worker) (or exit-code "unknown"))
       ;; Reap the OS process in a background thread to avoid blocking
       ;; the caller.  process-close calls waitpid internally, which
@@ -721,15 +731,37 @@ Returns nothing."
                "exit_code" (or exit-code "unknown")
                "reason" reason)))
 
+(defun %reported-a-leak-p (worker)
+  "True when WORKER's last answer said it was still carrying a leaked thread.
+
+A worker retires on the request *after* the one that leaked, so by the time it
+exits the parent has already been told: the count rides on every response,
+including the one that reported the deadline.  That makes it a witness the
+worker cannot produce by accident."
+  (let ((count (worker-leaked-threads worker)))
+    (and (integerp count) (plusp count))))
+
 (defun %retired-for-leaked-thread-p (worker)
   "True when WORKER's death was a deliberate retirement, not a crash.
 
-The exit code decides, in both directions: a worker sets it on its way out,
-and it describes the death itself.  The leaked-thread count from the last
-answer is only consulted when the exit status is not yet knowable, because it
-is a proxy and a stale one -- a worker can report a leak, have the thread
-finish, and then genuinely crash, which the count alone reads as a retirement
-and so hides a real crash from the callers that draw conclusions from one.
+Two witnesses have to agree, because neither is sound alone.
+
+The exit code describes the death itself, and it is the one that can say a
+death was *not* a retirement: a worker can report a leak, have the thread
+finish, and then genuinely crash, and the count alone reads that as a
+retirement -- hiding a real crash from the callers that draw conclusions from
+one.  But WORKER/EVAL runs whatever the user asks, so any exit code is
+reachable from a REPL: (SB-EXT:EXIT :CODE 70) in an otherwise healthy worker
+would otherwise be reported to that user as an earlier timeout leaving a
+thread behind, and excused from the circuit breaker.
+
+The count is what the exit code cannot be: evidence that this worker was in
+the condition the exit code claims.  It is also all there is to go on when the
+status cannot be read at all.
+
+Where the two cannot both be had the answer is \"crash\", which is the
+direction that loses least: a retirement misfiled as a crash costs a breaker
+tick and an init attribution, exactly as it did before any of this existed.
 
 The status is not terminal the instant the parent reads EOF: SBCL updates the
 process struct from its SIGCHLD handler, which has not run yet.  Measured, it
@@ -744,16 +776,36 @@ than falling back to the count on essentially every real retirement."
                    do (sleep 0.01))))
       (let ((status (and process (terminal-status))))
         (cond
-          ;; Known: the code answers, whichever way it answers.
+          ;; Known: the code answers, whichever way it answers -- but only a
+          ;; worker that had said it was carrying one can retire for it.
           ((eq status :exited)
-           (eql +leaked-thread-exit-code+
-                (ignore-errors (sb-ext:process-exit-code process))))
+           (and (eql +leaked-thread-exit-code+
+                     (ignore-errors (sb-ext:process-exit-code process)))
+                (%reported-a-leak-p worker)))
           ;; Killed by a signal, so not a retirement -- a retiring worker
           ;; exits under its own power.
           ((eq status :signaled) nil)
           ;; Unknowable: no process, already reaped, or still not settled.
-          (t (and (integerp (worker-leaked-threads worker))
-                  (plusp (worker-leaked-threads worker)))))))))
+          (t (%reported-a-leak-p worker)))))))
+
+(defun worker-retired-p (worker)
+  "True when WORKER died by retiring for a leaked thread rather than crashing.
+
+The same question as %RETIRED-FOR-LEAKED-THREAD-P, asked of the struct after
+the fact rather than of the process at the moment it stopped answering, and
+answered from whichever witness the asking path has.
+
+The recorded reason is the better one, and the RPC that saw the EOF publishes
+it.  But the pool's health monitor can reach a dead worker before any RPC
+does, and then nothing has classified it yet; there the exit code the monitor
+records on its way past is the only witness there is -- corroborated by the
+count for the same reason the EOF classifier corroborates it.
+
+Kept here, beside the classifier it has to agree with: the two answering the
+same question differently is how this exclusion has failed before."
+  (or (equal *retired-leaked-thread-reason* (worker-last-crash-reason worker))
+      (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
+           (%reported-a-leak-p worker))))
 
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
@@ -770,7 +822,17 @@ the worker handler (e.g. \"symbol not found\").  These are re-signaled
 without marking the worker as crashed."
   (bt:with-lock-held ((worker-stream-lock worker))
     (unless (worker-stream worker)
-      (error 'worker-crashed :worker worker :reason "already-dead"))
+      ;; Whoever got here first has already worked out what killed this
+      ;; worker; say that, rather than a second and weaker answer.  Callers
+      ;; act on the reason -- the init monitor decides whether to disable
+      ;; initialization for every later worker in the pool, and the proxy
+      ;; decides what to tell the user -- and every one of them that arrives
+      ;; behind the first RPC used to be told "already-dead", which reads as
+      ;; an ordinary crash.  The init monitor is not a rare straggler here: it
+      ;; polls the same worker every fraction of a second while a load runs.
+      (error 'worker-crashed :worker worker
+                             :reason (or (worker-last-crash-reason worker)
+                                         "already-dead")))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn

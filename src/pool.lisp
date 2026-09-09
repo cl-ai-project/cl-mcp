@@ -40,6 +40,7 @@
                 #:worker-last-exit-code
                 #:worker-crashed
                 #:worker-crashed-reason
+                #:worker-retired-p
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/utils/deadline
@@ -330,13 +331,7 @@ inert.  A TYPEP costs the same and cannot hide that."
        (equal *retired-leaked-thread-reason*
               (worker-crashed-reason condition))))
 
-(defun %retired-worker-p (worker)
-  "True when WORKER died by retiring rather than by crashing.
-The same distinction as %RETIREMENT-CRASH-P, asked of the worker struct after
-the fact rather than of the condition at the time."
-  (equal *retired-leaked-thread-reason* (worker-last-crash-reason worker)))
-
-(defun %breaker-countable-crash-p (worker &key (retired (%retired-worker-p worker)))
+(defun %breaker-countable-crash-p (worker)
   "True when WORKER's death should count toward its session's circuit breaker.
 
 Both push sites ask this rather than each spelling the exclusions out, because
@@ -347,12 +342,14 @@ never fire.
 A deliberate retirement is excluded.  Three uninterruptible timeouts in five
 minutes would otherwise trip the breaker and halt the session, where the same
 three before this behaviour existed returned three timeouts and left the user
-working.  RETIRED is a parameter because one caller has to sample it before
-that overwrite.
+working.  WORKER-RETIRED-P is asked here and now rather than sampled by the
+caller and passed in: the marker survives %HANDLE-WORKER-CRASH now, so there
+is no longer a moment at which the answer is only briefly available -- and a
+sampled copy is one more thing that can be taken at the wrong moment.
 
 An init-attributable crash is excluded for the reason it always was: the pool
 counts those separately, against initialization rather than the session."
-  (and (not retired)
+  (and (not (worker-retired-p worker))
        (not (%init-attributable-crash-p worker))))
 
 (defun %monitor-init (worker session-id max-failures)
@@ -746,14 +743,21 @@ to prevent recovery threads from spawning orphan workers."
                  "was_standby" was-standby
                  "exit_status" (or exit-status "unknown")
                  "exit_code" (or exit-code "unknown"))
-      ;; Captured before the slot is overwritten: %RETIRED-WORKER-P below
-      ;; reads it, and setting it to "process-died" first made that guard
-      ;; unreachable -- the same shape of inert guard this branch already had
-      ;; to fix once.
-      (setf retired-p (%retired-worker-p crashed-worker))
-      (setf (worker-last-crash-reason crashed-worker) "process-died"
-            (worker-last-exit-status crashed-worker) (or exit-status "unknown")
-            (worker-last-exit-code crashed-worker) (or exit-code "unknown")))
+      ;; Order matters twice over.  The exit code is recorded before the
+      ;; question is asked, because on this path -- the health monitor
+      ;; reaching a dead worker before any RPC has seen the EOF -- it is the
+      ;; only witness there is.  And the answer is taken before the reason is
+      ;; replaced, because the reason is the other witness.
+      (setf (worker-last-exit-status crashed-worker) (or exit-status "unknown")
+            (worker-last-exit-code crashed-worker) (or exit-code "unknown"))
+      (setf retired-p (worker-retired-p crashed-worker))
+      ;; A retirement keeps its marker rather than being flattened into
+      ;; "process-died".  Everything that reads this slot afterwards --
+      ;; GET-OR-ASSIGN-WORKER's own breaker push when it meets the same
+      ;; worker, the notification the user is shown -- would otherwise see a
+      ;; generic crash, which is how this exclusion has failed before.
+      (setf (worker-last-crash-reason crashed-worker)
+            (if retired-p *retired-leaked-thread-reason* "process-died")))
     (ignore-errors (kill-worker crashed-worker))
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.
@@ -766,7 +770,7 @@ to prevent recovery threads from spawning orphan workers."
               (window-start (- now *crash-breaker-window*)))
          (bordeaux-threads:with-lock-held (*pool-lock*)
            (let ((history (gethash session-id *crash-history*)))
-             (when (%breaker-countable-crash-p crashed-worker :retired retired-p)
+             (when (%breaker-countable-crash-p crashed-worker)
                (setf history
                      (remove-if (lambda (ts) (< ts window-start)) history))
                (push now history)
