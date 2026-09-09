@@ -24,6 +24,11 @@
                 #:externalize-value
                 #:definition-digest
                 #:printed-for-digest)
+  (:import-from #:cl-mcp/src/object-registry
+                #:register-object)
+  (:import-from #:cl-mcp/src/utils/bounded-stream
+                #:make-bounded-output-stream
+                #:bounded-output-string)
   (:import-from #:cl-mcp/src/code-core
                 #:code-describe-symbol)
   (:import-from #:cl-mcp/src/utils/deadline
@@ -84,18 +89,59 @@ that is the single most expensive mistake available here."
                       (lisp-implementation-version))))
 
 (defparameter +not-loaded-message+
-  "cl-spec is not loaded in this session's worker. Run load-system with system \
-\"cl-spec/check-it\" to get introspection and property execution, or \
-\"cl-spec\" for introspection only. Until then this tool cannot tell whether \
-anything is registered: an empty answer here is NOT evidence that the symbol \
-has no contract."
-  "Said when the CL-SPEC package is absent.")
+  (concatenate 'string
+               "cl-spec is not loaded in this session's worker. Run "
+               "load-system with system \"cl-spec/check-it\" to get "
+               "introspection and property execution, or \"cl-spec\" for "
+               "introspection only. Until then this tool cannot tell whether "
+               "anything is registered: an empty answer here is NOT evidence "
+               "that the symbol has no contract.")
+  "Said when the CL-SPEC package is absent.
+
+CONCATENATE rather than a string literal broken across lines: in Common Lisp
+a backslash before a newline escapes the newline INTO the string rather than
+continuing the line, so the C-looking spelling would put hard newlines and
+trailing spaces into every message and every JSON field carrying one.")
 
 (defparameter +incomplete-message+
-  "cl-spec is loaded but does not provide every name this adapter needs; see \
-the missing list in environment. This is a version mismatch between cl-mcp and \
-cl-spec, not a statement about the symbol."
+  (concatenate 'string
+               "cl-spec is loaded but does not provide every name this "
+               "adapter needs; see the missing list in environment. This is a "
+               "version mismatch between cl-mcp and cl-spec, not a statement "
+               "about the symbol.")
   "Said when cl-spec is present but a required name is missing.")
+
+(defparameter +runtime-escaping-message+
+  (concatenate 'string
+               "symbol or package name would need escaping; the runtime "
+               "lookup reads its argument back and could resolve a different "
+               "symbol")
+  "Said when the runtime join declines a name it cannot print unambiguously.")
+
+(defparameter +symbol-is-a-property-note+
+  (concatenate 'string
+               "this symbol is itself a registered property; run it with "
+               "property=")
+  "Noted when a symbol is both a property name and a target of others.")
+
+(defparameter +symbol-is-a-property-not-selected-note+
+  (concatenate 'string
+               "this symbol is itself a registered property; it was NOT "
+               "selected -- run it with property=")
+  "Noted on a selection that deliberately left the symbol's own property out.")
+
+(defparameter +about-source+
+  (concatenate 'string
+               "cl-spec:semantic-data -> :properties-about "
+               "(registry :about reverse index)")
+  "Where an :ABOUT selection came from, reported so a caller can weigh it.")
+
+(defparameter +budget-derivation-note+
+  (concatenate 'string
+               "derived by cl-mcp from cl-spec:property-trials and "
+               "cl-spec:backend-default-trials; cl-spec does not expose the "
+               "resolved budget")
+  "How the trial budget was arrived at, said so a reader can question it.")
 
 (defun unavailable-report (api-status environment)
   "Return the plist answering a call cl-spec cannot serve at all."
@@ -122,6 +168,22 @@ what lets a caller compare the two by eye."
         (values text t 0)
         (values (subseq text 0 max-chars) nil (- (length text) max-chars)))))
 
+(defun %plainly-printable-p (name)
+  "Return true when NAME needs no escaping to be read back as itself.
+
+CODE-DESCRIBE-SYMBOL takes a string and reads it.  Handing it the unescaped
+name of a symbol containing a colon, a space or a bar would have it read a
+different symbol -- or a symbol in a different package -- and report that
+one's signature under this one's name.  Refusing is the only safe answer:
+this join is decoration on the registry's own facts, never the identity."
+  (and (plusp (length name))
+       (every (lambda (character)
+                (and (graphic-char-p character)
+                     (not (member character '(#\: #\Space #\| #\\ #\( #\) #\"
+                                              #\; #\' #\` #\, #\#)))))
+              name)
+       (string= name (string-upcase name))))
+
 (defun %runtime-data (symbol)
   "Return (values RUNTIME REASON) for SYMBOL from cl-mcp's own introspection.
 
@@ -130,24 +192,28 @@ does not hold: the signature, the docstring and where the definition lives.
 A symbol with no binding at all is not an error here -- a property may be
 registered about a symbol that is not yet defined -- so the reason is
 reported and the caller carries on."
-  (handler-case
-      (let ((package (symbol-package symbol)))
-        (unless package
-          (return-from %runtime-data
-            (values nil "symbol is uninterned and has no source to look up")))
-        (multiple-value-bind (name type arglist documentation path line)
-            (code-describe-symbol (format nil "~A::~A"
-                                          (package-name package)
-                                          (symbol-name symbol)))
-          (declare (ignore name))
-          (values (list :type type
-                        :arglist arglist
-                        :documentation documentation
-                        :source-file path
-                        :source-line line)
-                  nil)))
-    (error (condition)
-      (values nil (princ-to-string condition)))))
+  (let ((package (symbol-package symbol))
+        (name (symbol-name symbol)))
+    (cond
+      ((null package)
+       (values nil "symbol is uninterned and has no source to look up"))
+      ((not (and (%plainly-printable-p name)
+                 (%plainly-printable-p (package-name package))))
+       (values nil +runtime-escaping-message+))
+      (t
+       (handler-case
+           (multiple-value-bind (found type arglist documentation path line)
+               (code-describe-symbol (format nil "~A::~A"
+                                             (package-name package) name))
+             (declare (ignore found))
+             (values (list :type type
+                           :arglist arglist
+                           :documentation documentation
+                           :source-file path
+                           :source-line line)
+                     nil))
+         (error (condition)
+           (values nil (princ-to-string condition))))))))
 
 (defun %spec-summary (spec-plist)
   "Return the one-line summary of an argument's spec used in a listing.
@@ -242,7 +308,7 @@ that is a signature and a source location belongs to cl-mcp)."
                 :notes (append
                         (list "properties_about lists direct (:about ...) registrations only")
                         (when (getf routing :property)
-                          (list "this symbol is itself a registered property; run it with property=")))
+                          (list +symbol-is-a-property-note+)))
                 :environment environment))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -250,10 +316,12 @@ that is a signature and a source location belongs to cl-mcp)."
 ;;; ---------------------------------------------------------------------------
 
 (defparameter +function-spec-unsupported-message+
-  "cl-spec provides no function-spec-data projection in this revision, and \
-defspec-function is still a stub, so there is nothing to describe. cl-mcp will \
-not assemble one out of the individual readers: that would duplicate cl-spec's \
-introspection responsibility on this side of the boundary."
+  (concatenate 'string
+               "cl-spec provides no function-spec-data projection in this "
+               "revision, and defspec-function is still a stub, so there is "
+               "nothing to describe. cl-mcp will not assemble one out of the "
+               "individual readers: that would duplicate cl-spec's "
+               "introspection responsibility on this side of the boundary.")
   "Said when spec-describe is asked for a function spec.")
 
 (defun %spec-tree (spec-plist)
@@ -388,46 +456,85 @@ Starting a run with a few milliseconds left produces a timeout that says
 nothing about the property, and costs a thread to say it.")
 
 (defparameter +backend-missing-message+
-  "No cl-spec generator backend is installed, so no property can be executed. \
-Run load-system with system \"cl-spec/check-it\". Nothing was executed: this \
-is NOT a successful verification."
+  (concatenate 'string
+               "No cl-spec generator backend is installed, so no property can "
+               "be executed. Run load-system with system "
+               "\"cl-spec/check-it\". Nothing was executed: this is NOT a "
+               "successful verification.")
   "Said when execution is requested with *GENERATOR-BACKEND* unset.")
 
 (defparameter +about-coverage-note+
-  "Direct (:about ...) registrations only. Callers, generic-function methods, \
-macro users and shared mutable state are NOT analysed. This is not a change \
-impact analysis (cl-spec specification 31 and 72.5)."
+  (concatenate 'string
+               "Direct (:about ...) registrations only. Callers, "
+               "generic-function methods, macro users and shared mutable "
+               "state are NOT analysed. This is not a change impact analysis "
+               "(cl-spec specification 31 and 72.5).")
   "The limit of what the :about reverse index can be said to cover.")
 
 (defparameter +explicit-coverage-note+
-  "Only the property named. Nothing else was selected, and nothing else was \
-checked."
+  (concatenate 'string
+               "Only the property named. Nothing else was selected, and "
+               "nothing else was checked.")
   "The limit of what an explicit single-property run covers.")
 
 (defparameter +shrink-note+
-  "Backend-searched reduction. NOT a guaranteed global minimum, and the \
-backend does not report whether shrinking completed, exhausted its budget or \
-was interrupted (cl-spec specification 16 and 72.4)."
+  (concatenate 'string
+               "Backend-searched reduction. NOT a guaranteed global minimum, "
+               "and the backend does not report whether shrinking completed, "
+               "exhausted its budget or was interrupted (cl-spec "
+               "specification 16 and 72.4).")
   "What a shrunk counterexample does and does not mean.")
 
 (defparameter +reproduce-scope-note+
-  "Regenerates the trial sequence from this seed under the same definitions, \
-backend, profile and image. It does NOT reproduce the code revision, external \
-I/O, the clock, or shared mutable state. This is regeneration, not replay of a \
-saved counterexample against a fixed implementation (cl-spec specification 15 \
-and 72.3)."
+  (concatenate 'string
+               "Regenerates the trial sequence from this seed under the same "
+               "definitions, backend, profile and image. It does NOT "
+               "reproduce the code revision, external I/O, the clock, or "
+               "shared mutable state. This is regeneration, not replay of a "
+               "saved counterexample against a fixed implementation (cl-spec "
+               "specification 15 and 72.3).")
   "What a seed does and does not fix.")
 
 (defparameter +zero-properties-message+
-  "0 properties selected -- this is NOT a successful verification. Nothing was \
-executed, and a registry with no property registered about this symbol says \
-nothing about whether it is correct."
+  (concatenate 'string
+               "0 properties selected -- this is NOT a successful "
+               "verification. Nothing was executed, and a registry with no "
+               "property registered about this symbol says nothing about "
+               "whether it is correct.")
   "Said when a selection comes back empty.")
 
 (defparameter +options-note+
-  "cl-mcp passes no backend options, so a re-run under the same seed and \
-profile cannot silently differ in them."
+  (concatenate 'string
+               "cl-mcp passes no backend options, so a re-run under the same "
+               "seed and profile cannot silently differ in them.")
   "Why the options field is always null.")
+
+(defparameter +budget-exhausted-message+
+  (concatenate 'string
+               "the whole-call timeout_seconds budget was spent before this "
+               "property started; nothing about it was checked")
+  "Said for a property the budget never reached.")
+
+(defparameter +timeout-leaked-message+
+  (concatenate 'string
+               "the property run exceeded its deadline and could not be "
+               "stopped: it is still executing in this worker and may hold "
+               "locks. Use pool-kill-worker to get a fresh worker before "
+               "retrying.")
+  "Said for a timeout whose run thread outlived every attempt to stop it.")
+
+(defparameter +timeout-stopped-message+
+  (concatenate 'string
+               "the property run exceeded its deadline and its run thread was "
+               "stopped. Nothing was proved or disproved; retry with a larger "
+               "timeout_seconds if the property legitimately needs longer.")
+  "Said for a timeout whose run thread was stopped cleanly.")
+
+(defparameter +seed-needs-one-property-message+
+  (concatenate 'string
+               "seed reproduces a single property run; the selection holds "
+               "more than one property. Name one with property= instead.")
+  "Said when a seed arrives alongside a multi-property selection.")
 
 (defun %resolve-profile (profile)
   "Return (values KEYWORD NIL) for the profile named by PROFILE.
@@ -492,10 +599,10 @@ appears in the property's trials table (see spec-describe)."
                         :requested (list :symbol (symbol-data name))
                         :selected (mapcar #'symbol-data about)
                         :count (length about)
-                        :source "cl-spec:semantic-data -> :properties-about (registry :about reverse index)"
+                        :source +about-source+
                         :coverage +about-coverage-note+
                         :notes (when (getf routing :property)
-                                 (list "this symbol is itself a registered property; it was NOT selected -- run it with property=")))
+                                 (list +symbol-is-a-property-not-selected-note+)))
                   nil)))))
 
 (defun %target-argument-error (property symbol)
@@ -549,7 +656,7 @@ cannot trace back is worse than one it can question."
                                (t "unknown"))
           :property-trials (when table (printed-for-digest table))
           :backend-default default
-          :budget-derivation "derived by cl-mcp from cl-spec:property-trials and cl-spec:backend-default-trials; cl-spec does not expose the resolved budget")))
+          :budget-derivation +budget-derivation-note+)))
 
 (defun %classify-condition (api condition)
   "Return the adapter status keyword for CONDITION.
@@ -572,15 +679,27 @@ of failing to load."
       ((search "generator backend" (princ-to-string condition)) :generator-error)
       (t :internal-error))))
 
+(defun %condition-report (condition max-chars)
+  "Return CONDITION's report text, retaining at most MAX-CHARS of it.
+
+Bounded on the way out rather than printed in full and cut afterwards: a
+condition signalled by a property body can carry a generated value as its
+datum, and its report is then as large as that value."
+  (handler-case
+      (let ((stream (make-bounded-output-stream (max 1 max-chars))))
+        (princ condition stream)
+        (bounded-output-string stream))
+    (serious-condition () "#<unprintable condition>")))
+
 (defun %condition-data (condition &key (max-chars 2000))
-  "Return CONDITION as the plist a response carries for it."
+  "Return CONDITION as the plist a response carries for it.
+
+The object id lets the existing inspect-object tool reach the condition's
+slots, which is where a signalled datum a caller needs is actually kept: the
+report text is a rendering, not the value."
   (list :type (princ-to-string (type-of condition))
-        :message (let ((text (handler-case (princ-to-string condition)
-                               (error () "#<unprintable condition>"))))
-                   (if (<= (length text) max-chars)
-                       text
-                       (subseq text 0 max-chars)))
-        :object-id (getf (externalize-value condition :max-chars 1) :object-id)))
+        :message (%condition-report condition max-chars)
+        :object-id (ignore-errors (register-object condition))))
 
 (defun %named-values (plist max-value-chars)
   "Return cl-spec's {variable value} counterexample PLIST as a list of plists."
@@ -630,8 +749,7 @@ of failing to load."
             :trials trials
             :definition-digest digest
             :definition-match :not-checked
-            :message "the whole-call timeout_seconds budget was spent before \
-this property started; nothing about it was checked")
+            :message +budget-exhausted-message+)
       (multiple-value-bind (value status leaked)
           (call-with-deadline-thread
            (lambda ()
@@ -651,13 +769,7 @@ this property started; nothing about it was checked")
                  :definition-digest digest
                  :definition-match :not-checked
                  :message
-                 (if leaked
-                     "the property run exceeded its deadline and could not be \
-stopped: it is still executing in this worker and may hold locks. Use \
-pool-kill-worker to get a fresh worker before retrying."
-                     "the property run exceeded its deadline and its run thread \
-was stopped. Nothing was proved or disproved; retry with a larger \
-timeout_seconds if the property legitimately needs longer.")))
+                 (if leaked +timeout-leaked-message+ +timeout-stopped-message+)))
           (:error
            (list :property (symbol-data name)
                  :status (%classify-condition api value)
@@ -738,8 +850,7 @@ anything holds."
               (list :status :invalid-arguments
                     :verified nil
                     :selection selection
-                    :message "seed reproduces a single property run; the \
-selection holds more than one property. Name one with property= instead."
+                    :message +seed-needs-one-property-message+
                     :environment environment)))
           (let ((budget (or timeout-seconds *default-check-timeout-seconds*))
                 (start (get-internal-real-time))

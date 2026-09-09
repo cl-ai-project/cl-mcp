@@ -73,7 +73,10 @@
                                         :body-forms 1 :body-omitted t
                                         :shrink-enabled t))
                             :nothing-registered nil
-                            :notes (list "properties_about lists direct (:about ...) registrations only")
+                            :notes (list (concatenate
+                                          'string
+                                          "properties_about lists direct "
+                                          "(:about ...) registrations only"))
                             :environment *environment*)))
            (text (first-text response)))
       (ok (string= "ok" (gethash "status" response)))
@@ -117,7 +120,10 @@
                             :results nil
                             :counts (list :selected 0 :passed 0 :failed 0
                                           :errored 0 :timed-out 0 :not-run 0)
-                            :message "0 properties selected -- this is NOT a successful verification."
+                            :message (concatenate
+                                      'string
+                                      "0 properties selected -- this is "
+                                      "NOT a successful verification.")
                             :environment *environment*)))
            (text (first-text response)))
       (ok (string= "no-properties" (gethash "status" response)))
@@ -208,6 +214,40 @@
       (testing "and the headline separates it from a falsified property"
         (ok (search "NOT VERIFIED" text))
         (ok (not (search "FAILED" text)))))))
+
+(deftest check-response-replays-the-failure-not-the-first-run
+  (testing "the replay line names the property that did not pass"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified nil
+                            :selection (list :mode "about" :count 2
+                                             :selected (list (%symbol-data "PROBE" "GOOD")
+                                                             (%symbol-data "PROBE" "BAD"))
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-digest "aaaaaaaaaaaaaaaa"
+                                        :definition-match :not-checked)
+                                  (list :property (%symbol-data "PROBE" "BAD")
+                                        :status :failed
+                                        :trials (list :executed 3 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "222" :profile :normal
+                                        :definition-digest "bbbbbbbbbbbbbbbb"
+                                        :definition-match :not-checked))
+                            :counts (list :selected 2 :passed 1 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "property=PROBE::BAD" text))
+      (ok (search "seed=222" text))
+      (testing "and not the one that already holds"
+        (ok (not (search "seed=111" text)))))))
 
 (deftest describe-response-marks-truncation
   (testing "a cut body says so in the text"

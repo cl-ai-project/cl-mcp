@@ -460,8 +460,16 @@ to see the rest; the text above is a preview, not a form that can be read back."
 
 (defun %format-check-footer (stream report)
   "Write the tally, the warnings and the replay line to STREAM."
-  (let ((counts (getf report :counts))
-        (first-result (first (getf report :results))))
+  ;; The replay line points at the first result that did NOT pass, falling
+  ;; back to the first.  A selection of three where the third failed would
+  ;; otherwise hand the caller the seed of a property that already holds --
+  ;; the one run they have no reason to reproduce.
+  (let* ((counts (getf report :counts))
+         (results (getf report :results))
+         (first-result (or (find-if-not (lambda (result)
+                                          (eq :passed (getf result :status)))
+                                        results)
+                           (first results))))
     (format stream "~&~%verified: ~A   ~D passed, ~D failed, ~D errored, ~
 ~D timed out, ~D not run"
             (if (getf report :verified) "true" "false")

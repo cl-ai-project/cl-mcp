@@ -180,6 +180,20 @@ GETF readers is a complete substitute and no cl-spec class is needed."
             (ok (= 1 (getf first-property :body-forms)))
             (ok (stringp (getf first-property :definition-digest)))))))))
 
+(deftest symbol-report-refuses-a-risky-runtime-lookup
+  (testing "a symbol whose name would need escaping gets no runtime join"
+    ;; FIND-SYMBOL matches this name exactly, which is the point: resolution
+    ;; never goes through the reader. The runtime join does, so it declines
+    ;; rather than read back a name that would denote something else.
+    (let ((package (%fixture-package)))
+      (export (intern "ODD NAME" package) package))
+    (let ((report (symbol-report (%stub-api) :ok
+                                 "CL-MCP-SPEC-REPORT-FIXTURE:ODD NAME")))
+      (ok (eq :ok (getf report :status)))
+      (ok (string= "ODD NAME" (getf (getf report :symbol) :name)))
+      (ok (null (getf report :runtime)))
+      (ok (search "escaping" (getf report :runtime-unavailable-reason))))))
+
 (deftest symbol-report-zero-properties-is-not-a-clean-bill
   (testing "no registration is reported as no registration"
     (let ((report (symbol-report (%stub-api) :ok
