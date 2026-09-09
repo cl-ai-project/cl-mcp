@@ -247,6 +247,102 @@ GETF readers is a complete substitute and no cl-spec class is needed."
 ;;; spec-check
 ;;; ---------------------------------------------------------------------------
 
+(defvar *fixture-backend* :global-backend
+  "Stands in for CL-SPEC:*GENERATOR-BACKEND*, so a test can check that the run
+thread sees the value the caller captured rather than the global one.")
+
+(deftest check-report-binds-the-captured-backend-in-the-run-thread
+  (testing "the run sees the backend the caller captured, not the global"
+    ;; RUN-PROPERTY reads *GENERATOR-BACKEND* where it runs, and a deadline
+    ;; thread does not inherit dynamic bindings. Without PROGV the thread
+    ;; would read :GLOBAL-BACKEND here and the budget would have been derived
+    ;; from a different object than the trials ran under.
+    (let* ((api (%api-with-run
+                 (lambda (name &key profile seed registry)
+                   (declare (ignore name profile seed registry))
+                   (%result-stub :status (if (eq *fixture-backend* :captured)
+                                             :passed
+                                             :failed)))
+                 :generator-backend (lambda () :captured)))
+           (with-specials (make-cl-spec-api
+                           :functions (cl-mcp/src/spec-adapter-core:cl-spec-api-functions api)
+                           :specials (list :generator-backend '*fixture-backend*)))
+           (report (check-report with-specials :ok
+                                 :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (eq :global-backend *fixture-backend*))
+      (ok (eq :passed (getf (first (getf report :results)) :status))))))
+
+(deftest check-report-zero-trials-is-not-verified
+  (testing "a passing status with nothing evaluated is not a verification"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub :status :passed :trials 0)))
+                   :ok
+                   :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (eq :completed (getf report :status)))
+      (ok (not (getf report :verified)))
+      (ok (member :zero-trials (getf report :verification-gaps)))
+      (testing "and the two unmeasurable gaps are always listed"
+        (ok (member :rejection-counts-unmeasured (getf report :verification-gaps)))
+        (ok (member :input-coverage-unmeasured (getf report :verification-gaps)))))))
+
+(deftest check-report-empty-counterexample-is-present-not-missing
+  (testing "a property that generates no arguments still has a counterexample"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub :status :failed :trials 1))
+                                  :property-data
+                                  (lambda (name &key registry)
+                                    (declare (ignore name registry))
+                                    (list :name (%sym "ADD-COMMUTES")
+                                          :arguments nil
+                                          :metadata (list :shrink t))))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES")))
+      (let ((result (first (getf report :results))))
+        (ok (eq :present (getf result :counterexample-status)))
+        (ok (null (getf result :counterexample)))))))
+
+(deftest check-report-disabled-shrinking-says-so
+  (testing "(:shrink nil) is reported as disabled, not as nothing found"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub :status :failed :trials 1
+                                                  :counterexample (list (%sym "A") 5)))
+                                  :property-data
+                                  (lambda (name &key registry)
+                                    (declare (ignore name registry))
+                                    (list :name (%sym "ADD-COMMUTES")
+                                          :arguments (list (list :variable (%sym "A")
+                                                                 :spec nil))
+                                          :metadata (list :shrink nil))))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES")))
+      (ok (eq :disabled (getf (first (getf report :results)) :shrink-status))))))
+
+(deftest check-report-timeout-leaves-worker-state-unknown
+  (testing "a stopped timeout is not evidence the image is safe to reuse"
+    (unwind-protect
+         (let ((report (check-report
+                        (%api-with-run (lambda (&rest ignored)
+                                         (declare (ignore ignored))
+                                         (sleep 5)
+                                         (%result-stub)))
+                        :ok
+                        :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                        :timeout-seconds 0.3)))
+           (ok (eq :timeout (getf (first (getf report :results)) :status)))
+           (ok (member (getf report :worker-reuse) '(:unknown :unsafe)))
+           (ok (search "pool-kill-worker" (getf report :worker-reuse-message)))
+           (testing "and the counterexample is unavailable with a reason"
+             (let ((result (first (getf report :results))))
+               (ok (eq :unavailable (getf result :counterexample-status)))
+               (ok (stringp (getf result :counterexample-unavailable-reason))))))
+      (forget-leaked-threads))))
+
 (deftest check-report-zero-properties-is-never-success
   (testing "a symbol with no :about property reports no-properties"
     (let ((report (check-report

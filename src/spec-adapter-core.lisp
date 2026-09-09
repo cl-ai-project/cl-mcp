@@ -24,6 +24,8 @@
            #:make-cl-spec-api
            #:cl-spec-api-functions
            #:cl-spec-api-classes
+           #:cl-spec-api-specials
+           #:api-special
            #:cl-spec-api-version
            #:cl-spec-api-system-directory
            #:cl-spec-api-missing
@@ -50,9 +52,16 @@
 
 FUNCTIONS and CLASSES are plists keyed by the adapter's own keywords rather
 than by cl-spec's symbols, so a test can build one out of lambdas and exercise
-every branch of the report layer in an image where cl-spec was never loaded."
+every branch of the report layer in an image where cl-spec was never loaded.
+
+SPECIALS holds the special variable SYMBOLS themselves, which FUNCTIONS cannot
+substitute for.  A run happens on a deadline thread, and a new thread does not
+inherit dynamic bindings: reading a special through a closure gives the
+caller's value, but making the run SEE that value takes PROGV, and PROGV needs
+the symbol.  Empty on a stub API, where PROGV then binds nothing."
   (functions nil :type list)
   (classes nil :type list)
+  (specials nil :type list)
   (version nil)
   (system-directory nil)
   (missing nil :type list))
@@ -118,6 +127,7 @@ load the system, report a version mismatch, or proceed."
       (return-from resolve-cl-spec-api (values nil :not-loaded)))
     (let ((functions '())
           (classes '())
+          (specials '())
           (missing '()))
       (loop for (key . name) in +required-functions+
             for symbol = (find-symbol name package)
@@ -131,7 +141,8 @@ load the system, report a version mismatch, or proceed."
                          (list* key
                                 (let ((special symbol))
                                   (lambda () (symbol-value special)))
-                                functions))
+                                functions)
+                         specials (list* key symbol specials))
                    (push name missing)))
       (loop for (key . name) in +condition-classes+
             for symbol = (find-symbol name package)
@@ -140,6 +151,7 @@ load the system, report a version mismatch, or proceed."
       (multiple-value-bind (version directory) (%system-version-and-directory)
         (let ((api (make-cl-spec-api :functions functions
                                      :classes classes
+                                     :specials specials
                                      :version version
                                      :system-directory directory
                                      :missing (sort missing #'string<))))
@@ -160,6 +172,13 @@ condition: the report layer checks the API's status before it calls anything."
 (defun api-class (api key)
   "Return the condition class symbol API carries for KEY, or NIL."
   (and api (getf (cl-spec-api-classes api) key)))
+
+(defun api-special (api key)
+  "Return the special variable symbol API carries for KEY, or NIL.
+
+Used to PROGV-bind cl-spec's specials inside a run thread.  A stub API carries
+none, and a caller binding an empty list of symbols simply binds nothing."
+  (and api (getf (cl-spec-api-specials api) key)))
 
 (defun api-backend-available-p (api)
   "Return true when a cl-spec generator backend is installed.
@@ -320,21 +339,38 @@ instance or a structure."
     (t (let ((name (type-of value)))
          (string-downcase (princ-to-string (if (consp name) (first name) name)))))))
 
+(defparameter *value-print-level* 12
+  "Depth beyond which a generated value is printed as # rather than walked.
+
+Finite, deliberately.  Bounding only the characters that are RETAINED bounds
+the memory a rendering costs but not the work it does: PRIN1 still walks the
+whole structure, and a generated value can be as deep as its generator was
+asked to make it.  A value cut here is a preview by construction, which is
+what EXTERNALIZE-VALUE's :RESTORABLE reports.")
+
+(defparameter *value-print-length* 200
+  "Elements per level beyond which a generated value is printed as ... .
+
+Same reasoning as *VALUE-PRINT-LEVEL*: a list of a million elements costs a
+million steps to render even when only the first two thousand characters are
+kept.")
+
 (defun %print-bounded (value max-chars)
   "Return (values TEXT DROPPED) for VALUE, retaining at most MAX-CHARS.
 
-The bound is on what is *retained*, not on what is produced: printing an
-unbounded structure into a string and cutting it afterwards costs the whole
-structure in heap first, and a generated counterexample can be arbitrarily
-large.  *PRINT-CIRCLE* is on so a shared or circular value prints as #n=
+Three bounds, not one.  MAX-CHARS bounds what is retained, so the memory a
+rendering costs does not follow the value's size.  *VALUE-PRINT-LEVEL* and
+*VALUE-PRINT-LENGTH* bound what is WALKED, which MAX-CHARS alone does not:
+PRIN1 traverses the whole structure whatever the sink does with the
+characters.  *PRINT-CIRCLE* is on so a shared or circular value prints as #n=
 notation instead of running forever."
   (handler-case
       (let ((stream (make-bounded-output-stream (max 1 max-chars))))
         (let ((*print-circle* t)
               (*print-readably* nil)
               (*print-pretty* nil)
-              (*print-level* nil)
-              (*print-length* nil))
+              (*print-level* *value-print-level*)
+              (*print-length* *value-print-length*))
           (prin1 value stream))
         (let ((dropped (bounded-output-dropped stream)))
           (values (bounded-output-string stream) dropped)))
@@ -347,20 +383,35 @@ notation instead of running forever."
   "Return VALUE as the plist every response uses for a generated value.
 
   (:printed <string> :printed-complete <boolean> :omitted-chars <integer>
+   :restorable <boolean> :print-level <integer> :print-length <integer>
    :type <string> :object-id <integer-or-nil>)
 
 No Lisp value is emitted as a JSON number: an integer seed or a rational can
 exceed what a JSON consumer holds exactly, and a rounded number that looks
 like a value is worse than text that admits to being text.
 
-:PRINTED-COMPLETE NIL means the text was cut at MAX-CHARS.  Such text is a
-display preview and NOT a value that can be read back -- the distinction
-cl-spec specification 72.6 asks for.  :OBJECT-ID, when non-NIL, is the
-object-registry id the existing inspect-object tool drills into."
+:PRINTED-COMPLETE and :RESTORABLE are separate answers to separate questions.
+The first says no characters were dropped at MAX-CHARS.  The second says the
+text can be read back as this value, and it is FALSE for most values whose
+text is complete: printing runs with *PRINT-READABLY* NIL and bounded depth,
+so a CLOS instance renders as #<FOO {1004}> -- complete, and not the object.
+A symbol is excluded too, because whether its text denotes it depends on the
+reading package.  What survives is numbers, characters, strings, keywords and
+NIL/T.  Everything else offers :OBJECT-ID instead, which the existing
+inspect-object tool drills into."
   (multiple-value-bind (printed dropped) (%print-bounded value max-chars)
     (list :printed printed
           :printed-complete (zerop dropped)
           :omitted-chars dropped
+          :restorable (and (zerop dropped)
+                           (or (numberp value)
+                               (characterp value)
+                               (stringp value)
+                               (keywordp value)
+                               (member value '(nil t)))
+                           t)
+          :print-level *value-print-level*
+          :print-length *value-print-length*
           :type (%value-type-name value)
           :object-id (when (inspectable-p value)
                        (ignore-errors (register-object value))))))
@@ -390,26 +441,44 @@ adding a crypto dependency to cl-mcp for it would not be."
           do (setf hash (logand (* (logxor hash byte) +fnv-prime+) +fnv-mask+)))
     (format nil "~(~16,'0x~)" hash)))
 
+(defparameter *digest-print-limit* 1000000
+  "Characters of printed definition a digest is computed over.
+
+Generous rather than tight: a digest that silently ignored part of a
+definition would report a match between two definitions that differ only past
+the cut, which is the one thing a digest exists to prevent.  PRINTED-FOR-DIGEST
+reports when the limit was reached so the caller is told rather than misled.")
+
 (defun printed-for-digest (form)
-  "Return FORM printed the same way regardless of the caller's environment.
+  "Return (values TEXT TRUNCATED-P) for FORM, printed the same way everywhere.
 
 *PACKAGE* is bound to KEYWORD so every symbol prints with its home package:
 the same form read in two packages must not digest differently, and a symbol
-printed without its package would let two same-named symbols collide."
+printed without its package would let two same-named symbols collide.
+
+Bounded by *DIGEST-PRINT-LIMIT* characters rather than by depth or length.  A
+source form comes from a file and its size is bounded by that file, so the
+limit is a guard against a pathological literal rather than the usual case --
+and unlike a depth cut, a character cut is detectable, which is what lets a
+digest computed from truncated input say so instead of quietly colliding with
+every other definition that shares its first megabyte."
   (handler-case
-      (let ((*package* (find-package "KEYWORD"))
-            (*print-circle* t)
-            (*print-pretty* nil)
-            (*print-readably* nil)
-            (*print-level* nil)
-            (*print-length* nil)
-            (*print-base* 10)
-            (*print-radix* nil)
-            (*print-case* :upcase)
-            (*read-default-float-format* 'double-float))
-        (prin1-to-string form))
+      (let ((stream (make-bounded-output-stream *digest-print-limit*)))
+        (let ((*package* (find-package "KEYWORD"))
+              (*print-circle* t)
+              (*print-pretty* nil)
+              (*print-readably* nil)
+              (*print-level* nil)
+              (*print-length* nil)
+              (*print-base* 10)
+              (*print-radix* nil)
+              (*print-case* :upcase)
+              (*read-default-float-format* 'double-float))
+          (prin1 form stream))
+        (let ((dropped (bounded-output-dropped stream)))
+          (values (bounded-output-string stream) (plusp dropped))))
     (serious-condition (condition)
-      (format nil "#<unprintable: ~A>" (type-of condition)))))
+      (values (format nil "#<unprintable: ~A>" (type-of condition)) t))))
 
 (defun %collect-spec-references (spec-plist accumulator)
   "Push every :REFERENCE target reachable from SPEC-PLIST onto ACCUMULATOR.
@@ -425,7 +494,12 @@ AND or a LIST-OF node."
   accumulator)
 
 (defun definition-digest (api property-name registry)
-  "Return a digest of PROPERTY-NAME's definition, or NIL when it cannot be read.
+  "Return (values DIGEST COMPLETE-P) for PROPERTY-NAME's definition.
+
+DIGEST is NIL when the definition cannot be read at all.  COMPLETE-P is false
+when the printed input hit *DIGEST-PRINT-LIMIT*, in which case two definitions
+differing only past the cut would digest the same -- so a caller comparing
+digests has to be told.
 
 The digest covers the property's own data and the data of every named spec
 reachable from its arguments, transitively.  Covering only the property would
@@ -453,10 +527,11 @@ than skipped, so the digest still changes if it is defined later."
                                  (error () (list :unresolved-reference name)))))
                      (push (cons name data) specs)
                      (setf pending (%collect-spec-references data pending))))
-        (digest-string
-         (printed-for-digest
-          (list :property property
-                :specs (sort specs #'string<
-                             :key (lambda (entry)
-                                    (princ-to-string (car entry))))))))
-    (error () nil)))
+        (multiple-value-bind (text truncated)
+            (printed-for-digest
+             (list :property property
+                   :specs (sort specs #'string<
+                                :key (lambda (entry)
+                                       (princ-to-string (car entry))))))
+          (values (digest-string text) (not truncated))))
+    (error () (values nil nil))))

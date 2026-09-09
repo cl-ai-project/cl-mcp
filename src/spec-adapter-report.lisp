@@ -18,6 +18,7 @@
                 #:api-fn
                 #:api-has-p
                 #:api-class
+                #:api-special
                 #:api-backend-available-p
                 #:resolve-symbol-designator
                 #:symbol-data
@@ -530,6 +531,27 @@ nothing about the property, and costs a thread to say it.")
                "timeout_seconds if the property legitimately needs longer.")
   "Said for a timeout whose run thread was stopped cleanly.")
 
+(defparameter +worker-reuse-unknown-message+
+  (concatenate 'string
+               "A property run was stopped at its deadline. Its thread is "
+               "gone, but nothing here can show that the state it was "
+               "changing was restored: cl-spec runs no cleanup this adapter "
+               "can observe, and an unwound property may have left shared "
+               "state part-way. Treat this image as unknown for later "
+               "verification (cl-spec specification 72.4). With a worker "
+               "pool, use pool-kill-worker before trusting a later result in "
+               "this session; running inline (MCP_NO_WORKER_POOL), restart "
+               "the process.")
+  "Said after any timeout whose thread was stopped.")
+
+(defparameter +worker-reuse-unsafe-message+
+  (concatenate 'string
+               "A property run could not be stopped and is still executing "
+               "in this image, holding whatever locks it had. Do not reuse "
+               "it: with a worker pool, use pool-kill-worker; running inline "
+               "(MCP_NO_WORKER_POOL), restart the process.")
+  "Said when a run thread outlived every attempt to stop it.")
+
 (defparameter +seed-needs-one-property-message+
   (concatenate 'string
                "seed reproduces a single property run; the selection holds "
@@ -632,20 +654,52 @@ coverage wrong."
       (%select-explicit api property package registry)
       (%select-about api symbol package registry)))
 
-(defun %trials-budget (api name registry profile)
-  "Return the trial budget plist for property NAME under PROFILE.
+(defun %property-facts (api name registry)
+  "Return the facts about property NAME a result needs to describe itself.
+
+  (:argument-count <integer-or-nil> :shrink-enabled <boolean>
+   :trials-table <plist-or-nil> :known <boolean>)
+
+Fetched once per property and threaded through, rather than read again from
+PROPERTY-DATA at each point that needs one of them.  ARGUMENT-COUNT is what
+separates \"this property generates no arguments, so its counterexample is
+legitimately empty\" from \"no counterexample was obtained\" -- a distinction
+an empty list on its own cannot carry.  :KNOWN is false when PROPERTY-DATA
+could not be read at all, so a consumer is not told zero arguments when the
+truth is that nothing was read."
+  (handler-case
+      (let ((data (funcall (api-fn api :property-data) name :registry registry)))
+        (list :argument-count (length (getf data :arguments))
+              :shrink-enabled (and (getf (getf data :metadata) :shrink) t)
+              :trials-table (getf data :trials)
+              :known t))
+    (error ()
+      (list :argument-count nil :shrink-enabled nil :trials-table nil
+            :known nil))))
+
+(defun %digest-facts (api name registry)
+  "Return (:value <string-or-nil> :complete <boolean>) for NAME's digest.
+
+Carried as one plist rather than two arguments because the pair travels
+together everywhere: a digest whose input was truncated is not a digest a
+caller may compare, and separating them invites reporting the value without
+the caveat."
+  (multiple-value-bind (value complete) (definition-digest api name registry)
+    (list :value value :complete (and value complete t))))
+
+(defun %trials-budget (api facts profile backend)
+  "Return the trial budget plist for a property described by FACTS under PROFILE.
 
 cl-spec resolves this internally in RESOLVE-TRIALS and neither exports that
 function nor records the figure on a PROPERTY-RESULT, so it is derived here
 from the two exported readers.  BUDGET-DERIVATION says so: a number a consumer
-cannot trace back is worse than one it can question."
-  (let* ((data (handler-case
-                   (funcall (api-fn api :property-data) name :registry registry)
-                 (error () nil)))
-         (table (getf data :trials))
+cannot trace back is worse than one it can question.
+
+BACKEND is passed in rather than read here, and is the same object the run
+will be given.  Reading *GENERATOR-BACKEND* separately would let the budget be
+computed from one backend and the run executed under another."
+  (let* ((table (getf facts :trials-table))
          (from-profile (and table (getf table profile)))
-         (backend (handler-case (funcall (api-fn api :generator-backend))
-                    (error () nil)))
          (default (and backend
                        (handler-case
                            (funcall (api-fn api :backend-default-trials) backend)
@@ -708,14 +762,26 @@ report text is a rendering, not the value."
                       :value (externalize-value value
                                                 :max-chars max-value-chars))))
 
-(defun %result-plist (api result name trials digest expected-digest max-value-chars)
-  "Return the per-property plist for a cl-spec RESULT."
-  (let ((counterexample (funcall (api-fn api :result-counterexample) result))
-        (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
-        (condition (funcall (api-fn api :result-condition) result))
-        (seed (funcall (api-fn api :result-seed) result)))
+(defun %result-plist (api result name trials digest expected-digest
+                      max-value-chars facts)
+  "Return the per-property plist for a cl-spec RESULT.
+
+COUNTEREXAMPLE-STATUS and SHRINK-STATUS carry what an empty list cannot.  A
+property that generates no arguments and fails has a counterexample that is
+legitimately empty, and cl-spec reports it as NIL -- exactly what a run that
+never reached a verdict also reports.  Reading one as the other is how a
+consumer ends up believing a timeout produced a counterexample with no
+arguments, or that a failure was somehow argument-free."
+  (let* ((status (funcall (api-fn api :result-status) result))
+         (counterexample (funcall (api-fn api :result-counterexample) result))
+         (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
+         (condition (funcall (api-fn api :result-condition) result))
+         (seed (funcall (api-fn api :result-seed) result))
+         (argument-count (getf facts :argument-count))
+         (zero-argument-property (eql 0 argument-count))
+         (verdict (member status '(:failed :error))))
     (list :property (symbol-data name)
-          :status (funcall (api-fn api :result-status) result)
+          :status status
           :trials (list* :executed (funcall (api-fn api :result-trials) result)
                          trials)
           ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
@@ -724,15 +790,36 @@ report text is a rendering, not the value."
           :seed (when seed (format nil "~D" seed))
           :profile (funcall (api-fn api :result-profile) result)
           :counterexample (%named-values counterexample max-value-chars)
+          :counterexample-status
+          (cond ((not verdict) :not-applicable)
+                (counterexample :present)
+                (zero-argument-property :present)
+                ((null argument-count) :unknown)
+                (t :none))
+          :counterexample-unavailable-reason
+          (when (and verdict (null counterexample) (null argument-count))
+            "the property's argument list could not be read, so an empty
+counterexample cannot be told from a missing one")
           :shrunk-counterexample (%named-values shrunk max-value-chars)
-          :shrink-note (when shrunk +shrink-note+)
+          :shrink-status
+          (cond ((not verdict) :not-applicable)
+                ((not (getf facts :shrink-enabled)) :disabled)
+                (shrunk :present)
+                (zero-argument-property :present)
+                (t :none))
+          :shrink-note (when (and verdict (getf facts :shrink-enabled))
+                         +shrink-note+)
           :condition (when condition (%condition-data condition))
           :elapsed (funcall (api-fn api :result-elapsed) result)
-          :definition-digest digest
-          :definition-match (cond ((null expected-digest) :not-checked)
-                                  ((and digest (string-equal digest expected-digest))
-                                   :true)
-                                  (t :false)))))
+          :definition-digest (getf digest :value)
+          :definition-digest-complete (getf digest :complete)
+          :definition-match
+          (let ((value (getf digest :value)))
+            (cond ((null expected-digest) :not-checked)
+                  ((and value (getf digest :complete)
+                        (string-equal value expected-digest))
+                   :true)
+                  (t :false))))))
 
 (defun %elapsed-since (start)
   "Return the seconds elapsed since internal real time START."
@@ -740,43 +827,78 @@ report text is a rendering, not the value."
      internal-time-units-per-second))
 
 (defun %run-one (api name registry profile seed trials digest expected-digest
-                 remaining max-value-chars)
-  "Run property NAME within REMAINING seconds and return its result plist."
+                 remaining max-value-chars backend facts)
+  "Run property NAME within REMAINING seconds and return its result plist.
+
+The deadline covers rendering as well as running.  Generation, evaluation,
+shrinking and the printing of the counterexample all happen inside it, because
+a value's own PRINT-OBJECT is user code as much as the property body is and a
+budget that stopped at the property's last trial would not bound it.
+
+cl-spec's specials are PROGV-bound inside the thread.  RUN-PROPERTY reads
+*GENERATOR-BACKEND* where it runs, and a thread does not inherit dynamic
+bindings, so without this a caller who rebound the backend would have the
+budget computed from one backend and the trials run under another."
   (if (< remaining *minimum-run-budget-seconds*)
       (list :property (symbol-data name)
             :status :not-run
             :reason :budget-exhausted
             :trials trials
-            :definition-digest digest
+            :definition-digest (getf digest :value)
+            :definition-digest-complete (getf digest :complete)
             :definition-match :not-checked
+            :counterexample-status :not-run
+            :shrink-status :not-run
             :message +budget-exhausted-message+)
-      (multiple-value-bind (value status leaked)
-          (call-with-deadline-thread
-           (lambda ()
-             (funcall (api-fn api :run-property) name
-                      :profile profile :seed seed :registry registry))
-           remaining
-           :name "mcp-spec-check")
-        (ecase status
-          (:ok (%result-plist api (first value) name trials digest
-                              expected-digest max-value-chars))
-          (:timeout
-           (list :property (symbol-data name)
-                 :status :timeout
-                 :timeout-seconds value
-                 :thread-leaked leaked
-                 :trials trials
-                 :definition-digest digest
-                 :definition-match :not-checked
-                 :message
-                 (if leaked +timeout-leaked-message+ +timeout-stopped-message+)))
-          (:error
-           (list :property (symbol-data name)
-                 :status (%classify-condition api value)
-                 :trials trials
-                 :definition-digest digest
-                 :definition-match :not-checked
-                 :condition (%condition-data value)))))))
+      (let* ((bindings
+               (remove nil
+                       (list (let ((symbol (api-special api :generator-backend)))
+                               (when symbol (cons symbol backend)))
+                             (let ((symbol (api-special api :registry)))
+                               (when symbol (cons symbol registry))))))
+             (names (mapcar #'car bindings))
+             (settings (mapcar #'cdr bindings)))
+        (multiple-value-bind (value status leaked)
+            (call-with-deadline-thread
+             (lambda ()
+               (progv names settings
+                 (%result-plist api
+                                (funcall (api-fn api :run-property) name
+                                         :profile profile :seed seed
+                                         :registry registry)
+                                name trials digest expected-digest
+                                max-value-chars facts)))
+             remaining
+             :name "mcp-spec-check")
+          (ecase status
+            (:ok (first value))
+            (:timeout
+             (list :property (symbol-data name)
+                   :status :timeout
+                   :timeout-seconds value
+                   :thread-leaked leaked
+                   :trials trials
+                   :definition-digest (getf digest :value)
+                   :definition-digest-complete (getf digest :complete)
+                   :definition-match :not-checked
+                   :counterexample-status :unavailable
+                   :counterexample-unavailable-reason
+                   "the run did not reach a verdict within its deadline"
+                   :shrink-status :unavailable
+                   :message
+                   (if leaked +timeout-leaked-message+ +timeout-stopped-message+)))
+            (:error
+             (list :property (symbol-data name)
+                   :status (%classify-condition api value)
+                   :trials trials
+                   :definition-digest (getf digest :value)
+                   :definition-digest-complete (getf digest :complete)
+                   :definition-match :not-checked
+                   :counterexample-status :unavailable
+                   :counterexample-unavailable-reason
+                   "the run signalled before producing a result"
+                   :shrink-status :unavailable
+                   :condition (%condition-data value))))))))
 
 (defun %terminal-status-p (status)
   "Return true when STATUS is a verdict about the property rather than about
@@ -793,6 +915,45 @@ the run's own machinery."
           :errored (tally :error)
           :timed-out (tally :timeout)
           :not-run (tally :not-run))))
+
+(defun %evaluated-p (result)
+  "Return true when RESULT records at least one trial actually evaluated.
+
+cl-spec reports :PASSED for a property whose profile resolves to a budget of
+zero -- the trial loop simply never runs -- and a passing status with nothing
+behind it is precisely the shape of a verification that did not happen."
+  (let ((executed (getf (getf result :trials) :executed)))
+    (and (integerp executed) (plusp executed))))
+
+(defun %verification-gaps (results)
+  "Return the reasons RESULTS fall short of a complete verification.
+
+Two of these hold on every run this adapter can make, and are listed anyway:
+cl-spec's runner reports neither how many generated inputs a precondition
+rejected nor which parts of the input domain were reached, so a caller must
+not read a trial count as either (cl-spec specification 72.1)."
+  (let ((gaps '()))
+    (dolist (result results)
+      (let ((status (getf result :status)))
+        (case status
+          (:passed (unless (%evaluated-p result) (pushnew :zero-trials gaps)))
+          ((:failed :error) nil)
+          (t (pushnew status gaps)))))
+    (append (nreverse gaps)
+            (list :rejection-counts-unmeasured :input-coverage-unmeasured))))
+
+(defun %verified-p (results)
+  "Return true only when RESULTS are evidence that every property held.
+
+Three conditions, not one: something was selected, every result is :PASSED,
+and every one of them evaluated at least one trial.  Dropping the third would
+let a property budgeted zero trials report itself verified."
+  (and results
+       (every (lambda (result)
+                (and (eq :passed (getf result :status))
+                     (%evaluated-p result)))
+              results)
+       t))
 
 (defun check-report (api api-status &key property symbol package profile seed
                                          expect-definition-digest
@@ -840,6 +1001,7 @@ anything holds."
             (return-from check-report
               (list :status :no-properties
                     :verified nil
+                    :verification-gaps (list :no-properties-selected)
                     :selection selection
                     :results nil
                     :counts (%counts nil)
@@ -855,14 +1017,22 @@ anything holds."
           (let ((budget (or timeout-seconds *default-check-timeout-seconds*))
                 (start (get-internal-real-time))
                 (results '())
-                (thread-leaked nil))
+                (thread-leaked nil)
+                ;; Captured once, on this thread, and handed to both the
+                ;; budget derivation and the run.  Reading the special in
+                ;; each place would let the two disagree.
+                (backend (handler-case
+                             (funcall (api-fn api :generator-backend))
+                           (error () nil))))
             (dolist (name names)
-              (let* ((trials (%trials-budget api name registry profile-keyword))
-                     (digest (definition-digest api name registry))
+              (let* ((facts (%property-facts api name registry))
+                     (trials (%trials-budget api facts profile-keyword backend))
+                     (digest (%digest-facts api name registry))
                      (remaining (- budget (%elapsed-since start)))
                      (result (%run-one api name registry profile-keyword seed
                                        trials digest expect-definition-digest
-                                       remaining max-value-chars)))
+                                       remaining max-value-chars backend
+                                       facts)))
                 (when (getf result :thread-leaked) (setf thread-leaked t))
                 (push result results)))
             (setf results (nreverse results))
@@ -871,17 +1041,29 @@ anything holds."
                                      results)
                               :completed
                               :incomplete)
-                  :verified (and results
-                                 (every (lambda (result)
-                                          (eq :passed (getf result :status)))
-                                        results)
-                                 t)
+                  :verified (%verified-p results)
+                  :verification-gaps (%verification-gaps results)
                   :selection selection
                   :results results
                   :counts (%counts results)
                   :profile profile-keyword
                   :timeout-seconds budget
                   :thread-leaked thread-leaked
+                  ;; Reported for any timeout, not only a leaked one.  A
+                  ;; thread that stopped is not evidence that what it was
+                  ;; doing was undone.
+                  :worker-reuse (cond (thread-leaked :unsafe)
+                                      ((find :timeout results
+                                             :key (lambda (result)
+                                                    (getf result :status)))
+                                       :unknown)
+                                      (t :safe))
+                  :worker-reuse-message
+                  (cond (thread-leaked +worker-reuse-unsafe-message+)
+                        ((find :timeout results
+                               :key (lambda (result) (getf result :status)))
+                         +worker-reuse-unknown-message+)
+                        (t nil))
                   :elapsed (%elapsed-since start)
                   :options nil
                   :options-note +options-note+

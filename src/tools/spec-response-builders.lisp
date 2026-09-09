@@ -25,6 +25,15 @@
 ;;; Shared conversions
 ;;; ---------------------------------------------------------------------------
 
+(defparameter +schema-version+ "1"
+  "Version of the JSON these tools emit.
+
+Owned by cl-mcp, not by cl-spec: this shape is the adapter's own external
+representation, so it carries a version from the first release rather than
+waiting on a capability API in the framework underneath (cl-spec
+specification 72.6).  Bumped when a field changes meaning or disappears;
+adding a field does not bump it.")
+
 (defun %keyword-string (value)
   "Return VALUE as a lower-case string, or NIL.
 
@@ -49,6 +58,12 @@ Status keywords cross the boundary as text rather than as JSON identifiers:
   (make-ht "printed" (sanitize-for-json (getf data :printed))
            "printed_complete" (json-bool (getf data :printed-complete))
            "omitted_chars" (getf data :omitted-chars)
+           ;; Kept apart from printed_complete on purpose: complete text is
+           ;; still not a value that can be read back for anything but a
+           ;; number, character, string, keyword or NIL/T.
+           "restorable" (json-bool (getf data :restorable))
+           "print_level" (getf data :print-level)
+           "print_length" (getf data :print-length)
            "type" (getf data :type)
            "object_id" (getf data :object-id)))
 
@@ -91,7 +106,8 @@ Status keywords cross the boundary as text rather than as JSON identifiers:
 Not an isError: the tool answered correctly.  \"cl-spec is not loaded\" is a
 fact about the image, and flagging it as a tool failure would push a caller
 towards retrying rather than towards loading the system."
-  (make-ht "status" (%keyword-string (getf report :status))
+  (make-ht "schema_version" +schema-version+
+           "status" (%keyword-string (getf report :status))
            "verified" (json-bool nil)
            "message" (getf report :message)
            "environment" (%environment-ht (getf report :environment))
@@ -120,7 +136,8 @@ created: this tool never interns a name it was given."
 (defun %unresolved-response (report)
   "Return the response for a symbol designator that resolves to nothing."
   (let ((line (%reason-line (getf report :reason))))
-    (make-ht "status" "unresolved-symbol"
+    (make-ht "schema_version" +schema-version+
+             "status" "unresolved-symbol"
              "verified" (json-bool nil)
              "input" (getf report :input)
              "reason" (%keyword-string (getf (getf report :reason) :reason))
@@ -131,7 +148,8 @@ created: this tool never interns a name it was given."
 
 (defun %simple-status-response (report)
   "Return the response for a status carrying a name and a message."
-  (make-ht "status" (%keyword-string (getf report :status))
+  (make-ht "schema_version" +schema-version+
+           "status" (%keyword-string (getf report :status))
            "name" (%symbol-ht (getf report :name))
            "message" (getf report :message)
            "environment" (%environment-ht (getf report :environment))
@@ -244,7 +262,8 @@ system defining them may simply not be loaded.")
     (t
      (let ((registry (getf report :registry))
            (runtime (getf report :runtime)))
-       (make-ht "status" "ok"
+       (make-ht "schema_version" +schema-version+
+                "status" "ok"
                 "symbol" (%symbol-ht (getf report :symbol))
                 "runtime" (when runtime
                             (make-ht "type" (getf runtime :type)
@@ -334,7 +353,8 @@ to see the rest; the text above is a preview, not a form that can be read back."
     ((:not-registered :unsupported :invalid-arguments)
      (%simple-status-response report))
     (t
-     (make-ht "status" "ok"
+     (make-ht "schema_version" +schema-version+
+              "status" "ok"
               "kind" (getf report :kind)
               "name" (%symbol-ht (getf report :name))
               "property_kind" (%keyword-string (getf report :property-kind))
@@ -398,8 +418,13 @@ to see the rest; the text above is a preview, not a form that can be read back."
            "seed" (getf result :seed)
            "profile" (%keyword-string (getf result :profile))
            "counterexample" (%named-value-hts (getf result :counterexample))
+           "counterexample_status" (%keyword-string
+                                    (getf result :counterexample-status))
+           "counterexample_unavailable_reason"
+           (getf result :counterexample-unavailable-reason)
            "shrunk_counterexample" (%named-value-hts
                                     (getf result :shrunk-counterexample))
+           "shrink_status" (%keyword-string (getf result :shrink-status))
            "shrink_note" (getf result :shrink-note)
            "condition" (let ((condition (getf result :condition)))
                          (when condition
@@ -411,6 +436,8 @@ to see the rest; the text above is a preview, not a form that can be read back."
            "timeout_seconds" (getf result :timeout-seconds)
            "thread_leaked" (json-bool (getf result :thread-leaked))
            "definition_digest" (getf result :definition-digest)
+           "definition_digest_complete" (json-bool
+                                         (getf result :definition-digest-complete))
            "definition_match" (%match-string (getf result :definition-match))
            "message" (getf result :message)))
 
@@ -424,6 +451,53 @@ to see the rest; the text above is a preview, not a form that can be read back."
                               (getf (getf entry :value) :printed)))
                     entries))))
 
+(defun %format-counterexample (stream result)
+  "Write RESULT's counterexample and shrinking lines to STREAM.
+
+The status words are printed, not inferred from the list being empty.  A
+property that generates no arguments has an empty counterexample and so does a
+run that never produced one, and the difference is the whole question of
+whether anything was learned."
+  (let* ((original (%format-values (getf result :counterexample)))
+         (shrunk (%format-values (getf result :shrunk-counterexample)))
+         ;; A result that carries no status is one this builder did not
+         ;; produce.  Values are still shown -- swallowing a counterexample
+         ;; because a field was absent would be the worse failure -- but the
+         ;; absence is reported as :UNKNOWN rather than guessed at.
+         (status (or (getf result :counterexample-status)
+                     (if original :present :unknown)))
+         (shrink-status (or (getf result :shrink-status)
+                            (if shrunk :present :unknown))))
+    (case status
+      (:present
+       (format stream "~&    counterexample:        ~A"
+               (or original "(this property generates no arguments)")))
+      (:unavailable
+       (format stream "~&    counterexample:        UNAVAILABLE~@[ -- ~A~]"
+               (getf result :counterexample-unavailable-reason)))
+      (:unknown
+       (format stream "~&    counterexample:        UNKNOWN~@[ -- ~A~]"
+               (getf result :counterexample-unavailable-reason)))
+      (:none
+       (format stream "~&    counterexample:        none reported by the backend"))
+      (t nil))
+    (case shrink-status
+      (:present
+       (format stream "~&    shrunk counterexample: ~A"
+               (or shrunk "(this property generates no arguments)"))
+       (when (getf result :shrink-note)
+         (format stream "~&      ~A" (getf result :shrink-note))))
+      (:disabled
+       (format stream "~&    shrunk counterexample: not attempted -- this ~
+property is defined with (:shrink nil)"))
+      (:none
+       (format stream "~&    shrunk counterexample: shrinking was enabled but ~
+returned no smaller input"))
+      (:unavailable
+       (format stream "~&    shrunk counterexample: UNAVAILABLE -- the run did ~
+not reach a verdict"))
+      (t nil))))
+
 (defun %format-one-result (stream result index)
   "Write one per-property result to STREAM."
   (format stream "~&~%[~D] ~A  ~A"
@@ -435,13 +509,7 @@ to see the rest; the text above is a preview, not a form that can be read back."
             (or (getf trials :executed) "none")
             (or (getf trials :budget) "unknown")
             (or (getf trials :budget-source) "unknown")))
-  (let ((original (%format-values (getf result :counterexample)))
-        (shrunk (%format-values (getf result :shrunk-counterexample))))
-    (when original
-      (format stream "~&    counterexample:        ~A" original))
-    (when shrunk
-      (format stream "~&    shrunk counterexample: ~A" shrunk)
-      (format stream "~&      ~A" (getf result :shrink-note))))
+  (%format-counterexample stream result)
   (let ((condition (getf result :condition)))
     (when condition
       (format stream "~&    condition: [~A] ~A"
@@ -476,9 +544,15 @@ to see the rest; the text above is a preview, not a form that can be read back."
             (getf counts :passed) (getf counts :failed)
             (getf counts :errored) (getf counts :timed-out)
             (getf counts :not-run))
-    (when (getf report :thread-leaked)
-      (format stream "~&A run thread could not be stopped. Use pool-kill-worker ~
-to get a fresh worker before trusting later results."))
+    ;; Printed for any timeout, not only a leaked thread.  A stopped thread
+    ;; is not evidence that what it was doing was undone.
+    (when (getf report :worker-reuse-message)
+      (format stream "~&~%worker_reuse: ~A~&~A"
+              (string-downcase (princ-to-string (getf report :worker-reuse)))
+              (getf report :worker-reuse-message)))
+    (let ((gaps (getf report :verification-gaps)))
+      (when gaps
+        (format stream "~&verification gaps: ~{~(~A~)~^, ~}" gaps)))
     (unless (eq :not-checked (getf report :reproduction-faithful))
       (format stream "~&reproduction: ~A"
               (%faithful-string (getf report :reproduction-faithful))))
@@ -543,7 +617,8 @@ was learned either way."
     (t
      (let ((selection (getf report :selection))
            (counts (getf report :counts)))
-       (make-ht "status" (%keyword-string (getf report :status))
+       (make-ht "schema_version" +schema-version+
+                "status" (%keyword-string (getf report :status))
                 "verified" (json-bool (getf report :verified))
                 "selection"
                 (make-ht "mode" (getf selection :mode)
@@ -567,6 +642,13 @@ was learned either way."
                 "profile" (%keyword-string (getf report :profile))
                 "timeout_seconds" (getf report :timeout-seconds)
                 "thread_leaked" (json-bool (getf report :thread-leaked))
+                "worker_reuse" (or (%keyword-string (getf report :worker-reuse))
+                                   "safe")
+                "worker_reuse_message" (getf report :worker-reuse-message)
+                "verification_gaps"
+                (coerce (mapcar #'%keyword-string
+                                (getf report :verification-gaps))
+                        'vector)
                 "elapsed" (getf report :elapsed)
                 "options" nil
                 "options_note" (getf report :options-note)

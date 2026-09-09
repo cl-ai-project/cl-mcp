@@ -163,8 +163,11 @@
                                                                  :omitted-chars 0
                                                                  :type "integer"
                                                                  :object-id nil)))
+                                        :counterexample-status :present
+                                        :shrink-status :present
                                         :shrink-note "Backend-searched reduction."
                                         :definition-digest "a41f9c2b7d0e5518"
+                                        :definition-digest-complete t
                                         :definition-match :not-checked))
                             :counts (list :selected 1 :passed 0 :failed 1
                                           :errored 0 :timed-out 0 :not-run 0)
@@ -199,12 +202,20 @@
                                         :status :timeout
                                         :timeout-seconds 0.3
                                         :thread-leaked t
+                                        :counterexample-status :unavailable
+                                        :counterexample-unavailable-reason
+                                        "the run did not reach a verdict within its deadline"
+                                        :shrink-status :unavailable
                                         :trials (list :budget 100
                                                       :budget-source "backend-default")
                                         :message "could not be stopped ... pool-kill-worker ..."))
                             :counts (list :selected 1 :passed 0 :failed 0
                                           :errored 0 :timed-out 1 :not-run 0)
                             :thread-leaked t
+                            :worker-reuse :unsafe
+                            :worker-reuse-message
+                            "still executing ... use pool-kill-worker ..."
+                            :verification-gaps (list :timeout)
                             :environment *environment*)))
            (text (first-text response)))
       (ok (string= "incomplete" (gethash "status" response)))
@@ -248,6 +259,105 @@
       (ok (search "seed=222" text))
       (testing "and not the one that already holds"
         (ok (not (search "seed=111" text)))))))
+
+(deftest check-response-distinguishes-empty-from-unavailable
+  (testing "a zero-argument failure and a timeout do not read the same"
+    (let* ((response (build-spec-check-response
+                      (list :status :incomplete
+                            :verified nil
+                            :selection (list :mode "about" :count 2
+                                             :selected nil
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "NO-ARGS")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :seed "7" :profile :normal
+                                        :counterexample nil
+                                        :counterexample-status :present
+                                        :shrunk-counterexample nil
+                                        :shrink-status :present
+                                        :definition-match :not-checked)
+                                  (list :property (%symbol-data "PROBE" "SLOW")
+                                        :status :timeout
+                                        :trials (list :budget 100)
+                                        :counterexample nil
+                                        :counterexample-status :unavailable
+                                        :counterexample-unavailable-reason
+                                        "the run did not reach a verdict within its deadline"
+                                        :shrunk-counterexample nil
+                                        :shrink-status :unavailable
+                                        :definition-match :not-checked))
+                            :counts (list :selected 2 :passed 0 :failed 1
+                                          :errored 0 :timed-out 1 :not-run 0)
+                            :worker-reuse :unknown
+                            :worker-reuse-message "state unknown; replace the worker"
+                            :verification-gaps (list :timeout
+                                                     :rejection-counts-unmeasured)
+                            :environment *environment*)))
+           (text (first-text response))
+           (results (gethash "results" response)))
+      (testing "the empty counterexample is reported as present, not missing"
+        (ok (string= "present" (gethash "counterexample_status" (aref results 0))))
+        (ok (search "generates no arguments" text)))
+      (testing "the timeout says why there is nothing to show"
+        (ok (string= "unavailable"
+                     (gethash "counterexample_status" (aref results 1))))
+        (ok (search "UNAVAILABLE" text)))
+      (testing "the worker is not silently assumed reusable"
+        (ok (string= "unknown" (gethash "worker_reuse" response)))
+        (ok (search "worker_reuse: unknown" text)))
+      (testing "and the gaps are named"
+        (ok (search "rejection-counts-unmeasured" text))))))
+
+(deftest check-response-carries-a-schema-version
+  (testing "every response names the version of the shape it is in"
+    (let ((response (build-spec-check-response
+                     (list :status :no-properties :verified nil
+                           :selection (list :mode "about" :count 0
+                                            :source "s" :coverage "c")
+                           :results nil
+                           :counts (list :selected 0 :passed 0 :failed 0
+                                         :errored 0 :timed-out 0 :not-run 0)
+                           :message "0 properties selected"
+                           :environment *environment*))))
+      (ok (stringp (gethash "schema_version" response))))))
+
+(deftest value-response-separates-complete-from-restorable
+  (testing "complete text is not the same claim as readable-back text"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :counterexample-status :present
+                                        :counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "OBJ")
+                                                    :value (list :printed "#<THING {1004}>"
+                                                                 :printed-complete t
+                                                                 :omitted-chars 0
+                                                                 :restorable nil
+                                                                 :print-level 12
+                                                                 :print-length 200
+                                                                 :type "thing"
+                                                                 :object-id 7)))
+                                        :shrink-status :none
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (value (gethash "value"
+                           (aref (gethash "counterexample"
+                                          (aref (gethash "results" response) 0))
+                                 0))))
+      (ok (eq t (gethash "printed_complete" value)))
+      (ok (eq yason:false (gethash "restorable" value)))
+      (ok (= 12 (gethash "print_level" value)))
+      (ok (= 7 (gethash "object_id" value))))))
 
 (deftest describe-response-marks-truncation
   (testing "a cut body says so in the text"
