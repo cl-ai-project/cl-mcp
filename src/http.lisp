@@ -6,6 +6,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/tools/registry #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session
                 #:%warn-if-init-without-pool)
@@ -464,7 +465,8 @@ attacks like localhost.evil.com."
                                ;; is out of scope. Do NOT change this
                                ;; default to :GENERATE or a token string.
                                (token nil)
-                               (worker-pool nil worker-pool-supplied-p))
+                               (worker-pool nil worker-pool-supplied-p)
+                               (tool-groups nil tool-groups-supplied-p))
   "Start the MCP HTTP server.
 TOKEN controls authentication:
   NIL (default)       - no authentication (local development tool)
@@ -474,6 +476,10 @@ When a token is active, all requests (except OPTIONS) must include
 an Authorization: Bearer <token> header.
 WORKER-POOL controls process isolation: T enables the worker pool,
 NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
+TOOL-GROUPS switches on optional tool groups, as a list of keywords or
+strings, for example (list :cl-spec).  Optional groups are off by default.
+When not supplied, uses *enabled-tool-groups*, which comes from
+MCP_ENABLE_TOOL_GROUPS.
 Returns the acceptor instance and port number."
   (when (http-server-running-p)
     (log-event :info "http.already-running" "port" *http-server-port*)
@@ -481,6 +487,8 @@ Returns the acceptor instance and port number."
 
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+  (when tool-groups-supplied-p
+    (set-enabled-tool-groups tool-groups))
 
   (%warn-if-init-without-pool *use-worker-pool*)
 

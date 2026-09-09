@@ -657,10 +657,16 @@ normally launches cl-mcp:
 ```
 
 Several groups are comma or space separated (`"cl-spec, other"`). For embedded
-use, `cl-mcp:run` takes the same setting:
+use, every server entry point takes the same setting, with the same
+supplied-p semantics `worker-pool` has — omitting it leaves whatever the
+environment set:
 
 ```lisp
-(cl-mcp:run :transport :stdio :tool-groups (list :cl-spec))
+(cl-mcp:run                      :transport :stdio :tool-groups (list :cl-spec))
+(cl-mcp:start-http-server        :port 3000        :tool-groups (list :cl-spec))
+(cl-mcp:serve-tcp                :port 4005        :tool-groups (list :cl-spec))
+(cl-mcp:start-tcp-server-thread  :port 4005        :tool-groups (list :cl-spec))
+(cl-mcp:ensure-tcp-server-thread :port 4005        :tool-groups (list :cl-spec))
 ```
 
 Calling a tool whose group is off returns a JSON-RPC error naming the group and

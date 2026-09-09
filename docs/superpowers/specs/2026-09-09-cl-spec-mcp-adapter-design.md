@@ -164,7 +164,7 @@ gating は registry 側の**汎用機構**として実装する。cl-spec 専用
 | `define-tool` の `:group` | tool をオプショナルグループに属させる |
 | `*enabled-tool-groups*` | 有効なグループ名(大文字文字列)。既定は空 |
 | `MCP_ENABLE_TOOL_GROUPS` | ロード時に読む。カンマ/空白区切り。**MCP クライアントは command + env で起動するので実用上こちらが主** |
-| `cl-mcp:run` の `:tool-groups` | `(list :cl-spec)`。`worker-pool` と同じ supplied-p 意味論 |
+| 各起動関数の `:tool-groups` | `(list :cl-spec)`。`worker-pool` と同じ supplied-p 意味論。**`worker-pool` を取る公開入口 5 つすべて**に置く: `run` / `start-http-server` / `serve-tcp` / `start-tcp-server-thread` / `ensure-tcp-server-thread`。`run` は `:stdio` と `:tcp` しか扱わないので、HTTP で起動する利用者は `run` を通らない |
 
 - **登録は無条件**に行い、表示と呼び出しの時点で絞る。ロード後に有効化しても
   届くようにするため。

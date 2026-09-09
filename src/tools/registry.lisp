@@ -18,6 +18,7 @@
            #:clear-tool-registry
            #:*enabled-tool-groups*
            #:normalize-tool-group
+           #:set-enabled-tool-groups
            #:parse-tool-groups
            #:tool-group-enabled-p
            #:disabled-tool-group))
@@ -51,8 +52,10 @@ interned into the image on a config value's say-so."
   "Optional tool groups switched on for this process, as upper-case strings.
 
 Empty by default: a group is opt-in.  Set from MCP_ENABLE_TOOL_GROUPS at load
-time, and overridden by CL-MCP:RUN's :TOOL-GROUPS argument, which is the same
-arrangement *USE-WORKER-POOL* has with MCP_NO_WORKER_POOL.")
+time, and overridden by the :TOOL-GROUPS argument of any server entry point --
+RUN, START-HTTP-SERVER, SERVE-TCP, START-TCP-SERVER-THREAD and
+ENSURE-TCP-SERVER-THREAD -- which is the same arrangement *USE-WORKER-POOL*
+has with MCP_NO_WORKER_POOL.")
 
 (defun parse-tool-groups (text)
   "Return the group names in TEXT, a comma or space separated list.
@@ -77,6 +80,17 @@ Returns NIL for NIL or for text with no names in it."
 (let ((from-environment (parse-tool-groups (getenv "MCP_ENABLE_TOOL_GROUPS"))))
   (when from-environment
     (setf *enabled-tool-groups* from-environment)))
+
+(defun set-enabled-tool-groups (groups)
+  "Set *ENABLED-TOOL-GROUPS* from GROUPS and return it.
+
+GROUPS is a list of keywords or strings, or a single one of either.  Shared by
+every server entry point that takes a :TOOL-GROUPS argument -- there are five,
+and each normalizing its own argument is five chances for them to disagree
+about what (list :cl-spec) and \"cl-spec\" mean."
+  (setf *enabled-tool-groups*
+        (remove nil (mapcar #'normalize-tool-group
+                            (if (listp groups) groups (list groups))))))
 
 (defun tool-group-enabled-p (group)
   "Return true when GROUP is switched on, or when there is no group.

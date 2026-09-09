@@ -57,8 +57,9 @@ mallet src/*.lisp src/*/*.lisp tests/*.lisp
 
 **Optional tool groups:** a tool declared with `define-tool`'s `:group` stays
 out of `tools/list` and refuses calls until its group is enabled, via
-`MCP_ENABLE_TOOL_GROUPS=cl-spec` in the server's environment or
-`(cl-mcp:run :tool-groups (list :cl-spec))`. cl-mcp has no dependency on
+`MCP_ENABLE_TOOL_GROUPS=cl-spec` in the server's environment or the
+`:tool-groups` argument of any server entry point (`run`, `start-http-server`,
+`serve-tcp`, `start-tcp-server-thread`, `ensure-tcp-server-thread`). cl-mcp has no dependency on
 cl-spec; the adapter resolves it at call time. See `docs/tools.md`.
 
 ## Code Style

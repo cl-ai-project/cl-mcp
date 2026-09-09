@@ -6,8 +6,7 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line #:make-state)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry
-                #:*enabled-tool-groups*
-                #:normalize-tool-group)
+                #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:%warn-if-init-without-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
@@ -139,11 +138,7 @@ call."
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
   (when tool-groups-supplied-p
-    (setf *enabled-tool-groups*
-          (remove nil (mapcar #'normalize-tool-group
-                              (if (listp tool-groups)
-                                  tool-groups
-                                  (list tool-groups))))))
+    (set-enabled-tool-groups tool-groups))
   (%warn-if-init-without-pool *use-worker-pool*)
   (ecase transport
     (:stdio

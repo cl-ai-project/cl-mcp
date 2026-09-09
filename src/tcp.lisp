@@ -8,6 +8,8 @@
                 #:fd-count)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
@@ -57,16 +59,20 @@ Does not disconnect on timeout to allow idle clients (e.g. AI agents thinking)."
 
 (declaim (ftype (function (&key (:host string) (:port (or integer null))
                                 (:accept-once t) (:on-listening (or null function))
-                                (:worker-pool t))
+                                (:worker-pool t) (:tool-groups t))
                           (values t (or integer null) &optional))
                 start-tcp-server-thread))
 (defun start-tcp-server-thread (&key (host "127.0.0.1") (port 0)
                                      (accept-once t) on-listening
-                                     (worker-pool nil worker-pool-supplied-p))
+                                     (worker-pool nil worker-pool-supplied-p)
+                                     (tool-groups nil tool-groups-supplied-p))
   "Start the TCP MCP server on a dedicated thread.
 Returns the thread object and the bound PORT once the listener is up.
 WORKER-POOL controls process isolation: T enables the worker pool,
-NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
+TOOL-GROUPS switches on optional tool groups, as a list of keywords or strings,
+for example (list :cl-spec).  Optional groups are off by default; when not
+supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
   (when (and *tcp-server-thread*
              (not (bordeaux-threads:thread-alive-p *tcp-server-thread*)))
     (setf *tcp-server-thread* nil
@@ -76,6 +82,8 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
     (return-from start-tcp-server-thread (values *tcp-server-thread* *tcp-server-port*)))
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+  (when tool-groups-supplied-p
+    (set-enabled-tool-groups tool-groups))
   (let ((actual-port nil))
     (setf *tcp-stop-flag* nil)
     (log-event :info "tcp.thread.start" "host" host "port" port "accept-once" accept-once)
@@ -100,17 +108,21 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
                                 (:port (or integer null))
                                 (:accept-once t)
                                 (:on-listening (or null function))
-                                (:worker-pool t))
+                                (:worker-pool t) (:tool-groups t))
                           (values (member :already-running :started nil) &optional))
                 ensure-tcp-server-thread))
 (defun ensure-tcp-server-thread (&key (host "127.0.0.1") (port 0)
                                       (accept-once nil) on-listening
-                                      (worker-pool nil worker-pool-supplied-p))
+                                      (worker-pool nil worker-pool-supplied-p)
+                                      (tool-groups nil tool-groups-supplied-p))
   "Ensure a background TCP server thread is running.
 Returns :already-running when one is alive, :started when a new one was
 successfully started, or NIL if the start attempt failed.
 WORKER-POOL controls process isolation: T enables the worker pool,
-NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
+TOOL-GROUPS switches on optional tool groups, as a list of keywords or strings,
+for example (list :cl-spec).  Optional groups are off by default; when not
+supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
   (cond
     ((tcp-server-running-p)
      (when (and on-listening *tcp-server-port*)
@@ -119,6 +131,8 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
     (t
      (when worker-pool-supplied-p
        (setf *use-worker-pool* worker-pool))
+     (when tool-groups-supplied-p
+       (set-enabled-tool-groups tool-groups))
      (multiple-value-bind (thr started-port)
          (start-tcp-server-thread :host host :port port
                                   :accept-once accept-once
@@ -280,14 +294,20 @@ NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
                                (princ-to-string e)))))))))
 
 (defun serve-tcp (&key (host "127.0.0.1") (port 0) (accept-once t) on-listening
-                       (worker-pool nil worker-pool-supplied-p))
+                       (worker-pool nil worker-pool-supplied-p)
+                       (tool-groups nil tool-groups-supplied-p))
   "Serve MCP over TCP. If PORT is 0, an ephemeral port is chosen.
 Calls ON-LISTENING with the actual port when ready. If ACCEPT-ONCE is T,
 accepts a single connection and returns T after the client closes.
 WORKER-POOL controls process isolation: T enables the worker pool,
-NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*."
+NIL runs all tools in-process.  When not supplied, uses *use-worker-pool*.
+TOOL-GROUPS switches on optional tool groups, as a list of keywords or strings,
+for example (list :cl-spec).  Optional groups are off by default; when not
+supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+  (when tool-groups-supplied-p
+    (set-enabled-tool-groups tool-groups))
   (let ((listener nil)
         (pool-initialized nil))
     (setf *tcp-stop-flag* nil)

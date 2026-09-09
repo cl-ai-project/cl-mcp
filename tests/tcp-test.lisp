@@ -193,3 +193,32 @@
                      (ok (and r1 (search "\"result\"" r1)))
                      (ok (and r2 (search "\"result\"" r2))))))
             (stop-tcp-server-thread))))))
+
+(deftest tcp-entry-points-apply-tool-groups
+  (testing "both TCP starters reach the registry with tool-groups"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let* ((groups-symbol (find-symbol "*ENABLED-TOOL-GROUPS*"
+                                           "CL-MCP/SRC/TOOLS/REGISTRY"))
+               (previous (symbol-value groups-symbol)))
+          (unwind-protect
+               (progn
+                 (setf (symbol-value groups-symbol) nil)
+                 (unwind-protect
+                      (progn
+                        (start-tcp-server-thread :host "127.0.0.1" :port 0
+                                                 :accept-once nil
+                                                 :worker-pool nil
+                                                 :tool-groups "cl-spec")
+                        (ok (equal '("CL-SPEC") (symbol-value groups-symbol))))
+                   (stop-tcp-server-thread))
+                 (setf (symbol-value groups-symbol) nil)
+                 (unwind-protect
+                      (progn
+                        (ensure-tcp-server-thread :host "127.0.0.1" :port 0
+                                                  :accept-once nil
+                                                  :worker-pool nil
+                                                  :tool-groups (list :cl-spec))
+                        (ok (equal '("CL-SPEC") (symbol-value groups-symbol))))
+                   (stop-tcp-server-thread)))
+            (setf (symbol-value groups-symbol) previous))))))
