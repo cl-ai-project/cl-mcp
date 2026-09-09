@@ -2,7 +2,9 @@
 
 - 日付: 2026-09-09
 - ステータス: 設計承認済み(ブランチ `feat/cl-spec-adapter`)
-- 対象 cl-spec revision: `8ab6ffb`(v0.2-draft, MVP vertical slice)
+- 対象 cl-spec revision: `d1cf1af`(v0.2-draft, MVP vertical slice)。
+  設計時は `8ab6ffb`。`d1cf1af` は仕様書のみの変更で `src/`・`main.lisp`・
+  `cl-spec.asd` は同一なので、本設計が照合した API に差はない
 - 参照: `/home/wiz/.roswell/local-projects/cl-spec/docs/cl-spec-specification-v0.2-draft.md`
   §0, §14〜16, §27〜31, §38, §47〜49, §60, §72, §73
 - 想定受益者: cl-mcp を利用する AI エージェント
