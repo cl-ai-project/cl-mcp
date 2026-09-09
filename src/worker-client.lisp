@@ -54,6 +54,7 @@
            #:worker-last-exit-code
            #:worker-retired-p
            #:worker-retirement-recorded
+           #:worker-owes-reset-p
            #:exit-code-says-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
@@ -681,14 +682,21 @@ Returns nothing."
         (worker-retirement-recorded worker) (equal
                                              *retired-leaked-thread-reason*
                                              reason))
+  ;; Everything a reader will want to know about this death is written
+  ;; before the state that tells it there was one -- the reset this death
+  ;; owes the user included.  The pool reads the flag in the same breath as
+  ;; the state, and writing it afterwards left a window in which a
+  ;; replacement was made carrying no debt, so the user's session was reset
+  ;; without their being told.
+  (setf (worker-needs-reset-notification worker) t)
   ;; The state is the flag that publishes all of the above, and the threads
   ;; that read it hold a different lock than this one -- so the ordering has
   ;; to be asked for.  Without it a pool thread can see :CRASHED while still
-  ;; seeing the classification it replaced, and count a retirement against
-  ;; the session's breaker.  WORKER-RETIRED-P pays the reader's half.
+  ;; seeing what it replaced, and count a retirement against the session's
+  ;; breaker or drop the reset it owes.  WORKER-RETIRED-P and
+  ;; WORKER-OWES-RESET-P pay the reader's half.
   (sb-thread:barrier (:write))
   (setf (worker-state worker) :crashed)
-  (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
   ;; The next RPC attempt will see :crashed state before trying I/O.
   (ignore-errors
@@ -860,6 +868,16 @@ across the write, and the pool takes its own lock before the stream lock."
   (sb-thread:barrier (:read))
   (worker-retirement-recorded worker))
 
+(defun worker-owes-reset-p (worker)
+  "True when a state-reset notification for WORKER is owed and undelivered.
+
+Behind the same read barrier as WORKER-RETIRED-P, and for the same reason:
+this is published by the writer's state change under a lock the pool does
+not hold, and a pool thread that saw :CRASHED without seeing this would give
+the replacement no debt -- resetting the user's session silently."
+  (sb-thread:barrier (:read))
+  (worker-needs-reset-notification worker))
+
 (defun exit-code-says-retired-p (worker)
   "True when WORKER's recorded exit code and leak count both say it retired.
 
@@ -1015,7 +1033,12 @@ Robust against already-dead processes."
       ;; A kill resets the session's Lisp state exactly as a crash does, and
       ;; the flag is what carries that owed notification to the replacement.
       ;; It is cleared by whoever actually delivers it.
+      ;;
+      ;; Written before the state, behind the same barrier %MARK-WORKER-CRASHED
+      ;; uses and for the same reason: the pool reads the two together, under
+      ;; a different lock than this one.
       (setf (worker-needs-reset-notification worker) t)
+      (sb-thread:barrier (:write))
       (setf (worker-state worker) :dead))
     ;; Terminate the OS process outside the lock (may block up to ~2.2s)
     (when process

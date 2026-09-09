@@ -871,7 +871,78 @@ next call learns why the session was reset")
           (ok (not (eq worker replacement)) "the session gets a new worker")
           (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
                replacement)
-              "which owes the user the notification nobody delivered"))))))
+              "which owes the user the notification nobody delivered")
+          ;; And can say what it was.  The notification is built from the
+          ;; crash details the replacement carries, so handing over the debt
+          ;; without them turns the one message this branch exists to
+          ;; produce back into "your worker crashed".
+          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                     (cl-mcp/src/worker-client:worker-last-crash-reason
+                      replacement))
+              "explained by what actually happened"))))))
+
+(deftest an-owed-reset-outlives-the-worker-that-owed-it
+  ;; The debt belongs to the session, because the paths that throw a dead
+  ;; worker away do not all have a replacement in hand to give it to.  Each
+  ;; of these lost it, and losing it means the user's next call lands in a
+  ;; fresh image -- systems unloaded, definitions gone -- with nothing said.
+  (testing "recovery that drops the worker without replacing it keeps it"
+    ;; The health monitor reaching a worker another thread has already marked
+    ;; crashed: this arm removes it from the pool and only schedules
+    ;; replenishment, so there is nothing to hand the debt to.
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (with-pool ()
+      (let* ((session "owed-reset-dropped")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed
+         worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+        (cl-mcp/src/pool::%handle-worker-crash worker)
+        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+          (ok (not (eq worker replacement)))
+          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+               replacement)
+              "the reset survives the worker it was owed by")
+          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                     (cl-mcp/src/worker-client:worker-last-crash-reason
+                      replacement))
+              "with what to say about it")))))
+  (testing "a replacement that cannot be spawned does not consume it"
+    ;; The debt used to live in one call's local variable, so a spawn that
+    ;; failed took it with it and the retry came back silently fresh.
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (with-pool ()
+      (let* ((session "owed-reset-failed-spawn")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed
+         worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+        ;; Two ways to fail, because they fail in different places: no room
+        ;; in the pool gives up before the spawn is attempted, while a
+        ;; handshake that times out fails inside it, after the debt has been
+        ;; taken out of the session's hands and put on a worker that is then
+        ;; thrown away.
+        (ok (handler-case
+                (let ((cl-mcp/src/pool:*max-pool-size* 0))
+                  (cl-mcp/src/pool:get-or-assign-worker session)
+                  nil)
+              (error () t))
+            "there is no room to spawn the replacement")
+        (ok (handler-case
+                (let ((cl-mcp/src/worker-client::*worker-startup-timeout*
+                        0.01))
+                  (cl-mcp/src/pool:get-or-assign-worker session)
+                  nil)
+              (error () t))
+            "and then the spawn itself fails")
+        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+               replacement)
+              "the retry still owes the user the reset")
+          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                     (cl-mcp/src/worker-client:worker-last-crash-reason
+                      replacement))
+              "and still knows why"))))))
 
 (deftest retirement-is-visible-where-it-has-to-be
   (testing "real work retires; only observation is exempt"
