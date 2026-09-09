@@ -374,7 +374,8 @@ counts those separately, against initialization rather than the session."
   (and (not (worker-retired-p worker))
        (not (%init-attributable-crash-p worker))))
 
-(defun %record-worker-death (worker exit-status exit-code)
+(defun %record-worker-death (worker exit-status exit-code
+                             &key already-classified)
   "Record what killed WORKER and return whether it was a deliberate retirement.
 
 Must be called under *POOL-LOCK*, in the same critical section that moves the
@@ -390,36 +391,62 @@ witness there is.  The answer is stored rather than left to be re-derived,
 because the reason below is copied onto the replacement worker and a question
 asked of that copy is answered about the wrong death.
 
-A retirement keeps its marker rather than being flattened into
-\"process-died\": the notification the user is shown reads this slot too."
-  (setf (worker-last-exit-status worker) (or exit-status "unknown")
-        (worker-last-exit-code worker) (or exit-code "unknown"))
+ALREADY-CLASSIFIED says the caller found this worker already marked crashed,
+so its reason describes this worker's own death and is kept: an RPC that met
+the death knows it was a \"timeout\" or a \"stream-error\", where this
+function only ever knows the process is gone, and \"process-died\" tells the
+user less than the truth it would overwrite.  Without that, any reason
+present was inherited from the predecessor whose replacement this worker is,
+and keeping it would report someone else's death as this one's.
+
+The exit details work the same way round: a fresh reading wins, since it is
+about this worker, and only where there is none is an existing one kept."
+  (let ((status (or exit-status
+                    (and already-classified (worker-last-exit-status worker))))
+        (code (or exit-code
+                  (and already-classified (worker-last-exit-code worker)))))
+    (setf (worker-last-exit-status worker) (or status "unknown")
+          (worker-last-exit-code worker) (or code "unknown")))
   (let ((retired (or (worker-retired-p worker)
                      (exit-code-says-retired-p worker))))
     (setf (worker-retirement-recorded worker) retired
           (worker-last-crash-reason worker)
-          (if retired *retired-leaked-thread-reason* "process-died"))
+          (cond (retired *retired-leaked-thread-reason*)
+                ((and already-classified (worker-last-crash-reason worker)))
+                (t "process-died")))
     retired))
 
-(defun %note-owed-reset (session-id worker)
-  "Remember a reset WORKER owes SESSION-ID that nobody has delivered.
-Call under *POOL-LOCK*, wherever a worker is dropped without a replacement in
-hand to give the debt to.  A worker that owes nothing changes nothing.
+(defun %owed-reset-of (worker)
+  "The reset WORKER owes and nobody has delivered, as (REASON STATUS CODE),
+or NIL when it owes nothing.
 
 Read rather than claimed.  Claiming it -- CHECK-AND-CLEAR-RESET-NOTIFICATION,
 which is atomic against the proxy's own claim -- would make delivery
-at-most-once across the two, but it takes the worker's stream lock, and this
-runs under *POOL-LOCK*.  An RPC holds that stream lock for as long as its
-call takes, which for a load-system is minutes; the pool would stop serving
-every session until it returned.  A cosmetic duplicate is the cheaper of the
-two, and it is not clearly a duplicate: the two messages go to two different
-requests, both of which really were answered by a worker that had been
-replaced."
-  (when (and session-id worker (worker-owes-reset-p worker))
-    (setf (gethash session-id *owed-resets*)
-          (list (worker-last-crash-reason worker)
-                (worker-last-exit-status worker)
-                (worker-last-exit-code worker)))))
+at-most-once across the two, but it takes the worker's stream lock, and the
+callers here run under *POOL-LOCK*.  An RPC holds that stream lock for as
+long as its call takes, which for a load-system is minutes; the pool would
+stop serving every session until it returned.  A duplicate is the cheaper of
+the two, and it is not clearly a duplicate: the two messages go to two
+different requests, both of which really were answered by a worker that had
+been replaced.
+
+Read once, early, and passed along: KILL-WORKER sets this flag on anything it
+kills, and the pool kills a worker before the arms that decide what to do
+about it, so a later reading would find a debt the proxy had already
+delivered and settled."
+  (when (and worker (worker-owes-reset-p worker))
+    (list (worker-last-crash-reason worker)
+          (worker-last-exit-status worker)
+          (worker-last-exit-code worker))))
+
+(defun %leave-owed-reset (session-id owed)
+  "Leave OWED -- a reset nobody has delivered -- with SESSION-ID.
+Call under *POOL-LOCK*, wherever a worker is dropped without a replacement in
+hand to give it to.  Nothing owed changes nothing, and an existing debt is
+not replaced by a later one: the first is the one the user has been waiting
+to hear about."
+  (when (and session-id owed (null (gethash session-id *owed-resets*)))
+    (setf (gethash session-id *owed-resets*) owed)))
 
 (defun %hand-reset-to (worker debt)
   "Put DEBT -- an owed reset and the details that explain it -- onto WORKER.
@@ -800,6 +827,7 @@ to prevent recovery threads from spawning orphan workers."
         (was-standby nil)
         (was-already-crashed nil)
         (retired-p nil)
+        (owed nil)
         (exit-code nil)
         (exit-status nil))
     ;; Read before the lock and recorded inside it: SB-EXT:PROCESS-STATUS is
@@ -830,6 +858,7 @@ to prevent recovery threads from spawning orphan workers."
          ;; when there is no replacement -- reads one flag rather than
          ;; guessing from which arm it arrived in.
          (setf (worker-needs-reset-notification crashed-worker) t)
+         (setf owed (%owed-reset-of crashed-worker))
          (setf (worker-state crashed-worker) :crashed))
         (:standby
          (setf was-standby t)
@@ -844,14 +873,16 @@ to prevent recovery threads from spawning orphan workers."
          (setf was-already-crashed t
                session-id (worker-session-id crashed-worker))
          (setf retired-p (%record-worker-death crashed-worker
-                                               exit-status exit-code))
+                                               exit-status exit-code
+                                               :already-classified t))
+         (setf owed (%owed-reset-of crashed-worker))
          (when (eql (gethash session-id *affinity-map*) crashed-worker)
            ;; Dropped here with no replacement in hand -- this arm only
            ;; schedules replenishment -- so an undelivered reset has to be
            ;; left with the session or it goes with the worker.  The RPC that
            ;; marked this one crashed may have been the pool's own, and
            ;; swallowed the error.
-           (%note-owed-reset session-id crashed-worker)
+           (%leave-owed-reset session-id owed)
            (remhash session-id *affinity-map*)
            (setf was-bound t))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
@@ -897,8 +928,11 @@ to prevent recovery threads from spawning orphan workers."
                  ;; next request is served -- and it would be served by a
                  ;; fresh image with neither the breaker's error nor a word
                  ;; about the reset.
-                 (%note-owed-reset session-id crashed-worker)
                  (when (eql (gethash session-id *affinity-map*) crashed-worker)
+                   ;; Only while this worker is still the session's: another
+                   ;; thread may have replaced it already, and it recorded
+                   ;; whatever was owed when it did.
+                   (%leave-owed-reset session-id owed)
                    (remhash session-id *affinity-map*))
                  (setf *all-workers* (remove crashed-worker *all-workers*))
                  (return-from %handle-worker-crash))))))
@@ -965,11 +999,11 @@ to prevent recovery threads from spawning orphan workers."
                       "session" session-id
                       "error" (princ-to-string e))
            (bordeaux-threads:with-lock-held (*pool-lock*)
-             ;; The replacement never happened, so nothing carries the reset
-             ;; this death owes.  Left with the session, the next request to
-             ;; get a worker delivers it.
-             (%note-owed-reset session-id crashed-worker)
              (when (eql (gethash session-id *affinity-map*) crashed-worker)
+               ;; The replacement never happened, so nothing carries the
+               ;; reset this death owes.  Left with the session, the next
+               ;; request to get a worker delivers it.
+               (%leave-owed-reset session-id owed)
                (remhash session-id *affinity-map*))
              (setf *all-workers* (remove crashed-worker *all-workers*))))))
       (was-standby
@@ -1318,7 +1352,7 @@ cannot be created."
          ;; deliberately rather than by chance: the root sync is a request
          ;; like any other, and a worker carrying a leaked thread retires on
          ;; it.
-         (%note-owed-reset session-id old-worker-to-kill)
+         (%leave-owed-reset session-id (%owed-reset-of old-worker-to-kill))
          (setf entry nil))
         ;; Path 2: Placeholder — another thread is spawning
         ((and entry (typep entry 'worker-placeholder))
@@ -1409,6 +1443,12 @@ cannot be created."
                      "session" session-id
                      "worker_id" (worker-id worker))
           (bordeaux-threads:with-lock-held (*pool-lock*)
+            ;; The last place a worker is dropped with no replacement.  This
+            ;; one may be carrying a debt handed to it moments ago -- the
+            ;; session's copy was dropped when it took it on -- so without
+            ;; this the reset is gone from both places at once and the user
+            ;; is never told their session was reset, twice over.
+            (%leave-owed-reset session-id (%owed-reset-of worker))
             (when (eql (gethash session-id *affinity-map*) worker)
               (remhash session-id *affinity-map*))
             (setf *all-workers* (remove worker *all-workers*)))

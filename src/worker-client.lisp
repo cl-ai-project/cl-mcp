@@ -1044,6 +1044,11 @@ Robust against already-dead processes."
       ;; the flag is what carries that owed notification to the replacement.
       ;; It is cleared by whoever actually delivers it.
       ;;
+      ;; Read in one place: GET-OR-ASSIGN-WORKER, when it finds the killed
+      ;; worker still bound to the session.  That is the cancellation path --
+      ;; RELEASE-SESSION and KILL-SESSION-WORKER unbind before killing, and
+      ;; the pool reads what a crashed worker owed before it gets here.
+      ;;
       ;; Written before the state, behind the same barrier %MARK-WORKER-CRASHED
       ;; uses and for the same reason: the pool reads the two together, under
       ;; a different lock than this one.
