@@ -25,7 +25,7 @@
                                 (:in stream) (:out stream)
                                 (:host string) (:port (or integer null))
                                 (:accept-once t) (:on-listening function)
-                                (:worker-pool t))
+                                (:worker-pool t) (:tool-groups t))
                           (values boolean &optional))
                 run))
 
