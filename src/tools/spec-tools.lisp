@@ -40,15 +40,22 @@
 (define-tool "spec-list"
   :group :cl-spec
   :description
-  "List the cl-spec specs and properties registered in this session's worker.
+  "List the cl-spec specs, function specs and properties registered in this
+session's worker.
 
 Use this when you do not yet know what is here. The other spec tools all take
 a name you already have; this is the one that answers \"what contracts does
 this project define?\".
 
-Returns names, and for each property its kind, tags, the symbols it is
-(:about ...), and its docstring. NOT bodies -- read one with 'spec-describe',
-run one with 'spec-check'.
+Returns names; for each property its kind, tags, the symbols it is
+(:about ...), and its docstring; for each function spec its parameter names and
+whether it carries a :returns. NOT bodies and NOT specs -- read one with
+'spec-describe', run one with 'spec-check'.
+
+A function spec is a contract on one function: which inputs it accepts and
+which output it must return. A property is a relation someone asserted about
+one or more functions. A project can have either without the other, so a
+listing with no function specs is not a listing with no contracts.
 
 An empty listing is NOT evidence that a project has no contracts: it shows
 what is registered in THIS worker, so a definition whose system has not been
@@ -61,11 +68,12 @@ and 'this tag does not exist here' are different answers.
 Examples:
   (no arguments) -- everything registered
   kind='properties', package='my-app'
+  kind='function-specs'
   tag='critical'"
   :args
   ((kind :type :string
-    :enum ("specs" "properties" "both")
-    :description "What to list (default: both)")
+    :enum ("specs" "properties" "function-specs" "both")
+    :description "What to list (default: both, which is all three)")
    (package :type :string
     :description "Only names whose home package is this one")
    (tag :type :string
@@ -145,15 +153,20 @@ that this relation is checked over that domain.
 
 kind='property'      the property's arguments, body, source form and digest
 kind='spec'          the spec's normalized IR tree
-kind='function-spec' NOT SUPPORTED by this cl-spec revision; the tool says so
-                     rather than inventing a projection
+kind='function-spec' the contract: the spec of each argument, the spec of the
+                     return value, and the :pre and :post forms. This is what
+                     answers \"which inputs does this accept and which output
+                     must it return\". A cl-spec revision that cannot project
+                     one says so rather than having a projection invented for
+                     it.
 
 Long bodies are cut at max_chars and the cut is reported. Truncated text is a
 preview for reading, NOT a form that can be read back.
 
 Examples:
   kind='property', name='my-app::transfer-preserves-total'
-  kind='spec', name='my-app::account'"
+  kind='spec', name='my-app::account'
+  kind='function-spec', name='my-app::transfer'"
   :args
   ((kind :type :string :required t
     :enum ("property" "spec" "function-spec")
@@ -180,8 +193,15 @@ Examples:
   :description
   "Run cl-spec properties and return structured results and counterexamples.
 
-Give EITHER property (one named property) OR symbol (every property registered
-with (:about <symbol>)).  Not both.
+Give EXACTLY ONE of property (one named property), symbol (every property
+registered with (:about <symbol>)) or function (one registered function spec,
+run with check-function).
+
+A function spec is the contract: which inputs the function accepts (:args,
+:pre) and which output it must return (:returns, :post).  It is NOT selected
+by symbol -- an :about selection covers properties only -- and the response
+says so when one exists.  Read it first with 'spec-describe'
+kind='function-spec'.
 
 WHAT A RESULT MEANS
 
@@ -203,6 +223,7 @@ Per property, results[].status:
 For the whole call, status:
   no-properties   ZERO properties were selected. This is NOT a successful
                   verification: nothing ran.
+  unsupported     the loaded cl-spec cannot run a contract. Nothing ran.
   completed       every selected property reached a verdict.
   incomplete      at least one timeout, not-run, or *-error.
   cl-spec-not-loaded / cl-spec-incomplete / backend-not-loaded /
@@ -218,8 +239,23 @@ verified is true ONLY when at least one property was selected, every one of
 them passed, AND every one evaluated at least one trial. A property whose
 profile resolves to a budget of zero passes without running anything, and that
 is not a verification. verification_gaps names what the run could not
-establish, and always includes the two things cl-spec never measures:
-precondition rejections and input-domain coverage.
+establish, and always includes input-domain coverage, which nothing measures.
+
+CONTRACT RUNS (function=...)
+A contract check generates arguments from :args, drops the ones :pre refuses,
+calls the function, then checks :returns and :post. results[].contract carries:
+  rejected         generated argument lists :pre refused
+  effective_trials trials minus rejected -- what the function was ACTUALLY
+                   called with. A passing run whose effective_trials is 0
+                   checked nothing; cl-spec reports that as skipped, not
+                   passed.
+  failure_reason   which half broke: return-spec, postcondition, precondition,
+                   condition -- or absent when the counterexample did not
+                   reproduce, which means the function is not deterministic.
+  explanation      cl-spec's structured account of a return value that missed
+                   its :returns spec.
+Because rejections are counted here, verification_gaps does not claim they are
+unmeasured for a contract run.
 
 REPRODUCING A RUN
 Every result carries seed (decimal TEXT, because a cl-spec seed can exceed
@@ -259,15 +295,22 @@ load-system call wrote to.
 
 Examples:
   symbol='my-app::transfer'
+  function='my-app::transfer'
   property='my-app::transfer-preserves-total'
   property='my-app::transfer-preserves-total', seed='3963993791726803706',
     profile='normal', expect_definition_digest='a41f9c2b7d0e5518'"
   :args
   ((property :type :string
-    :description "One registered property to run. Exclusive with symbol.")
+    :description
+    "One registered property to run. Exclusive with symbol and function.")
    (symbol :type :string
     :description
-    "Run every property registered (:about <symbol>). Exclusive with property.")
+    "Run every property registered (:about <symbol>). Does NOT include the
+symbol's function spec; the response names it when one exists.")
+   (function :type :string
+    :description
+    "One registered function spec to run against its function. Exclusive with
+property and symbol.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string
@@ -287,6 +330,7 @@ Examples:
   :body
   (let ((params (make-ht "property" property
                          "symbol" symbol
+                         "function" function
                          "package" package
                          "profile" profile
                          "seed" seed

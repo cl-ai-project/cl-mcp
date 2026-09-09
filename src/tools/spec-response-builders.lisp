@@ -388,6 +388,14 @@ max_chars -- which is to say, by luck."
                 (getf (getf (getf argument :spec) :target) :qualified))
         (map nil (lambda (child) (%format-spec-node stream child 1))
              (or (getf (getf argument :spec) :children) '()))))
+    (when (getf report :preconditions)
+      (format stream "~&~%:pre  ~A" (getf report :preconditions)))
+    (let ((returns (getf report :returns)))
+      (when returns
+        (format stream "~&~%returns:")
+        (%format-spec-node stream returns 0)))
+    (when (getf report :postconditions)
+      (format stream "~&~%:post ~A" (getf report :postconditions)))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -443,6 +451,9 @@ to see the rest; the text above is a preview, not a form that can be read back."
                               (getf report :arguments))
                       'vector)
               "spec" (%spec-tree-ht (getf report :spec))
+              "returns" (%spec-tree-ht (getf report :returns))
+              "preconditions" (sanitize-for-json (getf report :preconditions))
+              "postconditions" (sanitize-for-json (getf report :postconditions))
               "body" (sanitize-for-json (getf report :body))
               "body_complete" (json-bool (getf report :body-complete))
               "body_omitted_chars" (getf report :body-omitted-chars)
@@ -502,9 +513,24 @@ real disagreement.  CHECK-REPORT now says :FALSE for the disagreement."
            "backend_default" (getf trials :backend-default)
            "budget_derivation" (getf trials :budget-derivation)))
 
+(defun %contract-ht (contract)
+  "Return the contract half of a check result as a hash-table, or NIL.
+
+REJECTED_MEASURED travels beside REJECTED because a null rejected count is not
+a count of zero: one says nothing was refused, the other says the number could
+not be read."
+  (when contract
+    (make-ht "rejected" (getf contract :rejected)
+             "rejected_measured" (json-bool (getf contract :rejected-measured))
+             "effective_trials" (getf contract :effective-trials)
+             "failure_reason" (%keyword-string (getf contract :failure-reason))
+             "explanation" (sanitize-for-json (getf contract :explanation)))))
+
 (defun %result-ht (result)
   "Return one per-property result as a hash-table."
   (make-ht "property" (%symbol-ht (getf result :property))
+           "kind" (%keyword-string (getf result :kind))
+           "contract" (%contract-ht (getf result :contract))
            "status" (%keyword-string (getf result :status))
            "reason" (%keyword-string (getf result :reason))
            "trials" (%trials-ht (getf result :trials))
@@ -591,6 +617,33 @@ returned no smaller input"))
 not reach a verdict"))
       (t nil))))
 
+(defun %format-contract (stream result)
+  "Write a contract check's rejected count and failure reason to STREAM.
+
+The effective trial count is the one a reader should act on: a contract whose
+:PRE refused most of what was generated was checked far less than its trial
+count suggests, and that shortfall is invisible in every other line."
+  (let ((contract (getf result :contract)))
+    (when contract
+      (if (getf contract :rejected-measured)
+          (format stream "~&    contract: ~A of them refused by :pre, ~
+so the function was called ~A time~:P"
+                  (getf contract :rejected)
+                  (or (getf contract :effective-trials) "an unknown number of"))
+          (format stream "~&    contract: the refused-input count could not be ~
+read, so the trial count above is an upper bound on what was checked"))
+      (let ((reason (getf contract :failure-reason)))
+        (when reason
+          (format stream "~&    broken half: ~A" (%keyword-string reason))))
+      (when (and (member (getf result :status) '(:failed :error))
+                 (null (getf contract :failure-reason)))
+        (format stream "~&    broken half: not determined -- re-running the ~
+reported counterexample did not fail again, so the function is not ~
+deterministic"))
+      (let ((explanation (getf contract :explanation)))
+        (when explanation
+          (format stream "~&    return value: ~A" explanation))))))
+
 (defun %format-one-result (stream result index)
   "Write one per-property result to STREAM."
   (format stream "~&~%[~D] ~A  ~A"
@@ -602,6 +655,7 @@ not reach a verdict"))
             (or (getf trials :executed) "none")
             (or (getf trials :budget) "unknown")
             (or (getf trials :budget-source) "unknown")))
+  (%format-contract stream result)
   (%format-counterexample stream result)
   (let ((condition (getf result :condition)))
     (when condition
@@ -770,6 +824,15 @@ was learned either way."
            "targets" (%symbol-hts (getf data :targets))
            "documentation" (sanitize-for-json (getf data :documentation))))
 
+(defun %function-spec-entry-ht (data)
+  "Return one function spec listing entry as a hash-table."
+  (make-ht "name" (%symbol-ht (getf data :name))
+           "parameters" (%symbol-hts (getf data :parameters))
+           "returns_specified" (json-bool (getf data :returns-specified))
+           "precondition_count" (getf data :precondition-count)
+           "postcondition_count" (getf data :postcondition-count)
+           "documentation" (sanitize-for-json (getf data :documentation))))
+
 (defun %tag-resolved-string (value)
   "Return the tag-resolution answer as the word the tool documents."
   (case value
@@ -791,7 +854,10 @@ was learned either way."
                                   (format nil "~D spec~:P" (getf counts :specs)))
                                 (when (getf counts :properties)
                                   (format nil "~D propert~:@P"
-                                          (getf counts :properties)))))
+                                          (getf counts :properties)))
+                                (when (getf counts :function-specs)
+                                  (format nil "~D function spec~:P"
+                                          (getf counts :function-specs)))))
                   (list "nothing counted")))
       (when (getf filters :package)
         (format stream "  in package ~A" (getf filters :package)))
@@ -808,6 +874,29 @@ carry it -- this is not the same as no property having it)")))
           (format stream "~&~%specs:")
           (dolist (spec specs)
             (format stream "~&  ~A" (getf spec :qualified)))))
+      (let ((contracts (getf report :function-specs)))
+        (when contracts
+          (format stream "~&~%function specs:")
+          (dolist (contract contracts)
+            (format stream "~&  ~A (~{~A~^ ~})~:[~;  -> :returns~]"
+                    (getf (getf contract :name) :qualified)
+                    (mapcar (lambda (parameter) (getf parameter :name))
+                            (getf contract :parameters))
+                    (getf contract :returns-specified))
+            (when (or (plusp (or (getf contract :precondition-count) 0))
+                      (plusp (or (getf contract :postcondition-count) 0)))
+              (format stream "~&      :pre ~D, :post ~D"
+                      (or (getf contract :precondition-count) 0)
+                      (or (getf contract :postcondition-count) 0)))
+            (when (getf contract :documentation)
+              (format stream "~&      ~A" (getf contract :documentation))))))
+      (when (and (getf report :kind)
+                 (member (getf report :kind) '("function-specs" "both")
+                         :test #'string=)
+                 (not (getf report :function-specs-listable)))
+        (format stream "~&~%function specs: the loaded cl-spec cannot ~
+enumerate them, so none are listed here. This is not evidence that none are ~
+registered."))
       (let ((properties (getf report :properties)))
         (when properties
           (format stream "~&~%properties:")
@@ -824,7 +913,9 @@ carry it -- this is not the same as no property having it)")))
                       (mapcar #'%keyword-string (getf property :tags))))
             (when (getf property :documentation)
               (format stream "~&      ~A" (getf property :documentation))))))
-      (when (and (null (getf report :specs)) (null (getf report :properties)))
+      (when (and (null (getf report :specs))
+                 (null (getf report :properties))
+                 (null (getf report :function-specs)))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
 not evidence that this project has no contracts: a definition whose system ~
 has not been loaded into this worker is not here."))
@@ -848,11 +939,18 @@ has not been loaded into this worker is not here."))
                 "properties" (coerce (mapcar #'%listing-entry-ht
                                              (getf report :properties))
                                      'vector)
+                "function_specs" (coerce (mapcar #'%function-spec-entry-ht
+                                                 (getf report :function-specs))
+                                         'vector)
+                "function_specs_listable"
+                (json-bool (getf report :function-specs-listable))
                 ;; NIL for a kind that was not requested, which yason
                 ;; encodes as null: a consumer reading counts.specs as 0
                 ;; would take it for evidence that none are registered.
                 "counts" (make-ht "specs" (getf counts :specs)
-                                  "properties" (getf counts :properties))
+                                  "properties" (getf counts :properties)
+                                  "function_specs"
+                                  (getf counts :function-specs))
                 "truncated" (json-bool (getf report :truncated))
                 "limit" (getf report :limit)
                 "filters" (make-ht "package" (getf filters :package)

@@ -91,7 +91,13 @@ and fbound for the adapter to report itself usable.")
 (defparameter +optional-functions+
   '((:list-specs . "LIST-SPECS")
     (:list-properties . "LIST-PROPERTIES")
-    (:properties-with-tag . "PROPERTIES-WITH-TAG"))
+    (:list-function-specs . "LIST-FUNCTION-SPECS")
+    (:properties-with-tag . "PROPERTIES-WITH-TAG")
+    (:function-spec-data . "FUNCTION-SPEC-DATA")
+    (:check-function . "CHECK-FUNCTION")
+    (:check-rejected . "FUNCTION-CHECK-RESULT-REJECTED")
+    (:check-failure-reason . "FUNCTION-CHECK-RESULT-FAILURE-REASON")
+    (:check-explanation . "FUNCTION-CHECK-RESULT-EXPLANATION"))
   "Adapter key to cl-spec function name, resolved when present.
 
 Absence costs one operation rather than the whole adapter: a cl-spec without
@@ -112,6 +118,7 @@ calls a function and a stub can supply either.")
     (:generator-unavailable . "GENERATOR-UNAVAILABLE")
     (:unknown-spec . "UNKNOWN-SPEC")
     (:unknown-property . "UNKNOWN-PROPERTY")
+    (:unknown-function-spec . "UNKNOWN-FUNCTION-SPEC")
     (:not-implemented . "NOT-IMPLEMENTED"))
   "Adapter key to cl-spec condition name.  Absence is tolerated: a missing
 condition class only costs a coarser classification, never an error.")

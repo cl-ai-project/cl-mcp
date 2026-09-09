@@ -140,11 +140,19 @@ are what a test about the message has to look at."
       (ok (search "property" (%text result)))
       (ok (search "spec" (%text result))))))
 
-(deftest spec-check-refuses-both-targets
+(deftest spec-check-refuses-more-than-one-target
   (testing "property and symbol together is refused with a usable message"
     (let ((result (%call "spec-check"
                          "{\"property\":\"cl:car\",\"symbol\":\"cl:cdr\"}")))
-      (ok (search "both" (string-downcase (%text result)))))))
+      (ok (search "exactly one" (string-downcase (%text result))))))
+  (testing "so is a function alongside one of them"
+    (let ((result (%call "spec-check"
+                         "{\"function\":\"cl:car\",\"symbol\":\"cl:cdr\"}")))
+      (ok (search "exactly one" (string-downcase (%text result))))))
+  (testing "and naming none of the three says all three"
+    (let ((result (%call "spec-check" "{}")))
+      (ok (search "property, symbol or function"
+                  (string-downcase (%text result)))))))
 
 (deftest spec-check-refuses-a-non-numeric-seed
   (testing "a seed that is not decimal digits is rejected before any run"

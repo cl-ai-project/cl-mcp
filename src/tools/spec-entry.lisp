@@ -207,6 +207,7 @@ seed the caller did not mean is a run whose result means nothing."
                (check-report api status
                              :property (%string-arg params "property")
                              :symbol (%string-arg params "symbol")
+                             :function (%string-arg params "function")
                              :package (%string-arg params "package")
                              :profile (%string-arg params "profile")
                              :seed seed

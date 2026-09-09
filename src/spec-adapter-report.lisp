@@ -137,6 +137,29 @@ trailing spaces into every message and every JSON field carrying one.")
                "selected -- run it with property=")
   "Noted on a selection that deliberately left the symbol's own property out.")
 
+(defparameter +symbol-has-a-contract-note+
+  (concatenate 'string
+               "a function spec is registered for this symbol: read it with "
+               "spec-describe kind=function-spec, run it with spec-check "
+               "function=<this symbol>. It says which inputs the function "
+               "accepts and which output it must return, which the properties "
+               "about it do not.")
+  "Said by spec-symbol when a contract is registered for the symbol.")
+
+(defparameter +contract-not-selected-note+
+  (concatenate 'string
+               "a function spec is registered for this symbol and was NOT "
+               "run: an :about selection covers properties only. Run it with "
+               "spec-check function=<this symbol>.")
+  "Said by spec-check when an :about selection leaves a contract unchecked.")
+
+(defparameter +contract-coverage-note+
+  (concatenate 'string
+               "Only the contract named: its :pre, :returns and :post over "
+               "arguments generated from its :args. Properties registered "
+               "about the same symbol are NOT included and were not run.")
+  "The limit of what an explicit contract selection covers.")
+
 (defparameter +about-source+
   (concatenate 'string
                "cl-spec:semantic-data -> :properties-about "
@@ -345,7 +368,9 @@ is registered about this symbol: ~A" failure)
                 :notes (append
                         (list "properties_about lists direct (:about ...) registrations only")
                         (when (getf routing :property)
-                          (list +symbol-is-a-property-note+)))
+                          (list +symbol-is-a-property-note+))
+                        (when (getf routing :function-spec)
+                          (list +symbol-has-a-contract-note+)))
                 :environment environment)))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -362,7 +387,9 @@ UNKNOWN-SPEC reports the failure as a failure."
   (flet ((is-a (key)
            (let ((class (api-class api key)))
              (and class (typep condition class)))))
-    (or (is-a :unknown-spec) (is-a :unknown-property))))
+    (or (is-a :unknown-spec)
+        (is-a :unknown-property)
+        (is-a :unknown-function-spec))))
 
 (defparameter +listing-unsupported-message+
   (concatenate 'string
@@ -395,6 +422,25 @@ exists\" is the shape of question that should stay cheap."
               :documentation (getf data :documentation)))
     (error () (list :name (symbol-data name)))))
 
+(defun %function-spec-listing (api name registry)
+  "Return the one-line listing entry for the contract registered for NAME.
+
+Reports the parameter names and whether the contract carries a :RETURNS, which
+is what tells a reader whether the entry answers \"which output must this
+return\" at all.  The specs themselves stay in spec-describe: a listing is for
+finding a name, not for reading a contract."
+  (handler-case
+      (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
+        (list :name (symbol-data name)
+              :parameters (mapcar (lambda (argument)
+                                    (symbol-data (getf argument :variable)))
+                                  (getf data :arguments))
+              :returns-specified (and (getf data :returns) t)
+              :precondition-count (length (getf data :preconditions))
+              :postcondition-count (length (getf data :postconditions))
+              :documentation (getf data :documentation)))
+    (error () (list :name (symbol-data name)))))
+
 (defun %listing-package-filter (package)
   "Return (values PACKAGE-OBJECT ERROR) for the listing's package filter."
   (if (null package)
@@ -423,11 +469,12 @@ different answers."
     (unless (eq api-status :ok)
       (return-from list-report (unavailable-report api-status environment)))
     (unless (and (stringp kind)
-                 (member kind '("specs" "properties" "both") :test #'string=))
+                 (member kind '("specs" "properties" "function-specs" "both")
+                         :test #'string=))
       (return-from list-report
         (list :status :invalid-arguments
-              :message (format nil "kind must be one of specs, properties or ~
-both; got ~S" kind)
+              :message (format nil "kind must be one of specs, properties, ~
+function-specs or both; got ~S" kind)
               :environment environment)))
     (unless (and (api-has-p api :list-specs) (api-has-p api :list-properties))
       (return-from list-report
@@ -443,6 +490,20 @@ both; got ~S" kind)
              (tag-keyword (and tag (find-keyword tag)))
              (want-specs (member kind '("specs" "both") :test #'string=))
              (want-properties (member kind '("properties" "both") :test #'string=))
+             (want-function-specs (member kind '("function-specs" "both")
+                                          :test #'string=))
+             ;; Listed only when cl-spec can enumerate them.  Absence is
+             ;; reported as its own answer below rather than as an empty
+             ;; list: "this revision cannot enumerate contracts" and "there
+             ;; are none" are different, and only one of them is a fact
+             ;; about the project.
+             (function-specs-listable (and (api-has-p api :list-function-specs)
+                                           (api-has-p api :function-spec-data)))
+             (function-spec-names
+               (when (and want-function-specs function-specs-listable)
+                 (remove-if-not
+                  (lambda (name) (%in-package-p name package-object))
+                  (funcall (api-fn api :list-function-specs) registry))))
              (spec-names
                (when want-specs
                  (remove-if-not (lambda (name) (%in-package-p name package-object))
@@ -463,6 +524,9 @@ both; got ~S" kind)
               :specs (mapcar #'symbol-data (%take spec-names limit))
               :properties (loop for name in (%take property-names limit)
                                 collect (%property-listing api name registry))
+              :function-specs (loop for name in (%take function-spec-names limit)
+                                    collect (%function-spec-listing api name registry))
+              :function-specs-listable (and function-specs-listable t)
               ;; NIL, not 0, for a kind that was not asked for.  The count
               ;; is a fact about the registry and the list is what this
               ;; response carries; not looking leaves the first unknown, and
@@ -471,9 +535,13 @@ both; got ~S" kind)
               ;; their way to avoid.
               :counts (list :specs (when want-specs (length spec-names))
                             :properties (when want-properties
-                                          (length property-names)))
+                                          (length property-names))
+                            :function-specs (when (and want-function-specs
+                                                       function-specs-listable)
+                                              (length function-spec-names)))
               :truncated (or (> (length spec-names) limit)
-                             (> (length property-names) limit))
+                             (> (length property-names) limit)
+                             (> (length function-spec-names) limit))
               :limit limit
               :filters (list :package (when package-object
                                         (package-name package-object))
@@ -491,12 +559,21 @@ both; got ~S" kind)
 
 (defparameter +function-spec-unsupported-message+
   (concatenate 'string
-               "cl-spec provides no function-spec-data projection in this "
-               "revision, and defspec-function is still a stub, so there is "
-               "nothing to describe. cl-mcp will not assemble one out of the "
-               "individual readers: that would duplicate cl-spec's "
-               "introspection responsibility on this side of the boundary.")
-  "Said when spec-describe is asked for a function spec.")
+               "the cl-spec loaded here does not export function-spec-data, "
+               "so there is nothing to project. cl-mcp will not assemble one "
+               "out of the individual readers: that would duplicate cl-spec's "
+               "introspection responsibility on this side of the boundary. "
+               "This is a statement about the loaded revision, not about "
+               "whether a contract is registered for the symbol.")
+  "Said when spec-describe is asked for a function spec cl-spec cannot project.")
+
+(defparameter +check-function-unsupported-message+
+  (concatenate 'string
+               "the cl-spec loaded here does not export check-function, so a "
+               "contract cannot be executed. Its text can still be read with "
+               "spec-describe kind=function-spec when function-spec-data is "
+               "available.")
+  "Said when spec-check is asked to run a contract cl-spec cannot run.")
 
 (defun %spec-tree (spec-plist)
   "Return SPEC-PLIST with its symbols externalized, or NIL when there is none.
@@ -531,6 +608,39 @@ to the caller as one that exists."
           :source-form (printed-for-display (getf spec-plist :source-form))
           :source-location (getf spec-plist :source-location)
           :children (mapcar #'%spec-tree (getf spec-plist :children)))))
+
+(defun %describe-function-spec (api name registry max-chars)
+  "Return the detail plist for the contract registered for NAME.
+
+Built from cl-spec's own FUNCTION-SPEC-DATA, for the same reason the spec and
+property projections are: the two halves a caller asks about before editing a
+function -- which inputs are accepted, which output is required -- are
+cl-spec's answer to give, not this adapter's to assemble.
+
+:PRE and :POST are the author's forms.  Their compiled counterparts are not
+projected: a function cannot be read, and whether they hold is what spec-check
+answers."
+  (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
+    (multiple-value-bind (source source-complete source-omitted)
+        (%print-bounded-form (getf data :source-form) max-chars)
+      (list :status :ok
+            :kind "function-spec"
+            :name (symbol-data name)
+            :documentation (getf data :documentation)
+            :arguments (loop for argument in (getf data :arguments)
+                             collect (list :variable
+                                           (symbol-data (getf argument :variable))
+                                           :spec (%spec-tree (getf argument :spec))))
+            :returns (%spec-tree (getf data :returns))
+            :preconditions (let ((forms (getf data :preconditions)))
+                             (when forms (printed-for-display forms)))
+            :postconditions (let ((forms (getf data :postconditions)))
+                              (when forms (printed-for-display forms)))
+            :source-form source
+            :source-form-complete source-complete
+            :source-form-omitted-chars source-omitted
+            :source-location (getf data :source-location)
+            :definition-digest (definition-digest api name registry :property data)))))
 
 (defun %describe-property (api name registry max-chars)
   "Return the detail plist for property NAME."
@@ -596,7 +706,8 @@ function-spec; got ~S" kind)
         (return-from describe-report
           (list :status :unresolved-symbol :reason reason :input name
                 :environment environment)))
-      (when (string= kind "function-spec")
+      (when (and (string= kind "function-spec")
+                 (not (api-has-p api :function-spec-data)))
         (return-from describe-report
           (list :status :unsupported
                 :name (symbol-data symbol)
@@ -604,9 +715,12 @@ function-spec; got ~S" kind)
                 :environment environment)))
       (handler-case
           (let ((registry (funcall (api-fn api :registry))))
-            (append (if (string= kind "property")
-                        (%describe-property api symbol registry max-chars)
-                        (%describe-spec api symbol registry max-chars))
+            (append (cond
+                      ((string= kind "property")
+                       (%describe-property api symbol registry max-chars))
+                      ((string= kind "function-spec")
+                       (%describe-function-spec api symbol registry max-chars))
+                      (t (%describe-spec api symbol registry max-chars)))
                     (list :environment environment)))
         (error (condition)
           ;; Only cl-spec's own "no such name" conditions become
@@ -817,36 +931,83 @@ while listing the properties about this symbol: ~A" condition)))))))
                         :count (length about)
                         :source +about-source+
                         :coverage +about-coverage-note+
-                        :notes (when (getf routing :property)
-                                 (list +symbol-is-a-property-not-selected-note+)))
+                        :notes (append
+                                (when (getf routing :property)
+                                  (list +symbol-is-a-property-not-selected-note+))
+                                (when (getf routing :function-spec)
+                                  (list +contract-not-selected-note+))))
                   nil)))))
 
-(defun %target-argument-error (property symbol)
-  "Return the plist for a bad property/symbol pair, or NIL when it is fine.
+(defun %target-argument-error (property symbol function)
+  "Return the plist for a bad target selection, or NIL when it is fine.
 
-Checked before cl-spec is consulted.  Naming both or neither is a mistake in
-the call itself, and answering \"cl-spec is not loaded\" would send the caller
-to fix the wrong thing -- the same reason SPEC-ENTRY validates the seed before
-it resolves the API."
+Checked before cl-spec is consulted.  Naming more than one or none of them is
+a mistake in the call itself, and answering \"cl-spec is not loaded\" would
+send the caller to fix the wrong thing -- the same reason SPEC-ENTRY validates
+the seed before it resolves the API."
+  (let ((given (count-if-not #'null (list property symbol function))))
+    (cond
+      ((> given 1)
+       (list :status :invalid-arguments
+             :message "give exactly one of property, symbol or function"))
+      ((zerop given)
+       (list :status :invalid-arguments
+             :message "give one of property, symbol or function")))))
+
+(defun %registered-contract-p (api name registry)
+  "Return (values FOUND-P MESSAGE) for the contract registered for NAME."
+  (handler-case
+      (progn (funcall (api-fn api :function-spec-data) name :registry registry)
+             (values t nil))
+    (error (condition) (values nil (princ-to-string condition)))))
+
+(defun %select-contract (api function package registry)
+  "Return (values NAMES SELECTION ERROR) for an explicit contract request."
+  (multiple-value-bind (name reason)
+      (resolve-symbol-designator function :package package)
+    (if (null name)
+        (values nil nil (list :status :unresolved-symbol :reason reason
+                              :input function))
+        (multiple-value-bind (found-p message)
+            (%registered-contract-p api name registry)
+          (if (not found-p)
+              (values nil nil (list :status :not-registered
+                                    :name (symbol-data name)
+                                    :message message))
+              (values (list name)
+                      (list :mode "contract"
+                            :requested (list :function (symbol-data name))
+                            :selected (list (symbol-data name))
+                            :count 1
+                            :source "explicit function argument"
+                            :coverage +contract-coverage-note+)
+                      nil))))))
+
+(defun %select-properties (api property symbol function package registry)
+  "Return (values NAMES SELECTION ERROR KIND) for the requested selection.
+
+Exactly one of PROPERTY, SYMBOL and FUNCTION is supplied; %TARGET-ARGUMENT-ERROR
+has already rejected the other shapes.  KIND is :PROPERTY or :CONTRACT and says
+which runner the names go to.
+
+A symbol that is itself a registered property is deliberately not added to an
+:ABOUT selection, and neither is a contract registered for it: those are
+different relationships, and quietly widening what gets executed would make the
+reported coverage wrong.  The contract is named in a note instead, so a caller
+learns it exists rather than being left to assume the run covered it."
   (cond
-    ((and property symbol)
-     (list :status :invalid-arguments
-           :message "give either property or symbol, not both"))
-    ((not (or property symbol))
-     (list :status :invalid-arguments
-           :message "give one of property or symbol"))))
-
-(defun %select-properties (api property symbol package registry)
-  "Return (values NAMES SELECTION ERROR) for the requested selection.
-
-Exactly one of PROPERTY and SYMBOL is supplied; %TARGET-ARGUMENT-ERROR has
-already rejected the other two shapes.  A symbol that is itself a registered
-property is deliberately not added to an :ABOUT selection: that is a different
-relationship, and quietly widening what gets executed would make the reported
-coverage wrong."
-  (if property
-      (%select-explicit api property package registry)
-      (%select-about api symbol package registry)))
+    (function
+     (multiple-value-bind (names selection error)
+         (%select-contract api function package registry)
+       (values names selection error :contract)))
+    (property
+     (multiple-value-bind (names selection error)
+         (%select-explicit api property package registry)
+       (values names selection error :property)))
+    (t
+     (multiple-value-bind (names selection error)
+         (%select-about api symbol package registry)
+       (values names selection error :property)))))
 
 (defun %property-facts (api name registry)
   "Return the facts about property NAME a result needs to describe itself.
@@ -872,6 +1033,24 @@ truth is that nothing was read."
               :known t))
     (error ()
       (list :argument-count nil :shrink-enabled nil :trials-table nil
+            :data nil :known nil))))
+
+(defun %contract-facts (api name registry)
+  "Return the facts about the contract for NAME a result needs.
+
+The same shape %PROPERTY-FACTS returns, so everything downstream reads one
+plist.  A contract has no :TRIALS table -- cl-spec's CHECK-FUNCTION takes a
+count, not a profile -- and shrinking is always on, so those two are constants
+here rather than things read off a definition."
+  (handler-case
+      (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
+        (list :argument-count (length (getf data :arguments))
+              :shrink-enabled t
+              :trials-table nil
+              :data data
+              :known t))
+    (error ()
+      (list :argument-count nil :shrink-enabled t :trials-table nil
             :data nil :known nil))))
 
 (defun %digest-facts (api name registry facts)
@@ -962,7 +1141,33 @@ report text is a rendering, not the value."
                       :value (externalize-value value
                                                 :max-chars max-value-chars))))
 
-(defun %result-plist (api result name trials digest expected-digest
+(defun %contract-plist (api result executed max-value-chars)
+  "Return the contract-specific half of a CHECK-FUNCTION result, or NIL.
+
+REJECTED is what separates a run that checked the function from one that only
+generated arguments for it: cl-spec's checker refuses inputs its :PRE does not
+admit, and a trial count that includes them overstates the work.  It is
+reported with REJECTED-MEASURED beside it, because a cl-spec whose readers this
+adapter could not resolve gives NIL, which must not read as zero rejections.
+
+FAILURE-REASON names which half of the contract broke; EXPLANATION carries
+cl-spec's structured account of a return value that missed its spec."
+  (flet ((read-slot (key)
+           (when (api-has-p api key)
+             (handler-case (funcall (api-fn api key) result)
+               (error () nil)))))
+    (let* ((rejected (read-slot :check-rejected))
+           (reason (read-slot :check-failure-reason))
+           (explanation (read-slot :check-explanation)))
+      (list :rejected rejected
+            :rejected-measured (and (integerp rejected) t)
+            :effective-trials (when (and (integerp executed) (integerp rejected))
+                                (- executed rejected))
+            :failure-reason reason
+            :explanation (when explanation
+                           (print-form-bounded explanation max-value-chars))))))
+
+(defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
   "Return the per-property plist for a cl-spec RESULT.
 
@@ -979,11 +1184,14 @@ arguments, or that a failure was somehow argument-free."
          (seed (funcall (api-fn api :result-seed) result))
          (argument-count (getf facts :argument-count))
          (zero-argument-property (eql 0 argument-count))
+         (executed (funcall (api-fn api :result-trials) result))
          (verdict (member status '(:failed :error))))
     (list :property (symbol-data name)
+          :kind kind
+          :contract (when (eq kind :contract)
+                      (%contract-plist api result executed max-value-chars))
           :status status
-          :trials (list* :executed (funcall (api-fn api :result-trials) result)
-                         trials)
+          :trials (list* :executed executed trials)
           ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
           ;; consumer holding it as a number would round it, which turns a
           ;; reproducible failure into one that cannot be reproduced.
@@ -1034,9 +1242,14 @@ reproduction that was in fact faithful."
   (/ (float (- (get-internal-real-time) start))
      internal-time-units-per-second))
 
-(defun %run-one (api name registry profile seed trials digest expected-digest
+(defun %run-one (api name registry kind profile seed trials digest expected-digest
                  remaining max-value-chars backend facts)
-  "Run property NAME within REMAINING seconds and return its result plist.
+  "Run property or contract NAME within REMAINING seconds and return its plist.
+
+KIND is :PROPERTY or :CONTRACT.  A contract goes to CHECK-FUNCTION, which takes
+a trial count rather than a profile: cl-spec resolves a property's count from
+its own :TRIALS table and a contract has none, so the budget derived here is
+handed over directly.
 
 The deadline covers rendering as well as running.  Generation, evaluation,
 shrinking and the printing of the counterexample all happen inside it, because
@@ -1049,6 +1262,7 @@ bindings, so without this a caller who rebound the backend would have the
 budget computed from one backend and the trials run under another."
   (if (< remaining *minimum-run-budget-seconds*)
       (list :property (symbol-data name)
+            :kind kind
             :status :not-run
             :reason :budget-exhausted
             :trials trials
@@ -1071,10 +1285,14 @@ budget computed from one backend and the trials run under another."
              (lambda ()
                (progv names settings
                  (%result-plist api
-                                (funcall (api-fn api :run-property) name
-                                         :profile profile :seed seed
-                                         :registry registry)
-                                name trials digest expected-digest
+                                (if (eq kind :contract)
+                                    (funcall (api-fn api :check-function) name
+                                             :trials (getf trials :budget)
+                                             :seed seed :registry registry)
+                                    (funcall (api-fn api :run-property) name
+                                             :profile profile :seed seed
+                                             :registry registry))
+                                name kind trials digest expected-digest
                                 max-value-chars facts)))
              remaining
              :name "mcp-spec-check")
@@ -1082,6 +1300,7 @@ budget computed from one backend and the trials run under another."
             (:ok (first value))
             (:timeout
              (list :property (symbol-data name)
+                   :kind kind
                    :status :timeout
                    :timeout-seconds value
                    :thread-leaked leaked
@@ -1097,6 +1316,7 @@ budget computed from one backend and the trials run under another."
                    (if leaked +timeout-leaked-message+ +timeout-stopped-message+)))
             (:error
              (list :property (symbol-data name)
+                   :kind kind
                    :status (%classify-condition api value)
                    :trials trials
                    :definition-digest (getf digest :value)
@@ -1173,26 +1393,42 @@ same total in one number, and SELECTED always equals the sum."
 
 cl-spec reports :PASSED for a property whose profile resolves to a budget of
 zero -- the trial loop simply never runs -- and a passing status with nothing
-behind it is precisely the shape of a verification that did not happen."
-  (let ((executed (getf (getf result :trials) :executed)))
-    (and (integerp executed) (plusp executed))))
+behind it is precisely the shape of a verification that did not happen.
+
+For a contract the number that counts is the one with the rejected inputs taken
+out.  A generated argument list its :PRE refused was never passed to the
+function, so counting it here would let a contract nothing exercised report
+itself evaluated."
+  (let ((effective (getf (getf result :contract) :effective-trials))
+        (executed (getf (getf result :trials) :executed)))
+    (if (integerp effective)
+        (plusp effective)
+        (and (integerp executed) (plusp executed)))))
 
 (defun %verification-gaps (results)
   "Return the reasons RESULTS fall short of a complete verification.
 
-Two of these hold on every run this adapter can make, and are listed anyway:
-cl-spec's runner reports neither how many generated inputs a precondition
-rejected nor which parts of the input domain were reached, so a caller must
-not read a trial count as either (cl-spec specification 72.1)."
-  (let ((gaps '()))
+Input coverage holds on every run this adapter can make and is listed anyway:
+nothing reports which parts of the input domain were reached, so a caller must
+not read a trial count as that (cl-spec specification 72.1).
+
+Rejection counts are listed only when they were in fact not measured.  A
+property has no precondition and no rejection to count, and a contract check
+reports one; claiming the gap where the number is right there would train a
+reader to ignore the list."
+  (let ((gaps '())
+        (rejections-measured t))
     (dolist (result results)
+      (unless (getf (getf result :contract) :rejected-measured)
+        (setf rejections-measured nil))
       (let ((status (getf result :status)))
         (case status
           (:passed (unless (%evaluated-p result) (pushnew :zero-trials gaps)))
           ((:failed :error) nil)
           (t (pushnew status gaps)))))
     (append (nreverse gaps)
-            (list :rejection-counts-unmeasured :input-coverage-unmeasured))))
+            (unless rejections-measured (list :rejection-counts-unmeasured))
+            (list :input-coverage-unmeasured))))
 
 (defun %verified-p (results)
   "Return true only when RESULTS are evidence that every property held.
@@ -1207,22 +1443,23 @@ let a property budgeted zero trials report itself verified."
               results)
        t))
 
-(defun check-report (api api-status &key property symbol package profile seed
-                                         expect-definition-digest
+(defun check-report (api api-status &key property symbol function package profile
+                                         seed expect-definition-digest
                                          timeout-seconds
                                          (max-value-chars 2000))
   "Return the plist behind the spec-check tool.
 
-Runs either the property named by PROPERTY or every property registered
-:ABOUT the symbol named by SYMBOL.  TIMEOUT-SECONDS is the budget for the
-whole call, spent across the selection in order.
+Runs the property named by PROPERTY, every property registered :ABOUT the
+symbol named by SYMBOL, or the function spec named by FUNCTION.
+TIMEOUT-SECONDS is the budget for the whole call, spent across the selection
+in order.
 
 :VERIFIED is true only when at least one property was selected and every one
 of them passed.  A selection of zero, a timeout, a generator failure and a
 skipped run are each reported as themselves: none of them is evidence that
 anything holds."
   (let ((environment (environment-data api api-status))
-        (argument-error (%target-argument-error property symbol)))
+        (argument-error (%target-argument-error property symbol function)))
     ;; Before the availability check, deliberately: an argument that is wrong
     ;; is wrong whatever cl-spec is doing, and reporting the load state first
     ;; would send the caller to fix the wrong thing.
@@ -1237,14 +1474,21 @@ anything holds."
               :verified nil
               :message +backend-missing-message+
               :environment environment)))
+    (when (and function (not (and (api-has-p api :check-function)
+                                  (api-has-p api :function-spec-data))))
+      (return-from check-report
+        (list :status :unsupported
+              :verified nil
+              :message +check-function-unsupported-message+
+              :environment environment)))
     (multiple-value-bind (profile-keyword profile-error) (%resolve-profile profile)
       (when profile-error
         (return-from check-report
           (list :status :invalid-arguments :verified nil
                 :message profile-error :environment environment)))
       (let ((registry (funcall (api-fn api :registry))))
-        (multiple-value-bind (names selection selection-error)
-            (%select-properties api property symbol package registry)
+        (multiple-value-bind (names selection selection-error kind)
+            (%select-properties api property symbol function package registry)
           (when selection-error
             (return-from check-report
               (append selection-error
@@ -1292,11 +1536,13 @@ anything holds."
                              (funcall (api-fn api :generator-backend))
                            (error () nil))))
             (dolist (name names)
-              (let* ((facts (%property-facts api name registry))
+              (let* ((facts (if (eq kind :contract)
+                                (%contract-facts api name registry)
+                                (%property-facts api name registry)))
                      (trials (%trials-budget api facts profile-keyword backend))
                      (digest (%digest-facts api name registry facts))
                      (remaining (- budget (%elapsed-since start)))
-                     (result (%run-one api name registry profile-keyword seed
+                     (result (%run-one api name registry kind profile-keyword seed
                                        trials digest expect-definition-digest
                                        remaining max-value-chars backend
                                        facts)))
