@@ -211,6 +211,12 @@ registry は `load-system` を実行した worker image に載る。
 | backend 未ロード | `cl-spec:*generator-backend*` が NIL | `backend-not-loaded` | 取得系は動く。実行は不可。**成功ではない** |
 | 定義未登録 | `semantic-data` の**登録関係フィールド**(`:spec` `:function-spec` `:property` `:properties-about`)がすべて空。`:symbol` と `:package` は常に値を持つので判定に含めない | `not-registered` | registry に登録が無い。未ロードの可能性があり、契約不要を意味しない |
 | 機能未対応 | 例: `function-spec-data` が cl-spec に無い | `unsupported` | 欠けている cl-spec API 名を明示 |
+| 内部エラー | cl-spec が想定外に signal した(署名が食い違う revision 等) | `internal-error` | condition の内容をそのまま。**「登録が無い」と混同しない** |
+
+`not-registered` を名乗るのは cl-spec 自身の `unknown-spec` / `unknown-property`
+のときだけにする。あらゆる error を `not-registered` に畳むと、内部の不具合が
+「その名前は登録されていない」として報告され、この adapter が防ぐべき偽陰性に
+なる。condition クラスが取得できない image では `internal-error` 側へ倒す。
 
 全応答に `environment` を付ける。
 
@@ -260,6 +266,7 @@ tool 入力の symbol 文字列を解決するために任意の reader 評価�
 | `symbol` | string(必須) | — | 対象 symbol |
 | `package` | string | `COMMON-LISP-USER` | 未修飾名のときのみ使用 |
 | `include_runtime` | boolean | true | §28 の signature / source location join |
+| `timeout_seconds` | number | 30 | registry 読み取りの上限。**読むだけでも無料ではない**: 1 symbol の listing は関連 Property ごとに transitive spec closure を歩いて印字する |
 
 ### 6.2 応答
 
@@ -316,7 +323,8 @@ Property 本文と source-form はここでは返さない(`body_omitted: true`)
 | `kind` | string(必須) | — | `property` / `spec` / `function-spec` |
 | `name` | string(必須) | — | 登録名 |
 | `package` | string | `COMMON-LISP-USER` | 未修飾名のときのみ使用 |
-| `max_chars` | integer | 8000 | 本文 printed 表現の上限 |
+| `max_chars` | integer | 8000 | 本文 printed 表現の上限。**正の整数のみ**。負値は引数エラー |
+| `timeout_seconds` | number | 30 | registry 読み取りの上限 |
 
 ### 7.2 挙動
 
@@ -363,6 +371,12 @@ cl-spec が生成する seed は 2^62 未満で、JSON の安全整数 2^53 を�
 呼び出し側が数値として seed を持っている時点でその値は既に丸められており、
 受理すれば「再現できない seed を再現できる」と報告することになる。
 10 進数字のみでなければ引数エラー。
+
+**拒否は 2 層で行う。** tool schema が `seed` を string に制約し、
+`spec-check-response` の入口でも生の値を検査する。入口で文字列だけを通す
+アクセサを噛ませると、JSON number も空文字列も NIL(=「seed 指定なし」)に
+なり、**新しい乱数 seed で走って、それを呼び出し側の seed として報告する**。
+worker handler は params の hash-table を直接渡すので、schema だけでは足りない。
 
 ### 8.3 選択根拠
 
@@ -426,6 +440,14 @@ cl-spec が生成する seed は 2^62 未満で、JSON の安全整数 2^53 を�
 **かつ全件で実際に 1 件以上の trial が評価された**。3 つ目を落とすと、
 `(:trials (:normal 0))` の Property が `passed` / `trials 0` で返り
 (実測確認済み)、何も評価していない run が verified になる。
+
+**`counts` は全 status を数える。** 名前付きフィールド 5 つ
+(`passed` / `failed` / `errored` / `timed_out` / `not_run`)だけでは
+`generator-error` / `backend-error` / `internal-error` / `not-registered` が
+どこにも数えられず、**1 件選択して実行が失敗した run が「全部ゼロ」**として
+読める。`by_status`(出現した status → 件数)と `other` を併記し、
+`selected` が常に合計と一致するようにする。content text の集計行も
+固定 5 バケットではなく `by_status` から描画する。
 
 **`verification_gaps`** に、この run が確立できなかったことを機械可読で並べる。
 
@@ -523,6 +545,13 @@ cl-spec が解決済み予算を公開すればこの導出は不要になる(�
 | `max_value_chars`(既定 2000)+ `bounded-output-stream` | **保持メモリ**。超過分は捨て、`printed_complete: false` と `omitted_chars` を立てる |
 | §8.5 の全体予算 | **時間**。反例の印字は run と同じ deadline の内側で行う |
 | `*digest-print-limit*`(1,000,000 文字) | digest 入力の生成量。到達したら `definition_digest_complete: false` |
+| `print-form-bounded`(本文・source form) | **呼び出し側の `max_chars` で直接打ち切る**。1MB 出してから切ると、その 1MB を確保するうえ `omitted_chars` が「2 つの上限の差」になって実際の残量とずれる |
+
+**sink 自身の注記を値に混ぜない。** `bounded-output-string` は切り詰め時に
+`... (truncated, N total chars)` を付ける。これは捕捉ログには正しいが値には
+誤りで、`max_chars` を超え、`omitted_chars` を二重に言い、1 行のはずの
+描画に改行を入れる。切り詰めが起きたときの保持テキストはちょうど上限文字数
+なので、そこで切れば注記だけが落ちる。
 
 digest だけは深さ・長さで切らない。深さで切ると、切り口より下だけが異なる
 2 つの定義が同じ digest になり、digest の存在意義が消える。文字数で切れば
@@ -614,7 +643,14 @@ status を持たなければ両者と timeout が同じ `[]` になる。
 |---|---|
 | `not-checked` | `expect_definition_digest` が指定されなかった。**比較していない** |
 | `match` | 指定値と digest が一致した |
-| `mismatch` | 一致しない、digest を計算できなかった、または digest 入力が切られた |
+| `mismatch` | 指定値と digest が**一致しなかった** |
+| `unknown` | digest を計算できなかった、または digest 入力が `*digest-print-limit*` で切られた。**比較不能であって不一致ではない** |
+
+`unknown` を `mismatch` に畳んではならない。畳むと、変わっていない image に
+対して再実行した呼び出し側に「定義が動いた」と伝えることになり、正しい再現を
+破棄させる。`reproduction_faithful` も同じ 4 値(`faithful` / `unfaithful` /
+`unknown` / `not-checked`)で、**値が無いことは `not-checked`** とする
+(0 件選択の run が `unfaithful` を名乗っていた)。
 
 `match` が言うのは「Property とそれが参照する Spec の内容が同じ」だけである。
 **実装・backend・cl-spec の version・Lisp 実装・外部状態の一致は含まない。**
