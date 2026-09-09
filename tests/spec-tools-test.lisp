@@ -15,6 +15,9 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/spec-entry #:parse-seed-string)
+  (:import-from #:cl-mcp/src/spec-adapter-report
+                #:+result-statuses+
+                #:+call-statuses+)
   (:import-from #:cl-mcp/src/tools/registry
                 #:*enabled-tool-groups*
                 #:disabled-tool-group)
@@ -206,3 +209,45 @@ are what a test about the message has to look at."
       (multiple-value-bind (value message) (parse-seed-string bad)
         (ok (null value))
         (ok (stringp message))))))
+
+(deftest spec-check-description-names-every-status-it-can-answer-with
+  (testing "the description does not fall behind the statuses the code emits"
+    ;; The tool description is the only documentation a model ever sees, and
+    ;; it silently drifted behind three rounds of changes. Checked against the
+    ;; code's own list so the next status cannot be added without saying so.
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response))))
+           (description (loop for tool across tools
+                              when (string= "spec-check" (gethash "name" tool))
+                                return (gethash "description" tool))))
+      (ok (stringp description))
+      (dolist (status +result-statuses+)
+        (ok (search (string-downcase (symbol-name status)) description)
+            (format nil "spec-check description must name the ~(~A~) status"
+                    status)))
+      (testing "and the whole-call statuses too"
+        (dolist (status +call-statuses+)
+          (ok (search (string-downcase (symbol-name status)) description)
+              (format nil "spec-check description must name the ~(~A~) call status"
+                      status)))))))
+
+(deftest spec-check-description-states-the-current-rules
+  (testing "verified's third condition and the four-valued match are stated"
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response))))
+           (description (loop for tool across tools
+                              when (string= "spec-check" (gethash "name" tool))
+                                return (gethash "description" tool))))
+      (ok (search "at least one trial" description))
+      (ok (search "four-valued" description))
+      (ok (search "verification_gaps" description))
+      (ok (search "by_status" description))
+      (ok (search "worker_reuse" description)))))

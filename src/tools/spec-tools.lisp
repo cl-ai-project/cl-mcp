@@ -136,26 +136,57 @@ Give EITHER property (one named property) OR symbol (every property registered
 with (:about <symbol>)).  Not both.
 
 WHAT A RESULT MEANS
+
+Per property, results[].status:
   passed          not falsified over the trials that were generated. This is
                   evidence about the inputs that were tried, not a proof.
   failed          a counterexample was found; both the original and the shrunk
                   arguments are reported.
   error           the property body signalled.
+  skipped         defined by cl-spec; the current backend does not produce it.
+  pending         same. Reported as-is if it ever appears.
   timeout         the deadline expired. NOTHING was proved or disproved.
-  generator-error no value could be generated. Nothing was checked.
   not-run         the whole-call budget was spent before this property started.
+  generator-error no value could be generated. Nothing was checked.
+  backend-error   cl-spec signalled something else. Nothing was checked.
+  not-registered  the name resolved but nothing is registered under it.
+  internal-error  this adapter failed. NOT a statement about the property.
+
+For the whole call, status:
   no-properties   ZERO properties were selected. This is NOT a successful
                   verification: nothing ran.
+  completed       every selected property reached a verdict.
+  incomplete      at least one timeout, not-run, or *-error.
+  cl-spec-not-loaded / cl-spec-incomplete / backend-not-loaded /
+  unresolved-symbol / not-registered / invalid-arguments / internal-error
+                  the call did not get as far as running anything. None of
+                  these is evidence about the symbol or the property.
 
-verified is true only when at least one property was selected and every one of
-them passed.
+counts has a field for the five common statuses plus other, and by_status,
+which covers every status that occurred; selected always equals their sum. A
+status without a field of its own is in by_status, never dropped.
+
+verified is true ONLY when at least one property was selected, every one of
+them passed, AND every one evaluated at least one trial. A property whose
+profile resolves to a budget of zero passes without running anything, and that
+is not a verification. verification_gaps names what the run could not
+establish, and always includes the two things cl-spec never measures:
+precondition rejections and input-domain coverage.
 
 REPRODUCING A RUN
 Every result carries seed (decimal TEXT, because a cl-spec seed can exceed
 what JSON holds exactly as a number), profile, and definition_digest.  Re-run
 with the same property, seed and profile to regenerate the same trial
 sequence.  Pass expect_definition_digest to be told when the definitions moved
-underneath you: definition_match then reports match or mismatch.
+underneath you.
+
+definition_match is four-valued: match, mismatch, unknown (the digest could
+not be computed, or its input hit the print limit -- this is NOT a
+disagreement) and not-checked (no expect_definition_digest was given).
+reproduction_faithful says the same four things about the call as a whole.
+A matching digest means the property and the specs it references are
+unchanged; it says nothing about the implementation, the backend, or the
+environment.
 
 This regenerates the trial sequence.  It does NOT reproduce the code revision,
 external I/O, the clock or shared mutable state, and it is NOT replay of a
@@ -165,8 +196,13 @@ TIMEOUT
 timeout_seconds is the budget for the WHOLE call, spent across the selection
 in order, enforced by cl-mcp rather than by cl-spec. A property that exhausts
 it is reported as timeout and the rest as not-run.  If a run thread cannot be
-stopped the response says so; use 'pool-kill-worker' before trusting later
-results in that session.
+stopped the response says so.
+
+After ANY timeout, worker_reuse is unknown: a thread that stopped is not
+evidence that what it was doing was undone, and cl-spec runs no cleanup this
+adapter can observe. With a worker pool, use 'pool-kill-worker' before
+trusting a later result in that session; running inline (MCP_NO_WORKER_POOL),
+restart the process.
 
 PREREQUISITE: load 'cl-spec/check-it' and the system defining the properties
 with 'load-system' first.  After editing a definition, load-system again: this

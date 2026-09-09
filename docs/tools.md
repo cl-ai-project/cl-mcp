@@ -695,7 +695,10 @@ call time and report `cl-spec-not-loaded` when it is absent.
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported
-    as themselves.
+    as themselves. The full per-property and whole-call status sets are listed
+    in the tool's own description rather than duplicated here — that
+    description is checked against the code's status list by
+    `tests/spec-tools-test.lisp`, and a second copy would only drift.
   - The seed is text because a cl-spec seed exceeds JSON's safe integer range;
     a JSON number is refused rather than silently ignored.
 

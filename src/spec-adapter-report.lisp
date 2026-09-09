@@ -35,7 +35,9 @@
                 #:code-describe-symbol)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
-  (:export #:environment-data
+  (:export #:+result-statuses+
+           #:+call-statuses+
+           #:environment-data
            #:unavailable-report
            #:symbol-report
            #:describe-report
@@ -976,6 +978,24 @@ budget computed from one backend and the trials run under another."
   "Return true when STATUS is a verdict about the property rather than about
 the run's own machinery."
   (member status '(:passed :failed :error :skipped :pending)))
+
+(defparameter +result-statuses+
+  '(:passed :failed :error :skipped :pending
+    :timeout :not-run :generator-error :backend-error :not-registered
+    :internal-error)
+  "Every status one property's result can carry.
+
+Listed in one place so the tool description can be checked against it.  The
+set grew three times while the adapter was being reviewed and the description
+did not follow, which left an agent reading about seven statuses that a run
+could answer with eleven -- and the description is the only documentation a
+model ever sees.")
+
+(defparameter +call-statuses+
+  '(:no-properties :completed :incomplete
+    :cl-spec-not-loaded :cl-spec-incomplete :backend-not-loaded
+    :unresolved-symbol :not-registered :invalid-arguments :internal-error)
+  "Every status a whole spec-check call can carry.")
 
 (defparameter +named-count-statuses+
   '((:passed . :passed) (:failed . :failed) (:error . :errored)
