@@ -84,6 +84,7 @@
   (:import-from #:cl-mcp/src/project-scaffold
                 #:project-scaffold)
   (:import-from #:cl-mcp/src/tools/spec-tools
+                #:spec-list
                 #:spec-symbol
                 #:spec-describe
                 #:spec-check)
@@ -94,6 +95,7 @@
            ;; Project scaffolding
            #:project-scaffold
            ;; cl-spec contract discovery and property execution
+           #:spec-list
            #:spec-symbol
            #:spec-describe
            #:spec-check

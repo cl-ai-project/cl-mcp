@@ -21,6 +21,8 @@
                 #:api-special
                 #:api-backend-available-p
                 #:resolve-symbol-designator
+                #:find-package-named
+                #:find-keyword
                 #:symbol-data
                 #:externalize-value
                 #:definition-digest
@@ -35,7 +37,8 @@
                 #:code-describe-symbol)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
-  (:export #:+result-statuses+
+  (:export #:list-report
+           #:+result-statuses+
            #:+call-statuses+
            #:environment-data
            #:unavailable-report
@@ -161,6 +164,12 @@ trailing spaces into every message and every JSON field carrying one.")
 ;;; ---------------------------------------------------------------------------
 ;;; Shared helpers
 ;;; ---------------------------------------------------------------------------
+
+(defun %take (list limit)
+  "Return at most LIMIT elements of LIST."
+  (if (and limit (> (length list) limit))
+      (subseq list 0 limit)
+      list))
 
 (defun %print-bounded-form (form max-chars)
   "Return (values TEXT COMPLETE-P OMITTED-CHARS) for FORM at MAX-CHARS.
@@ -354,6 +363,124 @@ UNKNOWN-SPEC reports the failure as a failure."
            (let ((class (api-class api key)))
              (and class (typep condition class)))))
     (or (is-a :unknown-spec) (is-a :unknown-property))))
+
+(defparameter +listing-unsupported-message+
+  (concatenate 'string
+               "this cl-spec revision does not export the listing functions "
+               "(list-specs, list-properties); nothing can be enumerated. "
+               "Every other spec tool still works on a name you already have.")
+  "Said when the loaded cl-spec cannot enumerate its registry.")
+
+(defparameter +listing-coverage-note+
+  (concatenate 'string
+               "Everything registered in this worker's cl-spec registry. A "
+               "definition whose system has not been loaded is not here, and "
+               "an empty listing is not evidence that a project has no "
+               "contracts.")
+  "The limit of what a listing covers.")
+
+(defun %property-listing (api name registry)
+  "Return the one-line listing entry for property NAME.
+
+Deliberately cheaper than %PROPERTY-SUMMARY: no digest, no arguments, no body
+count.  A listing is the entry point for someone who does not yet know what is
+here, and computing a transitive spec closure per property to answer \"what
+exists\" is the shape of question that should stay cheap."
+  (handler-case
+      (let ((data (funcall (api-fn api :property-data) name :registry registry)))
+        (list :name (symbol-data name)
+              :kind (getf data :kind)
+              :tags (getf data :tags)
+              :targets (mapcar #'symbol-data (getf data :targets))
+              :documentation (getf data :documentation)))
+    (error () (list :name (symbol-data name)))))
+
+(defun %listing-package-filter (package)
+  "Return (values PACKAGE-OBJECT ERROR) for the listing's package filter."
+  (if (null package)
+      (values nil nil)
+      (let ((found (find-package-named package)))
+        (if found
+            (values found nil)
+            (values nil (list :status :unresolved-package
+                              :message
+                              (format nil "No package named ~A exists in this ~
+image, so nothing can be listed from it. It was looked up, not created."
+                                      package)))))))
+
+(defun %in-package-p (name package)
+  "Return true when NAME's home package is PACKAGE, or PACKAGE is NIL."
+  (or (null package) (eq (symbol-package name) package)))
+
+(defun list-report (api api-status &key kind package tag (limit 200))
+  "Return the plist behind the spec-list tool.
+
+KIND is \"specs\", \"properties\" or \"both\".  PACKAGE and TAG narrow the
+result; TAG applies to properties only, and a tag no loaded code mentions is
+reported as unresolved rather than as an empty result, because the two are
+different answers."
+  (let ((environment (environment-data api api-status)))
+    (unless (eq api-status :ok)
+      (return-from list-report (unavailable-report api-status environment)))
+    (unless (and (stringp kind)
+                 (member kind '("specs" "properties" "both") :test #'string=))
+      (return-from list-report
+        (list :status :invalid-arguments
+              :message (format nil "kind must be one of specs, properties or ~
+both; got ~S" kind)
+              :environment environment)))
+    (unless (and (api-has-p api :list-specs) (api-has-p api :list-properties))
+      (return-from list-report
+        (list :status :unsupported
+              :message +listing-unsupported-message+
+              :environment environment)))
+    (multiple-value-bind (package-object package-error)
+        (%listing-package-filter package)
+      (when package-error
+        (return-from list-report
+          (append package-error (list :environment environment))))
+      (let* ((registry (funcall (api-fn api :registry)))
+             (tag-keyword (and tag (find-keyword tag)))
+             (want-specs (member kind '("specs" "both") :test #'string=))
+             (want-properties (member kind '("properties" "both") :test #'string=))
+             (spec-names
+               (when want-specs
+                 (remove-if-not (lambda (name) (%in-package-p name package-object))
+                                (funcall (api-fn api :list-specs) registry))))
+             (property-names
+               (when want-properties
+                 (remove-if-not
+                  (lambda (name) (%in-package-p name package-object))
+                  (cond
+                    ((null tag) (funcall (api-fn api :list-properties) registry))
+                    ((null tag-keyword) '())
+                    ((api-has-p api :properties-with-tag)
+                     (funcall (api-fn api :properties-with-tag)
+                              tag-keyword registry))
+                    (t '()))))))
+        (list :status :ok
+              :kind kind
+              :specs (mapcar #'symbol-data (%take spec-names limit))
+              :properties (loop for name in (%take property-names limit)
+                                collect (%property-listing api name registry))
+              :counts (list :specs (length spec-names)
+                            :properties (length property-names))
+              :truncated (or (> (length spec-names) limit)
+                             (> (length property-names) limit))
+              :limit limit
+              :filters (list :package (when package-object
+                                        (package-name package-object))
+                             :tag tag
+                             ;; A tag that names no keyword in this image
+                             ;; cannot be carried by any registered property,
+                             ;; so an empty result is correct -- but saying
+                             ;; only "empty" would read as "no property has
+                             ;; it" rather than "no such tag exists here".
+                             :tag-resolved (cond ((null tag) :not-requested)
+                                                 (tag-keyword t)
+                                                 (t nil)))
+              :coverage +listing-coverage-note+
+              :environment environment)))))
 
 (defparameter +function-spec-unsupported-message+
   (concatenate 'string

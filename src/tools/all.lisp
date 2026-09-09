@@ -52,6 +52,7 @@
   (:import-from #:cl-mcp/src/project-scaffold
                 #:project-scaffold)
   (:import-from #:cl-mcp/src/tools/spec-tools
+                #:spec-list
                 #:spec-symbol
                 #:spec-describe
                 #:spec-check)

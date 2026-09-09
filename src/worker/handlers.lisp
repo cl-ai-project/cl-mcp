@@ -45,6 +45,7 @@
                 #:build-inspect-response
                 #:expand-and-build-response)
   (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-list-response
                 #:spec-symbol-response
                 #:spec-describe-response
                 #:spec-check-response)
@@ -395,6 +396,10 @@ Returns a success payload."
 ;;; only process that can see them.  Running them in the parent would answer
 ;;; from an empty registry and report "nothing registered" for every symbol.
 
+(defun %handle-spec-list (params)
+  "List the cl-spec specs and properties registered in this worker."
+  (spec-list-response params))
+
 (defun %handle-spec-symbol (params)
   "Find the cl-spec contracts registered about a symbol."
   (unless (gethash "symbol" params)
@@ -427,6 +432,7 @@ hand-maintained count is wrong again the next time a method is added."
                    (cons "worker/code-find-references" #'%handle-code-find-references)
                    (cons "worker/inspect-object" #'%handle-inspect-object)
                    (cons "worker/macroexpand" #'%handle-macroexpand)
+                   (cons "worker/spec-list" #'%handle-spec-list)
                    (cons "worker/spec-symbol" #'%handle-spec-symbol)
                    (cons "worker/spec-describe" #'%handle-spec-describe)
                    (cons "worker/spec-check" #'%handle-spec-check)

@@ -15,7 +15,8 @@
                 #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
-  (:export #:build-spec-symbol-response
+  (:export #:build-spec-list-response
+           #:build-spec-symbol-response
            #:build-spec-describe-response
            #:build-spec-check-response))
 
@@ -756,3 +757,97 @@ was learned either way."
                 "message" (getf report :message)
                 "environment" (%environment-ht (getf report :environment))
                 "content" (text-content (%format-check-text report)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; spec-list
+;;; ---------------------------------------------------------------------------
+
+(defun %listing-entry-ht (data)
+  "Return one property listing entry as a hash-table."
+  (make-ht "name" (%symbol-ht (getf data :name))
+           "kind" (%keyword-string (getf data :kind))
+           "tags" (%strings (getf data :tags))
+           "targets" (%symbol-hts (getf data :targets))
+           "documentation" (sanitize-for-json (getf data :documentation))))
+
+(defun %tag-resolved-string (value)
+  "Return the tag-resolution answer as the word the tool documents."
+  (case value
+    ((nil) "no-such-keyword")
+    (:not-requested "not-requested")
+    (t "resolved")))
+
+(defun %format-list-text (report)
+  "Render the spec-list report as the text an MCP client will show."
+  (with-output-to-string (stream)
+    (let ((counts (getf report :counts))
+          (filters (getf report :filters)))
+      (format stream "~D spec~:P, ~D propert~:@P"
+              (getf counts :specs) (getf counts :properties))
+      (when (getf filters :package)
+        (format stream "  in package ~A" (getf filters :package)))
+      (when (getf filters :tag)
+        (format stream "  tagged ~A" (getf filters :tag))
+        (unless (eq t (getf filters :tag-resolved))
+          (format stream " (NO SUCH TAG exists in this image, so nothing can ~
+carry it -- this is not the same as no property having it)")))
+      (when (getf report :truncated)
+        (format stream "~&Showing at most ~D of each; raise limit for more."
+                (getf report :limit)))
+      (let ((specs (getf report :specs)))
+        (when specs
+          (format stream "~&~%specs:")
+          (dolist (spec specs)
+            (format stream "~&  ~A" (getf spec :qualified)))))
+      (let ((properties (getf report :properties)))
+        (when properties
+          (format stream "~&~%properties:")
+          (dolist (property properties)
+            (format stream "~&  ~A~@[  [~A]~]"
+                    (getf (getf property :name) :qualified)
+                    (%keyword-string (getf property :kind)))
+            (when (getf property :targets)
+              (format stream "~&      about: ~{~A~^, ~}"
+                      (mapcar (lambda (target) (getf target :qualified))
+                              (getf property :targets))))
+            (when (getf property :tags)
+              (format stream "~&      tags: ~{~A~^, ~}"
+                      (mapcar #'%keyword-string (getf property :tags))))
+            (when (getf property :documentation)
+              (format stream "~&      ~A" (getf property :documentation))))))
+      (when (and (null (getf report :specs)) (null (getf report :properties)))
+        (format stream "~&~%Nothing registered matches. An empty listing is ~
+not evidence that this project has no contracts: a definition whose system ~
+has not been loaded into this worker is not here."))
+      (format stream "~&~%~A" (getf report :coverage))
+      (format stream "~&Read one with spec-describe; run one with spec-check."))))
+
+(defun build-spec-list-response (report)
+  "Return the MCP response for a LIST-REPORT plist."
+  (case (getf report :status)
+    ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
+    ((:unsupported :invalid-arguments :unresolved-package :internal-error
+      :timeout)
+     (%simple-status-response report))
+    (t
+     (let ((counts (getf report :counts))
+           (filters (getf report :filters)))
+       (make-ht "schema_version" +schema-version+
+                "status" "ok"
+                "kind" (getf report :kind)
+                "specs" (%symbol-hts (getf report :specs))
+                "properties" (coerce (mapcar #'%listing-entry-ht
+                                             (getf report :properties))
+                                     'vector)
+                "counts" (make-ht "specs" (getf counts :specs)
+                                  "properties" (getf counts :properties))
+                "truncated" (json-bool (getf report :truncated))
+                "limit" (getf report :limit)
+                "filters" (make-ht "package" (getf filters :package)
+                                   "tag" (getf filters :tag)
+                                   "tag_resolved"
+                                   (%tag-resolved-string
+                                    (getf filters :tag-resolved)))
+                "coverage" (getf report :coverage)
+                "environment" (%environment-ht (getf report :environment))
+                "content" (text-content (%format-list-text report)))))))

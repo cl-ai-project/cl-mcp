@@ -14,6 +14,7 @@
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:make-cl-spec-api)
   (:import-from #:cl-mcp/src/spec-adapter-report
+                #:list-report
                 #:environment-data
                 #:symbol-report
                 #:describe-report
@@ -355,6 +356,84 @@ thread sees the value the caller captured rather than the global one.")
                (ok (eq :unavailable (getf result :counterexample-status)))
                (ok (stringp (getf result :counterexample-unavailable-reason))))))
       (forget-leaked-threads))))
+
+(defun %listing-api (&rest overrides)
+  "Return a stub API that can enumerate a two-name registry."
+  (apply #'%stub-api
+         (append
+          overrides
+          (list :list-specs
+                (lambda (&optional registry)
+                  (declare (ignore registry))
+                  (list (%sym "SMALL-INT")))
+                :list-properties
+                (lambda (&optional registry)
+                  (declare (ignore registry))
+                  (list (%sym "ADD-COMMUTES")))
+                :properties-with-tag
+                (lambda (tag &optional registry)
+                  (declare (ignore registry))
+                  (when (eq tag :math) (list (%sym "ADD-COMMUTES"))))))))
+
+(deftest list-report-enumerates-what-is-registered
+  (testing "both kinds come back with the property's discovery fields"
+    (let ((report (list-report (%listing-api) :ok :kind "both")))
+      (ok (eq :ok (getf report :status)))
+      (ok (= 1 (getf (getf report :counts) :specs)))
+      (ok (= 1 (getf (getf report :counts) :properties)))
+      (let ((property (first (getf report :properties))))
+        (ok (string= "ADD-COMMUTES" (getf (getf property :name) :name)))
+        (ok (eq :commutativity (getf property :kind)))
+        (ok (equal (list :math) (getf property :tags)))
+        (ok (string= "ADD" (getf (first (getf property :targets)) :name)))
+        (testing "and no body or digest, which a listing does not need"
+          (ok (null (getf property :body)))
+          (ok (null (getf property :definition-digest))))))))
+
+(deftest list-report-filters-by-kind-and-package
+  (testing "kind narrows what is enumerated"
+    (ok (null (getf (list-report (%listing-api) :ok :kind "specs") :properties)))
+    (ok (null (getf (list-report (%listing-api) :ok :kind "properties") :specs))))
+  (testing "an unknown package is diagnosed rather than answered as empty"
+    (let ((report (list-report (%listing-api) :ok :kind "both"
+                               :package "NO-SUCH-PACKAGE-FOR-LISTING")))
+      (ok (eq :unresolved-package (getf report :status)))
+      (ok (search "looked up, not created" (getf report :message)))))
+  (testing "a package that exists but holds nothing gives an empty listing"
+    (let ((report (list-report (%listing-api) :ok :kind "both"
+                               :package "KEYWORD")))
+      (ok (eq :ok (getf report :status)))
+      (ok (null (getf report :specs)))
+      (ok (null (getf report :properties))))))
+
+(deftest list-report-separates-an-absent-tag-from-an-unmatched-one
+  (testing "a tag that exists but matches nothing is resolved and empty"
+    (let ((report (list-report (%listing-api) :ok :kind "properties"
+                               :tag "shrink")))
+      (ok (eq :ok (getf report :status)))
+      (ok (null (getf report :properties)))
+      (ok (eq t (getf (getf report :filters) :tag-resolved)))))
+  (testing "a tag no keyword exists for says so"
+    (let ((report (list-report (%listing-api) :ok :kind "properties"
+                               :tag "no-such-tag-in-this-image-xyz")))
+      (ok (eq :ok (getf report :status)))
+      (ok (null (getf report :properties)))
+      (ok (null (getf (getf report :filters) :tag-resolved)))
+      ;; The point: asking about it must not intern it.
+      (ok (null (find-symbol "NO-SUCH-TAG-IN-THIS-IMAGE-XYZ" "KEYWORD"))))))
+
+(deftest list-report-without-the-listing-api
+  (testing "a cl-spec that cannot enumerate is unsupported, not empty"
+    ;; The listing functions are optional: losing them costs this one
+    ;; operation rather than the whole adapter.
+    (let ((report (list-report (%stub-api) :ok :kind "both")))
+      (ok (eq :unsupported (getf report :status)))
+      (ok (search "list-specs" (getf report :message))))))
+
+(deftest list-report-rejects-an-unknown-kind
+  (testing "kind is constrained"
+    (ok (eq :invalid-arguments
+            (getf (list-report (%listing-api) :ok :kind "everything") :status)))))
 
 (deftest check-report-zero-properties-is-never-success
   (testing "a symbol with no :about property reports no-properties"

@@ -24,16 +24,64 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result)
   (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-list-response
                 #:spec-symbol-response
                 #:spec-describe-response
                 #:spec-check-response)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
-  (:export #:spec-symbol
+  (:export #:spec-list
+           #:spec-symbol
            #:spec-describe
            #:spec-check))
 
 (in-package #:cl-mcp/src/tools/spec-tools)
+
+(define-tool "spec-list"
+  :group :cl-spec
+  :description
+  "List the cl-spec specs and properties registered in this session's worker.
+
+Use this when you do not yet know what is here. The other spec tools all take
+a name you already have; this is the one that answers \"what contracts does
+this project define?\".
+
+Returns names, and for each property its kind, tags, the symbols it is
+(:about ...), and its docstring. NOT bodies -- read one with 'spec-describe',
+run one with 'spec-check'.
+
+An empty listing is NOT evidence that a project has no contracts: it shows
+what is registered in THIS worker, so a definition whose system has not been
+loaded is not here. Load it with 'load-system' first.
+
+tag names a keyword. A tag no loaded code mentions is reported as
+no-such-keyword rather than as an empty result -- 'nothing carries this tag'
+and 'this tag does not exist here' are different answers.
+
+Examples:
+  (no arguments) -- everything registered
+  kind='properties', package='my-app'
+  tag='critical'"
+  :args
+  ((kind :type :string
+    :enum ("specs" "properties" "both")
+    :description "What to list (default: both)")
+   (package :type :string
+    :description "Only names whose home package is this one")
+   (tag :type :string
+    :description "Only properties carrying this tag. Applies to properties only.")
+   (limit :type :integer
+    :description "Maximum names of each kind to return (default: 200)")
+   (timeout-seconds :type :number :json-name "timeout_seconds"
+    :description "Deadline for reading the registry in seconds (default: 30)"))
+  :body
+  (let ((params (make-ht "kind" kind
+                         "package" package
+                         "tag" tag
+                         "limit" limit
+                         "timeout_seconds" timeout-seconds)))
+    (with-proxy-dispatch (id "worker/spec-list" params)
+      (result id (spec-list-response params)))))
 
 (define-tool "spec-symbol"
   :group :cl-spec

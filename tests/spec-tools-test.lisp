@@ -79,7 +79,7 @@ are what a test about the message has to look at."
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response))))
            (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-      (dolist (name '("spec-symbol" "spec-describe" "spec-check"))
+      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
         (ok (not (member name names :test #'string=))))
       (testing "and the tools that are not optional are still there"
         (ok (member "repl-eval" names :test #'string=)))))
@@ -108,7 +108,7 @@ are what a test about the message has to look at."
       (ok (null (disabled-tool-group "spec-check"))))))
 
 (deftest spec-tools-are-registered
-  (testing "all three tools appear in tools/list once the group is on"
+  (testing "all four tools appear in tools/list once the group is on"
     (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
@@ -116,12 +116,13 @@ are what a test about the message has to look at."
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response))))
            (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-      (dolist (name '("spec-symbol" "spec-describe" "spec-check"))
+      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
         (ok (member name names :test #'string=)))
       (testing "and each carries an inputSchema"
         (loop for tool across tools
               when (member (gethash "name" tool)
-                           '("spec-symbol" "spec-describe" "spec-check")
+                           '("spec-list" "spec-symbol" "spec-describe"
+                             "spec-check")
                            :test #'string=)
                 do (ok (hash-table-p (gethash "inputSchema" tool))))))))
 
@@ -251,3 +252,16 @@ are what a test about the message has to look at."
       (ok (search "verification_gaps" description))
       (ok (search "by_status" description))
       (ok (search "worker_reuse" description)))))
+
+(deftest spec-list-refuses-a-non-positive-limit
+  (testing "limit is validated before anything reads the registry"
+    (let ((response (%call "spec-list" "{\"limit\":0}")))
+      (ok (search "limit" (%text response)))
+      (ok (search "positive" (string-downcase (%text response)))))))
+
+(deftest spec-list-is-in-the-optional-group
+  (testing "the listing tool is opt-in like the other three"
+    (%ensure-tools)
+    (ok (eq :cl-spec (disabled-tool-group "spec-list")))
+    (with-cl-spec-group
+      (ok (null (disabled-tool-group "spec-list"))))))

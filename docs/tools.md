@@ -673,13 +673,24 @@ Calling a tool whose group is off returns a JSON-RPC error naming the group and
 how to enable it, rather than "tool not found" — the tool is real, the setting
 is what is missing.
 
-### Group `cl-spec` — `spec-symbol`, `spec-describe`, `spec-check`
+### Group `cl-spec` — `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`
 
 Fetch the [cl-spec](https://github.com/cl-ai-project/cl-spec) Spec/Property
 registered about a symbol, read one in full, and run it for a structured
 counterexample. cl-mcp does not depend on cl-spec: these tools resolve it at
 call time and report `cl-spec-not-loaded` when it is absent.
 
+- `spec-list` — what is registered at all. The entry point when you do not yet
+  know a name: the other three all take one you already have. Returns names,
+  and for each property its kind, tags, `(:about ...)` targets and docstring —
+  not bodies.
+  - `kind` (`specs` | `properties` | `both`, default `both`), `package`, `tag`,
+    `limit` (positive integer, default 200), `timeout_seconds`
+  - `tag` names a keyword. A tag no loaded code mentions comes back as
+    `tag_resolved: "no-such-keyword"` rather than as an empty result — "nothing
+    carries this tag" and "this tag does not exist here" are different answers.
+  - An empty listing is not evidence that a project has no contracts: it shows
+    what is registered in *this worker*.
 - `spec-symbol` — what is registered about a symbol, joined with this image's
   signature, docstring and source location. Property bodies are summarized,
   not inlined.

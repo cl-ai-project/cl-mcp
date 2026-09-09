@@ -283,6 +283,32 @@ tool 入力の symbol 文字列を解決するために任意の reader 評価�
   **package の異なる同名 symbol を取り違えない**ための最小形式。
 - 表示文字列を reader 入力として評価し直すことはない。
 
+## 5b. tool 0: `spec-list` — 一覧(名前を知らない段階の入口)
+
+他の 3 tool は**対象 symbol 名を既に知っていることが前提**である。
+リポジトリに入ったばかりの LLM が「ここには何の仕様があるのか」を問う入口が
+無いと、発見のフローが閉じない。cl-spec は `list-specs` / `list-properties` /
+`properties-with-tag` を export しているので、薄く載る。
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `kind` | `both` | `specs` / `properties` / `both` |
+| `package` | — | home package で絞る。存在しない package は `unresolved-package` |
+| `tag` | — | Property のみ。keyword を `find-symbol` で解決(intern しない) |
+| `limit` | 200 | 各 kind の上限。正の整数のみ |
+| `timeout_seconds` | 30 | registry 読み取りの上限 |
+
+- **本文も digest も返さない。** 名前・kind・tags・`:about` の対象・docstring
+  まで。`property-data` は 1 件 1 回で済み、digest の推移的走査は行わない
+  (「何があるか」の問いは安いままであるべき)。
+- **tag が未解決であることを空の結果と区別する。** その keyword が image に
+  存在しなければどの Property も持ちえないので空が正しいが、
+  「誰も持っていない」と「そのタグ自体が存在しない」は別の答えである。
+- **空の一覧を「契約が無い」と読ませない。** 表示しているのはこの worker の
+  registry であり、system 未ロードの定義はここに無い。
+- cl-spec 側の listing API は **optional** として解決する。無い revision では
+  この 1 操作が `unsupported` になるだけで、他の tool は動く。
+
 ## 6. tool 1: `spec-symbol` — 発見
 
 対象 symbol について、registry が知っていることと cl-mcp が知っていることを

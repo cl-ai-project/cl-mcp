@@ -35,6 +35,8 @@
            #:api-backend-available-p
            #:resolve-cl-spec-api
            #:resolve-symbol-designator
+           #:find-package-named
+           #:find-keyword
            #:symbol-data
            #:externalize-value
            #:digest-string
@@ -86,6 +88,17 @@ the symbol.  Empty on a stub API, where PROGV then binds nothing."
   "Adapter key to cl-spec function name.  Every one of these must be present
 and fbound for the adapter to report itself usable.")
 
+(defparameter +optional-functions+
+  '((:list-specs . "LIST-SPECS")
+    (:list-properties . "LIST-PROPERTIES")
+    (:properties-with-tag . "PROPERTIES-WITH-TAG"))
+  "Adapter key to cl-spec function name, resolved when present.
+
+Absence costs one operation rather than the whole adapter: a cl-spec without
+these still answers every question about a symbol the caller already knows,
+so putting them in +REQUIRED-FUNCTIONS+ would take the whole integration down
+to lose a listing.  API-HAS-P is how a caller asks.")
+
 (defparameter +required-specials+
   '((:registry . "*REGISTRY*")
     (:generator-backend . "*GENERATOR-BACKEND*"))
@@ -136,6 +149,10 @@ load the system, report a version mismatch, or proceed."
             do (if (and symbol (fboundp symbol))
                    (setf functions (list* key (fdefinition symbol) functions))
                    (push name missing)))
+      (loop for (key . name) in +optional-functions+
+            for symbol = (find-symbol name package)
+            do (when (and symbol (fboundp symbol))
+                 (setf functions (list* key (fdefinition symbol) functions))))
       (loop for (key . name) in +required-specials+
             for symbol = (find-symbol name package)
             do (if (and symbol (boundp symbol))
@@ -202,7 +219,7 @@ execution needs it, so the two are reported separately."
 ;;; matters -- does this name already denote something -- and answer it
 ;;; without side effects.
 
-(defun %find-package-named (name)
+(defun find-package-named (name)
   "Return the package NAME denotes, trying NAME before its upcased form.
 
 Exact first, because a package genuinely created with a lower-case name must
@@ -269,7 +286,7 @@ can say which package and which name it looked in."
                              (and (stringp package) (plusp (length package))
                                   package)
                              "COMMON-LISP-USER"))
-           (found-package (%find-package-named package-name)))
+           (found-package (find-package-named package-name)))
       (unless found-package
         (return-from resolve-symbol-designator
           (values nil (list :reason :package-not-found
@@ -293,6 +310,15 @@ can say which package and which name it looked in."
                              :name (symbol-name symbol)
                              :input designator)))
           (t (values symbol nil)))))))
+
+(defun find-keyword (name)
+  "Return the keyword named NAME if it already exists, else NIL.
+
+Never interns.  A keyword no loaded code mentions cannot be carried by any
+registered definition either, so the absence is an answer rather than a reason
+to create one -- the same rule tool arguments follow everywhere here."
+  (when (and (stringp name) (plusp (length name)))
+    (find-symbol (string-upcase name) "KEYWORD")))
 
 (defun symbol-data (symbol)
   "Return SYMBOL as the plist every response uses for a symbol.

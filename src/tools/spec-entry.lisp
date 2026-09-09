@@ -12,16 +12,19 @@
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:resolve-cl-spec-api)
   (:import-from #:cl-mcp/src/spec-adapter-report
+                #:list-report
                 #:symbol-report
                 #:describe-report
                 #:check-report)
   (:import-from #:cl-mcp/src/tools/spec-response-builders
+                #:build-spec-list-response
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
-  (:export #:spec-symbol-response
+  (:export #:spec-list-response
+           #:spec-symbol-response
            #:spec-describe-response
            #:spec-check-response
            #:parse-seed-string
@@ -134,6 +137,23 @@ timeout_seconds or narrow the request."
                             (format nil "reading the registry failed in ~
 cl-mcp: ~A" value)
                             :environment (%environment-stub)))))))))
+
+(defun spec-list-response (params)
+  "Return the spec-list response hash-table for PARAMS."
+  (multiple-value-bind (limit message)
+      (%positive-integer-arg params "limit" 200)
+    (if message
+        (%argument-error-response message #'build-spec-list-response)
+        (%within-deadline
+         params #'build-spec-list-response
+         (lambda ()
+           (multiple-value-bind (api status) (resolve-cl-spec-api)
+             (build-spec-list-response
+              (list-report api status
+                           :kind (or (%string-arg params "kind") "both")
+                           :package (%string-arg params "package")
+                           :tag (%string-arg params "tag")
+                           :limit limit))))))))
 
 (defun spec-symbol-response (params)
   "Return the spec-symbol response hash-table for PARAMS."
