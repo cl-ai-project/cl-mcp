@@ -83,12 +83,20 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/project-scaffold
                 #:project-scaffold)
+  (:import-from #:cl-mcp/src/tools/spec-tools
+                #:spec-symbol
+                #:spec-describe
+                #:spec-check)
   (:export #:run
            #:version
            ;; Tool definition macro
            #:define-tool
            ;; Project scaffolding
            #:project-scaffold
+           ;; cl-spec contract discovery and property execution
+           #:spec-symbol
+           #:spec-describe
+           #:spec-check
            ;; File system tools
            #:fs-read-file
            #:fs-write-file

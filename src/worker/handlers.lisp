@@ -44,6 +44,10 @@
                 #:build-code-find-references-response
                 #:build-inspect-response
                 #:expand-and-build-response)
+  (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-symbol-response
+                #:spec-describe-response
+                #:spec-check-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
@@ -382,6 +386,31 @@ Returns a success payload."
 ;;; Public API
 ;;; ---------------------------------------------------------------------------
 
+;;; ---------------------------------------------------------------------------
+;;; worker/spec-symbol, worker/spec-describe, worker/spec-check
+;;; ---------------------------------------------------------------------------
+;;;
+;;; These run in the worker because the cl-spec registry lives here: the
+;;; load-system that defined the properties ran in this image, so this is the
+;;; only process that can see them.  Running them in the parent would answer
+;;; from an empty registry and report "nothing registered" for every symbol.
+
+(defun %handle-spec-symbol (params)
+  "Find the cl-spec contracts registered about a symbol."
+  (unless (gethash "symbol" params)
+    (error "symbol is required"))
+  (spec-symbol-response params))
+
+(defun %handle-spec-describe (params)
+  "Read one registered cl-spec definition in full."
+  (unless (and (gethash "kind" params) (gethash "name" params))
+    (error "kind and name are required"))
+  (spec-describe-response params))
+
+(defun %handle-spec-check (params)
+  "Run cl-spec properties and return structured results."
+  (spec-check-response params))
+
 (defun register-all-handlers (server)
   "Register all worker method handlers on SERVER."
   (register-method server "worker/eval" #'%handle-eval)
@@ -392,6 +421,9 @@ Returns a success payload."
   (register-method server "worker/code-find-references" #'%handle-code-find-references)
   (register-method server "worker/inspect-object" #'%handle-inspect-object)
   (register-method server "worker/macroexpand" #'%handle-macroexpand)
+  (register-method server "worker/spec-symbol" #'%handle-spec-symbol)
+  (register-method server "worker/spec-describe" #'%handle-spec-describe)
+  (register-method server "worker/spec-check" #'%handle-spec-check)
   (register-method server "worker/set-project-root" #'%handle-set-project-root)
   (register-method server "worker/init-start" #'handle-init-start)
   (register-method server "worker/init-status" #'handle-init-status)
