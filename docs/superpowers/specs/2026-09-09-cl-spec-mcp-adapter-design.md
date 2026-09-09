@@ -162,8 +162,10 @@ registry は special の値を**呼び出しスレッドで読んで明示的に
 
 | ファイル | 責務 |
 |---|---|
-| `src/spec-adapter-core.lisp` | cl-spec API 遅延解決、symbol 解決、値の外部表現、digest、実行 + deadline。plist を返す |
+| `src/spec-adapter-core.lisp` | cl-spec API 遅延解決、symbol 解決、値の外部表現、digest |
+| `src/spec-adapter-report.lisp` | 発見・取得・実行の 3 操作を plist で組み立てる。deadline と予算配分もここ |
 | `src/tools/spec-response-builders.lisp` | plist → hash-table、content text 生成 |
+| `src/tools/spec-entry.lisp` | API 解決 → report → hash-table の入口。tool と worker handler の共通部 |
 | `src/tools/spec-tools.lisp` | `define-tool` ×3 |
 | `tests/spec-adapter-core-test.lisp` | 単体(cl-spec 非依存) |
 | `tests/spec-response-builders-test.lisp` | 応答形状 |
@@ -327,7 +329,10 @@ condition を RPC エラーとして漏らさない。
 
 cl-spec の seed は最大 2^62 未満で、JSON の安全整数 2^53 を超える。
 **seed は常に 10 進文字列で返す。JSON number としては返さない。**
-入力は文字列と整数の両方を受け付け、`parse-integer` で解釈する
+入力も文字列のみを受け付け、`parse-integer` で解釈する
+(reader は使わない)。JSON number を受理しないのは仕様であって不便ではない。
+呼び出し側が数値として seed を持っている時点でその値は既に丸められており、
+受理すれば「再現できない seed を再現できる」と報告することになる
 (reader は使わない)。非負整数でなければ引数エラー。
 
 ### 8.3 選択根拠
