@@ -77,10 +77,14 @@ REPLAY status=:FAILED trials=1   seed=3963993791726803706 ce=(A 68 B 85) sce=(A 
 
 ### 2.3 cl-spec 側の制約で判明した事実
 
-- **seed は最大 `(expt 2 62)` 未満**(`src/utils/random.lisp` `+seed-limit+`)。
-  実測値 `3963993791726803706` は JSON の安全整数 2^53 を超える。
-  JSON number で往復させると JavaScript クライアントで丸められ、
-  **再現できない seed を再現できると誤報告する**。
+- **`make-seed` が生成する seed は `(expt 2 62)` 未満**
+  (`src/utils/random.lisp` `+seed-limit+`)。実測値 `3963993791726803706` は
+  JSON の安全整数 2^53 を超える。JSON number で往復させると JavaScript
+  クライアントで丸められ、**再現できない seed を再現できると誤報告する**。
+  これは**自動生成 seed の範囲であって入力 seed の上限ではない**。
+  `seed->random-state` は `(integer 0)` を受け、実測で 2^80 も受理される。
+  したがって文字列表現は「2^62 に収まらないから」ではなく
+  「任意精度の整数を JSON number に載せられないから」必要である。
 - `check-it` backend の `run-generated-test` が返す status は
   `:passed` / `:failed` / `:error` の 3 つのみ。
   `property-result` の docstring が挙げる `:skipped` / `:pending` は
@@ -152,9 +156,19 @@ registry は `load-system` を実行した worker image に載る。
 構造的に保証され、`load-system` で再ロードした変更が次の `spec-check` に反映される。
 プール無効時(`MCP_NO_WORKER_POOL=1`)は既存 tool と同じ inline fallback。
 
-registry は special の値を**呼び出しスレッドで読んで明示的に引数へ渡す**。
-`call-with-deadline-thread` が起こす新スレッドは dynamic binding を継承しないため、
-`*registry*` を rebind したテストや将来の分離 registry でも正しく動く。
+**実行スレッドへ引き継ぐ実行環境を明示する。**
+`call-with-deadline-thread` が起こす新スレッドは dynamic binding を継承しない。
+
+| 対象 | 引き継ぎ方 |
+|---|---|
+| `*registry*` | 呼び出しスレッドで読み、`run-property` の `:registry` に明示的に渡す。加えてスレッド内で `progv` 束縛する |
+| `*generator-backend*` | 呼び出しスレッドで 1 回読み、**予算導出と実行の両方に同じ値を使う**。`run-property` は実行スレッドで `current-generator-backend` を読むため、`progv` で束縛しないと「予算を導いた backend」と「実際に走った backend」が食い違う |
+| `check-it:*num-trials*` / `*size*` | 引き継がない。backend が実行スレッドで読む global を使う。**保証対象外**として報告する |
+| `*print-*` 等の印字設定 | 引き継がない。値の印字はアダプタが自前の束縛で行う(§8.7) |
+| その他の dynamic 変数 | 引き継がない。cl-spec が将来追加した special は自動では反映されない。**保証対象外** |
+
+`progv` には special の**シンボル**が要るので、API 構造体は読み取り関数だけで
+なくシンボルそのものも保持する。
 
 ### 3.3 新規ファイル
 
@@ -170,6 +184,7 @@ registry は special の値を**呼び出しスレッドで読んで明示的に
 | `src/tools/spec-entry.lisp` | API 解決 → report → hash-table の入口。tool と worker handler の共通部 |
 | `src/tools/spec-tools.lisp` | `define-tool` ×3 |
 | `tests/spec-adapter-core-test.lisp` | 単体(cl-spec 非依存) |
+| `tests/spec-worker-test.lisp` | pool 有効の worker 経由(§10.4) |
 | `tests/spec-response-builders-test.lisp` | 応答形状 |
 | `tests/spec-tools-test.lisp` | tool 経由(cl-spec があれば実物、無ければ skip) |
 
@@ -194,7 +209,7 @@ registry は special の値を**呼び出しスレッドで読んで明示的に
 |---|---|---|---|
 | cl-spec 未ロード | `CL-SPEC` package 不在 / 必須 symbol 欠落 | `cl-spec-not-loaded` | `load-system` で `cl-spec/check-it`(実行込み)か `cl-spec`(取得のみ)を先に。**対象に契約が無い証拠ではない** |
 | backend 未ロード | `cl-spec:*generator-backend*` が NIL | `backend-not-loaded` | 取得系は動く。実行は不可。**成功ではない** |
-| 定義未登録 | `semantic-data` が全て NIL / 空 | `not-registered` | registry に登録が無い。未ロードの可能性があり、契約不要を意味しない |
+| 定義未登録 | `semantic-data` の**登録関係フィールド**(`:spec` `:function-spec` `:property` `:properties-about`)がすべて空。`:symbol` と `:package` は常に値を持つので判定に含めない | `not-registered` | registry に登録が無い。未ロードの可能性があり、契約不要を意味しない |
 | 機能未対応 | 例: `function-spec-data` が cl-spec に無い | `unsupported` | 欠けている cl-spec API 名を明示 |
 
 全応答に `environment` を付ける。
@@ -340,7 +355,8 @@ cl-spec の状態と無関係であり、先に「cl-spec 未ロード」を返�
 
 ### 8.2 seed を文字列で扱う
 
-cl-spec の seed は最大 2^62 未満で、JSON の安全整数 2^53 を超える。
+cl-spec が生成する seed は 2^62 未満で、JSON の安全整数 2^53 を超える。
+入力側に上限はなく、任意の非負整数が受理される(§2.3)。
 **seed は常に 10 進文字列で返す。JSON number としては返さない。**
 入力も文字列のみを受け付け、`parse-integer` で解釈する
 (reader は使わない)。JSON number を受理しないのは仕様であって不便ではない。
@@ -395,7 +411,35 @@ cl-spec の seed は最大 2^62 未満で、JSON の安全整数 2^53 を超え�
 | `completed` | 全 Property が verdict に到達 |
 | `incomplete` | timeout / error / not-run を含む |
 
-**`verified`**: `(and (plusp count) (every passed))` のときだけ true。
+**呼び出し全体 status の集約規則**
+
+| 個別 status の集合 | 全体 status | `verified` |
+|---|---|---|
+| 選択 0 件 | `no-properties` | false |
+| 全件 `passed`、かつ全件で `trials.executed` が 1 以上 | `completed` | **true** |
+| 全件 `passed` だが `trials.executed` が 0 の件がある | `completed` | false(`zero-trials`) |
+| `failed` / `error` を含み、他は verdict のみ | `completed` | false |
+| `skipped` / `pending` を含む | `completed` | false |
+| `timeout` / `not-run` / `generator-error` / `backend-error` / `internal-error` を含む | `incomplete` | false |
+
+**`verified` は 3 条件**: 選択が 1 件以上、全件 `passed`、
+**かつ全件で実際に 1 件以上の trial が評価された**。3 つ目を落とすと、
+`(:trials (:normal 0))` の Property が `passed` / `trials 0` で返り
+(実測確認済み)、何も評価していない run が verified になる。
+
+**`verification_gaps`** に、この run が確立できなかったことを機械可読で並べる。
+
+| gap | 意味 |
+|---|---|
+| `no-properties-selected` | 選択が 0 件 |
+| `zero-trials` | `passed` だが評価件数 0 |
+| `timeout` / `not-run` / `generator-error` / `backend-error` / `internal-error` / `skipped` / `pending` | その status が 1 件以上ある |
+| `rejection-counts-unmeasured` | **常に付く**。cl-spec は precondition による棄却件数を報告しない |
+| `input-coverage-unmeasured` | **常に付く**。生成 domain の到達範囲は計測していない |
+
+後ろ 2 つが常に付くので、**この adapter は「検証の網羅性」を主張しない**。
+§72.1 の受け入れ条件のうち「棄却件数」「境界値の検査状況」は
+現 runner に情報がなく、不明として報告する(§11 で LLM-01 を部分対応とする理由)。
 
 0 件は必ず `no-properties` + `verified: false` とし、content text に
 `0 properties selected -- this is NOT a successful verification.` を出す。
@@ -412,10 +456,27 @@ per-property の値にすると、複数 Property の合計が proxy の待ち�
 - worker 内で `call-with-deadline-thread` を使う(`run-tests` と同じ機構)。
 - 複数 Property は逐次実行し、各 `run-property` には**残予算**を渡す。
 - 残予算が尽きたら以降は `not-run` / `budget-exhausted`。
-- thread を停止できなかった場合は `thread_leaked: true` を返し、
-  既存の worker 退役ゲートがそのまま働く。復旧案内は `run-tests` の
-  `make-timeout-result` と同じ文言(pool-kill-worker で worker を差し替える)。
+- 予算は**生成・評価・shrinking・結果の印字まで**を覆う。反例の印字は
+  値自身の `print-object`(任意のユーザコード)を走らせるので、Property の
+  最後の trial で予算を止めると印字が予算の外に出てしまう。
 - `cl-spec:run-property` に `:timeout` は渡さない(cl-spec 側未実装)。
+
+**timeout 後の image の扱い(§72.4)**
+
+thread が止まったことは、その Property が変更していた状態が戻ったことの
+証拠ではない。cl-spec には adapter から観測できる cleanup が無く、
+巻き戻された Property は共有状態を途中まで変えたまま終わりうる。
+したがって**状態を復元できた証拠がない以上、timeout 後の image は不明として扱う**。
+
+| 条件 | `worker_reuse` | 案内 |
+|---|---|---|
+| timeout なし | `safe` | なし |
+| timeout あり・thread は停止 | `unknown` | pool 有効なら `pool-kill-worker`、inline(`MCP_NO_WORKER_POOL`)なら**プロセス再起動** |
+| thread 停止不能(`thread_leaked`) | `unsafe` | 同上。加えて既存の worker 退役ゲートが次の要求前に退役させる |
+
+**inline 実行には退役ゲートが無い。** `%retire-if-carrying-leaked-threads` は
+worker server の要求受付経路にあり、pool 無効時は通らない。この場合の復旧は
+プロセス再起動しかないので、応答の案内は両方の配備を名指しする。
 
 §48 が将来区別するとしている「全体予算」と「trial 単位予算」のうち、
 今回は全体予算のみを扱う。trial 単位予算は cl-spec 側 API が無いので未対応。
@@ -440,33 +501,82 @@ cl-spec が解決済み予算を公開すればこの導出は不要になる(�
 ```json
 "counterexample": [
   {"variable": {"package":"PROBE","name":"A"},
-   "printed": "68",
-   "printed_complete": true,
-   "type": "(INTEGER 0 100)",
-   "object_id": null}],
-"shrunk_counterexample": [
-  {"variable": {"package":"PROBE","name":"A"},
-   "printed": "0", "printed_complete": true,
-   "type": "(INTEGER 0 100)", "object_id": null}],
-"shrink_enabled": true,
-"shrink_note": "Backend-searched reduction. NOT a guaranteed global minimum (cl-spec spec §16, §72.4)."
+   "value": {"printed": "68",
+             "printed_complete": true, "omitted_chars": 0,
+             "restorable": true,
+             "print_level": 12, "print_length": 200,
+             "type": "integer", "object_id": null}}],
+"counterexample_status": "present",
+"counterexample_unavailable_reason": null,
+"shrunk_counterexample": [ ... ],
+"shrink_status": "present",
+"shrink_note": "Backend-searched reduction. NOT a guaranteed global minimum ..."
 ```
+
+**印字は生成量も制限する。** 保持文字数だけを制限しても、`prin1` は構造を
+最後まで歩く。生成値は generator が作った深さ・長さを持ちうるし、値自身の
+`print-object` は任意のユーザコードである。したがって:
+
+| 制限 | 何を抑えるか |
+|---|---|
+| `*print-level*` = 12 / `*print-length*` = 200(応答に `print_level` / `print_length` として明記) | **走査量**。深い・長い値を最後まで歩かない |
+| `max_value_chars`(既定 2000)+ `bounded-output-stream` | **保持メモリ**。超過分は捨て、`printed_complete: false` と `omitted_chars` を立てる |
+| §8.5 の全体予算 | **時間**。反例の印字は run と同じ deadline の内側で行う |
+| `*digest-print-limit*`(1,000,000 文字) | digest 入力の生成量。到達したら `definition_digest_complete: false` |
+
+digest だけは深さ・長さで切らない。深さで切ると、切り口より下だけが異なる
+2 つの定義が同じ digest になり、digest の存在意義が消える。文字数で切れば
+切ったこと自体を検出できるので、そちらを報告する。
+
+**表示の完全性・取得状態・復元可能性は別のフィールドにする。**
+
+| フィールド | 問い |
+|---|---|
+| `printed_complete` | `max_value_chars` で切られなかったか |
+| `restorable` | このテキストを読み戻すとこの値になるか |
+| `counterexample_status` | 反例を取得できたか |
+
+`printed_complete: true` は復元可能を意味しない。印字は `*print-readably*` nil
+かつ有限の深さで行うので、CLOS インスタンスは `#<FOO {1004}>` として
+**完全に**印字されるが値ではない。`restorable` が true になるのは
+数値・文字・文字列・keyword・`NIL`/`T` に限る。それ以外は `object_id` を付け、
+既存 `inspect-object` で深掘りさせる(同一 worker なので ID が有効)。
+
+**`counterexample_status`**(空配列と「取得できなかった」を分ける)
+
+| 値 | 意味 |
+|---|---|
+| `present` | 反例を取得した。**引数を生成しない Property では空配列が正しい present** |
+| `not-applicable` | run が `passed` で、反例は定義上存在しない |
+| `none` | verdict は出たが backend が反例を返さなかった |
+| `unavailable` | 取得できなかった(timeout / 実行エラー / 未実行)。`counterexample_unavailable_reason` に理由 |
+| `unknown` | Property の引数リストが読めず、空配列と欠損を区別できない |
+
+**`shrink_status`**
+
+| 値 | 意味 |
+|---|---|
+| `present` | 縮小済み反例を取得した |
+| `disabled` | Property が `(:shrink nil)` で定義されている |
+| `none` | 縮小は有効だが、より小さい入力は返らなかった |
+| `not-applicable` | run が `passed` |
+| `unavailable` / `not-run` | verdict に到達していない |
+
+実測で `(:shrink nil)` の失敗も引数ゼロの失敗も cl-spec は `NIL` を返す。
+status を持たなければ両者と timeout が同じ `[]` になる。
 
 - **すべての Lisp 値は printed 文字列で返す。JSON number は使わない。**
   整数・有理数の正確さを落とさないため。
-- printing は `*print-circle*` t / `*print-readably*` nil /
-  `*print-level*`・`*print-length*` nil で行い、`max_value_chars` を超えたら
-  切り詰めて `printed_complete: false` を立てる。
-  **`printed_complete: false` の値は復元可能な反例データではない**
-  (表示用プレビューと復元形式を混同しない、§72.6)。
-- 非プリミティブ値は `register-object` で `object_id` を付け、
-  既存 `inspect-object` で深掘りできるようにする(同一 worker なので ID が有効)。
 - `condition` は `{"type":"DIVISION-BY-ZERO","message":"...","object_id":N}`。
-- `counterexample` が null になるのは status が `passed` のときのみ。
-  `shrunk_counterexample` が null でも `shrink_enabled` で理由が読める。
+  message も bounded stream で切り出す(condition の report が生成値を
+  含みうるため)。
 - Property の predicate は単一の汎用 boolean を返すので多値は関与しない。
   Lisp の `NIL` はフィールドの型で意味が決まる
   (boolean は `json-bool` で厳密化、list は空配列、未取得は null + 理由フィールド)。
+- **inline と worker 経由で `false` の Lisp 表現が違う**。inline は
+  `yason:false`、worker 経由は JSON へ直列化して再パースされるので `NIL`。
+  クライアントにはどちらも JSON の `false` として届くので外部表現は同一だが、
+  hash-table を直接触るテストは両方を受け入れる必要がある。
 
 ### 8.8 再現性
 
@@ -475,7 +585,8 @@ cl-spec が解決済み予算を公開すればこの導出は不要になる(�
   "seed": "3963993791726803706",
   "profile": "normal",
   "definition_digest": "a41f9c2b7d0e5518",
-  "definition_match": true,
+  "definition_digest_complete": true,
+  "definition_match": "not-checked",
   "options": null,
   "call": {"tool":"spec-check","property":"PROBE::ADD-IS-WRONG",
            "seed":"3963993791726803706","profile":"normal",
@@ -492,9 +603,24 @@ cl-spec が解決済み予算を公開すればこの導出は不要になる(�
 - printing は `*package*` を `KEYWORD` に束縛し(symbol が常に package 修飾
   される)、`*print-pretty*` nil / level・length nil / `*print-base*` 10 /
   `*print-case*` `:upcase` で決定的にする。
-- `expect_definition_digest` 不一致なら `definition_match: false` を
-  status と content text の両方に出す。
-  **「元の実行を厳密に再現した」とは報告しない。**
+- printing は `*package*` を `KEYWORD` に束縛し、文字数のみで打ち切る(§8.7)。
+  打ち切られたら `definition_digest_complete: false` とし、
+  その digest を一致判定に使わない(`definition_match` は `mismatch` 側に倒す)。
+
+**`definition_match` は 3 値**で、`expect_definition_digest` を渡さなかった
+場合は `true` ではなく `not-checked` である。
+
+| 値 | 意味 |
+|---|---|
+| `not-checked` | `expect_definition_digest` が指定されなかった。**比較していない** |
+| `match` | 指定値と digest が一致した |
+| `mismatch` | 一致しない、digest を計算できなかった、または digest 入力が切られた |
+
+`match` が言うのは「Property とそれが参照する Spec の内容が同じ」だけである。
+**実装・backend・cl-spec の version・Lisp 実装・外部状態の一致は含まない。**
+それらは `environment` に併記するが、digest は覆わない。
+不一致なら status と content text の両方に出し、
+**「元の実行を厳密に再現した」とは報告しない。**
 
 **options**
 
@@ -578,31 +704,66 @@ verified: false
 2. **4 状態の区別** — 未ロード / backend 未 / 未登録 / 未対応
 3. **0 件** — `no-properties` かつ `verified: false`、text に警告文
 4. **成功に畳まない** — failed / error / timeout / generator-error / not-run
-5. **seed 往復** — 2^62 級整数が文字列で欠損なく往復。整数入力も受理
-6. **値の外部表現** — `printed_complete: false` の付与、`object_id` の付与
-7. **digest** — 決定性、参照 spec 変更時に変化、`definition_match: false`
-8. **deadline** — 停止しない thunk で `timeout` + `thread_leaked`。
-   `forget-leaked-threads` で image を元に戻す
+5. **評価件数ゼロ** — `passed` / `trials 0` が `verified: false` になり、
+   `verification_gaps` に `zero-trials` が出ること
+6. **反例の取得状態** — 引数ゼロの失敗が `present`、timeout が `unavailable`、
+   `(:shrink nil)` が `disabled`
+7. **seed 往復** — 2^62 級整数が文字列で欠損なく往復
+8. **値の外部表現** — `printed_complete` と `restorable` が別の答えであること、
+   `object_id` の付与
+9. **backend の引き継ぎ** — 実行スレッドが、呼び出し側で捕捉した backend を
+   `progv` 経由で見ること(global を見ていたら赤になる回帰テスト)
+10. **digest** — 決定性、参照 spec 変更時に変化、`definition_match: mismatch`
+11. **deadline** — 停止しない thunk で `timeout`、`worker_reuse: unknown`
 
-### 10.2 統合(cl-spec 実物)
+**`forget-leaked-threads` は記録を消すだけでスレッドを止めない**
+(`src/utils/deadline.lisp`)。したがって「image を元に戻す」道具ではなく、
+記録簿を汚さないための後始末にすぎない。**本当にスレッドが漏れる検証は
+使い捨てプロセスで行う**。上記 11 の `sleep` は割り込み可能なので
+協調的巻き戻しで停止し、スレッドは漏れない。
+
+### 10.2 統合(cl-spec 実物・inline)
 
 `tests/integration-test.lisp` と同じ `process-json-line` 経由、
 `*use-worker-pool*` nil。cl-spec が解決できない環境ではスキップ理由を
 明示して skip する(cl-mcp のテストを cl-spec 必須にしない)。
 仕様取得 → 失敗取得 → 再実行の一周。
 
+**skip されたら統合確認済みとしない。** cl-spec 実物を使う検証
+(§10.2・§10.3、および §10.2b の一部)がすべて skip された実行は、
+「cl-spec との統合は未検証」と報告する。skip は緑だが証拠ではない。
+
+### 10.2b worker 経由(pool 有効)
+
+inline では検証できない保証がある。`tests/spec-worker-test.lisp` は
+`with-pool` で実 worker を起動し、次を確認する。
+
+1. **session affinity** — 同一 session で cl-spec ロード → fixture ロード →
+   `spec-symbol` が 3 件を見る → `spec-check` が反例を返す
+2. **worker 間の分離** — 別 session の worker が同じ symbol を解決できない
+3. **object ID の有効性** — 反例の `object_id` が同じ session の
+   `inspect-object` で解決できる
+4. **timeout 後の扱い** — `worker_reuse` が `unknown` / `unsafe` になり、
+   案内に `pool-kill-worker` が出る
+
+worker 起動と cl-spec ロードを伴うので遅い。worker を起動できない環境、
+cl-spec を解決できない環境では理由付きで skip する。
+
 ### 10.3 実 tool 経由の実証
 
-新規 SBCL プロセス、scratchpad の使い捨て fixture。
+新規プロセス、**worker pool 有効**、scratchpad の使い捨て fixture。
 外部 I/O も共有可変状態も持たない小関数を対象にする。
 
 1. `spec-symbol` で契約を発見
 2. `spec-describe` で Property 本文を取得
 3. `spec-check` で意図的失敗と反例を取得
-4. 実装を修正して `fs-write-file` で保存、`load-system` で再ロード
-5. 同一 seed で `spec-check` を再実行し、解消を確認
-   (`definition_match: false` が出ることも確認 — 実装を直せば digest は
-   変わらないが、Property を書き換えた場合は変わる)
+4. 実装を修正して保存する。**既存 Lisp ファイルの修正は
+   `lisp-edit-form` / `lisp-patch-form` を使う**(開発指針どおり。
+   `fs-write-file` は新規ファイルのみ)。`repl-eval` の `load` か
+   `load-system` で同じ worker へ再ロード
+5. 同一 seed で `spec-check` を再実行し、解消を確認。
+   実装だけを直したなら digest は変わらないので `definition_match: match` /
+   `reproduction: faithful` になる。Property を書き換えた場合は `mismatch`
 
 fixture は scratchpad にのみ置き、cl-mcp / cl-spec のソースツリーにも
 稼働中の MCP worker にも残さない。
@@ -618,12 +779,20 @@ fixture は scratchpad にのみ置き、cl-mcp / cl-spec のソースツリー�
 
 | 要件 | 今回 | 備考 |
 |---|---|---|
-| LLM-01 検証結果と検証範囲 | 対応 | 0 件・timeout・error を成功に畳まない。選択根拠と網羅範囲を明示。予算は導出であることを明記 |
-| LLM-02 契約の由来と変更 | **未対応** | registry が由来・レビュー状態・version を持たない。cl-spec 側 §73 D8 |
-| LLM-03 再生成と反例の再検査 | 部分対応 | 生成列 replay と digest 不一致検出は対応。**保存反例の直接再検査は未対応**(cl-spec §73 D3 未決定) |
-| LLM-04 状態・縮小・時間上限 | 部分対応 | 全体予算と leaked thread 時の worker 退役は対応。trial 単位予算・縮小の完了/予算切れ/中断の区別・失敗同一性は cl-spec 側 API が無く未対応 |
-| LLM-05 変更影響と image の整合性 | 部分対応 | `:about` 直接関連のみと明示。同一 worker でのロードと実行は保証。registry 世代・cache invalidation は cl-spec §73 D6 |
-| LLM-06 機械可読境界 | 部分対応 | package 区別・省略の明示・値の正確さ・reader 非使用は対応。**外部 JSON の schema version と capability API は未対応**(cl-spec §73 D7 未決定) |
+| LLM-01 検証結果と検証範囲 | **部分対応** | 0 件・timeout・error・評価件数ゼロを成功に畳まない。選択根拠と網羅範囲、予算が導出であることを明記。**未対応: 棄却件数と生成 domain の到達範囲**。cl-spec の runner が報告しないので `verification_gaps` に `rejection-counts-unmeasured` / `input-coverage-unmeasured` を常に付け、不明として返す |
+| LLM-02 契約の由来と変更 | **未対応** | registry が由来・レビュー状態・version を持たない。cl-spec 側 §73 D8。`definition_digest` は内容の同一性のみで trust 状態ではない |
+| LLM-03 再生成と反例の再検査 | 部分対応 | 生成列 replay と digest 不一致検出は対応。**保存反例の直接再検査は未対応**(cl-spec §73 D3 未決定)。fixture 復元条件と backend/framework version の artifact 化も未対応 |
+| LLM-04 状態・縮小・時間上限 | 部分対応 | 全体予算(印字を含む)、timeout 後の `worker_reuse: unknown`、leaked thread 時の退役は対応。**未対応**: trial 単位予算、縮小の完了/予算切れ/中断の区別、縮小候補の入力妥当性と失敗同一性 — いずれも cl-spec backend が情報を返さない |
+| LLM-05 変更影響と image の整合性 | 部分対応 | `:about` 直接関連のみと明示。同一 worker でのロードと実行は保証し、pool 有効テストで確認。registry 世代・cache invalidation は cl-spec §73 D6 |
+| LLM-06 機械可読境界 | **対応(cl-mcp が所有する範囲)** | package 区別、省略の明示、値の正確さ、`printed_complete` と `restorable` の分離、reader 非使用は対応。**`schema_version` を最初から付ける**(下記)。cl-spec 本体の capability API は別課題 |
+
+**schema version は cl-spec を待たない。** ここで定義する JSON は
+cl-mcp adapter が所有する外部表現であり、その version 付与を cl-spec 本体の
+API 追加に依存させる理由はない。全応答が `schema_version` を持つ。
+利用可能な操作は既存の `tools/list` の inputSchema から、未対応機能は
+`status: unsupported` と `environment.missing` から取得できる。
+cl-spec 側の capability API(§73 D7)は、cl-spec が自身の実装状況を
+機械可読に返す別の話として残す。
 
 ## 12. cl-spec 側に必要な変更(報告のみ、今回は実装しない)
 
@@ -633,6 +802,13 @@ fixture は scratchpad にのみ置き、cl-mcp / cl-spec のソースツリー�
 2. 解決済み trial 予算の公開 — `resolve-trials` は内部関数で、
    `property-result` にも予算が載らない。cl-mcp が
    `property-trials` + `backend-default-trials` から導出している。
-3. `run-property` の `:timeout`(§48) — 今は実行ホスト側で扱っている。
-4. 保存反例の直接再検査 API(§73 D3)。
-5. 外部表現の schema version と capability API(§73 D7)。
+3. `run-property` の `:timeout`(§48)と trial 単位予算 — 今は実行ホスト側で
+   全体予算だけを扱っている。
+4. **棄却件数と実評価件数の分離**(§72.1)。現在の `property-result-trials` は
+   停止した試行番号であり、前提条件で棄却された生成の数は分からない。
+5. **縮小の完了状態**(完了 / 予算切れ / 中断)と、縮小結果と元の失敗の同一性
+   (§73 D4)。現在は `shrunk-counterexample` の有無しか分からない。
+6. **timeout 後の cleanup と状態復元の契約**(§73 D5)。現在は
+   「復元できた証拠がない」としか言えず、実行ホストが image を不明扱いにする
+   しかない。
+7. 保存反例の直接再検査 API と replay artifact schema(§73 D3)。
