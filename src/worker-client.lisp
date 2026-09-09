@@ -795,6 +795,11 @@ A worker retires on the request *after* the one that leaked, so by the time it
 exits the parent has already been told: the count rides on every response,
 including the one that reported the deadline.  That makes it a witness the
 worker cannot produce by accident."
+  ;; Behind the same read barrier as the other two slots this publication
+  ;; writes: it is written under the worker's stream lock and read under the
+  ;; pool's.  A stale read here fails safe -- zero reads as "crash" -- but
+  ;; the three are written together and should be read the same way.
+  (sb-thread:barrier (:read))
   (let ((count (worker-leaked-threads worker)))
     (and (integerp count) (plusp count))))
 
@@ -829,6 +834,13 @@ The status is not terminal the instant the parent reads EOF: SBCL updates the
 process struct from its SIGCHLD handler, which has not run yet.  Measured, it
 settles within a few tens of milliseconds, so this waits briefly for it rather
 than falling back to the count on essentially every real retirement."
+  ;; Asked before anything is waited for.  Every answer below requires it --
+  ;; the exit code is only ever half of one -- and this runs under the
+  ;; worker's stream lock, which KILL-WORKER and a cancellation have to take.
+  ;; A worker that never reported a leak is the overwhelmingly common death,
+  ;; and it used to pay the whole wait to be told what a struct read knew.
+  (unless (%reported-a-leak-p worker)
+    (return-from %retired-for-leaked-thread-p nil))
   (let ((process (worker-process-info worker)))
     (flet ((terminal-status ()
              (loop repeat 40

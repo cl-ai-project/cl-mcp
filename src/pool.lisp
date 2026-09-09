@@ -949,12 +949,18 @@ to prevent recovery threads from spawning orphan workers."
                    (setf (worker-state new-worker) :bound)
                    (setf (worker-session-id new-worker) session-id)
                    (setf (worker-needs-reset-notification new-worker) t)
-                   (setf (worker-last-crash-reason new-worker)
-                           (worker-last-crash-reason crashed-worker)
-                         (worker-last-exit-status new-worker)
-                           (worker-last-exit-status crashed-worker)
-                         (worker-last-exit-code new-worker)
-                           (worker-last-exit-code crashed-worker))
+                   ;; The same snapshot every other path hands over, taken
+                   ;; under the lock that classified this death rather than
+                   ;; re-read here, where the reaper may already have closed
+                   ;; the process out from under it.
+                   (%hand-reset-to new-worker
+                                   (or owed
+                                       (list (worker-last-crash-reason
+                                              crashed-worker)
+                                             (worker-last-exit-status
+                                              crashed-worker)
+                                             (worker-last-exit-code
+                                              crashed-worker))))
                    (bordeaux-threads:with-lock-held (*pool-lock*)
                      (cond
                        ((not *pool-running*)
@@ -1448,8 +1454,13 @@ cannot be created."
             ;; session's copy was dropped when it took it on -- so without
             ;; this the reset is gone from both places at once and the user
             ;; is never told their session was reset, twice over.
-            (%leave-owed-reset session-id (%owed-reset-of worker))
+            ;;
+            ;; Only while this worker is still the session's, like every
+            ;; other site: recovery may have replaced it already and given
+            ;; the debt to the replacement, and a copy left here would
+            ;; outlive its consumer and later explain a different death.
             (when (eql (gethash session-id *affinity-map*) worker)
+              (%leave-owed-reset session-id (%owed-reset-of worker))
               (remhash session-id *affinity-map*))
             (setf *all-workers* (remove worker *all-workers*)))
           (ignore-errors (kill-worker worker))

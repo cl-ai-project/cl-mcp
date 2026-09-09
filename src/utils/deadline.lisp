@@ -188,6 +188,14 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                  ;; clean while still carrying it.
                  (when (and thread (thread-alive-p thread))
                    (with-lock-held (%leaked-lock%)
+                     ;; Pruned as well as added, because in this image
+                     ;; nothing else may ever ask.  LEAKED-THREADS prunes,
+                     ;; and the worker calls it on every request -- but the
+                     ;; same deadline machinery runs inline in the parent
+                     ;; when the pool is disabled, where there is no gate to
+                     ;; ask and finished threads would be held forever.
+                     (setf %leaked-threads%
+                           (remove-if-not #'thread-alive-p %leaked-threads%))
                      (pushnew thread %leaked-threads%))))
                (finish (timed-out leaked)
                  (let ((settled outcome))
