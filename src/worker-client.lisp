@@ -52,7 +52,8 @@
            #:worker-last-crash-reason
            #:worker-last-exit-status
            #:worker-last-exit-code
-           #:worker-retired-p))
+           #:worker-retired-p
+           #:exit-code-says-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
 
@@ -178,10 +179,20 @@ Handles both LF and CRLF line endings."
   (request-counter 0 :type integer)
   (stderr-thread nil)
   ;; Count of threads the worker last reported a deadline could not stop.
-  ;; Diagnostic only: the worker retires itself rather than waiting to be
-  ;; told, so nothing in the parent acts on this -- it exists so pool-status
-  ;; can show the condition while it lasts.
+  ;; Shown by pool-status, and load-bearing besides: it is the corroborating
+  ;; witness in %RETIRED-FOR-LEAKED-THREAD-P, without which an exit code any
+  ;; evaluated form can produce would be taken as proof of a retirement.
   (leaked-threads 0 :type integer)
+  ;; Whether this worker's *own* death was a deliberate retirement.  Recorded
+  ;; by whoever classified it -- the RPC that saw the EOF, or the pool's
+  ;; health monitor -- and deliberately not derived on demand from
+  ;; LAST-CRASH-REASON: a replacement worker inherits those crash details from
+  ;; its predecessor so the user can be told why it was replaced, and a
+  ;; healthy worker carrying an inherited reason would answer this question
+  ;; about a death that was not its own.  That answer disables the session's
+  ;; circuit breaker, so it would stay disabled for as long as the session
+  ;; lived, re-inherited by every later replacement.
+  (retired-p nil :type boolean)
   (crash-history-pushed-p nil :type boolean)
   (last-crash-reason nil)
   (last-exit-status nil)
@@ -657,7 +668,13 @@ Returns nothing."
   ;; ordinary crash.  It is also set unconditionally now: it used to be set
   ;; alongside the exit code, inside the branch that needs a process object,
   ;; so a worker without one recorded no reason at all.
-  (setf (worker-last-crash-reason worker) reason)
+  (setf (worker-last-crash-reason worker) reason
+        ;; Recorded as a fact about this worker rather than left to be
+        ;; re-derived from the reason later: the reason is copied onto a
+        ;; replacement worker, and a question asked of the string would
+        ;; then be answered about a death that was not this worker's.
+        (worker-retired-p worker) (equal *retired-leaked-thread-reason*
+                                         reason))
   (setf (worker-state worker) :crashed)
   (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
@@ -668,13 +685,23 @@ Returns nothing."
       (setf (worker-socket worker) nil
             (worker-stream worker) nil)))
   ;; Wait for the stderr drain thread to finish forwarding remaining
-  ;; log output (including worker.fatal crash messages).  The worker
-  ;; process is dead so the pipe's write end is closed, causing
-  ;; read-line to return NIL and the thread to exit naturally.
-  ;; Timeout of 1 second prevents blocking if something goes wrong.
+  ;; log output (including worker.fatal crash messages).  When the worker
+  ;; process is dead its pipe's write end is closed, so read-line returns
+  ;; NIL and the thread exits on its own; the timeout is there in case
+  ;; something goes wrong.
+  ;;
+  ;; Only worth waiting for when the process is actually gone.  Not every
+  ;; caller here has lost one: "timeout" and "stream-error" abandon a worker
+  ;; that is still running, its pipe still open and its drain thread still
+  ;; blocked on read-line, so the wait would run its full second -- with
+  ;; WORKER-STREAM-LOCK held, which is what KILL-WORKER and a cancellation
+  ;; have to take.
   (let ((th (worker-stderr-thread worker)))
     (when (and th (bt:thread-alive-p th))
-      (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))
+      (let ((process (worker-process-info worker)))
+        (when (and process
+                   (not (ignore-errors (sb-ext:process-alive-p process))))
+          (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))))
       (when (bt:thread-alive-p th)
         (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
@@ -788,24 +815,21 @@ than falling back to the count on essentially every real retirement."
           ;; Unknowable: no process, already reaped, or still not settled.
           (t (%reported-a-leak-p worker)))))))
 
-(defun worker-retired-p (worker)
-  "True when WORKER died by retiring for a leaked thread rather than crashing.
+(defun exit-code-says-retired-p (worker)
+  "True when WORKER's recorded exit code and leak count both say it retired.
 
-The same question as %RETIRED-FOR-LEAKED-THREAD-P, asked of the struct after
-the fact rather than of the process at the moment it stopped answering, and
-answered from whichever witness the asking path has.
+For the path where nothing has classified the death yet: the pool's health
+monitor can reach a dead worker before any RPC has seen the EOF, and there the
+exit code it records on its way past is the only witness there is.
 
-The recorded reason is the better one, and the RPC that saw the EOF publishes
-it.  But the pool's health monitor can reach a dead worker before any RPC
-does, and then nothing has classified it yet; there the exit code the monitor
-records on its way past is the only witness there is -- corroborated by the
-count for the same reason the EOF classifier corroborates it.
-
-Kept here, beside the classifier it has to agree with: the two answering the
-same question differently is how this exclusion has failed before."
-  (or (equal *retired-leaked-thread-reason* (worker-last-crash-reason worker))
-      (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
-           (%reported-a-leak-p worker))))
+Read only by a caller that is looking at a worker's own death, and never as a
+standing property of the worker: a replacement inherits its predecessor's exit
+code along with the rest of the crash details it shows the user.  The count is
+not inherited, which is what keeps that inherited code from answering here --
+but the caller is what keeps the question from being asked about the wrong
+worker in the first place."
+  (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
+       (%reported-a-leak-p worker)))
 
 (defun worker-rpc (worker method params &key timeout)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
@@ -830,8 +854,15 @@ without marking the worker as crashed."
       ;; behind the first RPC used to be told "already-dead", which reads as
       ;; an ordinary crash.  The init monitor is not a rare straggler here: it
       ;; polls the same worker every fraction of a second while a load runs.
+      ;; Only a worker that actually crashed has a reason of its own to
+      ;; report.  One that was killed deliberately, or a replacement still
+      ;; carrying the crash details it inherited to show the user, has
+      ;; nothing to say here -- and reporting the inherited string would
+      ;; describe its predecessor's death as its own, which for "timeout"
+      ;; means telling the user an operation they never ran took too long.
       (error 'worker-crashed :worker worker
-                             :reason (or (worker-last-crash-reason worker)
+                             :reason (or (and (eq :crashed (worker-state worker))
+                                              (worker-last-crash-reason worker))
                                          "already-dead")))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
@@ -948,7 +979,12 @@ Robust against already-dead processes."
       ;; and the thread exits naturally within the timeout.
       (let ((th (worker-stderr-thread worker)))
         (when (and th (bt:thread-alive-p th))
-          (ignore-errors (bt:join-thread th :timeout 1))
+          ;; BT:JOIN-THREAD takes no :TIMEOUT, so this used to signal a
+          ;; program-error that IGNORE-ERRORS swallowed: the documented wait
+          ;; never happened and the thread was destroyed mid-line, losing the
+          ;; worker's last log output -- which after a SIGKILL is the part
+          ;; that says why.
+          (ignore-errors (sb-thread:join-thread th :timeout 1 :default nil))
           (when (bt:thread-alive-p th)
             (ignore-errors (bt:destroy-thread th)))
           (setf (worker-stderr-thread worker) nil)))

@@ -41,6 +41,7 @@
                 #:worker-crashed
                 #:worker-crashed-reason
                 #:worker-retired-p
+                #:exit-code-says-retired-p
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/utils/deadline
@@ -342,10 +343,13 @@ never fire.
 A deliberate retirement is excluded.  Three uninterruptible timeouts in five
 minutes would otherwise trip the breaker and halt the session, where the same
 three before this behaviour existed returned three timeouts and left the user
-working.  WORKER-RETIRED-P is asked here and now rather than sampled by the
-caller and passed in: the marker survives %HANDLE-WORKER-CRASH now, so there
-is no longer a moment at which the answer is only briefly available -- and a
-sampled copy is one more thing that can be taken at the wrong moment.
+working.  WORKER-RETIRED-P is a slot recorded by whoever classified the death
+rather than a question asked of the crash reason: the reason is copied onto
+the replacement worker so the user can be told why it was reset, and deriving
+the answer from it made a healthy worker report its predecessor's retirement
+as its own -- which would have disabled this breaker for the rest of the
+session, re-inherited by every later replacement, exactly where a crash loop
+is what the breaker is for.
 
 An init-attributable crash is excluded for the reason it always was: the pool
 counts those separately, against initialization rather than the session."
@@ -743,14 +747,18 @@ to prevent recovery threads from spawning orphan workers."
                  "was_standby" was-standby
                  "exit_status" (or exit-status "unknown")
                  "exit_code" (or exit-code "unknown"))
-      ;; Order matters twice over.  The exit code is recorded before the
-      ;; question is asked, because on this path -- the health monitor
-      ;; reaching a dead worker before any RPC has seen the EOF -- it is the
-      ;; only witness there is.  And the answer is taken before the reason is
-      ;; replaced, because the reason is the other witness.
+      ;; The exit code is recorded before it is consulted: on this path --
+      ;; the health monitor reaching a dead worker before any RPC has seen
+      ;; the EOF -- nothing has classified the death, and the code this
+      ;; worker left is the only witness there is.  Recording the answer
+      ;; rather than leaving it to be re-derived later is what keeps it
+      ;; attached to the worker it is about, since the reason below is
+      ;; copied onto the replacement.
       (setf (worker-last-exit-status crashed-worker) (or exit-status "unknown")
             (worker-last-exit-code crashed-worker) (or exit-code "unknown"))
-      (setf retired-p (worker-retired-p crashed-worker))
+      (setf retired-p (or (worker-retired-p crashed-worker)
+                          (exit-code-says-retired-p crashed-worker))
+            (worker-retired-p crashed-worker) retired-p)
       ;; A retirement keeps its marker rather than being flattened into
       ;; "process-died".  Everything that reads this slot afterwards --
       ;; GET-OR-ASSIGN-WORKER's own breaker push when it meets the same
