@@ -489,7 +489,12 @@ to get a fresh worker before trusting later results."))
               (getf first-result :seed)
               (%keyword-string (getf first-result :profile))
               (getf first-result :definition-digest)))
-    (when (getf report :reproduce-scope)
+    ;; Gated on there being a seed to reproduce from.  A run where nothing
+    ;; executed has nothing to say about reproduction, and printing the
+    ;; caveat there is noise the caller has to read past every time.
+    (when (and (getf report :reproduce-scope)
+               first-result
+               (getf first-result :seed))
       (format stream "~&~A" (getf report :reproduce-scope)))))
 
 (defun %check-headline (report)
