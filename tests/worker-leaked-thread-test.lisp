@@ -544,7 +544,12 @@ initialization pool-wide for")
              (cl-mcp/src/worker-client:kill-worker worker)
              (ok finished "it ran to the end instead of being cut off")
              (ok (null (cl-mcp/src/worker-client::worker-stderr-thread worker))
-                 "and the slot no longer points at it"))
+                 "and the slot no longer points at it")
+             ;; A kill resets the session's state as surely as a crash does,
+             ;; and the flag is how the replacement knows to say so.
+             (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+                  worker)
+                 "the reset it owes the user is recorded"))
         (ignore-errors (bt:destroy-thread drain))))))
 
 (deftest pool-status-shows-a-worker-that-is-carrying-one
@@ -666,6 +671,34 @@ timeout leaving a thread behind, and excused from the circuit breaker"))
                  "by exiting with the code the parent classifies on, and the
 parent waited long enough for the status to settle to read it"))
         (cl-mcp/src/worker-client:kill-worker worker)))))
+
+(deftest a-recorded-retirement-survives-a-second-look
+  ;; Two things classify a death, and the second one sees less.  The RPC that
+  ;; met the EOF reads the exit code while the process is still there; by the
+  ;; time the pool runs over the same worker the reaper may have closed it,
+  ;; leaving the code unreadable -- and killing what it replaces makes the
+  ;; process look signalled rather than exited.  Neither may turn a recorded
+  ;; retirement back into a crash: that would put it in front of the circuit
+  ;; breaker and blame initialization for it.
+  (testing "the pool's own look does not overwrite what the RPC established"
+    (let ((worker (cl-mcp/src/worker-client::make-worker
+                   :state :bound :leaked-threads 1)))
+      (cl-mcp/src/worker-client::%mark-worker-crashed
+       worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+      (ok (cl-mcp/src/pool::%record-worker-death worker "signaled" 9)
+          "it is still a retirement")
+      (ok (cl-mcp/src/worker-client::worker-retired-p worker)
+          "and stays recorded as one")
+      (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                 (cl-mcp/src/worker-client:worker-last-crash-reason worker))
+          "with the reason the user is shown intact")))
+  (testing "but a death it has no record of is read from what it can see"
+    (let ((worker (cl-mcp/src/worker-client::make-worker
+                   :state :bound :leaked-threads 1)))
+      (ok (not (cl-mcp/src/pool::%record-worker-death worker "signaled" 9))
+          "a signalled death is not a retirement")
+      (ok (equal "process-died"
+                 (cl-mcp/src/worker-client:worker-last-crash-reason worker))))))
 
 (deftest a-retirement-is-not-counted-against-the-session-breaker
   ;; Against a real pool, because what is under test is the two push sites
@@ -811,6 +844,35 @@ next call learns why the session was reset")
       (ok (init-disabled-after-start "eof")
           "while a real crash there still disables it"))))
 
+(deftest a-retirement-on-the-pools-own-rpc-still-reaches-the-user
+  ;; The pool sends RPCs of its own: the project-root sync after
+  ;; fs-set-project-root, the init monitor's polling.  Their errors are
+  ;; swallowed by design -- they are housekeeping, not the user's request --
+  ;; so when the worker dies on one, nobody has told the user anything.
+  ;;
+  ;; Retirement makes that reachable on purpose rather than by chance: the
+  ;; root sync is a request like any other, so a worker carrying a leaked
+  ;; thread retires on it.  Their next call would otherwise land in a fresh
+  ;; image with their systems unloaded and nothing said about it.
+  (testing "the reset it owes is handed to the replacement"
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (with-pool ()
+      (let* ((session "retire-on-internal-rpc")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+        (cl-mcp/src/worker-client:worker-rpc
+         worker "worker/eval" (leaking-params))
+        ;; The pool's own RPC, called the way fs-set-project-root calls it.
+        (cl-mcp/src/pool::send-root-to-session-worker
+         session (namestring (uiop:temporary-directory)))
+        (ok (not (eq :bound (cl-mcp/src/worker-client:worker-state worker)))
+            "the worker retired on it")
+        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+          (ok (not (eq worker replacement)) "the session gets a new worker")
+          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+               replacement)
+              "which owes the user the notification nobody delivered"))))))
+
 (deftest retirement-is-visible-where-it-has-to-be
   (testing "real work retires; only observation is exempt"
     ;; The exemption exists so an init-status poll -- sent every fraction of a
@@ -840,21 +902,27 @@ next call learns why the session was reset")
                :test #'equal))
         "the exemption list is exactly the methods that ask for nothing"))
   (testing "an exempt method is served rather than retiring the worker"
-    (with-clean-leak-record
-      (leak-one-thread)
-      (let* ((served nil)
-             (retired nil)
-             (server (cl-mcp/src/worker/server::%make-worker-server))
-             (cl-mcp/src/worker/server::*retire-action*
-               (lambda (leaked) (declare (ignore leaked)) (setf retired t))))
-        (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t)
-        (cl-mcp/src/worker/server:register-method
-         server "worker/init-status"
-         (lambda (params) (declare (ignore params)) (setf served t) "status"))
-        (cl-mcp/src/worker/server::%dispatch-request
-         server 1 "worker/init-status" (make-hash-table :test 'equal))
-        (ok (null retired) "a poll does not retire the worker")
-        (ok served "and is answered"))))
+    ;; Both of them: naming the list is not the same as the dispatcher
+    ;; honouring it, and the entry that is never exercised is the one that
+    ;; quietly stops working.
+    (dolist (method '("worker/init-status" "worker/ping"))
+      (with-clean-leak-record
+        (leak-one-thread)
+        (let* ((served nil)
+               (retired nil)
+               (server (cl-mcp/src/worker/server::%make-worker-server))
+               (cl-mcp/src/worker/server::*retire-action*
+                 (lambda (leaked) (declare (ignore leaked)) (setf retired t))))
+          (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server)
+                t)
+          (cl-mcp/src/worker/server:register-method
+           server method
+           (lambda (params) (declare (ignore params)) (setf served t) "ok"))
+          (cl-mcp/src/worker/server::%dispatch-request
+           server 1 method (make-hash-table :test 'equal))
+          (ok (null retired)
+              (format nil "~A does not retire the worker" method))
+          (ok served (format nil "and ~A is answered" method))))))
   (testing "a non-string method cannot take the worker down"
     ;; The exemption check runs on every authenticated request; reaching
     ;; STRING= with a non-string would unwind to the worker's toplevel and
@@ -986,4 +1054,49 @@ next call learns why the session was reset")
                    cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
           "the replacement's one-time notification says it too")
       (ok (search "crashed" (text-after-reset "eof"))
-          "and still reads as a crash when it was one"))))
+          "and still reads as a crash when it was one"))
+    ;; Delivering the message settles what the death owed the user.  The
+    ;; pool hands an *undelivered* one to the replacement, so a proxy that
+    ;; reports the death without consuming it produces the message twice --
+    ;; and, before the flag meant this, a pool that read it the other way
+    ;; round produced it neither time for a death nobody reported.
+    (let* ((worker (cl-mcp/src/worker-client::make-worker :state :bound))
+           (cl-mcp/src/proxy::*current-session-id* "leak-probe-consume")
+           (cl-mcp/src/proxy::%cached-get-or-assign%
+             (lambda (session) (declare (ignore session)) worker))
+           (cl-mcp/src/proxy::%cached-check-and-clear%
+             #'cl-mcp/src/worker-client:check-and-clear-reset-notification)
+           (cl-mcp/src/proxy::%cached-worker-rpc%
+             (lambda (w method params &key timeout)
+               (declare (ignore method params timeout))
+               ;; What %MARK-WORKER-CRASHED does on its way out.
+               (setf (cl-mcp/src/worker-client:worker-needs-reset-notification
+                      w)
+                     t)
+               (error 'cl-mcp/src/worker-client:worker-crashed
+                      :worker w :reason "eof")))
+           (cl-mcp/src/proxy::%cached-worker-crashed-sym%
+             'cl-mcp/src/worker-client:worker-crashed)
+           (cl-mcp/src/proxy::%cached-worker-crashed-reason%
+             #'cl-mcp/src/worker-client:worker-crashed-reason)
+           (cl-mcp/src/proxy::%cached-worker-last-crash-reason%
+             #'cl-mcp/src/worker-client:worker-last-crash-reason)
+           (cl-mcp/src/proxy::%cached-worker-last-exit-status%
+             #'cl-mcp/src/worker-client:worker-last-exit-status)
+           (cl-mcp/src/proxy::%cached-worker-last-exit-code%
+             #'cl-mcp/src/worker-client:worker-last-exit-code))
+      ;; Bound for PROXY-TO-WORKER to find, not for this body to read: they
+      ;; are the proxy's own cached bindings, and it resolves them itself.
+      (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
+                          cl-mcp/src/proxy::%cached-check-and-clear%
+                          cl-mcp/src/proxy::%cached-worker-rpc%
+                          cl-mcp/src/proxy::%cached-worker-crashed-sym%
+                          cl-mcp/src/proxy::%cached-worker-crashed-reason%
+                          cl-mcp/src/proxy::%cached-worker-last-crash-reason%
+                          cl-mcp/src/proxy::%cached-worker-last-exit-status%
+                          cl-mcp/src/proxy::%cached-worker-last-exit-code%))
+      (cl-mcp/src/proxy:proxy-to-worker "leak-probe-consume-request"
+                                        "repl-eval" nil)
+      (ok (not (cl-mcp/src/worker-client:worker-needs-reset-notification
+                worker))
+          "reporting the death here settles the reset it owed"))))

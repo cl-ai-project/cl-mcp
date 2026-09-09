@@ -371,6 +371,15 @@ TOCTOU race with concurrent requests for the same session."
                    (error (e)
                      (cond
                        ((typep e worker-crashed-sym)
+                        ;; Delivering the notification here is what settles
+                        ;; the reset this death owes the user, so consume the
+                        ;; flag that records it.  The pool hands an unconsumed
+                        ;; one to the replacement worker instead -- which is
+                        ;; how a death nobody reported, during an internal RPC
+                        ;; the pool makes on its own behalf, still reaches the
+                        ;; user rather than leaving them talking to a fresh
+                        ;; image that has lost their session.
+                        (ignore-errors (funcall %cached-check-and-clear% worker))
                         (let ((reason
                                (ignore-errors
                                  (funcall %cached-worker-crashed-reason% e))))

@@ -53,6 +53,7 @@
            #:worker-last-exit-status
            #:worker-last-exit-code
            #:worker-retired-p
+           #:worker-retirement-recorded
            #:exit-code-says-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
@@ -192,7 +193,11 @@ Handles both LF and CRLF line endings."
   ;; about a death that was not its own.  That answer disables the session's
   ;; circuit breaker, so it would stay disabled for as long as the session
   ;; lived, re-inherited by every later replacement.
-  (retired-p nil :type boolean)
+  ;;
+  ;; Read through WORKER-RETIRED-P rather than directly: the writer and the
+  ;; readers hold different locks, so the pairing that makes this visible is
+  ;; a barrier rather than a lock.
+  (retirement-recorded nil :type boolean)
   (crash-history-pushed-p nil :type boolean)
   (last-crash-reason nil)
   (last-exit-status nil)
@@ -673,8 +678,15 @@ Returns nothing."
         ;; re-derived from the reason later: the reason is copied onto a
         ;; replacement worker, and a question asked of the string would
         ;; then be answered about a death that was not this worker's.
-        (worker-retired-p worker) (equal *retired-leaked-thread-reason*
-                                         reason))
+        (worker-retirement-recorded worker) (equal
+                                             *retired-leaked-thread-reason*
+                                             reason))
+  ;; The state is the flag that publishes all of the above, and the threads
+  ;; that read it hold a different lock than this one -- so the ordering has
+  ;; to be asked for.  Without it a pool thread can see :CRASHED while still
+  ;; seeing the classification it replaced, and count a retirement against
+  ;; the session's breaker.  WORKER-RETIRED-P pays the reader's half.
+  (sb-thread:barrier (:write))
   (setf (worker-state worker) :crashed)
   (setf (worker-needs-reset-notification worker) t)
   ;; Close the stream/socket to prevent stale-response corruption.
@@ -826,6 +838,27 @@ than falling back to the count on essentially every real retirement."
           ;; retirement one breaker tick, exactly as it did before any of
           ;; this existed.
           (t nil))))))
+
+(defun worker-retired-p (worker)
+  "True when WORKER's own death was recorded as a deliberate retirement.
+
+Reads the slot behind a read barrier, which is the half the reader owes.
+
+The writers publish this under WORKER-STREAM-LOCK, or under the pool's own
+lock; the readers that matter are on the other side of a different one --
+GET-OR-ASSIGN-WORKER asks it about a worker it found :CRASHED while holding
+*POOL-LOCK*, and an RPC blocked behind the stream lock asks what killed the
+worker it was holding.  Two threads that never take the same lock have no
+ordering between them from the locks alone, and on a weakly ordered machine
+-- SBCL runs on several -- a reader can see the :CRASHED that publishes this
+answer without yet seeing the answer.  It would then count a deliberate
+retirement against the session's circuit breaker, which is the failure this
+whole exclusion exists to prevent.
+
+Taking *POOL-LOCK* to close that is not available: the stream lock is held
+across the write, and the pool takes its own lock before the stream lock."
+  (sb-thread:barrier (:read))
+  (worker-retirement-recorded worker))
 
 (defun exit-code-says-retired-p (worker)
   "True when WORKER's recorded exit code and leak count both say it retired.
@@ -979,6 +1012,10 @@ Robust against already-dead processes."
           (ignore-errors (usocket:socket-close socket))
           (setf (worker-socket worker) nil
                 (worker-stream worker) nil)))
+      ;; A kill resets the session's Lisp state exactly as a crash does, and
+      ;; the flag is what carries that owed notification to the replacement.
+      ;; It is cleared by whoever actually delivers it.
+      (setf (worker-needs-reset-notification worker) t)
       (setf (worker-state worker) :dead))
     ;; Terminate the OS process outside the lock (may block up to ~2.2s)
     (when process

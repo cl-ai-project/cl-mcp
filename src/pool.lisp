@@ -41,6 +41,7 @@
                 #:worker-crashed
                 #:worker-crashed-reason
                 #:worker-retired-p
+                #:worker-retirement-recorded
                 #:exit-code-says-retired-p
                 #:*reaper-threads* #:*reaper-threads-lock*
                 #:*worker-startup-timeout*)
@@ -378,7 +379,7 @@ A retirement keeps its marker rather than being flattened into
         (worker-last-exit-code worker) (or exit-code "unknown"))
   (let ((retired (or (worker-retired-p worker)
                      (exit-code-says-retired-p worker))))
-    (setf (worker-retired-p worker) retired
+    (setf (worker-retirement-recorded worker) retired
           (worker-last-crash-reason worker)
           (if retired *retired-leaked-thread-reason* "process-died"))
     retired))
@@ -1213,13 +1214,25 @@ cannot be created."
              (setf (gethash session-id *crash-history*) history)
              (when (>= (length history) *crash-breaker-threshold*)
                (setf circuit-breaker-tripped t))))
-         ;; Avoid double crash notification: when %mark-worker-crashed
-         ;; (called by worker-rpc on EOF) set needs-reset-notification
-         ;; on the old worker, the proxy's worker-crashed handler
-         ;; already returned a notification to the client.
+         ;; The flag on the dead worker is an owed reset that nobody has
+         ;; delivered: %MARK-WORKER-CRASHED and KILL-WORKER set it, and the
+         ;; proxy clears it when it returns the notification itself, so a
+         ;; death reported mid-request does not produce a second one here.
+         ;;
+         ;; It used to be read the other way round, as "the flag is set,
+         ;; therefore the proxy already told them".  That holds only for a
+         ;; death during a user's own request.  The pool makes RPCs of its
+         ;; own -- the project-root sync after fs-set-project-root, the init
+         ;; monitor's polling -- and those swallow the error, so a worker
+         ;; dying on one left the flag set with nobody told.  The user's next
+         ;; call then landed in a fresh image with their systems unloaded and
+         ;; nothing said about it.  A retirement makes that reachable
+         ;; deliberately rather than by chance: the root sync is a request
+         ;; like any other, and a worker carrying a leaked thread retires on
+         ;; it.
          (setf entry nil
-               need-reset (not (worker-needs-reset-notification
-                                old-worker-to-kill))))
+               need-reset (worker-needs-reset-notification
+                           old-worker-to-kill)))
         ;; Path 2: Placeholder — another thread is spawning
         ((and entry (typep entry 'worker-placeholder))
          nil))
