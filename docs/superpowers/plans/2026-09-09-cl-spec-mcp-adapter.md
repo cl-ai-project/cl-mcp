@@ -4014,3 +4014,154 @@ git commit -m "docs: record what the tools actually returned end to end"
 - `definition-match` は report 層で `:true` / `:false` / `:not-checked`、応答で `"match"` / `"mismatch"` / `"not-checked"`。
 - `reproduction-faithful` は report 層で `t` / `nil` / `:not-checked`、応答で `"faithful"` / `"unfaithful"` / `"not-checked"`。
 - seed は report 層以降つねに文字列。整数は `check-report` の引数と cl-spec 呼び出しの内側だけ。
+
+---
+
+## 実証結果 (2026-09-09)
+
+`ros run` の新規プロセスで、**worker pool を有効にしたまま** `process-json-line`
+経由で 12 回の `tools/call` を行った。fixture は scratchpad の使い捨て
+(`spec-demo/clamp.lisp`)。`clamp` の実装は上限を適用しないバグ入り、Property は
+2 件とも正しい。以下は実行結果そのもの。
+
+### 1. 契約の発見 — `spec-symbol symbol=spec-demo::clamp`
+
+```
+SPEC-DEMO::CLAMP  function (VALUE LOW HIGH)
+  defined at repl-eval
+  Return VALUE confined to [LOW, HIGH].
+
+Registered:
+  spec:          none
+  function spec: none
+  property:      none
+
+Properties about this symbol (2):
+  SPEC-DEMO::CLAMP-RESPECTS-HIGH  [invariant]
+      CLAMP never returns more than HIGH.
+      digest: aa4b67c3804d69b0  trials: (:NORMAL 100)
+      body omitted (1 form) -- fetch it with spec-describe kind=property
+  SPEC-DEMO::CLAMP-RESPECTS-LOW  [invariant]
+      CLAMP never returns less than LOW.
+      digest: 030c291c2298a4b5
+      body omitted (1 form) -- fetch it with spec-describe kind=property
+
+note: properties_about lists direct (:about ...) registrations only
+```
+
+signature `(VALUE LOW HIGH)` と docstring は cl-mcp 側の join。
+`spec: none / function spec: none` は registry に無いことの明示であり、
+本文は省略されている旨と取得方法が出ている。
+
+### 2. 詳細の取得 — `spec-describe kind=property name=spec-demo::clamp-respects-high`
+
+```
+PROPERTY SPEC-DEMO::CLAMP-RESPECTS-HIGH  [invariant]
+CLAMP never returns more than HIGH.
+about: SPEC-DEMO::CLAMP
+arguments:
+  VALUE : reference -> SPEC-DEMO::SMALL-INT
+definition_digest: aa4b67c3804d69b0
+body:
+((COMMON-LISP:<= (SPEC-DEMO:CLAMP SPEC-DEMO::VALUE 0 50) 50))
+source form:
+(CL-SPEC/SRC/DSL:DEFPROPERTY SPEC-DEMO::CLAMP-RESPECTS-HIGH ...)
+defined in .../spec-demo/clamp.lisp (package SPEC-DEMO)
+```
+
+### 3. 失敗と反例の取得 — `spec-check symbol=spec-demo::clamp`
+
+```
+✗ FAILED
+Selected 2 properties via cl-spec:semantic-data -> :properties-about (registry :about reverse index).
+  Direct (:about ...) registrations only. ... This is not a change impact analysis.
+
+[1] SPEC-DEMO::CLAMP-RESPECTS-HIGH  failed
+    trials: 2 executed of 100 budget (property-profile)
+    counterexample:        VALUE = 62
+    shrunk counterexample: VALUE = 51
+      Backend-searched reduction. NOT a guaranteed global minimum, ...
+    seed: 3013752598065164257   profile: normal
+    definition_digest: aa4b67c3804d69b0
+
+[2] SPEC-DEMO::CLAMP-RESPECTS-LOW  passed
+    trials: 100 executed of 100 budget (backend-default)
+    seed: 2441597211547797803   profile: normal
+    definition_digest: 030c291c2298a4b5
+
+verified: false   1 passed, 1 failed, 0 errored, 0 timed out, 0 not run
+Replay: spec-check property=SPEC-DEMO::CLAMP-RESPECTS-HIGH seed=3013752598065164257 profile=normal expect_definition_digest=aa4b67c3804d69b0
+```
+
+`VALUE = 51` は `[0, 50]` へ clamp されるべき最小の反例。
+seed `3013752598065164257` は 19 桁で JSON の安全整数 2^53 を超えており、
+文字列で往復させる設計の必要性が実測で確認できた。
+`Replay:` 行は passed だった 2 件目ではなく失敗した 1 件目を指している。
+
+### 4. 修正 → 再ロード → 同一 seed で再検証
+
+`lisp-edit-form` で `clamp` に上限節を追加し(**Property は変更していない**)、
+`repl-eval (load ...)` で同じ worker へ再ロードしてから、記録した seed と
+digest で再実行した。
+
+```
+✓ VERIFIED
+Selected 1 property via explicit property argument.
+[1] SPEC-DEMO::CLAMP-RESPECTS-HIGH  passed
+    trials: 100 executed of 100 budget (property-profile)
+    seed: 3013752598065164257   profile: normal
+    definition_digest: aa4b67c3804d69b0  (match)
+verified: true   1 passed, 0 failed, 0 errored, 0 timed out, 0 not run
+reproduction: faithful
+```
+
+`definition_match: match` と `reproduction: faithful` は、**契約を弱めずに
+実装だけを直した**ことの機械可読な証拠になっている。
+
+### 5. 成功と区別されるべきケース
+
+```
+⚠ NO PROPERTIES  COMMON-LISP::CAR
+Selected 0 properties via cl-spec:semantic-data -> :properties-about (...).
+0 properties selected -- this is NOT a successful verification. ...
+verified: false
+```
+
+```
+UNRESOLVED SYMBOL
+Package SPEC-DEMO has no symbol named NO-SUCH-PROPERTY. It was looked up, not
+created: this tool never interns a name it was given.
+```
+
+```
+⚠ NOT VERIFIED                                    (timeout_seconds=0.01)
+[1] SPEC-DEMO::CLAMP-RESPECTS-HIGH  not-run
+    trials: none executed of 100 budget (property-profile)
+    the whole-call timeout_seconds budget was spent before this property
+    started; nothing about it was checked
+verified: false   0 passed, 0 failed, 0 errored, 0 timed out, 1 not run
+```
+
+cl-spec を一切ロードしない新規プロセス:
+
+```
+CL-SPEC package present: NIL
+spec-symbol -> {"status":"cl-spec-not-loaded", "verified":false,
+                "message":"... an empty answer here is NOT evidence that the
+                symbol has no contract."}
+repl-eval (+ 1 2) -> 3
+```
+
+### 6. 実証中に見つかり修正した欠陥
+
+| 欠陥 | 影響 | 修正 |
+|---|---|---|
+| 文字列リテラルの `\`+改行を行継続だと誤解 | 全メッセージに改行と行末空白が混入。content text のインデントが崩れ、`coverage` 等の JSON フィールドが段落になる | `concatenate 'string` へ。分割できない文字列は定数へ切り出し |
+| `Replay:` 行が先頭の結果を指す | 3 件中 3 件目が失敗したとき、再現する理由のない seed を返す | 最初に passed でない結果を指すよう変更 |
+| 引数エラーより可用性判定が先 | `property` と `symbol` の同時指定に対し「cl-spec 未ロード」と答え、誤った修正へ誘導 | 引数検査を可用性判定の前へ |
+| runtime join が名前を reader で読み戻す | エスケープの要る名前で別 symbol の signature を報告しうる | 読み戻して曖昧にならない名前のときだけ join し、それ以外は理由付きで null |
+| headline が失敗と未完了を区別しない | timeout が反例のように読める | `✓ VERIFIED` / `✗ FAILED` / `⚠ NOT VERIFIED` / `⚠ NO PROPERTIES` の 4 語へ |
+| 実行ゼロでも再現性の注記を出す | 再現するものが無い場面で毎回読まされる | seed のある結果があるときだけ出す |
+
+fixture は scratchpad にのみ存在し、cl-mcp / cl-spec のソースツリーにも
+稼働中の MCP worker にも残していない。

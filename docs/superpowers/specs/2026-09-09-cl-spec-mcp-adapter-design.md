@@ -279,6 +279,14 @@ tool 入力の symbol 文字列を解決するために任意の reader 評価�
 失敗時は `runtime: null` + `runtime_unavailable_reason` に理由を書く
 (**null と「取得しなかった」を区別する**)。
 
+`code-describe-symbol` は文字列引数を reader で読み戻すため、**エスケープが
+必要な名前(コロン・空白・縦棒を含む、あるいは小文字を含む symbol 名や
+package 名)の場合は join を行わず理由を返す**。無理に読ませると別の symbol
+に解決し、その signature をこの symbol の名前で報告しかねない。
+join は registry の事実に対する付加情報であって同一性ではない。
+symbol の解決自体は `find-symbol` の完全一致なので、この種の名前でも
+`spec-symbol` は正しく解決し、`runtime` だけが欠ける。
+
 Property 本文と source-form はここでは返さない(`body_omitted: true`)。
 概要から詳細へ辿れる形にし、省略したことを明示する(§72.6)。
 
@@ -324,6 +332,9 @@ condition を RPC エラーとして漏らさない。
 | `max_value_chars` | integer | 2000 | 反例 1 値あたりの printed 上限 |
 
 `property` と `symbol` の同時指定、どちらも無しは引数エラー。
+**この検査は cl-spec の可用性判定より前に行う。** 引数が誤っていることは
+cl-spec の状態と無関係であり、先に「cl-spec 未ロード」を返すと呼び出し側を
+誤った修正へ誘導する(`seed` の検査を API 解決より前に置くのと同じ理由)。
 
 ### 8.2 seed を文字列で扱う
 
@@ -502,34 +513,53 @@ tool 引数として公開しない。理由は §2.3 のとおり check-it back
 ## 9. content text
 
 MCP クライアントは `content[].text` しか描画しない。判断に必要な情報は
-必ずここに出す。`spec-check` の例:
+必ずここに出す。
+
+見出しは 4 種類にする。既存の `run-tests` の `✓ PASS` / `✗ FAIL` /
+`⚠ NO TESTS RAN` に合わせつつ、**反証された run と完走できなかった run を
+別の語で報告する**。1 語にまとめると timeout が反例のように読める。
+
+| 見出し | 条件 |
+|---|---|
+| `✓ VERIFIED` | 1 件以上選択され、全件 passed |
+| `✗ FAILED` | 1 件以上が failed |
+| `⚠ NOT VERIFIED` | failed は無いが timeout / error / not-run がある |
+| `⚠ NO PROPERTIES` | 選択が 0 件 |
+
+`spec-check` の実出力(§10.3 の実証より、値は実行結果そのもの):
 
 ```
-✗ FAILED  PROBE::ADD-IS-WRONG
-Selected 1 property for PROBE::ADD via the :about reverse index.
-  (direct :about registrations only -- not a change-impact analysis)
+✗ FAILED
+Selected 2 properties via cl-spec:semantic-data -> :properties-about (registry :about reverse index).
+  Direct (:about ...) registrations only. Callers, generic-function methods, macro users and shared mutable state are NOT analysed. This is not a change impact analysis (cl-spec specification 31 and 72.5).
 
-[1] PROBE::ADD-IS-WRONG  failed
-    trials: 1 executed of 100 budget (backend-default)
-    counterexample:        A = 68, B = 85
-    shrunk counterexample: A = 0,  B = 0
-      (backend-searched reduction; not a guaranteed global minimum)
-    seed: 3963993791726803706   profile: normal
-    definition_digest: a41f9c2b7d0e5518
+[1] SPEC-DEMO::CLAMP-RESPECTS-HIGH  failed
+    trials: 2 executed of 100 budget (property-profile)
+    counterexample:        VALUE = 62
+    shrunk counterexample: VALUE = 51
+      Backend-searched reduction. NOT a guaranteed global minimum, and the backend does not report whether shrinking completed, exhausted its budget or was interrupted (cl-spec specification 16 and 72.4).
+    seed: 3013752598065164257   profile: normal
+    definition_digest: aa4b67c3804d69b0
 
-verified: false   1 failed, 0 passed, 0 errored, 0 timed out
-Replay: spec-check property=PROBE::ADD-IS-WRONG seed=3963993791726803706
-        profile=normal expect_definition_digest=a41f9c2b7d0e5518
+[2] SPEC-DEMO::CLAMP-RESPECTS-LOW  passed
+    trials: 100 executed of 100 budget (backend-default)
+    seed: 2441597211547797803   profile: normal
+    definition_digest: 030c291c2298a4b5
+
+verified: false   1 passed, 1 failed, 0 errored, 0 timed out, 0 not run
+Replay: spec-check property=SPEC-DEMO::CLAMP-RESPECTS-HIGH seed=3013752598065164257 profile=normal expect_definition_digest=aa4b67c3804d69b0
+Regenerates the trial sequence from this seed under the same definitions, backend, profile and image. ...
 ```
+
+`Replay:` 行は**最初に passed でなかった結果**を指す。3 件中 3 件目が失敗した
+とき、1 件目の seed を返しても再現する理由がない。
 
 0 件の場合:
 
 ```
-⚠ NO PROPERTIES  PROBE::HELPER
-Selected 0 properties via the :about reverse index.
-0 properties selected -- this is NOT a successful verification.
-Nothing was executed. A registry with no (:about helper) property says
-nothing about whether HELPER is correct.
+⚠ NO PROPERTIES  COMMON-LISP::CAR
+Selected 0 properties via cl-spec:semantic-data -> :properties-about (registry :about reverse index).
+0 properties selected -- this is NOT a successful verification. Nothing was executed, and a registry with no property registered about this symbol says nothing about whether it is correct.
 verified: false
 ```
 
