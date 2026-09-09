@@ -39,6 +39,7 @@
            #:externalize-value
            #:digest-string
            #:printed-for-digest
+           #:print-form-bounded
            #:definition-digest))
 
 (in-package #:cl-mcp/src/spec-adapter-core)
@@ -355,6 +356,26 @@ Same reasoning as *VALUE-PRINT-LEVEL*: a list of a million elements costs a
 million steps to render even when only the first two thousand characters are
 kept.")
 
+(defun %drain-bounded (stream limit)
+  "Return (values RETAINED DROPPED) for a bounded STREAM written up to LIMIT.
+
+BOUNDED-OUTPUT-STRING appends a note of its own -- \"... (truncated, N total
+chars)\" -- when anything was dropped.  That note is right for a captured
+transcript and wrong for a value: it pushes the text past the caller's
+max_chars, restates the count the caller already gets as :OMITTED-CHARS, and
+puts a newline inside what is documented as a one-line rendering.  The
+retained text is exactly LIMIT characters whenever anything was dropped, since
+the sink stops accepting at LIMIT, so cutting there removes the note and
+nothing else."
+  ;; Nested rather than parallel: BOUNDED-OUTPUT-STRING drains the sink and
+  ;; resets the counters, so the dropped count has to be read first.
+  (let ((dropped (bounded-output-dropped stream)))
+    (let ((text (bounded-output-string stream)))
+      (values (if (plusp dropped)
+                  (subseq text 0 (min (length text) limit))
+                  text)
+              dropped))))
+
 (defun %print-bounded (value max-chars)
   "Return (values TEXT DROPPED) for VALUE, retaining at most MAX-CHARS.
 
@@ -372,8 +393,7 @@ notation instead of running forever."
               (*print-level* *value-print-level*)
               (*print-length* *value-print-length*))
           (prin1 value stream))
-        (let ((dropped (bounded-output-dropped stream)))
-          (values (bounded-output-string stream) dropped)))
+        (%drain-bounded stream (max 1 max-chars)))
     (serious-condition (condition)
       (values (format nil "#<error printing a ~A: ~A>"
                       (%value-type-name value) (type-of condition))
@@ -475,10 +495,41 @@ every other definition that shares its first megabyte."
               (*print-case* :upcase)
               (*read-default-float-format* 'double-float))
           (prin1 form stream))
-        (let ((dropped (bounded-output-dropped stream)))
-          (values (bounded-output-string stream) (plusp dropped))))
+        (multiple-value-bind (text dropped)
+            (%drain-bounded stream *digest-print-limit*)
+          (values text (plusp dropped))))
     (serious-condition (condition)
       (values (format nil "#<unprintable: ~A>" (type-of condition)) t))))
+
+(defun print-form-bounded (form max-chars)
+  "Return (values TEXT COMPLETE-P OMITTED-CHARS) for FORM at MAX-CHARS.
+
+Bounded on the way out rather than printed in full and cut afterwards.  The
+caller of a spec-describe asks for 8000 characters by default; rendering a
+megabyte to hand back eight kilobytes costs the megabyte, three times per
+property.  The sink counts what it discards, so the remainder reported here is
+the true one rather than the difference between two limits.
+
+Prints the way PRINTED-FOR-DIGEST does, so a body reads the same way it is
+hashed and a caller can compare the two by eye."
+  (let ((limit (max 1 max-chars)))
+    (handler-case
+        (let ((stream (make-bounded-output-stream limit)))
+          (let ((*package* (find-package "KEYWORD"))
+                (*print-circle* t)
+                (*print-pretty* nil)
+                (*print-readably* nil)
+                (*print-level* nil)
+                (*print-length* nil)
+                (*print-base* 10)
+                (*print-radix* nil)
+                (*print-case* :upcase)
+                (*read-default-float-format* 'double-float))
+            (prin1 form stream))
+          (multiple-value-bind (text dropped) (%drain-bounded stream limit)
+            (values text (zerop dropped) dropped)))
+      (serious-condition (condition)
+        (values (format nil "#<unprintable: ~A>" (type-of condition)) nil 0)))))
 
 (defun %collect-spec-references (spec-plist accumulator)
   "Push every :REFERENCE target reachable from SPEC-PLIST onto ACCUMULATOR.
@@ -493,8 +544,28 @@ AND or a LIST-OF node."
       (setf accumulator (%collect-spec-references child accumulator))))
   accumulator)
 
-(defun definition-digest (api property-name registry)
+(defun %spec-sort-key (entry)
+  "Return the ordering key for one (NAME . DATA) entry of a digest input.
+
+Package and name are kept apart, and read off the symbol rather than printed.
+PRINC-TO-STRING renders A::ACCOUNT and B::ACCOUNT both as \"ACCOUNT\", so two
+same-named specs from different packages tied and their order fell out of
+traversal instead of the sort -- in the one case the sort exists for.  It also
+followed *PRINT-CASE*, which a digest must not."
+  (let* ((symbol (car entry))
+         (package (symbol-package symbol)))
+    (concatenate 'string
+                 (if package (package-name package) "#:")
+                 "|"
+                 (symbol-name symbol))))
+
+(defun definition-digest (api property-name registry &key (property nil property-p))
   "Return (values DIGEST COMPLETE-P) for PROPERTY-NAME's definition.
+
+PROPERTY, when supplied, is PROPERTY-DATA's plist for the same name, already
+fetched by the caller.  Passing it is what keeps a listing of N properties to
+N calls rather than 2N: the digest needs exactly the data the summary beside
+it already read.
 
 DIGEST is NIL when the definition cannot be read at all.  COMPLETE-P is false
 when the printed input hit *DIGEST-PRINT-LIMIT*, in which case two definitions
@@ -510,8 +581,10 @@ different input domain and the run is not a reproduction of the earlier one.
 A reference to a spec that is not registered is recorded as unresolved rather
 than skipped, so the digest still changes if it is defined later."
   (handler-case
-      (let ((property (funcall (api-fn api :property-data)
-                               property-name :registry registry))
+      (let ((property (if property-p
+                          property
+                          (funcall (api-fn api :property-data)
+                                   property-name :registry registry)))
             (pending '())
             (seen (make-hash-table :test #'eq))
             (specs '()))
@@ -530,8 +603,6 @@ than skipped, so the digest still changes if it is defined later."
         (multiple-value-bind (text truncated)
             (printed-for-digest
              (list :property property
-                   :specs (sort specs #'string<
-                                :key (lambda (entry)
-                                       (princ-to-string (car entry))))))
+                   :specs (sort specs #'string< :key #'%spec-sort-key)))
           (values (digest-string text) (not truncated))))
     (error () (values nil nil))))

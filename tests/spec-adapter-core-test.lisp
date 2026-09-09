@@ -22,6 +22,7 @@
                 #:externalize-value
                 #:digest-string
                 #:printed-for-digest
+                #:print-form-bounded
                 #:definition-digest))
 
 (in-package #:cl-mcp/tests/spec-adapter-core-test)
@@ -167,6 +168,69 @@ Same name, different home package: the pair a resolver must not confuse."
                          (printed-for-digest (list symbol)))))
       (ok (string= in-cl-user in-fixture))
       (ok (search "CL-MCP-SPEC-FIXTURE-A" in-cl-user)))))
+
+(deftest externalize-value-keeps-the-sinks-note-out-of-the-value
+  (testing "printed stays within max-chars and carries no truncation note"
+    ;; BOUNDED-OUTPUT-STRING appends "... (truncated, N total chars)" of its
+    ;; own, which pushed the value past the caller's budget, restated
+    ;; omitted_chars, and put a newline inside a one-line rendering.
+    (let* ((data (externalize-value (make-list 200 :initial-element "aaaaaaaaaa")
+                                    :max-chars 40))
+           (printed (getf data :printed)))
+      (ok (<= (length printed) 40))
+      (ok (not (find #\Newline printed)))
+      (ok (not (search "truncated" printed)))
+      (ok (plusp (getf data :omitted-chars)))
+      (ok (not (getf data :printed-complete))))))
+
+(deftest print-form-bounded-reports-the-true-remainder
+  (testing "the form is cut at the budget and the remainder is the real one"
+    (let ((form (make-list 500 :initial-element :aaaaaaaaaa)))
+      (multiple-value-bind (text complete omitted) (print-form-bounded form 50)
+        (ok (<= (length text) 50))
+        (ok (not complete))
+        (ok (not (search "truncated" text)))
+        (testing "and the omitted count plus the kept text is the whole form"
+          (ok (= (+ (length text) omitted)
+                 (length (printed-for-digest form))))))
+      (testing "a form inside the budget is complete with nothing omitted"
+        (multiple-value-bind (text complete omitted) (print-form-bounded :x 100)
+          (ok (string= ":X" text))
+          (ok complete)
+          (ok (zerop omitted)))))))
+
+(deftest definition-digest-orders-same-named-specs-by-package
+  (testing "two specs named alike in two packages get distinct sort keys"
+    ;; PRINC-TO-STRING rendered both A::ACCOUNT and B::ACCOUNT as "ACCOUNT",
+    ;; so their order fell out of traversal rather than the sort -- in the one
+    ;; case the sort exists for.
+    (dolist (name '("CL-MCP-DIGEST-PKG-A" "CL-MCP-DIGEST-PKG-B"))
+      (unless (find-package name) (make-package name :use '())))
+    (let* ((a (intern "ACCOUNT" "CL-MCP-DIGEST-PKG-A"))
+           (b (intern "ACCOUNT" "CL-MCP-DIGEST-PKG-B"))
+           (property (list :name 'prop
+                           :arguments (list (list :variable 'x
+                                                  :spec (list :kind :reference
+                                                              :target a))
+                                            (list :variable 'y
+                                                  :spec (list :kind :reference
+                                                              :target b)))))
+           (api-for (lambda (a-min b-min)
+                      (make-cl-spec-api
+                       :functions
+                       (list :property-data
+                             (lambda (n &key registry)
+                               (declare (ignore n registry)) property)
+                             :spec-data
+                             (lambda (n &key registry)
+                               (declare (ignore registry))
+                               (list :name n :kind :range
+                                     :min (if (eq n a) a-min b-min))))))))
+      (let ((base (definition-digest (funcall api-for 0 1) 'prop nil))
+            (swapped (definition-digest (funcall api-for 1 0) 'prop nil)))
+        (testing "swapping which package holds which bound changes the digest"
+          (ok (stringp base))
+          (ok (not (string= base swapped))))))))
 
 (deftest definition-digest-follows-spec-references
   (testing "a change in a referenced spec changes the property's digest"

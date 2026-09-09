@@ -60,16 +60,21 @@ Examples:
     :description "Package for an unqualified symbol (default: COMMON-LISP-USER)")
    (include-runtime :type :boolean :json-name "include_runtime" :default t
     :description
-    "Join this image's signature, docstring and source location (default: true)"))
+    "Join this image's signature, docstring and source location (default: true)")
+   (timeout-seconds :type :number :json-name "timeout_seconds"
+    :description
+    "Deadline for reading the registry in seconds (default: 30). Digesting every property about a symbol is bounded work, but not free."))
   :body
-  (with-proxy-dispatch (id "worker/spec-symbol"
-                           (make-ht "symbol" symbol
-                                    "package" package
-                                    "include_runtime" include-runtime))
-    (result id (spec-symbol-response
-                (make-ht "symbol" symbol
+  ;; One binding, used by both branches of WITH-PROXY-DISPATCH.  Marshalling
+  ;; the arguments twice means keeping two copies in step by hand, and a
+  ;; divergence would make the pooled and inline paths answer differently for
+  ;; the same call with no test able to see it.
+  (let ((params (make-ht "symbol" symbol
                          "package" package
-                         "include_runtime" include-runtime)))))
+                         "include_runtime" include-runtime
+                         "timeout_seconds" timeout-seconds)))
+    (with-proxy-dispatch (id "worker/spec-symbol" params)
+      (result id (spec-symbol-response params)))))
 
 (define-tool "spec-describe"
   :description
@@ -101,18 +106,17 @@ Examples:
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (max-chars :type :integer :json-name "max_chars"
-    :description "Maximum characters of body and source form (default: 8000)"))
+    :description "Maximum characters of body and source form (default: 8000)")
+   (timeout-seconds :type :number :json-name "timeout_seconds"
+    :description "Deadline for reading the registry in seconds (default: 30)"))
   :body
-  (with-proxy-dispatch (id "worker/spec-describe"
-                           (make-ht "kind" kind
-                                    "name" name
-                                    "package" package
-                                    "max_chars" max-chars))
-    (result id (spec-describe-response
-                (make-ht "kind" kind
+  (let ((params (make-ht "kind" kind
                          "name" name
                          "package" package
-                         "max_chars" max-chars)))))
+                         "max_chars" max-chars
+                         "timeout_seconds" timeout-seconds)))
+    (with-proxy-dispatch (id "worker/spec-describe" params)
+      (result id (spec-describe-response params)))))
 
 (define-tool "spec-check"
   :description

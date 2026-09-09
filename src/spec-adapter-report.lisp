@@ -24,7 +24,8 @@
                 #:symbol-data
                 #:externalize-value
                 #:definition-digest
-                #:printed-for-digest)
+                #:printed-for-digest
+                #:print-form-bounded)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -162,12 +163,14 @@ trailing spaces into every message and every JSON field carrying one.")
 (defun %print-bounded-form (form max-chars)
   "Return (values TEXT COMPLETE-P OMITTED-CHARS) for FORM at MAX-CHARS.
 
-Uses the digest printer so a body reads the same way it is hashed, which is
-what lets a caller compare the two by eye."
-  (let ((text (printed-for-digest form)))
-    (if (<= (length text) max-chars)
-        (values text t 0)
-        (values (subseq text 0 max-chars) nil (- (length text) max-chars)))))
+Delegates to PRINT-FORM-BOUNDED, which stops at the budget instead of
+rendering the whole form and cutting.  The previous spelling measured the text
+PRINTED-FOR-DIGEST had already truncated at its own million-character limit,
+so a larger form reported the wrong remainder -- and reported itself complete
+whenever MAX-CHARS reached that limit.  It also fed MAX-CHARS straight to
+SUBSEQ as an end index, where a negative value signalled a type error that the
+caller above then mislabelled."
+  (print-form-bounded form (max 1 max-chars)))
 
 (defun %plainly-printable-p (name)
   "Return true when NAME needs no escaping to be read back as itself.
@@ -217,10 +220,13 @@ reported and the caller carries on."
            (values nil (princ-to-string condition))))))))
 
 (defun %spec-summary (spec-plist)
-  "Return the one-line summary of an argument's spec used in a listing.
+  "Return the one-line summary of an argument's spec, or NIL when there is none.
 
-The whole spec tree belongs in spec-describe; here a caller needs only enough
-to see which spec generates the argument."
+Guarded rather than assumed to be a plist: an argument whose :SPEC is NIL --
+or anything that is not a list -- must answer \"no spec\" rather than signal
+into the caller's handler and take the whole listing entry down with it."
+  (unless (and spec-plist (listp spec-plist))
+    (return-from %spec-summary nil))
   (list :kind (getf spec-plist :kind)
         :name (let ((name (getf spec-plist :name)))
                 (when name (symbol-data name)))
@@ -250,7 +256,10 @@ wrote.  BODY-OMITTED says so rather than leaving a reader to infer it."
                               (when table (printed-for-digest table)))
               :shrink-enabled (getf (getf data :metadata) :shrink)
               :source-location (getf data :source-location)
-              :definition-digest (definition-digest api name registry)
+              ;; The digest is derived from the data already in hand.  Left
+              ;; to fetch its own, a listing of N properties made 2N calls.
+              :definition-digest (definition-digest api name registry
+                                                    :property data)
               :body-forms (length (getf data :body))
               :body-omitted t
               :detail-via "spec-describe kind=property"))
@@ -279,10 +288,26 @@ that is a signature and a source location belongs to cl-mcp)."
                 :reason reason
                 :input designator
                 :environment environment)))
-      (let* ((registry (funcall (api-fn api :registry)))
-             (routing (funcall (api-fn api :semantic-data) symbol
-                               :registry registry))
-             (about (getf routing :properties-about)))
+      (multiple-value-bind (registry routing failure)
+          (handler-case
+              (let ((registry (funcall (api-fn api :registry))))
+                (values registry
+                        (funcall (api-fn api :semantic-data) symbol
+                                 :registry registry)
+                        nil))
+            (error (condition) (values nil nil condition)))
+        (when failure
+          ;; The module answers with a status rather than signalling, and
+          ;; this call was the one place that did not.  RESOLVE-CL-SPEC-API
+          ;; only checks FBOUNDP, so a cl-spec whose signatures drifted
+          ;; resolves to :OK and then signals a PROGRAM-ERROR out of the tool.
+          (return-from symbol-report
+            (list :status :internal-error
+                  :symbol (symbol-data symbol)
+                  :message (format nil "cl-spec signalled while reading what ~
+is registered about this symbol: ~A" failure)
+                  :environment environment)))
+        (let ((about (getf routing :properties-about)))
         (multiple-value-bind (runtime runtime-reason)
             (if include-runtime (%runtime-data symbol) (values nil nil))
           (list :status :ok
@@ -310,11 +335,23 @@ that is a signature and a source location belongs to cl-mcp)."
                         (list "properties_about lists direct (:about ...) registrations only")
                         (when (getf routing :property)
                           (list +symbol-is-a-property-note+)))
-                :environment environment))))))
+                :environment environment)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; spec-describe
 ;;; ---------------------------------------------------------------------------
+
+(defun %unknown-registration-p (api condition)
+  "Return true when CONDITION is cl-spec saying a name is not registered.
+
+Asked of the API's condition classes rather than of the message, and false
+when the classes are unavailable: mistaking an internal failure for an absent
+registration is the expensive direction, so an image whose cl-spec predates
+UNKNOWN-SPEC reports the failure as a failure."
+  (flet ((is-a (key)
+           (let ((class (api-class api key)))
+             (and class (typep condition class)))))
+    (or (is-a :unknown-spec) (is-a :unknown-property))))
 
 (defparameter +function-spec-unsupported-message+
   (concatenate 'string
@@ -326,11 +363,16 @@ that is a signature and a source location belongs to cl-mcp)."
   "Said when spec-describe is asked for a function spec.")
 
 (defun %spec-tree (spec-plist)
-  "Return SPEC-PLIST with its symbols externalized, children included.
+  "Return SPEC-PLIST with its symbols externalized, or NIL when there is none.
 
 Kept as a projection of cl-spec's own SPEC-DATA rather than a re-derivation:
-every key here comes straight across, and nothing is computed on this side."
-  (when (listp spec-plist)
+every key here comes straight across, and nothing is computed on this side.
+
+The guard tests for a non-empty list, not merely for a list.  LISTP is true of
+NIL, so an argument with no spec used to render as a full node of nulls whose
+source_form was the literal string \"NIL\" -- a spec nobody wrote, described
+to the caller as one that exists."
+  (when (and spec-plist (listp spec-plist))
     (list :kind (getf spec-plist :kind)
           :name (let ((name (getf spec-plist :name)))
                   (when name (symbol-data name)))
@@ -424,18 +466,25 @@ function-spec; got ~S" kind)
                 :name (symbol-data symbol)
                 :message +function-spec-unsupported-message+
                 :environment environment)))
-      (let ((registry (funcall (api-fn api :registry))))
-        (handler-case
+      (handler-case
+          (let ((registry (funcall (api-fn api :registry))))
             (append (if (string= kind "property")
                         (%describe-property api symbol registry max-chars)
                         (%describe-spec api symbol registry max-chars))
-                    (list :environment environment))
-          (error (condition)
-            (list :status :not-registered
-                  :kind kind
-                  :name (symbol-data symbol)
-                  :message (princ-to-string condition)
-                  :environment environment)))))))
+                    (list :environment environment)))
+        (error (condition)
+          ;; Only cl-spec's own "no such name" conditions become
+          ;; :NOT-REGISTERED.  A blanket mapping reported every internal
+          ;; failure -- a bad argument, a printer error, a malformed
+          ;; :ARGUMENTS entry -- as the absence of a registration, which is
+          ;; exactly the false negative this file exists to prevent.
+          (list :status (if (%unknown-registration-p api condition)
+                            :not-registered
+                            :internal-error)
+                :kind kind
+                :name (symbol-data symbol)
+                :message (princ-to-string condition)
+                :environment environment))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; spec-check
@@ -613,8 +662,17 @@ appears in the property's trials table (see spec-describe)."
     (if (null name)
         (values nil nil (list :status :unresolved-symbol :reason reason
                               :input symbol))
-        (let* ((routing (funcall (api-fn api :semantic-data) name
-                                 :registry registry))
+        (let* ((routing (handler-case
+                            (funcall (api-fn api :semantic-data) name
+                                     :registry registry)
+                          (error (condition)
+                            (return-from %select-about
+                              (values nil nil
+                                      (list :status :internal-error
+                                            :name (symbol-data name)
+                                            :message
+                                            (format nil "cl-spec signalled ~
+while listing the properties about this symbol: ~A" condition)))))))
                (about (getf routing :properties-about)))
           (values about
                   (list :mode "about"
@@ -672,19 +730,25 @@ truth is that nothing was read."
         (list :argument-count (length (getf data :arguments))
               :shrink-enabled (and (getf (getf data :metadata) :shrink) t)
               :trials-table (getf data :trials)
+              ;; Carried so the digest beside it does not fetch the same
+              ;; plist again.
+              :data data
               :known t))
     (error ()
       (list :argument-count nil :shrink-enabled nil :trials-table nil
-            :known nil))))
+            :data nil :known nil))))
 
-(defun %digest-facts (api name registry)
+(defun %digest-facts (api name registry facts)
   "Return (:value <string-or-nil> :complete <boolean>) for NAME's digest.
 
 Carried as one plist rather than two arguments because the pair travels
 together everywhere: a digest whose input was truncated is not a digest a
 caller may compare, and separating them invites reporting the value without
 the caveat."
-  (multiple-value-bind (value complete) (definition-digest api name registry)
+  (multiple-value-bind (value complete)
+      (if (getf facts :known)
+          (definition-digest api name registry :property (getf facts :data))
+          (definition-digest api name registry))
     (list :value value :complete (and value complete t))))
 
 (defun %trials-budget (api facts profile backend)
@@ -813,13 +877,21 @@ counterexample cannot be told from a missing one")
           :elapsed (funcall (api-fn api :result-elapsed) result)
           :definition-digest (getf digest :value)
           :definition-digest-complete (getf digest :complete)
-          :definition-match
-          (let ((value (getf digest :value)))
-            (cond ((null expected-digest) :not-checked)
-                  ((and value (getf digest :complete)
-                        (string-equal value expected-digest))
-                   :true)
-                  (t :false))))))
+          :definition-match (%definition-match digest expected-digest))))
+
+(defun %definition-match (digest expected)
+  "Return how DIGEST compares to EXPECTED: one of four answers, not two.
+
+:UNKNOWN is the one that was missing.  A digest the adapter could not compute,
+or one whose input hit the print limit, is not a digest that disagrees -- and
+reporting it as :FALSE told a caller re-running against an unchanged image
+that its definitions had moved, which is grounds for throwing away a
+reproduction that was in fact faithful."
+  (let ((value (getf digest :value)))
+    (cond ((null expected) :not-checked)
+          ((or (null value) (not (getf digest :complete))) :unknown)
+          ((string-equal value expected) :true)
+          (t :false))))
 
 (defun %elapsed-since (start)
   "Return the seconds elapsed since internal real time START."
@@ -905,16 +977,42 @@ budget computed from one backend and the trials run under another."
 the run's own machinery."
   (member status '(:passed :failed :error :skipped :pending)))
 
+(defparameter +named-count-statuses+
+  '((:passed . :passed) (:failed . :failed) (:error . :errored)
+    (:timeout . :timed-out) (:not-run . :not-run))
+  "Statuses with a field of their own in the counts plist.")
+
 (defun %counts (results)
-  "Return the per-status tally of RESULTS."
+  "Return the per-status tally of RESULTS.
+
+BY-STATUS covers every status that occurred, not only the five with fields of
+their own.  The named fields alone lost :GENERATOR-ERROR, :BACKEND-ERROR,
+:INTERNAL-ERROR and :NOT-REGISTERED entirely, so a selection of one property
+whose run blew up reported one selected and zero of everything -- a run that
+failed outright, reading as a run in which nothing went wrong.  OTHER is the
+same total in one number, and SELECTED always equals the sum."
   (flet ((tally (status)
            (count status results :key (lambda (result) (getf result :status)))))
-    (list :selected (length results)
-          :passed (tally :passed)
-          :failed (tally :failed)
-          :errored (tally :error)
-          :timed-out (tally :timeout)
-          :not-run (tally :not-run))))
+    (let ((by-status '()))
+      (dolist (result results)
+        (let* ((status (getf result :status))
+               (entry (assoc status by-status)))
+          (if entry
+              (incf (cdr entry))
+              (push (cons status 1) by-status))))
+      (list :selected (length results)
+            :passed (tally :passed)
+            :failed (tally :failed)
+            :errored (tally :error)
+            :timed-out (tally :timeout)
+            :not-run (tally :not-run)
+            :other (count-if-not (lambda (result)
+                                   (assoc (getf result :status)
+                                          +named-count-statuses+))
+                                 results)
+            :by-status (sort by-status #'string<
+                             :key (lambda (entry)
+                                    (princ-to-string (car entry))))))))
 
 (defun %evaluated-p (result)
   "Return true when RESULT records at least one trial actually evaluated.
@@ -1005,6 +1103,20 @@ anything holds."
                     :selection selection
                     :results nil
                     :counts (%counts nil)
+                    ;; Carried explicitly, even though nothing ran: the
+                    ;; builder reads these keys, and an absent
+                    ;; :REPRODUCTION-FAITHFUL published as "unfaithful" --
+                    ;; an unfaithful reproduction of a run that never
+                    ;; happened, for a call that requested no comparison.
+                    :profile profile-keyword
+                    :timeout-seconds (or timeout-seconds
+                                         *default-check-timeout-seconds*)
+                    :thread-leaked nil
+                    :worker-reuse :safe
+                    :elapsed 0
+                    :options nil
+                    :options-note +options-note+
+                    :reproduction-faithful :not-checked
                     :message +zero-properties-message+
                     :environment environment)))
           (when (and seed (rest names))
@@ -1012,6 +1124,7 @@ anything holds."
               (list :status :invalid-arguments
                     :verified nil
                     :selection selection
+                    :reproduction-faithful :not-checked
                     :message +seed-needs-one-property-message+
                     :environment environment)))
           (let ((budget (or timeout-seconds *default-check-timeout-seconds*))
@@ -1027,7 +1140,7 @@ anything holds."
             (dolist (name names)
               (let* ((facts (%property-facts api name registry))
                      (trials (%trials-budget api facts profile-keyword backend))
-                     (digest (%digest-facts api name registry))
+                     (digest (%digest-facts api name registry facts))
                      (remaining (- budget (%elapsed-since start)))
                      (result (%run-one api name registry profile-keyword seed
                                        trials digest expect-definition-digest
@@ -1073,9 +1186,16 @@ anything holds."
                   ;; is to have reproduced the earlier run.
                   :reproduction-faithful
                   (cond ((null expect-definition-digest) :not-checked)
+                        ((find :unknown results
+                               :key (lambda (result)
+                                      (getf result :definition-match)))
+                         :unknown)
                         ((every (lambda (result)
                                   (eq :true (getf result :definition-match)))
                                 results)
-                         t)
-                        (t nil))
+                         :true)
+                        ;; :FALSE rather than NIL: absence of a verdict and a
+                        ;; verdict of "not faithful" are different answers,
+                        ;; and NIL was carrying both.
+                        (t :false))
                   :environment environment)))))))

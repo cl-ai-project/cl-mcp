@@ -83,7 +83,7 @@ Status keywords cross the boundary as text rather than as JSON identifiers:
            "cl_spec_system_directory" (getf data :cl-spec-system-directory)
            "generator_backend" (getf data :generator-backend)
            "backend_available" (json-bool (getf data :backend-available))
-           "registry" (getf data :registry)
+           "registry" (sanitize-for-json (getf data :registry))
            "missing" (coerce (getf data :missing) 'vector)
            "lisp" (getf data :lisp)))
 
@@ -109,7 +109,7 @@ towards retrying rather than towards loading the system."
   (make-ht "schema_version" +schema-version+
            "status" (%keyword-string (getf report :status))
            "verified" (json-bool nil)
-           "message" (getf report :message)
+           "message" (sanitize-for-json (getf report :message))
            "environment" (%environment-ht (getf report :environment))
            "content" (text-content
                       (format nil "~A~%~%~A"
@@ -151,7 +151,7 @@ created: this tool never interns a name it was given."
   (make-ht "schema_version" +schema-version+
            "status" (%keyword-string (getf report :status))
            "name" (%symbol-ht (getf report :name))
-           "message" (getf report :message)
+           "message" (sanitize-for-json (getf report :message))
            "environment" (%environment-ht (getf report :environment))
            "content" (text-content
                       (format nil "~A~@[ ~A~]~%~%~A"
@@ -169,7 +169,7 @@ created: this tool never interns a name it was given."
            "kind" (%keyword-string (getf data :kind))
            "tags" (%strings (getf data :tags))
            "targets" (%symbol-hts (getf data :targets))
-           "documentation" (getf data :documentation)
+           "documentation" (sanitize-for-json (getf data :documentation))
            "arguments"
            (coerce (mapcar (lambda (argument)
                              (let ((spec (getf argument :spec)))
@@ -183,14 +183,17 @@ created: this tool never interns a name it was given."
                                                            (getf spec :target))))))
                            (getf data :arguments))
                    'vector)
-           "trials_table" (getf data :trials-table)
+           "trials_table" (sanitize-for-json (getf data :trials-table))
            "shrink_enabled" (json-bool (getf data :shrink-enabled))
            "source_location" (%source-location-ht (getf data :source-location))
            "definition_digest" (getf data :definition-digest)
            "body_forms" (getf data :body-forms)
            "body_omitted" (json-bool (getf data :body-omitted))
            "detail_via" (getf data :detail-via)
-           "unavailable_reason" (getf data :unavailable-reason)))
+           ;; A raw PRINC of a condition, so caller-controlled text like any
+           ;; docstring: the sanitizer applies for the same reason it does
+           ;; four lines up.
+           "unavailable_reason" (sanitize-for-json (getf data :unavailable-reason))))
 
 (defun %format-symbol-runtime (stream report)
   "Write the runtime half of the spec-symbol text to STREAM."
@@ -259,6 +262,8 @@ system defining them may simply not be loaded.")
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
+    ((:internal-error :timeout :invalid-arguments)
+     (%simple-status-response report))
     (t
      (let ((registry (getf report :registry))
            (runtime (getf report :runtime)))
@@ -267,11 +272,13 @@ system defining them may simply not be loaded.")
                 "symbol" (%symbol-ht (getf report :symbol))
                 "runtime" (when runtime
                             (make-ht "type" (getf runtime :type)
-                                     "arglist" (getf runtime :arglist)
-                                     "documentation" (getf runtime :documentation)
+                                     "arglist" (sanitize-for-json (getf runtime :arglist))
+                                     "documentation" (sanitize-for-json
+                                                      (getf runtime :documentation))
                                      "source_file" (getf runtime :source-file)
                                      "source_line" (getf runtime :source-line)))
-                "runtime_unavailable_reason" (getf report :runtime-unavailable-reason)
+                "runtime_unavailable_reason" (sanitize-for-json
+                                              (getf report :runtime-unavailable-reason))
                 "registry"
                 (make-ht "spec" (%symbol-ht (getf registry :spec))
                          "function_spec" (%symbol-ht (getf registry :function-spec))
@@ -350,7 +357,7 @@ to see the rest; the text above is a preview, not a form that can be read back."
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
-    ((:not-registered :unsupported :invalid-arguments)
+    ((:not-registered :unsupported :invalid-arguments :internal-error :timeout)
      (%simple-status-response report))
     (t
      (make-ht "schema_version" +schema-version+
@@ -360,8 +367,8 @@ to see the rest; the text above is a preview, not a form that can be read back."
               "property_kind" (%keyword-string (getf report :property-kind))
               "tags" (%strings (getf report :tags))
               "targets" (%symbol-hts (getf report :targets))
-              "documentation" (getf report :documentation)
-              "trials_table" (getf report :trials-table)
+              "documentation" (sanitize-for-json (getf report :documentation))
+              "trials_table" (sanitize-for-json (getf report :trials-table))
               "shrink_enabled" (json-bool (getf report :shrink-enabled))
               "arguments"
               (coerce (mapcar (lambda (argument)
@@ -387,18 +394,40 @@ to see the rest; the text above is a preview, not a form that can be read back."
 ;;; spec-check
 ;;; ---------------------------------------------------------------------------
 
+(defun %by-status-ht (by-status)
+  "Return the status-to-count alist as a hash-table keyed by status name."
+  (let ((table (make-hash-table :test #'equal)))
+    (loop for (status . count) in by-status
+          do (setf (gethash (%keyword-string status) table) count))
+    table))
+
 (defun %match-string (value)
-  "Return a definition-match keyword as the word the tool documents."
+  "Return a definition-match keyword as the word the tool documents.
+
+Four answers.  \"unknown\" is the digest that could not be computed or whose
+input was truncated: it disagrees with nothing, and calling it a mismatch told
+a caller its definitions had moved when all that happened was that they could
+not be read."
   (case value
     (:true "match")
     (:false "mismatch")
+    (:unknown "unknown")
     (t "not-checked")))
 
 (defun %faithful-string (value)
-  "Return the reproduction-faithful value as a documented word."
-  (cond ((eq value :not-checked) "not-checked")
-        (value "faithful")
-        (t "unfaithful")))
+  "Return the reproduction-faithful value as a documented word.
+
+Four answers, and NIL is not one of them.  A report that carries no verdict at
+all -- a selection of zero, where nothing ran and no digest was requested --
+was being published as an unfaithful reproduction of a run that never
+happened, because \"unfaithful\" was the fallback for both an absent key and a
+real disagreement.  CHECK-REPORT now says :FALSE for the disagreement."
+  (case value
+    (:true "faithful")
+    (:false "unfaithful")
+    (:unknown "unknown")
+    ;; NIL included: a report with no verdict at all has not been checked.
+    (t "not-checked")))
 
 (defun %trials-ht (trials)
   "Return the trial budget plist as a hash-table."
@@ -439,7 +468,7 @@ to see the rest; the text above is a preview, not a form that can be read back."
            "definition_digest_complete" (json-bool
                                          (getf result :definition-digest-complete))
            "definition_match" (%match-string (getf result :definition-match))
-           "message" (getf result :message)))
+           "message" (sanitize-for-json (getf result :message))))
 
 (defun %format-values (entries)
   "Return \"A = 68, B = 85\" for a counterexample, or NIL when there is none."
@@ -538,12 +567,12 @@ not reach a verdict"))
                                           (eq :passed (getf result :status)))
                                         results)
                            (first results))))
-    (format stream "~&~%verified: ~A   ~D passed, ~D failed, ~D errored, ~
-~D timed out, ~D not run"
+    (format stream "~&~%verified: ~A   ~D selected: ~{~A~^, ~}"
             (if (getf report :verified) "true" "false")
-            (getf counts :passed) (getf counts :failed)
-            (getf counts :errored) (getf counts :timed-out)
-            (getf counts :not-run))
+            (getf counts :selected)
+            (or (loop for (status . count) in (getf counts :by-status)
+                      collect (format nil "~D ~(~A~)" count status))
+                (list "nothing ran")))
     ;; Printed for any timeout, not only a leaked thread.  A stopped thread
     ;; is not evidence that what it was doing was undone.
     (when (getf report :worker-reuse-message)
@@ -610,7 +639,8 @@ was learned either way."
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
-    ((:not-registered :invalid-arguments :backend-not-loaded)
+    ((:not-registered :invalid-arguments :backend-not-loaded :internal-error
+      :timeout)
      (let ((response (%simple-status-response report)))
        (setf (gethash "verified" response) (json-bool nil))
        response))
@@ -638,7 +668,12 @@ was learned either way."
                                   "failed" (getf counts :failed)
                                   "errored" (getf counts :errored)
                                   "timed_out" (getf counts :timed-out)
-                                  "not_run" (getf counts :not-run))
+                                  "not_run" (getf counts :not-run)
+                                  "other" (getf counts :other)
+                                  ;; Every status that occurred, so a tally
+                                  ;; that does not sum to selected cannot
+                                  ;; hide a status without a field of its own.
+                                  "by_status" (%by-status-ht (getf counts :by-status)))
                 "profile" (%keyword-string (getf report :profile))
                 "timeout_seconds" (getf report :timeout-seconds)
                 "thread_leaked" (json-bool (getf report :thread-leaked))

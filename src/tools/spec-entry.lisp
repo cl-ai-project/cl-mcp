@@ -19,10 +19,13 @@
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:export #:spec-symbol-response
            #:spec-describe-response
            #:spec-check-response
-           #:parse-seed-string))
+           #:parse-seed-string
+           #:*default-introspection-timeout-seconds*))
 
 (in-package #:cl-mcp/src/tools/spec-entry)
 
@@ -54,6 +57,26 @@ text." text)))
   (let ((value (and params (gethash name params))))
     (when (and (stringp value) (plusp (length value))) value)))
 
+(defun %positive-integer-arg (params name default)
+  "Return (values N NIL) for a positive integer argument, or (values NIL MESSAGE).
+
+An absent argument takes DEFAULT.  Validated here rather than left to the
+consumer: a negative character budget reached SUBSEQ as an end index and
+signalled a type error, which the layer above then reported as \"this name is
+not registered\"."
+  (let ((value (and params (gethash name params))))
+    (cond
+      ((null value) (values default nil))
+      ((and (integerp value) (plusp value)) (values value nil))
+      (t (values nil (format nil "~A must be a positive integer, got ~S"
+                             name value))))))
+
+(defun %argument-error-response (message builder)
+  "Return BUILDER's response for an argument MESSAGE, before cl-spec is asked."
+  (funcall builder
+           (list :status :invalid-arguments :verified nil :message message
+                 :environment (%environment-stub))))
+
 (defun %environment-stub ()
   "Return the environment plist for an answer given before cl-spec was asked.
 
@@ -66,47 +89,93 @@ response that never looked at either."
                       (lisp-implementation-type)
                       (lisp-implementation-version))))
 
+(defvar *default-introspection-timeout-seconds* 30
+  "Budget for spec-symbol and spec-describe when the caller names none.
+
+They read rather than run, but reading is not free: a listing digests every
+property registered about a symbol, and a digest walks that property's whole
+transitive spec closure and prints it.  Without a deadline a large registry
+could hold the worker past the proxy's own ceiling, and a proxy timeout is not
+a timeout report -- it kills the worker and resets the session's Lisp state.")
+
+(defun %within-deadline (params builder thunk)
+  "Run THUNK under the request's deadline, or answer with a timeout report."
+  (multiple-value-bind (seconds message)
+      (%positive-integer-arg params "timeout_seconds"
+                             *default-introspection-timeout-seconds*)
+    (if message
+        (%argument-error-response message builder)
+        (multiple-value-bind (value status leaked)
+            (call-with-deadline-thread thunk seconds :name "mcp-spec-read")
+          (if (eq status :ok)
+              (first value)
+              (funcall builder
+                       (list :status :timeout
+                             :verified nil
+                             :message
+                             (format nil "reading the registry exceeded its ~
+~A second deadline~:[ and its thread was stopped~; and its thread could not be ~
+stopped, so this worker should be replaced~]. Nothing was read; raise ~
+timeout_seconds or narrow the request."
+                                     seconds leaked)
+                             :environment (%environment-stub))))))))
+
 (defun spec-symbol-response (params)
   "Return the spec-symbol response hash-table for PARAMS."
-  (multiple-value-bind (api status) (resolve-cl-spec-api)
-    (build-spec-symbol-response
-     (symbol-report api status (gethash "symbol" params)
-                    :package (%string-arg params "package")
-                    :include-runtime (multiple-value-bind (value present)
-                                         (gethash "include_runtime" params)
-                                       (if present value t))))))
+  (%within-deadline
+   params #'build-spec-symbol-response
+   (lambda ()
+     (multiple-value-bind (api status) (resolve-cl-spec-api)
+       (build-spec-symbol-response
+        (symbol-report api status (gethash "symbol" params)
+                       :package (%string-arg params "package")
+                       :include-runtime (multiple-value-bind (value present)
+                                            (gethash "include_runtime" params)
+                                          (if present value t))))))))
 
 (defun spec-describe-response (params)
   "Return the spec-describe response hash-table for PARAMS."
-  (multiple-value-bind (api status) (resolve-cl-spec-api)
-    (build-spec-describe-response
-     (describe-report api status
-                      (gethash "kind" params)
-                      (gethash "name" params)
-                      :package (%string-arg params "package")
-                      :max-chars (or (gethash "max_chars" params) 8000)))))
+  (multiple-value-bind (max-chars message)
+      (%positive-integer-arg params "max_chars" 8000)
+    (if message
+        (%argument-error-response message #'build-spec-describe-response)
+        (%within-deadline
+         params #'build-spec-describe-response
+         (lambda ()
+           (multiple-value-bind (api status) (resolve-cl-spec-api)
+             (build-spec-describe-response
+              (describe-report api status
+                               (gethash "kind" params)
+                               (gethash "name" params)
+                               :package (%string-arg params "package")
+                               :max-chars max-chars))))))))
 
 (defun spec-check-response (params)
   "Return the spec-check response hash-table for PARAMS.
 
 An unusable seed is answered here rather than passed on: a run started with a
 seed the caller did not mean is a run whose result means nothing."
+  ;; The raw value, not %STRING-ARG's: that filter turned a JSON number or an
+  ;; empty string into NIL, and NIL means "no seed given" -- so the run went
+  ;; ahead with a fresh random seed and reported it as though it were the
+  ;; caller's.  A seed that cannot be honoured has to be refused, which is
+  ;; the whole reason it travels as text.
   (multiple-value-bind (seed seed-error)
-      (parse-seed-string (%string-arg params "seed"))
-    (if seed-error
-        (build-spec-check-response
-         (list :status :invalid-arguments :verified nil :message seed-error
-               :environment (%environment-stub)))
-        (multiple-value-bind (api status) (resolve-cl-spec-api)
-          (build-spec-check-response
-           (check-report api status
-                         :property (%string-arg params "property")
-                         :symbol (%string-arg params "symbol")
-                         :package (%string-arg params "package")
-                         :profile (%string-arg params "profile")
-                         :seed seed
-                         :expect-definition-digest
-                         (%string-arg params "expect_definition_digest")
-                         :timeout-seconds (gethash "timeout_seconds" params)
-                         :max-value-chars (or (gethash "max_value_chars" params)
-                                              2000)))))))
+      (parse-seed-string (and params (gethash "seed" params)))
+    (multiple-value-bind (max-value-chars chars-error)
+        (%positive-integer-arg params "max_value_chars" 2000)
+      (let ((message (or seed-error chars-error)))
+        (if message
+            (%argument-error-response message #'build-spec-check-response)
+            (multiple-value-bind (api status) (resolve-cl-spec-api)
+              (build-spec-check-response
+               (check-report api status
+                             :property (%string-arg params "property")
+                             :symbol (%string-arg params "symbol")
+                             :package (%string-arg params "package")
+                             :profile (%string-arg params "profile")
+                             :seed seed
+                             :expect-definition-digest
+                             (%string-arg params "expect_definition_digest")
+                             :timeout-seconds (gethash "timeout_seconds" params)
+                             :max-value-chars max-value-chars))))))))

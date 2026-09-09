@@ -23,6 +23,17 @@
 
 (in-package #:cl-mcp/tests/spec-adapter-report-test)
 
+(define-condition fixture-unknown-name (error)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (format stream "No such name is registered.")))
+  (:documentation "Stands in for cl-spec's UNKNOWN-SPEC / UNKNOWN-PROPERTY.
+
+The adapter tells \"not registered\" from \"something went wrong reading it\"
+by asking the API's condition classes, so a stub that signals a plain ERROR
+exercises the internal-error path, not the not-registered one."))
+
 (defun %fixture-package ()
   "Return a package holding the symbols these tests talk about."
   (let ((package (or (find-package "CL-MCP-SPEC-REPORT-FIXTURE")
@@ -46,6 +57,8 @@ OVERRIDES come first in the plist, so GETF finds them before the defaults."
   (make-cl-spec-api
    :version "0.1.0"
    :system-directory "/tmp/cl-spec/"
+   :classes (list :unknown-spec 'fixture-unknown-name
+                  :unknown-property 'fixture-unknown-name)
    :functions
    (append
     overrides
@@ -69,7 +82,7 @@ OVERRIDES come first in the plist, so GETF finds them before the defaults."
      (lambda (name &key registry)
        (declare (ignore registry))
        (unless (eq name (%sym "ADD-COMMUTES"))
-         (error "No property named ~S is registered." name))
+         (error 'fixture-unknown-name))
        (list :name (%sym "ADD-COMMUTES")
              :kind :commutativity
              :targets (list (%sym "ADD"))
@@ -89,7 +102,7 @@ OVERRIDES come first in the plist, so GETF finds them before the defaults."
      (lambda (name &key registry)
        (declare (ignore registry))
        (unless (eq name (%sym "SMALL-INT"))
-         (error "No spec named ~S is registered." name))
+         (error 'fixture-unknown-name))
        (list :name (%sym "SMALL-INT") :kind :range :base-type nil
              :min 0 :max 100
              :source-form '(range 0 100) :source-location nil))))))
@@ -457,7 +470,7 @@ thread sees the value the caller captured rather than the global one.")
                    :ok
                    :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
                    :expect-definition-digest "0000000000000000")))
-      (ok (not (getf report :reproduction-faithful)))
+      (ok (eq :false (getf report :reproduction-faithful)))
       (let ((result (first (getf report :results))))
         (ok (eq :false (getf result :definition-match)))))))
 
@@ -484,6 +497,108 @@ thread sees the value the caller captured rather than the global one.")
                    :property "CL-MCP-SPEC-REPORT-FIXTURE:LONELY")))
       (ok (eq :not-registered (getf report :status)))
       (ok (not (getf report :verified))))))
+
+(deftest check-report-counts-every-status
+  (testing "an adapter-level failure is counted, not dropped from the tally"
+    ;; The named buckets alone lost :GENERATOR-ERROR entirely, so a selection
+    ;; of one whose run blew up reported one selected and zero of everything.
+    (let* ((report (check-report
+                    (%api-with-run (lambda (&rest ignored)
+                                     (declare (ignore ignored))
+                                     (error "No generator backend is installed.")))
+                    :ok
+                    :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (counts (getf report :counts)))
+      (ok (= 1 (getf counts :selected)))
+      (ok (= 1 (getf counts :other)))
+      (ok (equal '(1) (mapcar #'cdr (getf counts :by-status))))
+      (testing "and the tally sums to the selection"
+        (ok (= (getf counts :selected)
+               (reduce #'+ (getf counts :by-status) :key #'cdr)))))))
+
+(deftest describe-report-tells-a-failure-from-an-absence
+  (testing "an internal failure is not reported as an unregistered name"
+    ;; A blanket handler turned every error into :NOT-REGISTERED -- the exact
+    ;; false negative this module exists to prevent.
+    (let ((api (%stub-api :spec-data
+                          (lambda (name &key registry)
+                            (declare (ignore name registry))
+                            (error "something went wrong in here")))))
+      (let ((report (describe-report api :ok "spec"
+                                     "CL-MCP-SPEC-REPORT-FIXTURE:SMALL-INT")))
+        (ok (eq :internal-error (getf report :status)))
+        (ok (search "something went wrong" (getf report :message)))))))
+
+(deftest check-report-unreadable-digest-is-unknown-not-mismatch
+  (testing "a digest that could not be computed disagrees with nothing"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub))
+                                  :property-data
+                                  (lambda (name &key registry)
+                                    (declare (ignore registry))
+                                    ;; Readable for the facts, unreadable for
+                                    ;; the digest is not expressible here, so
+                                    ;; make it unreadable for both: the digest
+                                    ;; then comes back NIL.
+                                    (if (eq name (%sym "ADD-COMMUTES"))
+                                        (error 'fixture-unknown-name)
+                                        (error 'fixture-unknown-name))))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                   :expect-definition-digest "0000000000000000")))
+      ;; The property cannot be read at all, so this is not-registered --
+      ;; which is itself the point: it is not reported as a digest mismatch.
+      (ok (eq :not-registered (getf report :status)))
+      (ok (not (eq :false (getf report :reproduction-faithful)))))))
+
+(deftest check-report-no-properties-does-not-claim-an-unfaithful-replay
+  (testing "a selection of zero has not been checked, not found unfaithful"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub)))
+                   :ok
+                   :symbol "CL-MCP-SPEC-REPORT-FIXTURE:LONELY")))
+      (ok (eq :no-properties (getf report :status)))
+      (ok (eq :not-checked (getf report :reproduction-faithful)))
+      (ok (eq :safe (getf report :worker-reuse))))))
+
+(deftest symbol-report-answers-when-cl-spec-signals
+  (testing "a drifted cl-spec is a status, not a condition out of the tool"
+    (let* ((api (%stub-api :semantic-data
+                           (lambda (symbol &key registry)
+                             (declare (ignore symbol registry))
+                             (error "SEMANTIC-DATA got an unexpected argument"))))
+           (report (symbol-report api :ok "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                                  :include-runtime nil)))
+      (ok (eq :internal-error (getf report :status)))
+      (ok (search "unexpected argument" (getf report :message))))))
+
+(deftest describe-report-rejects-a-negative-budget
+  (testing "max-chars is clamped rather than fed to subseq as an end index"
+    ;; The tool layer refuses a non-positive value outright; the report layer
+    ;; clamps so a direct caller cannot signal a type error either.
+    (let ((report (describe-report (%stub-api) :ok "property"
+                                   "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                                   :max-chars -1)))
+      (ok (eq :ok (getf report :status)))
+      (ok (not (getf report :body-complete))))))
+
+(deftest spec-summary-and-tree-tolerate-a-missing-spec
+  (testing "an argument with no spec yields no spec node"
+    (let ((report (describe-report
+                   (%stub-api :property-data
+                              (lambda (name &key registry)
+                                (declare (ignore name registry))
+                                (list :name (%sym "ADD-COMMUTES")
+                                      :arguments (list (list :variable (%sym "A")
+                                                             :spec nil))
+                                      :metadata (list :shrink t))))
+                   :ok "property" "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES")))
+      (ok (eq :ok (getf report :status)))
+      (ok (null (getf (first (getf report :arguments)) :spec))))))
 
 (deftest check-report-requires-exactly-one-target
   (testing "neither or both of property and symbol is an argument error"

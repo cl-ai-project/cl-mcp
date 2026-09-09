@@ -99,6 +99,52 @@ are what a test about the message has to look at."
                          "{\"property\":\"cl:car\",\"seed\":\"not-a-number\"}")))
       (ok (search "seed" (string-downcase (%text result)))))))
 
+(deftest spec-check-refuses-a-numeric-seed
+  (testing "a JSON number is refused at the schema, before any run"
+    (let ((response (%call "spec-check"
+                           "{\"property\":\"cl:car\",\"seed\":12345}")))
+      (ok (search "seed" (string-downcase (%text response))))
+      (ok (search "string" (string-downcase (%text response))))))
+  (testing "and the entry point refuses one too, for callers below the schema"
+    ;; SPEC-CHECK-RESPONSE is exported and the worker handler calls it with a
+    ;; params table directly, so the refusal cannot live only in the schema.
+    (%ensure-tools)
+    (let* ((params (make-hash-table :test #'equal))
+           (response (progn (setf (gethash "property" params) "cl:car"
+                                  (gethash "seed" params) 12345)
+                            (funcall (find-symbol "SPEC-CHECK-RESPONSE"
+                                                  "CL-MCP/SRC/TOOLS/SPEC-ENTRY")
+                                     params))))
+      (ok (string= "invalid-arguments" (gethash "status" response)))
+      (ok (search "digits" (string-downcase (gethash "message" response)))))))
+
+(deftest spec-check-refuses-an-empty-seed
+  (testing "an empty seed is refused, not treated as absent"
+    (let ((response (%call "spec-check"
+                           "{\"property\":\"cl:car\",\"seed\":\"\"}")))
+      (ok (search "seed" (string-downcase (%text response)))))))
+
+(deftest spec-describe-refuses-a-negative-budget
+  (testing "max_chars is validated before anything reads the registry"
+    (let ((response (%call "spec-describe"
+                           "{\"kind\":\"property\",\"name\":\"cl:car\",\"max_chars\":-1}")))
+      (ok (search "max_chars" (%text response)))
+      (ok (search "positive" (string-downcase (%text response)))))))
+
+(deftest read-tools-accept-a-timeout
+  (testing "spec-symbol and spec-describe take timeout_seconds"
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response)))))
+      (loop for tool across tools
+            when (member (gethash "name" tool) '("spec-symbol" "spec-describe")
+                         :test #'string=)
+              do (let ((properties (gethash "properties"
+                                            (gethash "inputSchema" tool))))
+                   (ok (nth-value 1 (gethash "timeout_seconds" properties))))))))
+
 (deftest parse-seed-string-round-trips-a-big-seed
   (testing "a seed beyond JSON's safe integer parses exactly"
     (multiple-value-bind (value message)

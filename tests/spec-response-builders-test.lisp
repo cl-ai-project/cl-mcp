@@ -359,6 +359,102 @@
       (ok (= 12 (gethash "print_level" value)))
       (ok (= 7 (gethash "object_id" value))))))
 
+(deftest check-response-renders-every-status-in-the-tally
+  (testing "a status with no field of its own still reaches the summary line"
+    (let* ((response (build-spec-check-response
+                      (list :status :incomplete :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :generator-error
+                                        :trials (list :budget 100)
+                                        :counterexample-status :unavailable
+                                        :shrink-status :unavailable
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0
+                                          :other 1
+                                          :by-status '((:generator-error . 1)))
+                            :environment *environment*)))
+           (text (first-text response))
+           (counts (gethash "counts" response)))
+      (ok (= 1 (gethash "other" counts)))
+      (ok (= 1 (gethash "generator-error" (gethash "by_status" counts))))
+      (testing "and the text does not say zero of everything"
+        (ok (search "1 generator-error" text))
+        (ok (not (search "0 errored" text)))))))
+
+(deftest check-response-not-checked-is-not-unfaithful
+  (testing "an absent reproduction verdict is not-checked"
+    (let ((response (build-spec-check-response
+                     (list :status :completed :verified t
+                           :selection (list :mode "explicit" :count 1
+                                            :source "s" :coverage "c")
+                           :results
+                           (list (list :property (%symbol-data "PROBE" "P")
+                                       :status :passed
+                                       :trials (list :executed 100 :budget 100)
+                                       :counterexample-status :not-applicable
+                                       :shrink-status :not-applicable
+                                       :definition-match :not-checked))
+                           :counts (list :selected 1 :passed 1 :failed 0
+                                         :errored 0 :timed-out 0 :not-run 0
+                                         :other 0 :by-status '((:passed . 1)))
+                           :environment *environment*))))
+      (ok (string= "not-checked" (gethash "reproduction_faithful" response)))))
+  (testing "an unreadable digest is unknown, and a real disagreement unfaithful"
+    (flet ((faithful (value)
+             (gethash "reproduction_faithful"
+                      (build-spec-check-response
+                       (list :status :completed :verified nil
+                             :selection (list :mode "explicit" :count 1
+                                              :source "s" :coverage "c")
+                             :results nil
+                             :counts (list :selected 0 :passed 0 :failed 0
+                                           :errored 0 :timed-out 0 :not-run 0
+                                           :other 0 :by-status nil)
+                             :reproduction-faithful value
+                             :environment *environment*)))))
+      (ok (string= "unknown" (faithful :unknown)))
+      (ok (string= "unfaithful" (faithful :false)))
+      (ok (string= "faithful" (faithful :true))))))
+
+(deftest value-response-carries-no-truncation-note
+  (testing "the printed value is the value, not the sink's commentary"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :counterexample-status :present
+                                        :counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "V")
+                                                    :value (list :printed "(1 2 3"
+                                                                 :printed-complete nil
+                                                                 :omitted-chars 900
+                                                                 :restorable nil
+                                                                 :print-level 12
+                                                                 :print-length 200
+                                                                 :type "cons"
+                                                                 :object-id 3)))
+                                        :shrink-status :none
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0
+                                          :other 0 :by-status '((:failed . 1)))
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "V = (1 2 3" text))
+      (testing "the whole value sits on the counterexample line"
+        (let* ((start (search "counterexample:" text))
+               (end (or (position #\Newline text :start start) (length text)))
+               (line (subseq text start end)))
+          (ok (search "V = (1 2 3" line)))))))
+
 (deftest describe-response-marks-truncation
   (testing "a cut body says so in the text"
     (let* ((response (build-spec-describe-response
