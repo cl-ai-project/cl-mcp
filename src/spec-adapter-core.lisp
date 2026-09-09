@@ -39,6 +39,7 @@
            #:externalize-value
            #:digest-string
            #:printed-for-digest
+           #:printed-for-display
            #:print-form-bounded
            #:definition-digest))
 
@@ -501,6 +502,52 @@ every other definition that shares its first megabyte."
     (serious-condition (condition)
       (values (format nil "#<unprintable: ~A>" (type-of condition)) t))))
 
+(defparameter *display-print-level* 50
+  "Depth guard for the display printer.
+
+Display prints with *PRINT-CIRCLE* NIL, which cannot terminate on a circular
+form by itself.  A source form comes from the reader and is a tree, so this
+never fires in practice; it is the guard that makes \"never in practice\" safe
+to rely on.")
+
+(defparameter *display-print-length* 10000
+  "Length guard for the display printer.  See *DISPLAY-PRINT-LEVEL*.")
+
+(defmacro with-display-printing (&body body)
+  "Run BODY with the printer bound for reading by a person or a model.
+
+*PRINT-CIRCLE* is NIL here and T in WITH-DIGEST-PRINTING, and that difference
+is the whole point.  A form loaded from a compiled file has its tails
+coalesced by the file compiler -- ordinary structure sharing, not circularity
+-- and *PRINT-CIRCLE* T renders that as #1=(LOW . #2=(HIGH)), which reads as a
+dotted improper list to anyone skimming it.  The same body loaded from source,
+or defined at a REPL, prints cleanly, so the broken rendering appears exactly
+when the definition came from the file it is supposed to document.
+
+The depth and length guards replace the termination that *PRINT-CIRCLE* was
+providing: a circular form stops at them instead of running forever.
+
+Not pretty-printed: BODY and SOURCE_FORM travel as JSON fields a client may
+compare across calls, and pretty printing makes their line breaks depend on
+*PRINT-RIGHT-MARGIN*."
+  `(let ((*package* (find-package "KEYWORD"))
+         (*print-circle* nil)
+         (*print-pretty* nil)
+         (*print-readably* nil)
+         (*print-level* *display-print-level*)
+         (*print-length* *display-print-length*)
+         (*print-base* 10)
+         (*print-radix* nil)
+         (*print-case* :upcase)
+         (*read-default-float-format* 'double-float))
+     ,@body))
+
+(defun printed-for-display (form)
+  "Return FORM printed for a reader, with no structure-sharing labels."
+  (handler-case (with-display-printing (prin1-to-string form))
+    (serious-condition (condition)
+      (format nil "#<unprintable: ~A>" (type-of condition)))))
+
 (defun print-form-bounded (form max-chars)
   "Return (values TEXT COMPLETE-P OMITTED-CHARS) for FORM at MAX-CHARS.
 
@@ -510,22 +557,11 @@ megabyte to hand back eight kilobytes costs the megabyte, three times per
 property.  The sink counts what it discards, so the remainder reported here is
 the true one rather than the difference between two limits.
 
-Prints the way PRINTED-FOR-DIGEST does, so a body reads the same way it is
-hashed and a caller can compare the two by eye."
+Prints for display, not for the digest: see WITH-DISPLAY-PRINTING."
   (let ((limit (max 1 max-chars)))
     (handler-case
         (let ((stream (make-bounded-output-stream limit)))
-          (let ((*package* (find-package "KEYWORD"))
-                (*print-circle* t)
-                (*print-pretty* nil)
-                (*print-readably* nil)
-                (*print-level* nil)
-                (*print-length* nil)
-                (*print-base* 10)
-                (*print-radix* nil)
-                (*print-case* :upcase)
-                (*read-default-float-format* 'double-float))
-            (prin1 form stream))
+          (with-display-printing (prin1 form stream))
           (multiple-value-bind (text dropped) (%drain-bounded stream limit)
             (values text (zerop dropped) dropped)))
       (serious-condition (condition)

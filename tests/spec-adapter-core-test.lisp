@@ -22,6 +22,7 @@
                 #:externalize-value
                 #:digest-string
                 #:printed-for-digest
+                #:printed-for-display
                 #:print-form-bounded
                 #:definition-digest))
 
@@ -198,6 +199,44 @@ Same name, different home package: the pair a resolver must not confuse."
           (ok (string= ":X" text))
           (ok complete)
           (ok (zerop omitted)))))))
+
+(deftest display-printing-shows-shared-structure-as-itself
+  (testing "a form with shared tails prints as a list, not as #1= labels"
+    ;; The file compiler coalesces tails, so a property loaded from a compiled
+    ;; file has them. *PRINT-CIRCLE* T renders that sharing as
+    ;; #1=(LOW . #2=(HIGH)), which reads as a dotted improper list -- and it
+    ;; appears exactly when the definition came from the file it documents,
+    ;; never when it was typed at a REPL.
+    (let* ((tail (list 'low 'high))
+           (form (list (cons '> tail) (cons '<= tail))))
+      (let ((display (printed-for-display form))
+            (digest (printed-for-digest form)))
+        (ok (not (search "#1=" display)))
+        (ok (not (search "#1#" display)))
+        (testing "the shared tail is written out on both branches"
+          ;; Two occurrences of HIGH, not one plus a label.
+          (ok (= 2 (count-if (lambda (start) (declare (ignore start)) t)
+                             (loop with from = 0
+                                   for at = (search "HIGH" display :start2 from)
+                                   while at
+                                   collect at
+                                   do (setf from (1+ at)))))))
+        (testing "while the digest keeps the labels, which is what it needs"
+          (ok (search "#1=" digest))))))
+  (testing "print-form-bounded uses the display settings"
+    (let* ((tail (list 'low 'high))
+           (form (list (cons '> tail) (cons '<= tail))))
+      (ok (not (search "#1=" (print-form-bounded form 1000)))))))
+
+(deftest display-printing-terminates-on-a-circular-form
+  (testing "a cycle stops at the length guard instead of running forever"
+    ;; *PRINT-CIRCLE* NIL cannot terminate on a cycle by itself; the depth and
+    ;; length guards are what make turning it off safe.
+    (let ((cycle (list 1 2 3)))
+      (setf (cdr (last cycle)) cycle)
+      (let ((text (printed-for-display cycle)))
+        (ok (stringp text))
+        (ok (search "..." text))))))
 
 (deftest definition-digest-orders-same-named-specs-by-package
   (testing "two specs named alike in two packages get distinct sort keys"

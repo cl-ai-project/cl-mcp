@@ -99,7 +99,13 @@ could hold the worker past the proxy's own ceiling, and a proxy timeout is not
 a timeout report -- it kills the worker and resets the session's Lisp state.")
 
 (defun %within-deadline (params builder thunk)
-  "Run THUNK under the request's deadline, or answer with a timeout report."
+  "Run THUNK under the request's deadline and build its answer.
+
+CALL-WITH-DEADLINE-THREAD answers :OK, :TIMEOUT or :ERROR, and the three are
+kept apart here.  Folding :ERROR into the timeout report told a caller its
+registry was too large to read when what actually happened was a bug in this
+adapter -- the same mislabelling DESCRIBE-REPORT's blanket handler used to
+make, in a second place."
   (multiple-value-bind (seconds message)
       (%positive-integer-arg params "timeout_seconds"
                              *default-introspection-timeout-seconds*)
@@ -107,18 +113,27 @@ a timeout report -- it kills the worker and resets the session's Lisp state.")
         (%argument-error-response message builder)
         (multiple-value-bind (value status leaked)
             (call-with-deadline-thread thunk seconds :name "mcp-spec-read")
-          (if (eq status :ok)
-              (first value)
-              (funcall builder
-                       (list :status :timeout
-                             :verified nil
-                             :message
-                             (format nil "reading the registry exceeded its ~
+          (ecase status
+            (:ok (first value))
+            (:timeout
+             (funcall builder
+                      (list :status :timeout
+                            :verified nil
+                            :message
+                            (format nil "reading the registry exceeded its ~
 ~A second deadline~:[ and its thread was stopped~; and its thread could not be ~
 stopped, so this worker should be replaced~]. Nothing was read; raise ~
 timeout_seconds or narrow the request."
-                                     seconds leaked)
-                             :environment (%environment-stub))))))))
+                                    seconds leaked)
+                            :environment (%environment-stub))))
+            (:error
+             (funcall builder
+                      (list :status :internal-error
+                            :verified nil
+                            :message
+                            (format nil "reading the registry failed in ~
+cl-mcp: ~A" value)
+                            :environment (%environment-stub)))))))))
 
 (defun spec-symbol-response (params)
   "Return the spec-symbol response hash-table for PARAMS."

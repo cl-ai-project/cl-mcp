@@ -455,6 +455,66 @@
                (line (subseq text start end)))
           (ok (search "V = (1 2 3" line)))))))
 
+(deftest describe-response-renders-the-spec-tree
+  (testing "kind=spec shows the normalized IR tree the description promises"
+    ;; The tree was reaching the payload and not the text, which for a client
+    ;; that renders only content[].text is the same as not existing.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "spec"
+                            :name (%symbol-data "PROBE" "SMALL-INT")
+                            :spec (list :kind :and
+                                        :name (%symbol-data "PROBE" "SMALL-INT")
+                                        :children
+                                        (list (list :kind :type :type "INTEGER")
+                                              (list :kind :range :min "0"
+                                                    :max "100")))
+                            :source-form "(AND INTEGER (RANGE 0 100))"
+                            :source-form-complete t
+                            :source-form-omitted-chars 0
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "normalized IR tree" text))
+      (ok (search "and" text))
+      (ok (search "INTEGER" text))
+      (ok (search "[0, 100]" text)))))
+
+(deftest describe-response-shows-tags-trials-and-shrinking
+  (testing "the facts the profile error message points at are actually shown"
+    ;; %RESOLVE-PROFILE tells a caller to look at the property's trials table
+    ;; "see spec-describe", so spec-describe has to show it rather than leave
+    ;; it to whether the raw source form survived max_chars.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "property"
+                            :name (%symbol-data "PROBE" "P")
+                            :property-kind :invariant
+                            :tags (list :bounds :demo)
+                            :trials-table "(:NORMAL 200 :SMOKE 10)"
+                            :shrink-enabled nil
+                            :targets nil :arguments nil
+                            :body "((= 1 1))" :body-complete t
+                            :body-omitted-chars 0
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "tags: BOUNDS, DEMO" text))
+      (ok (search ":NORMAL 200 :SMOKE 10" text))
+      (testing "and shrinking says which of the two it is"
+        (ok (search "shrinking: disabled" text))))))
+
+(deftest describe-response-does-not-claim-a-file-that-is-nil
+  (testing "a REPL definition is not reported as defined in NIL"
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "property"
+                            :name (%symbol-data "PROBE" "P")
+                            :property-kind :invariant
+                            :targets nil :arguments nil
+                            :body "((= 1 1))" :body-complete t
+                            :body-omitted-chars 0
+                            :source-location (list :file nil :package "PROBE")
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (not (search "defined in NIL" text)))
+      (ok (search "defined at a REPL, in package PROBE" text)))))
+
 (deftest describe-response-marks-truncation
   (testing "a cut body says so in the text"
     (let* ((response (build-spec-describe-response

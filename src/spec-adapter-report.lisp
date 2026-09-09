@@ -24,7 +24,7 @@
                 #:symbol-data
                 #:externalize-value
                 #:definition-digest
-                #:printed-for-digest
+                #:printed-for-display
                 #:print-form-bounded)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
@@ -255,7 +255,7 @@ wrote.  BODY-OMITTED says so rather than leaving a reader to infer it."
                                              :spec (%spec-summary
                                                     (getf argument :spec))))
               :trials-table (let ((table (getf data :trials)))
-                              (when table (printed-for-digest table)))
+                              (when table (printed-for-display table)))
               :shrink-enabled (getf (getf data :metadata) :shrink)
               :source-location (getf data :source-location)
               ;; The digest is derived from the data already in hand.  Left
@@ -381,20 +381,20 @@ to the caller as one that exists."
           :target (let ((target (getf spec-plist :target)))
                     (when target (symbol-data target)))
           :type (let ((type (getf spec-plist :type)))
-                  (when type (printed-for-digest type)))
+                  (when type (printed-for-display type)))
           :predicate (let ((predicate (getf spec-plist :predicate)))
-                       (when predicate (printed-for-digest predicate)))
+                       (when predicate (printed-for-display predicate)))
           :values (let ((values (getf spec-plist :values)))
-                    (when values (printed-for-digest values)))
+                    (when values (printed-for-display values)))
           :base-type (let ((base (getf spec-plist :base-type)))
-                       (when base (printed-for-digest base)))
+                       (when base (printed-for-display base)))
           :min (let ((minimum (getf spec-plist :min)))
-                 (when minimum (printed-for-digest minimum)))
+                 (when minimum (printed-for-display minimum)))
           :max (let ((maximum (getf spec-plist :max)))
-                 (when maximum (printed-for-digest maximum)))
+                 (when maximum (printed-for-display maximum)))
           :class-name (let ((name (getf spec-plist :class-name)))
                         (when name (symbol-data name)))
-          :source-form (printed-for-digest (getf spec-plist :source-form))
+          :source-form (printed-for-display (getf spec-plist :source-form))
           :source-location (getf spec-plist :source-location)
           :children (mapcar #'%spec-tree (getf spec-plist :children)))))
 
@@ -413,7 +413,7 @@ to the caller as one that exists."
               :targets (mapcar #'symbol-data (getf data :targets))
               :documentation (getf data :documentation)
               :trials-table (let ((table (getf data :trials)))
-                              (when table (printed-for-digest table)))
+                              (when table (printed-for-display table)))
               :shrink-enabled (getf (getf data :metadata) :shrink)
               :arguments (loop for argument in (getf data :arguments)
                                collect (list :variable
@@ -774,7 +774,7 @@ computed from one backend and the run executed under another."
           :budget-source (cond (from-profile "property-profile")
                                (default "backend-default")
                                (t "unknown"))
-          :property-trials (when table (printed-for-digest table))
+          :property-trials (when table (printed-for-display table))
           :backend-default default
           :budget-derivation +budget-derivation-note+)))
 

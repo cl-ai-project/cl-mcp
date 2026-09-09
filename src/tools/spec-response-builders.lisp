@@ -314,6 +314,56 @@ system defining them may simply not be loaded.")
              "children" (coerce (mapcar #'%spec-tree-ht (getf data :children))
                                 'vector))))
 
+(defun %format-spec-node (stream node depth)
+  "Write one spec-data node and its children to STREAM, indented by DEPTH.
+
+spec-describe's own description promises \"the spec's normalized IR tree\", and
+the tree was reaching the payload but not the text -- which for a client that
+renders only content[].text is the same as not reaching it at all."
+  (when node
+    ;; The kind is lower-cased like every other keyword this file renders
+    ;; (statuses, property kinds, argument spec kinds); an upper-case AND in
+    ;; the middle of lower-case prose reads as a different vocabulary.
+    (format stream "~&~vT~A~@[ ~A~]~@[ -> ~A~]"
+            (+ 2 (* 2 depth))
+            (or (%keyword-string (getf node :kind)) "node")
+            (or (getf (getf node :name) :qualified)
+                (getf node :type)
+                (getf node :predicate)
+                (getf node :class-name))
+            (getf (getf node :target) :qualified))
+    (let ((minimum (getf node :min))
+          (maximum (getf node :max))
+          (values* (getf node :values))
+          (base (getf node :base-type)))
+      (when (or minimum maximum)
+        (format stream " [~A, ~A]" (or minimum "*") (or maximum "*")))
+      (when base (format stream "  base: ~A" base))
+      (when values* (format stream "  values: ~A" values*)))
+    ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
+    ;; where :CHILDREN is a list, while the payload carries a vector.  ACROSS
+    ;; signalled a type error on the list, and the deadline wrapper above
+    ;; reported that error as a timeout.
+    (map nil (lambda (child) (%format-spec-node stream child (1+ depth)))
+         (or (getf node :children) '()))))
+
+(defun %format-property-facts (stream report)
+  "Write a property's tags, trial table and shrink setting to STREAM.
+
+The profile error message tells a caller to look at the property's trials
+table \"see spec-describe\", so spec-describe has to actually show it.  Before
+this it was visible only when the raw source form happened to survive
+max_chars -- which is to say, by luck."
+  (let ((tags (getf report :tags))
+        (trials (getf report :trials-table)))
+    (when (plusp (length tags))
+      (format stream "~&tags: ~{~A~^, ~}" (coerce tags 'list)))
+    (when trials
+      (format stream "~&trials: ~A" trials))
+    (when (getf report :property-kind)
+      (format stream "~&shrinking: ~:[disabled (:shrink nil)~;enabled~]"
+              (getf report :shrink-enabled)))))
+
 (defun %format-describe-text (report)
   "Render the spec-describe report as text."
   (with-output-to-string (stream)
@@ -327,13 +377,20 @@ system defining them may simply not be loaded.")
       (format stream "~&about: ~{~A~^, ~}"
               (mapcar (lambda (target) (getf target :qualified))
                       (getf report :targets))))
+    (%format-property-facts stream report)
     (when (getf report :arguments)
       (format stream "~&~%arguments:")
       (dolist (argument (getf report :arguments))
         (format stream "~&  ~A : ~A~@[ -> ~A~]"
                 (getf (getf argument :variable) :name)
                 (%keyword-string (getf (getf argument :spec) :kind))
-                (getf (getf (getf argument :spec) :target) :qualified))))
+                (getf (getf (getf argument :spec) :target) :qualified))
+        (map nil (lambda (child) (%format-spec-node stream child 1))
+             (or (getf (getf argument :spec) :children) '()))))
+    (let ((tree (getf report :spec)))
+      (when tree
+        (format stream "~&~%normalized IR tree:")
+        (%format-spec-node stream tree 0)))
     (when (getf report :definition-digest)
       (format stream "~&~%definition_digest: ~A" (getf report :definition-digest)))
     (when (getf report :body)
@@ -347,10 +404,16 @@ to see the rest; the text above is a preview, not a form that can be read back."
       (unless (getf report :source-form-complete)
         (format stream "~&... truncated, ~D more character~:P."
                 (getf report :source-form-omitted-chars))))
+    ;; Guarded on the file, not on the plist: a REPL definition has a
+    ;; location whose :FILE is NIL, and printing that gave "defined in NIL".
     (let ((location (getf report :source-location)))
-      (when location
-        (format stream "~&~%defined in ~A~@[ (package ~A)~]"
-                (getf location :file) (getf location :package))))))
+      (cond
+        ((getf location :file)
+         (format stream "~&~%defined in ~A~@[ (package ~A)~]"
+                 (getf location :file) (getf location :package)))
+        ((getf location :package)
+         (format stream "~&~%defined at a REPL, in package ~A"
+                 (getf location :package)))))))
 
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
