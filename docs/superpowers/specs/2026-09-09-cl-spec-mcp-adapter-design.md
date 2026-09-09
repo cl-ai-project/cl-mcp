@@ -367,6 +367,12 @@ Property 本文と source-form はここでは返さない(`body_omitted: true`)
   組み立てることは、cl-spec の introspection 責務の複製になるので行わない。
   必要な cl-spec 側変更として最終報告に挙げる。
 
+**content text にも構造を出す。** 正規化 IR ツリー、tags、trials テーブル、
+shrink の有効/無効は payload だけでなく text に描画する。MCP クライアントは
+`content[].text` しか描画しないので、payload にしか無い情報は存在しないのと
+同じである。特に profile が不正なときのエラーは「Property の trials テーブルを
+spec-describe で見よ」と案内するので、**案内先に案内した情報が無い状態を作らない**。
+
 `unknown-spec` / `unknown-property` は `not-registered` に変換して返し、
 condition を RPC エラーとして漏らさない。
 
@@ -575,6 +581,20 @@ cl-spec が解決済み予算を公開すればこの導出は不要になる(�
 | §8.5 の全体予算 | **時間**。反例の印字は run と同じ deadline の内側で行う |
 | `*digest-print-limit*`(1,000,000 文字) | digest 入力の生成量。到達したら `definition_digest_complete: false` |
 | `print-form-bounded`(本文・source form) | **呼び出し側の `max_chars` で直接打ち切る**。1MB 出してから切ると、その 1MB を確保するうえ `omitted_chars` が「2 つの上限の差」になって実際の残量とずれる |
+
+**表示用と digest 用の印字設定を分ける。** `*print-circle*` は digest では t、
+表示では **nil**。ファイルコンパイラは form の末尾を共有するので、
+`compile-file` 経由(= `load-system` の実際の経路)でロードされた Property の
+本文を `*print-circle*` t で出すと `#1=(LOW . #2=(HIGH))` になり、
+**ドット対の improper list に読める**。共有されているだけで循環していないので
+nil にすれば正しく出る。厄介なのは REPL 定義や source ロードでは共有が起きず
+綺麗に出ることで、**手元検証では気づかず `load-system` で入った定義だけが壊れる**。
+
+`*print-circle*` nil は循環に対して停止しないので、表示側は
+`*print-level*` 50 / `*print-length*` 10000 を停止保証として持つ。
+実在の source form では発火しない値である。表示は pretty print しない
+(`body` / `source_form` はクライアントが比較しうる JSON フィールドで、
+pretty print は改行位置が `*print-right-margin*` に依存する)。
 
 **sink 自身の注記を値に混ぜない。** `bounded-output-string` は切り詰め時に
 `... (truncated, N total chars)` を付ける。これは捕捉ログには正しいが値には
