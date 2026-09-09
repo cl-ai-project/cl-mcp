@@ -879,7 +879,22 @@ next call learns why the session was reset")
           (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
                      (cl-mcp/src/worker-client:worker-last-crash-reason
                       replacement))
-              "explained by what actually happened"))))))
+              "explained by what actually happened")
+          ;; The whole account travels, not just the headline.  The exit
+          ;; code is the part that says the death was deliberate, and it is
+          ;; recorded by the same write that publishes the death, so a
+          ;; reader copying the debt cannot catch it half-written.
+          (ok (eql cl-mcp/src/utils/deadline::+leaked-thread-exit-code+
+                   (cl-mcp/src/worker-client:worker-last-exit-code
+                    replacement))
+              "down to the exit code it left")
+          (ok (equal "exited"
+                     (cl-mcp/src/worker-client:worker-last-exit-status
+                      replacement)))
+          ;; And the session is no longer owed anything: it is on a worker
+          ;; that someone can find, so a copy left here would arrive twice.
+          (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
+              "the session's copy is dropped once the worker carries it"))))))
 
 (deftest an-owed-reset-outlives-the-worker-that-owed-it
   ;; The debt belongs to the session, because the paths that throw a dead
@@ -907,6 +922,69 @@ next call learns why the session was reset")
                      (cl-mcp/src/worker-client:worker-last-crash-reason
                       replacement))
               "with what to say about it")))))
+  (testing "a warm standby takes it on just as a fresh spawn does"
+    ;; The two ways a session gets its next worker are different code, and
+    ;; every other test here has an empty standby list, so this one is
+    ;; exercised by nothing.
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (with-pool ()
+      (let* ((session "owed-reset-standby")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session))
+             (standby (cl-mcp/src/worker-client:spawn-worker)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed
+         worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+        (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+          (push standby cl-mcp/src/pool::*standby-workers*)
+          (push standby cl-mcp/src/pool::*all-workers*))
+        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+          (ok (eq standby replacement) "the standby is what gets assigned")
+          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+               replacement)
+              "and it carries the reset")
+          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                     (cl-mcp/src/worker-client:worker-last-crash-reason
+                      replacement))
+              "with what to say about it")
+          (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
+              "and the session's copy is dropped once it is bound")))))
+  (testing "the circuit breaker halting recovery does not swallow it"
+    ;; The breaker gives up on recovery and returns, clearing the history as
+    ;; it goes -- so the session is served again on the next request, by a
+    ;; fresh image.  That request is exactly the one that has to be told.
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (let ((cl-mcp/src/pool::*crash-breaker-threshold* 1))
+      (with-pool ()
+        (let* ((session "owed-reset-breaker")
+               (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+          (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
+                         sb-posix:sigkill)
+          (sleep 0.5)
+          (cl-mcp/src/pool::%handle-worker-crash worker)
+          (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+            (ok (not (eq worker replacement)))
+            (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
+                 replacement)
+                "the session is told, even though recovery gave up"))))))
+  (testing "and a released session leaves none behind for the next one"
+    ;; A debt can outlive the affinity entry -- recovery drops the worker
+    ;; and only then is the session released -- and a session id can come
+    ;; back.  Left behind, it greets whoever reuses the id with a crash that
+    ;; was not theirs.
+    (unless (spawn-available-p)
+      (skip "worker processes cannot be spawned here"))
+    (with-pool ()
+      (let* ((session "owed-reset-released")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed
+         worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
+        (cl-mcp/src/pool::%handle-worker-crash worker)
+        (ok (gethash session cl-mcp/src/pool::*owed-resets*)
+            "the debt is waiting with no worker to hold it")
+        (cl-mcp/src/pool:release-session session)
+        (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
+            "and goes when the session it belonged to does"))))
   (testing "a replacement that cannot be spawned does not consume it"
     ;; The debt used to live in one call's local variable, so a spawn that
     ;; failed took it with it and the retry came back silently fresh.
@@ -1045,6 +1123,21 @@ next call learns why the session was reset")
                   "a request with no method"
                   (cl-mcp/src/worker/server::%process-line
                    server "{\"id\": 1}"))
+                 ;; And the other direction: once authenticated, the same
+                 ;; routes do report it.  Withholding it from everyone would
+                 ;; pass every assertion above while hiding the condition
+                 ;; from pool-status and from the parent that acts on it.
+                 (setf (cl-mcp/src/worker/server::worker-server-authenticated-p
+                        server)
+                       t)
+                 (let ((json (yason:parse
+                              (cl-mcp/src/worker/server::%process-line
+                               server "{"))))
+                   (ok (eql 1 (gethash "leaked_threads" json))
+                       "an authenticated peer is told, even on a parse error"))
+                 (setf (cl-mcp/src/worker/server::worker-server-authenticated-p
+                        server)
+                       nil)
                  (withholds-p
                   "a failed authentication"
                   (cl-mcp/src/worker/server::%dispatch-request

@@ -674,6 +674,23 @@ Returns nothing."
   ;; ordinary crash.  It is also set unconditionally now: it used to be set
   ;; alongside the exit code, inside the branch that needs a process object,
   ;; so a worker without one recorded no reason at all.
+  ;; Read before anything is published, so the whole account of this death
+  ;; is written together.  The pool copies these three onto the replacement
+  ;; worker to explain the reset to the user, and it can read them the
+  ;; instant the state below says there was a death -- so a status recorded
+  ;; afterwards is one the message never gets, and "exit_code=70" is the
+  ;; part that says a retirement was deliberate.
+  (let ((process (worker-process-info worker))
+        (exit-status nil)
+        (exit-code nil))
+    (when process
+      (ignore-errors
+        (let ((status (sb-ext:process-status process)))
+          (setf exit-status (string-downcase (symbol-name status)))
+          (when (member status '(:exited :signaled))
+            (setf exit-code (sb-ext:process-exit-code process))))))
+    (setf (worker-last-exit-status worker) (or exit-status "unknown")
+          (worker-last-exit-code worker) (or exit-code "unknown")))
   (setf (worker-last-crash-reason worker) reason
         ;; Recorded as a fact about this worker rather than left to be
         ;; re-derived from the reason later: the reason is copied onto a
@@ -725,21 +742,14 @@ Returns nothing."
       (when (bt:thread-alive-p th)
         (ignore-errors (bt:destroy-thread th)))
       (setf (worker-stderr-thread worker) nil)))
-  ;; Collect the exit code before reaping.  process-status is
-  ;; non-blocking; if the process already exited (typical for crashes)
-  ;; the exit code is immediately available.
+  ;; Read again for the log line below.  The worker's own record was
+  ;; written above, before the death was published, because a reader can be
+  ;; copying it the moment it is.
   (let ((process (worker-process-info worker))
         (wid (worker-id worker))
-        (exit-code nil)
-        (exit-status nil))
+        (exit-code (worker-last-exit-code worker))
+        (exit-status (worker-last-exit-status worker)))
     (when process
-      (ignore-errors
-        (let ((status (sb-ext:process-status process)))
-          (setf exit-status (string-downcase (symbol-name status)))
-          (when (member status '(:exited :signaled))
-            (setf exit-code (sb-ext:process-exit-code process)))))
-      (setf (worker-last-exit-status worker) (or exit-status "unknown")
-            (worker-last-exit-code worker) (or exit-code "unknown"))
       ;; Reap the OS process in a background thread to avoid blocking
       ;; the caller.  process-close calls waitpid internally, which
       ;; blocks if the worker process is still alive.

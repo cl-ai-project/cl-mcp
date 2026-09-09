@@ -404,7 +404,17 @@ A retirement keeps its marker rather than being flattened into
 (defun %note-owed-reset (session-id worker)
   "Remember a reset WORKER owes SESSION-ID that nobody has delivered.
 Call under *POOL-LOCK*, wherever a worker is dropped without a replacement in
-hand to give the debt to.  A worker that owes nothing changes nothing."
+hand to give the debt to.  A worker that owes nothing changes nothing.
+
+Read rather than claimed.  Claiming it -- CHECK-AND-CLEAR-RESET-NOTIFICATION,
+which is atomic against the proxy's own claim -- would make delivery
+at-most-once across the two, but it takes the worker's stream lock, and this
+runs under *POOL-LOCK*.  An RPC holds that stream lock for as long as its
+call takes, which for a load-system is minutes; the pool would stop serving
+every session until it returned.  A cosmetic duplicate is the cheaper of the
+two, and it is not clearly a duplicate: the two messages go to two different
+requests, both of which really were answered by a worker that had been
+replaced."
   (when (and session-id worker (worker-owes-reset-p worker))
     (setf (gethash session-id *owed-resets*)
           (list (worker-last-crash-reason worker)
@@ -881,6 +891,13 @@ to prevent recovery threads from spawning orphan workers."
                  ;; Clear crash history to prevent stale data if session
                  ;; ID is reused or session reconnects later.
                  (remhash session-id *crash-history*)
+                 ;; The recovery stops here, so this is another drop with no
+                 ;; replacement to hand the debt to.  The session is not
+                 ;; halted for good -- the history is cleared above, so the
+                 ;; next request is served -- and it would be served by a
+                 ;; fresh image with neither the breaker's error nor a word
+                 ;; about the reset.
+                 (%note-owed-reset session-id crashed-worker)
                  (when (eql (gethash session-id *affinity-map*) crashed-worker)
                    (remhash session-id *affinity-map*))
                  (setf *all-workers* (remove crashed-worker *all-workers*))
@@ -1325,11 +1342,14 @@ cannot be created."
               do (cond
                    ((%worker-process-alive-p w)
                     (%hand-reset-to w need-reset)
-                    (when need-reset
-                      (remhash session-id *owed-resets*))
                     (setf (worker-state w) :bound
                           (worker-session-id w) session-id
                           (gethash session-id *affinity-map*) w)
+                    ;; After the worker is registered, not before: the debt
+                    ;; is only safely somewhere else once someone else can
+                    ;; find it there.
+                    (when need-reset
+                      (remhash session-id *owed-resets*))
                     (setf assigned-from-standby w)
                     (return))
                    (t
@@ -1418,6 +1438,13 @@ then checks state outside it) will skip it and not treat the
 impending kill as a crash."
   (let ((worker-to-kill nil))
     (bt:with-lock-held (*pool-lock*)
+      ;; Outside the branches below, because a debt can outlive the affinity
+      ;; entry: recovery that dropped the worker, or a replacement spawn that
+      ;; failed, leaves one behind with nothing in the map.  The session is
+      ;; going away, so a reset owed to it is owed to nobody -- and left
+      ;; here it would greet a later session that reused the id with someone
+      ;; else's crash.
+      (remhash session-id *owed-resets*)
       (let ((entry (gethash session-id *affinity-map*)))
         (cond
           ((and entry (typep entry 'worker))
@@ -1425,10 +1452,6 @@ impending kill as a crash."
            (setf (worker-state worker-to-kill) :released)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           ;; The session is going away; a reset owed to it is owed to
-           ;; nobody, and leaving it would greet a later session that
-           ;; reused the id with someone else's crash.
-           (remhash session-id *owed-resets*)
            (setf *all-workers* (remove worker-to-kill *all-workers*))
            (when (and *runtime-owner* (eq (cdr *runtime-owner*) worker-to-kill))
              (setf *runtime-owner* nil)))
@@ -1436,7 +1459,6 @@ impending kill as a crash."
            (setf (worker-placeholder-cancelled entry) t)
            (remhash session-id *affinity-map*)
            (remhash session-id *crash-history*)
-           (remhash session-id *owed-resets*)
            (log-event :info "pool.session.cancelled-spawn"
                       "session" session-id)))))
     (when worker-to-kill
