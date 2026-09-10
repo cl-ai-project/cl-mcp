@@ -79,14 +79,15 @@ exactly what loading an edited file produces."
     (= (clamp (clamp value 10 90) 10 90)
        (clamp value 10 90))))
 
-
 (defun widen (value)
-  "Return VALUE moved one step away from zero.
+  "Return VALUE moved halfway up SMALL-INT's range, leaving it at the top.
 
-Written to break its own contract at the top of SMALL-INT's range, so a test
-can see a contract failure that is not a property failure."
-  (1+ value))
-
+Written to break its :RETURNS over most of that range rather than at one end
+of it.  (1+ value) broke it only at 100, one of the 101 values check-it draws
+uniformly, so the test that reads the failure passed 300 trials and still came
+up empty about once in twenty runs -- measured at 4 misses in 60.  A fixture
+whose failure is rare makes the test that reads it a coin toss."
+  (+ value 50))
 
 (defun never-callable (value)
   "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
