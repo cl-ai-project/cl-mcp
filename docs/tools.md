@@ -688,8 +688,9 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
   - `kind` (`specs` | `properties` | `function-specs` | `both`, default
     `both`), `package`, `tag`, `limit` (positive integer, default 200),
     `timeout_seconds`
-  - `specs_listable`, `properties_listable` and `function_specs_listable` say
-    whether this cl-spec can enumerate each half at all. False there is not
+  - `specs_listable`, `properties_listable`, `function_specs_listable` and
+    `tag_filterable` say whether this cl-spec can enumerate each half, and
+    whether it can filter by tag at all. False there is not
     "this project has none" — and the matching entry in `counts` is `null`,
     never `0`. `kind=both` lists the halves it can and reports the rest this
     way rather than failing the whole call.
@@ -744,9 +745,12 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     `rejected_measured` false means no refused count came back — this cl-spec
     exports no reader for it, or the reader signalled; `rejected_overcounted`
     true means cl-spec reported more refusals than trials (its counter keeps
-    running when the function signals); `has_precondition` false means the
-    contract has no `:pre`, so nothing could be refused, and `null` means the
-    definition could not be read. A 0 there would read as "never called".
+    running when the function signals); `rejected_contradicted` true means
+    refusals were reported for a contract with no `:pre`; `has_precondition`
+    false means the contract has no `:pre`, so nothing could be refused, and
+    `null` means the definition could not be read. `rejected_usable` is the
+    single flag answering whether the count may be subtracted with. A 0 in
+    `effective_trials` would read as "never called".
   - A contract run whose effective count is unknown is not evidence:
     `verified` is false and `verification_gaps` carries
     `effective-trials-unknown` (plus `rejection-counts-unmeasured` when the
@@ -756,7 +760,12 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
   - `verification_gaps` values: `zero-trials`, `effective-trials-unknown`,
     `rejection-counts-unmeasured`, `input-coverage-unmeasured`,
     `contract-not-run`, `properties-not-run`, `related-properties-unknown`,
-    `no-properties-selected`, and any non-terminal result status.
+    `no-properties-selected`, and any non-terminal result status. The tool's
+    own description defines each one, and `tests/spec-tools-test.lisp` checks
+    that description against the code's list so the two cannot drift.
+  - `selection.properties_not_run` is `null`, not `[]`, for a selection that
+    never looks — `property=` and `symbol=` leave the symbol's other
+    registrations unrun without reporting which.
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported
