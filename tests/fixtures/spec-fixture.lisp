@@ -93,7 +93,6 @@ whose failure is rare makes the test that reads it a coin toss."
   "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
   value)
 
-
 (defun magnitude (value)
   "Return the absolute value of VALUE."
   (abs value))
@@ -107,32 +106,12 @@ signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
   (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
     (and data (fboundp data) t)))
 
-;; Guarded because this file is LOADed, not compiled: against a cl-spec whose
-;; DEFSPEC-FUNCTION is still a stub, one signalling form aborts the load and
-;; every test in the file fails -- including the three that have nothing to do
-;; with contracts.  cl-mcp does not depend on cl-spec and must stay green
-;; against whichever revision happens to be installed.
+;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
+;; and LOAD reads each top-level form before evaluating it -- so a
+;; CL-SPEC:DEFSPEC-FUNCTION form written here is resolved by the reader
+;; whatever a guard around it says, and against a revision that does not
+;; export the symbol the reader error takes the whole fixture down, CLAMP and
+;; the properties with it.  Only a separate file is left unread.
 (when (function-specs-supported-p)
-  (cl-spec:defspec-function clamp
-    "CLAMP returns a value inside the interval it was given."
-    (:args (value small-int) (low small-int) (high small-int))
-    (:pre (<= low high))
-    (:returns small-int)
-    (:post (and (<= low result) (<= result high))))
-
-  (cl-spec:defspec-function widen
-    "WIDEN stays inside SMALL-INT, which it does not."
-    (:args (value small-int))
-    (:returns small-int)
-    (:post (> result value)))
-
-  (cl-spec:defspec-function never-callable
-    "A contract whose precondition no generated value can satisfy."
-    (:args (value small-int))
-    (:pre (> value 1000))
-    (:returns small-int))
-
-  (cl-spec:defspec-function magnitude
-    "The magnitude is never negative, and has no upper bound worth naming."
-    (:args (value small-int))
-    (:returns (range integer 0 *))))
+  (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
+                         (asdf:system-source-directory "cl-mcp"))))
