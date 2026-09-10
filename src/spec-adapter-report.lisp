@@ -621,26 +621,39 @@ cl-spec's answer to give, not this adapter's to assemble.
 projected: a function cannot be read, and whether they hold is what spec-check
 answers."
   (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
-    (multiple-value-bind (source source-complete source-omitted)
-        (%print-bounded-form (getf data :source-form) max-chars)
-      (list :status :ok
-            :kind "function-spec"
-            :name (symbol-data name)
-            :documentation (getf data :documentation)
-            :arguments (loop for argument in (getf data :arguments)
-                             collect (list :variable
-                                           (symbol-data (getf argument :variable))
-                                           :spec (%spec-tree (getf argument :spec))))
-            :returns (%spec-tree (getf data :returns))
-            :preconditions (let ((forms (getf data :preconditions)))
-                             (when forms (printed-for-display forms)))
-            :postconditions (let ((forms (getf data :postconditions)))
-                              (when forms (printed-for-display forms)))
-            :source-form source
-            :source-form-complete source-complete
-            :source-form-omitted-chars source-omitted
-            :source-location (getf data :source-location)
-            :definition-digest (definition-digest api name registry :property data)))))
+    (flet ((clause (forms)
+             ;; Bounded like the body a property describe carries.  A :PRE or
+             ;; :POST form is short in practice, but "in practice" is not a
+             ;; budget, and every other form this module prints is cut at one.
+             ;; NIL rather than the string "NIL" for an absent clause, so a
+             ;; renderer can tell a contract with no :PRE from one whose :PRE
+             ;; is the literal NIL.
+             (when forms
+               (multiple-value-bind (text complete) (%print-bounded-form forms max-chars)
+                 (list text complete)))))
+      (let ((pre (clause (getf data :preconditions)))
+            (post (clause (getf data :postconditions))))
+        (multiple-value-bind (source source-complete source-omitted)
+            (%print-bounded-form (getf data :source-form) max-chars)
+          (list :status :ok
+                :kind "function-spec"
+                :name (symbol-data name)
+                :documentation (getf data :documentation)
+                :arguments (loop for argument in (getf data :arguments)
+                                 collect (list :variable
+                                               (symbol-data (getf argument :variable))
+                                               :spec (%spec-tree (getf argument :spec))))
+                :returns (%spec-tree (getf data :returns))
+                :preconditions (first pre)
+                :preconditions-complete (if pre (second pre) t)
+                :postconditions (first post)
+                :postconditions-complete (if post (second post) t)
+                :source-form source
+                :source-form-complete source-complete
+                :source-form-omitted-chars source-omitted
+                :source-location (getf data :source-location)
+                :definition-digest (definition-digest api name registry
+                                                      :property data)))))))
 
 (defun %describe-property (api name registry max-chars)
   "Return the detail plist for property NAME."

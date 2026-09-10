@@ -459,7 +459,9 @@ to see the rest; the text above is a preview, not a form that can be read back."
               "spec" (%spec-tree-ht (getf report :spec))
               "returns" (%spec-tree-ht (getf report :returns))
               "preconditions" (sanitize-for-json (getf report :preconditions))
+              "preconditions_complete" (json-bool (getf report :preconditions-complete))
               "postconditions" (sanitize-for-json (getf report :postconditions))
+              "postconditions_complete" (json-bool (getf report :postconditions-complete))
               "body" (sanitize-for-json (getf report :body))
               "body_complete" (json-bool (getf report :body-complete))
               "body_omitted_chars" (getf report :body-omitted-chars)
@@ -710,12 +712,24 @@ deterministic"))
       (format stream "~&reproduction: ~A"
               (%faithful-string (getf report :reproduction-faithful))))
     (when (and first-result (getf first-result :seed))
-      (format stream "~&~%Replay: spec-check property=~A seed=~A profile=~A~
+      ;; The argument the run was actually selected by, and for a contract the
+      ;; budget as well.  Printed as property= a contract's replay line asks
+      ;; for a property that does not exist, and without trials= a failure
+      ;; found at a raised budget need not reappear at the backend default --
+      ;; a replay instruction that does not replay is worse than none.
+      (if (eq :contract (getf first-result :kind))
+          (format stream "~&~%Replay: spec-check function=~A seed=~A~
+~@[ trials=~A~]~@[ expect_definition_digest=~A~]"
+                  (getf (getf first-result :property) :qualified)
+                  (getf first-result :seed)
+                  (getf (getf first-result :trials) :budget)
+                  (getf first-result :definition-digest))
+          (format stream "~&~%Replay: spec-check property=~A seed=~A profile=~A~
 ~@[ expect_definition_digest=~A~]"
-              (getf (getf first-result :property) :qualified)
-              (getf first-result :seed)
-              (%keyword-string (getf first-result :profile))
-              (getf first-result :definition-digest)))
+                  (getf (getf first-result :property) :qualified)
+                  (getf first-result :seed)
+                  (%keyword-string (getf first-result :profile))
+                  (getf first-result :definition-digest))))
     ;; Gated on there being a seed to reproduce from.  A run where nothing
     ;; executed has nothing to say about reproduction, and printing the
     ;; caveat there is noise the caller has to read past every time.
@@ -723,6 +737,20 @@ deterministic"))
                first-result
                (getf first-result :seed))
       (format stream "~&~A" (getf report :reproduce-scope)))))
+
+(defun %selection-noun (selection)
+  "Return the word for what SELECTION selected, singular or plural.
+
+A contract run selects a contract, not a property.  The two are different
+instruments -- one is the function's own :args/:returns, the other a relation
+someone asserted about it -- and a line that calls both \"property\" hides
+which one just ran."
+  (let ((contractp (equal "contract" (getf selection :mode)))
+        (one (eql 1 (getf selection :count))))
+    (cond ((and contractp one) "contract")
+          (contractp "contracts")
+          (one "property")
+          (t "properties"))))
 
 (defun %check-headline (report)
   "Return the first line of a spec-check text, in this project's house style.
@@ -740,16 +768,24 @@ was learned either way."
   (with-output-to-string (stream)
     (let ((selection (getf report :selection)))
       (if (eq :no-properties (getf report :status))
-          (format stream "⚠ NO PROPERTIES  ~A~&Selected 0 properties via ~A.~&~%~A~
-~&verified: false"
-                  (or (getf (getf (getf selection :requested) :symbol) :qualified)
-                      "")
-                  (getf selection :source)
-                  (getf report :message))
+          (progn
+            (format stream "⚠ NO PROPERTIES  ~A~&Selected 0 properties via ~A.~&~%~A"
+                    (or (getf (getf (getf selection :requested) :symbol) :qualified)
+                        "")
+                    (getf selection :source)
+                    (getf report :message))
+            ;; The notes belong here most of all.  A caller who asked about a
+            ;; symbol and was told nothing ran has no reason to look further,
+            ;; and the note is what says a contract is registered for it.
+            (dolist (note (getf selection :notes))
+              (format stream "~&~%note: ~A" note))
+            (format stream "~&verified: false"))
           (progn
             (format stream "~A" (%check-headline report))
-            (format stream "~&Selected ~D propert~:@P via ~A."
-                    (getf selection :count) (getf selection :source))
+            (format stream "~&Selected ~D ~A via ~A."
+                    (getf selection :count)
+                    (%selection-noun selection)
+                    (getf selection :source))
             (format stream "~&  ~A" (getf selection :coverage))
             (dolist (note (getf selection :notes))
               (format stream "~&  note: ~A" note))
@@ -779,7 +815,8 @@ was learned either way."
                          "requested"
                          (let ((requested (getf selection :requested)))
                            (make-ht "property" (%symbol-ht (getf requested :property))
-                                    "symbol" (%symbol-ht (getf requested :symbol))))
+                                    "symbol" (%symbol-ht (getf requested :symbol))
+                                    "function" (%symbol-ht (getf requested :function))))
                          "selected" (%symbol-hts (getf selection :selected))
                          "count" (getf selection :count)
                          "source" (getf selection :source)

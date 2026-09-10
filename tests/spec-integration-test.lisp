@@ -323,6 +323,36 @@ reached the caller."
               (ok (string= "invalid-arguments" (gethash "status" response)))
               (ok (search "function=" (%text response)))))
 
+          (testing "the replay line for a contract is a call that would work"
+            ;; Printed as spec-check property=<name>, following it verbatim
+            ;; asks for a property that does not exist -- and without the
+            ;; budget, a failure found at 300 trials need not reappear at the
+            ;; backend default.
+            (let* ((response (spec-check-response
+                              (make-ht "function" (%fixture-name "WIDEN")
+                                       "trials" 300)))
+                   (text (%text response)))
+              (ok (search "Replay: spec-check function=" text))
+              (ok (not (search "Replay: spec-check property=" text)))
+              (ok (search "trials=300" text))))
+
+          (testing "the selection line calls a contract a contract"
+            (let ((text (%text (spec-check-response
+                                (make-ht "function" (%fixture-name "CLAMP")
+                                         "trials" 20)))))
+              (ok (search "Selected 1 contract" text))
+              (ok (not (search "Selected 1 property" text)))))
+
+          (testing "a symbol whose only registration is a contract still says so"
+            ;; The caller asked about the symbol and got "nothing ran". If the
+            ;; contract is not named here they have no reason to look further.
+            (let* ((response (spec-check-response
+                              (make-ht "symbol" (%fixture-name "NEVER-CALLABLE"))))
+                   (text (%text response)))
+              (ok (string= "no-properties" (gethash "status" response)))
+              (ok (search "function spec is registered" text))
+              (ok (search "function=" text))))
+
           (testing "spec-list enumerates contracts as their own kind"
             (let* ((response (spec-list-response (make-ht "kind" "function-specs")))
                    (text (%text response)))
