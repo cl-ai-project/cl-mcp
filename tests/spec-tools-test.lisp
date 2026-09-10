@@ -278,10 +278,18 @@ are what a test about the message has to look at."
             (format nil "spec-check description must name the ~(~A~) status"
                     status)))
       (testing "and the whole-call statuses too"
-        (dolist (status +call-statuses+)
-          (ok (search (string-downcase (symbol-name status)) description)
-              (format nil "spec-check description must name the ~(~A~) call status"
-                      status))))
+        ;; Searched inside the whole-call section, not the whole string: a
+        ;; status documented only under results[].status satisfied a search
+        ;; over the description and the guard reported coverage it did not
+        ;; have -- which is how undefined-function reached +CALL-STATUSES+
+        ;; without ever being defined for a caller reading about a call.
+        (let* ((start (search "For the whole call, status:" description))
+               (section (subseq description (or start 0))))
+          (ok start "the description must have a whole-call status section")
+          (dolist (status +call-statuses+)
+            (ok (search (string-downcase (symbol-name status)) section)
+                (format nil "the whole-call section must name ~(~A~)"
+                        status)))))
       (testing "and every verification gap it can report"
         ;; The gap set grew four times in one branch while the description
         ;; explained two of the values.  Checked from the code's own list for

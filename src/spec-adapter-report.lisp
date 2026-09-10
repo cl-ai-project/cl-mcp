@@ -147,6 +147,23 @@ trailing spaces into every message and every JSON field carrying one.")
                "about the same symbol are NOT included and were not run.")
   "The limit of what an explicit contract selection covers.")
 
+(defparameter +unverifiable-contract-note+
+  (concatenate 'string
+               "this cl-spec exports no refused-input reader "
+               "(function-check-result-rejected), so no contract run here can "
+               "reach verified: how much of the generated input the function "
+               "actually saw cannot be established. Failures and "
+               "counterexamples are still reported. Raising trials will not "
+               "change the verdict.")
+  "Said when the loaded cl-spec makes a verified contract run impossible.")
+
+(defparameter +related-unknown-note+
+  (concatenate 'string
+               "whether any property is registered about this symbol could "
+               "not be read, so this run's coverage is unknown beyond the "
+               "contract.")
+  "Said when the reverse index could not be consulted for a contract run.")
+
 (defparameter +own-property-not-run-note+
   (concatenate 'string
                "this symbol is itself a registered property and was NOT run: "
@@ -417,6 +434,22 @@ this cl-spec cannot enumerate.  One table, read by all four.
 (defun listing-kind-wanted-p (row kind)
   "Return true when KIND asks for the listing half ROW describes."
   (or (string= kind "both") (string= kind (first row))))
+
+(defparameter +contract-operations+
+  '((:describe :function-spec-data)
+    (:run :check-function :function-spec-data)
+    (:list :list-function-specs :function-spec-data))
+  "The cl-spec handles each contract operation needs.
+
+Written out by hand in three places -- DESCRIBE-REPORT's gate, CHECK-REPORT's
+gate and +LISTING-KINDS+ -- which is the arrangement +LISTING-KINDS+'s own
+docstring says had already disagreed twice on this branch.  Adding a handle to
+one operation is an edit here, not three ANDs no table checks.")
+
+(defun contract-operation-missing (api operation)
+  "Return the handles OPERATION needs that API does not have."
+  (remove-if (lambda (key) (api-has-p api key))
+             (rest (assoc operation +contract-operations+))))
 
 (defun %listing-unsupported-message (missing)
   "Return the message for a listing kind this cl-spec cannot enumerate.
@@ -693,11 +726,8 @@ FUNCTION-SPEC-DATA -- and its fallback, \"read it with spec-describe\", is the
 one operation that revision cannot do either.  The whole point of the wording
 is that it is a statement about the loaded revision, so it has to name the
 right fact about it."
-  (let ((missing (remove nil
-                         (list (unless (api-has-p api :check-function)
-                                 "check-function")
-                               (unless (api-has-p api :function-spec-data)
-                                 "function-spec-data")))))
+  (let ((missing (mapcar (lambda (key) (string-downcase (symbol-name key)))
+                         (contract-operation-missing api :run))))
     (format nil "the cl-spec loaded here does not export ~{~A~^ or ~}, so a ~
 contract cannot be executed.~@[ ~A~]"
             missing
@@ -941,7 +971,7 @@ function-spec; got ~S" kind)
           (list :status :unresolved-symbol :reason reason :input name
                 :environment environment)))
       (when (and (string= kind "function-spec")
-                 (not (api-has-p api :function-spec-data)))
+                 (contract-operation-missing api :describe))
         (return-from describe-report
           (list :status :unsupported
                 :name (symbol-data symbol)
@@ -1330,27 +1360,23 @@ learns it exists rather than being left to assume the run covered it."
                              (list :properties-not-run about
                                    :own-property-not-run own
                                    :properties-not-run-read (and read t))
-                             (cond
-                               ((or about own)
-                                (list :notes
-                                      (append
-                                       (when about
-                                         (list (format nil "~D propert~:@P ~
+                             (list :notes
+                                   (append
+                                    ;; A verdict that can never flip has to
+                                    ;; say so where the caller reads it, or
+                                    ;; they retry with a larger trials=
+                                    ;; against a gate no budget reaches.
+                                    (unless (api-has-p api :check-rejected)
+                                      (list +unverifiable-contract-note+))
+                                    (when about
+                                      (list (format nil "~D propert~:@P ~
 registered (:about this symbol) ~:*~[~;is~:;are~] NOT covered by a contract ~
 run: run them with spec-check symbol=<this symbol>."
-                                                       (length about))))
-                                       (when own
-                                         (list +own-property-not-run-note+)))))
-                               ((not read)
-                                (list :notes
-                                      (list (concatenate 'string
-                                                         "whether any property "
-                                                         "is registered about "
-                                                         "this symbol could "
-                                                         "not be read, so "
-                                                         "this run's coverage "
-                                                         "is unknown beyond "
-                                                         "the contract")))))))
+                                                    (length about))))
+                                    (when own
+                                      (list +own-property-not-run-note+))
+                                    (unless read
+                                      (list +related-unknown-note+))))))
                    selection)
                error :contract data)))
     (property
@@ -1387,6 +1413,12 @@ truth is that nothing was read."
       (let ((data (or pre-read
                       (funcall (api-fn api :property-data) name
                                :registry registry))))
+        ;; The same refusal %CONTRACT-FACTS makes.  Read as a real answer, a
+        ;; NIL projection gives :ARGUMENT-COUNT 0 with :KNOWN T, and
+        ;; %RESULT-PLIST then reports an empty counterexample as "this
+        ;; property legitimately generates no arguments" rather than "nothing
+        ;; was read" -- which is what :KNOWN exists to keep apart.
+        (unless data (error 'unreadable-projection))
         (list :argument-count (length (getf data :arguments))
               :kind :property
               :shrink-enabled (and (getf (getf data :metadata) :shrink) t)
@@ -1603,10 +1635,7 @@ cl-spec's structured account of a return value that missed its spec."
       (multiple-value-bind (explanation explanation-read)
           (read-slot :check-explanation)
         (multiple-value-bind (rejected rejected-read) (read-slot :check-rejected)
-      (let* (;; REJECTED-READ, not (integerp rejected).  "no reader" and "the
-             ;; reader signalled" are different facts about the loaded
-             ;; revision, and the description promises the first.
-             (rejected rejected)
+        (let* (
                (countable (and (integerp executed) (integerp rejected)))
                (overcounted (and countable (> rejected executed)))
                ;; A refusal reported against a contract whose projection says it
@@ -1819,6 +1848,7 @@ budget computed from one backend and the trials run under another."
             :reason :budget-exhausted
             :trials trials
             :definition-digest (getf digest :value)
+            :definition-digest-covers (getf digest :covers)
             :definition-digest-complete (getf digest :complete)
             :definition-match :not-checked
             :counterexample-status :not-run
@@ -1865,6 +1895,7 @@ budget computed from one backend and the trials run under another."
                    :thread-leaked leaked
                    :trials trials
                    :definition-digest (getf digest :value)
+                   :definition-digest-covers (getf digest :covers)
                    :definition-digest-complete (getf digest :complete)
                    :definition-match :not-checked
                    :counterexample-status :unavailable
@@ -1879,6 +1910,7 @@ budget computed from one backend and the trials run under another."
                    :status (%classify-condition api value)
                    :trials trials
                    :definition-digest (getf digest :value)
+                   :definition-digest-covers (getf digest :covers)
                    :definition-digest-complete (getf digest :complete)
                    :definition-match :not-checked
                    :counterexample-status :unavailable
@@ -2042,8 +2074,7 @@ establish -- read full coverage for a function whose contract never ran."
             (when (or (getf selection :properties-not-run)
                       (getf selection :own-property-not-run))
               (list :properties-not-run))
-            (when (and (getf selection :kind)
-                       (eq :contract (getf selection :kind))
+            (when (and (eq :contract (getf selection :kind))
                        (not (getf selection :properties-not-run-read)))
               (list :related-properties-unknown))
             (unless rejections-measured (list :rejection-counts-unmeasured))
@@ -2093,8 +2124,7 @@ anything holds."
     ;; the image and does not change when a generator backend is installed.
     ;; Ordered the other way, a caller was sent to load cl-spec/check-it and
     ;; only then told that the cl-spec they have cannot run a contract at all.
-    (when (and function (not (and (api-has-p api :check-function)
-                                  (api-has-p api :function-spec-data))))
+    (when (and function (contract-operation-missing api :run))
       (return-from check-report
         (list :status :unsupported
               :verified nil

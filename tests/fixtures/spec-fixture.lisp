@@ -107,13 +107,18 @@ signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
   (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
     (and data (fboundp data) t)))
 
-(defvar *contracts-registered-in* '()
+(defvar *contracts-registered-in*
+  (make-hash-table :test #'eq :weakness :key)
   "Every registry the contract half of this fixture has loaded into.
 
-A list rather than one value: this file is loaded once per registry and the
+A set rather than one value: this file is loaded once per registry and the
 loads interleave with the tests that read the answer, so recording only the
 latest let a private load clobber the shared registry's entry -- and the
-contract tests then skipped against a registry that holds them.")
+contract tests then skipped against a registry that holds them.
+
+Weak on the key, because one test builds a throwaway registry per run and this
+defvar outlives the suite in a worker image: a strong set would retain every
+registry, with all its entries, for the life of the process.")
 
 (defun contracts-registered-p (&optional (registry (symbol-value
                                                     (find-symbol "*REGISTRY*"
@@ -131,7 +136,7 @@ registry and one test loads a private copy of it: a flag that only said
 could skip the contract tests against a shared registry that holds them, or a
 private load that succeeded could send them at one that does not.  Recording
 one registry rather than all of them has the same fault one step in."
-  (and registry (member registry *contracts-registered-in*) t))
+  (and registry (gethash registry *contracts-registered-in*) t))
 
 ;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
 ;; and LOAD reads each top-level form before evaluating it -- so a
@@ -154,8 +159,9 @@ one registry rather than all of them has the same fault one step in."
       (progn
         (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
                                (asdf:system-source-directory "cl-mcp")))
-        (pushnew (symbol-value (find-symbol "*REGISTRY*" "CL-SPEC"))
-                 *contracts-registered-in*))
+        (setf (gethash (symbol-value (find-symbol "*REGISTRY*" "CL-SPEC"))
+                       *contracts-registered-in*)
+              t))
     (error (condition)
       (format *error-output*
               "~&;; spec-fixture: contracts NOT registered: ~A~%" condition))))

@@ -239,6 +239,9 @@ For the whole call, status:
   unsupported     the loaded cl-spec cannot run a contract. Nothing ran.
   completed       every selected property reached a verdict.
   incomplete      at least one timeout, not-run, or *-error.
+  undefined-function
+                  the name is registered but the function it contracts is not
+                  defined in this image. Nothing ran. NOT an adapter fault.
   cl-spec-not-loaded / cl-spec-incomplete / backend-not-loaded /
   unresolved-symbol / not-registered / invalid-arguments / internal-error
                   the call did not get as far as running anything. None of

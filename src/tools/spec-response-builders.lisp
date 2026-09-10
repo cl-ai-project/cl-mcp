@@ -593,6 +593,7 @@ not be read."
                                       (json-bool value)))
              "rejected" (getf contract :rejected)
              "rejected_measured" (json-bool (getf contract :rejected-measured))
+             "rejected_readable" (json-bool (getf contract :rejected-readable))
              "rejected_overcounted" (json-bool
                                      (getf contract :rejected-overcounted))
              "effective_trials" (getf contract :effective-trials)
@@ -719,9 +720,10 @@ count suggests, and that shortfall is invisible in every other line."
 trial~:P -- cl-spec counted more refusals than trials, so how often the ~
 function was actually called cannot be derived here~@[. This contract has ~
 no :pre, so it should have refused none~]"
+                 ;; EXECUTED is an integer here: :OVERCOUNTED is chosen only
+                 ;; after the countability guard, which requires one.
                  (getf contract :rejected)
-                 (or (getf (getf result :trials) :executed)
-                     "an unknown number of")
+                 (getf (getf result :trials) :executed)
                  (null (getf contract :precondition-p))))
         (:unmeasured
          (format stream "~&    contract: the refused-input count could not be ~
@@ -898,7 +900,10 @@ it came out."
                        ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
                        (t "⚠ NOT VERIFIED")))
         (contract (getf (getf report :selection) :contract-not-run))
-        (properties (getf (getf report :selection) :properties-not-run)))
+        (properties (append (getf (getf report :selection) :properties-not-run)
+                            (let ((own (getf (getf report :selection)
+                                             :own-property-not-run)))
+                              (when own (list own))))))
     (cond
       (contract
        (format nil "~A (properties only -- the function spec for ~A was NOT run)"
@@ -996,6 +1001,8 @@ symbol could not be read)"
                            (%symbol-hts (getf selection :properties-not-run)))
                          "properties_not_run_read"
                          (%optional-bool selection :properties-not-run-read)
+                         "own_property_not_run"
+                         (%symbol-ht (getf selection :own-property-not-run))
                          "notes" (%strings (getf selection :notes)))
                 "results" (coerce (mapcar #'%result-ht (getf report :results))
                                   'vector)
@@ -1096,15 +1103,22 @@ symbol could not be read)"
         ;; clause used to re-derive two of the same three facts, so "this
         ;; kind lists no properties" and "this cl-spec cannot filter by tag"
         ;; were one edit away from being reported as each other.
-        (let ((lists-properties (and (member (getf report :kind)
-                                             '("properties" "both")
-                                             :test #'equal)
-                                     (getf report :properties-listable)
-                                     t)))
+        ;; Three reasons, each named as itself.  Folding "this cl-spec cannot
+        ;; enumerate properties" into the kind test gave kind=both the answer
+        ;; "this kind lists none" two lines above a block saying the revision
+        ;; cannot enumerate them -- one response, two reasons, one fact.
+        (let ((kind-lists-properties (and (member (getf report :kind)
+                                                  '("properties" "both")
+                                                  :test #'equal)
+                                          t)))
           (cond
-            ((not lists-properties)
+            ((not kind-lists-properties)
              (format stream "  tag ~A was NOT applied: it narrows properties, ~
 and this kind lists none"
+                     (getf filters :tag)))
+            ((not (getf report :properties-listable))
+             (format stream "  tag ~A was NOT applied: the loaded cl-spec ~
+cannot enumerate properties, so there was nothing for it to narrow"
                      (getf filters :tag)))
             ((not (getf report :tag-filterable))
              (format stream "  tag ~A was NOT applied: the loaded cl-spec ~
