@@ -391,14 +391,25 @@ max_chars -- which is to say, by luck."
                 (getf (getf (getf argument :spec) :target) :qualified))
         (map nil (lambda (child) (%format-spec-node stream child 1))
              (or (getf (getf argument :spec) :children) '()))))
+    ;; Cut and reported, like the body and the source form below.  A silently
+    ;; truncated :PRE is worse than either: a reader takes a clause for the
+    ;; whole condition and concludes the contract admits inputs it refuses.
     (when (getf report :preconditions)
-      (format stream "~&~%:pre  ~A" (getf report :preconditions)))
+      (format stream "~&~%:pre  ~A" (getf report :preconditions))
+      (unless (getf report :preconditions-complete)
+        (format stream "~&... truncated, ~D more character~:P. Raise max_chars ~
+to see the rest."
+                (getf report :preconditions-omitted-chars))))
     (let ((returns (getf report :returns)))
       (when returns
         (format stream "~&~%returns:")
         (%format-spec-node stream returns 0)))
     (when (getf report :postconditions)
-      (format stream "~&~%:post ~A" (getf report :postconditions)))
+      (format stream "~&~%:post ~A" (getf report :postconditions))
+      (unless (getf report :postconditions-complete)
+        (format stream "~&... truncated, ~D more character~:P. Raise max_chars ~
+to see the rest."
+                (getf report :postconditions-omitted-chars))))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -457,8 +468,12 @@ to see the rest; the text above is a preview, not a form that can be read back."
               "returns" (%spec-tree-ht (getf report :returns))
               "preconditions" (sanitize-for-json (getf report :preconditions))
               "preconditions_complete" (json-bool (getf report :preconditions-complete))
+              "preconditions_omitted_chars" (getf report
+                                                  :preconditions-omitted-chars)
               "postconditions" (sanitize-for-json (getf report :postconditions))
               "postconditions_complete" (json-bool (getf report :postconditions-complete))
+              "postconditions_omitted_chars" (getf report
+                                                   :postconditions-omitted-chars)
               "body" (sanitize-for-json (getf report :body))
               "body_complete" (json-bool (getf report :body-complete))
               "body_omitted_chars" (getf report :body-omitted-chars)
@@ -527,11 +542,17 @@ not be read."
   (when contract
     (make-ht "rejected" (getf contract :rejected)
              "rejected_measured" (json-bool (getf contract :rejected-measured))
+             "rejected_overcounted" (json-bool
+                                     (getf contract :rejected-overcounted))
              "effective_trials" (getf contract :effective-trials)
              "failure_reason" (%keyword-string (getf contract :failure-reason))
              "failure_reason_readable" (json-bool
                                         (getf contract :failure-reason-readable))
-             "explanation" (sanitize-for-json (getf contract :explanation)))))
+             "explanation" (sanitize-for-json (getf contract :explanation))
+             "explanation_complete" (json-bool
+                                     (getf contract :explanation-complete))
+             "explanation_omitted_chars" (getf contract
+                                               :explanation-omitted-chars))))
 
 (defun %result-ht (result)
   "Return one per-property result as a hash-table."
@@ -632,13 +653,25 @@ The effective trial count is the one a reader should act on: a contract whose
 count suggests, and that shortfall is invisible in every other line."
   (let ((contract (getf result :contract)))
     (when contract
-      (if (getf contract :rejected-measured)
-          (format stream "~&    contract: ~A of them refused by :pre, ~
+      (cond
+        ((getf contract :rejected-overcounted)
+         ;; More refusals than trials, so the difference says nothing.  Left
+         ;; as its own line rather than folded into the one below: printing
+         ;; "the function was called 0 times" for a run that did call it is a
+         ;; different wrong answer, not a smaller one.
+         (format stream "~&    contract: ~A inputs refused by :pre against ~
+~A trials -- cl-spec counted more refusals than trials, so how often the ~
+function was actually called cannot be derived here"
+                 (getf contract :rejected)
+                 (or (getf (getf result :trials) :executed) "an unknown number of")))
+        ((getf contract :rejected-measured)
+         (format stream "~&    contract: ~A of them refused by :pre, ~
 so the function was called ~A time~:P"
-                  (getf contract :rejected)
-                  (or (getf contract :effective-trials) "an unknown number of"))
-          (format stream "~&    contract: the refused-input count could not be ~
-read, so the trial count above is an upper bound on what was checked"))
+                 (getf contract :rejected)
+                 (or (getf contract :effective-trials) "an unknown number of")))
+        (t
+         (format stream "~&    contract: the refused-input count could not be ~
+read, so the trial count above is an upper bound on what was checked")))
       ;; An absent reason has two causes and they are opposite accusations:
       ;; cl-spec saying the counterexample would not reproduce, and this
       ;; adapter never having had a reader to ask.  Printing the first for
@@ -659,7 +692,11 @@ cl-spec does not export the reader. Which half broke is unknown; this is NOT ~
 a finding about the function"))))
       (let ((explanation (getf contract :explanation)))
         (when explanation
-          (format stream "~&    return value: ~A" explanation))))))
+          (format stream "~&    return value: ~A" explanation)
+          (unless (getf contract :explanation-complete)
+            (format stream "~&    ... truncated, ~D more character~:P. Raise ~
+max_value_chars to see the rest."
+                    (getf contract :explanation-omitted-chars))))))))
 
 (defun %format-one-result (stream result index)
   "Write one per-property result to STREAM."

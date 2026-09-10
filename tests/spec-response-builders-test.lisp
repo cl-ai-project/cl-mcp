@@ -39,7 +39,9 @@
   (list :package package :name name
         :qualified (format nil "~A::~A" package name)))
 
-(defun %contract-check-report (&key failure-reason failure-reason-readable)
+(defun %contract-check-report (&key failure-reason failure-reason-readable
+                                    rejected-overcounted (rejected 3)
+                                    (effective-trials 27))
   "Return a completed contract check report whose single result failed."
   (list :status :completed
         :verified nil
@@ -53,9 +55,10 @@
                     :status :failed
                     :trials (list :executed 30 :budget 30
                                   :budget-source "requested")
-                    :contract (list :rejected 3
+                    :contract (list :rejected rejected
                                     :rejected-measured t
-                                    :effective-trials 27
+                                    :rejected-overcounted rejected-overcounted
+                                    :effective-trials effective-trials
                                     :failure-reason failure-reason
                                     :failure-reason-readable
                                     failure-reason-readable)
@@ -622,6 +625,31 @@
       (ok (search "truncated" text))
       (ok (search "31" text)))))
 
+(deftest describe-response-marks-a-cut-precondition
+  (testing "a truncated :pre or :post says so, like the body does"
+    ;; A silently cut :PRE is worse than a cut body: a reader takes the clause
+    ;; for the whole condition and concludes the contract admits inputs it
+    ;; refuses.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "function-spec"
+                            :name (%symbol-data "PROBE" "TRANSFER")
+                            :documentation nil :arguments nil :returns nil
+                            :preconditions "(AND (PLUSP AMOUNT)"
+                            :preconditions-complete nil
+                            :preconditions-omitted-chars 62
+                            :postconditions "(> RESULT"
+                            :postconditions-complete nil
+                            :postconditions-omitted-chars 17
+                            :source-form "(DEFSPEC-FUNCTION" :source-form-complete t
+                            :definition-digest "a41f9c2b7d0e5518"
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (eq yason:false (gethash "preconditions_complete" response)))
+      (ok (= 62 (gethash "preconditions_omitted_chars" response)))
+      (ok (= 17 (gethash "postconditions_omitted_chars" response)))
+      (ok (search "62 more characters" text))
+      (ok (search "17 more characters" text)))))
+
 (deftest list-response-omits-a-kind-that-was-not-requested
   (testing "the header names only what was counted"
     (flet ((text-for (kind specs properties)
@@ -706,3 +734,30 @@
       (ok (search "broken half: return-spec" (first-text response)))
       (ok (string= "return-spec" (gethash "failure_reason" contract)))
       (ok (eq t (gethash "failure_reason_readable" contract))))))
+
+(deftest check-response-never-reports-a-negative-call-count
+  (testing "more refusals than trials is said, not subtracted"
+    ;; cl-spec stops counting refusals at the first failure it recognizes, but
+    ;; a target that SIGNALS unwinds past that point with the counter running
+    ;; and shrinking keeps feeding it.  Measured at 3 runs in 8 against such a
+    ;; contract -- one of them 1 trial and 2 rejections, which printed as "the
+    ;; function was called -1 times".
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :rejected 2
+                                              :effective-trials 0
+                                              :rejected-overcounted t
+                                              :failure-reason :condition
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0)))
+           (text (first-text response)))
+      (ok (eq t (gethash "rejected_overcounted" contract)))
+      (ok (search "more refusals than trials" text))
+      (ok (not (search "-1" text)))
+      (ok (not (search "called 0 time" text)))))
+  (testing "and an ordinary count still reads as one"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason :return-spec
+                                          :failure-reason-readable t)))))
+      (ok (search "called 27 times" text))
+      (ok (not (search "more refusals than trials" text))))))

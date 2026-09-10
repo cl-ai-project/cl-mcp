@@ -375,6 +375,28 @@ thread sees the value the caller captured rather than the global one.")
                   (declare (ignore registry))
                   (when (eq tag :math) (list (%sym "ADD-COMMUTES"))))))))
 
+(defun %contract-listing-api ()
+  "Return a stub API that can enumerate contracts and nothing else.
+
+Stands for a cl-spec whose function-spec half is present while the older
+listing functions are not -- the shape the blanket listing guard refused."
+  (%stub-api :list-function-specs
+             (lambda (&optional registry)
+               (declare (ignore registry))
+               (list (%sym "ADD")))
+             :function-spec-data
+             (lambda (name &key registry)
+               (declare (ignore registry))
+               (list :name name
+                     :documentation "ADD stays inside SMALL-INT."
+                     :arguments (list (list :variable (%sym "A")
+                                            :spec (list :kind :reference
+                                                        :target (%sym "SMALL-INT"))))
+                     :returns (list :kind :reference
+                                    :target (%sym "SMALL-INT"))
+                     :preconditions nil
+                     :postconditions nil))))
+
 (deftest list-report-enumerates-what-is-registered
   (testing "both kinds come back with the property's discovery fields"
     (let ((report (list-report (%listing-api) :ok :kind "both")))
@@ -446,6 +468,20 @@ thread sees the value the caller captured rather than the global one.")
     (let ((report (list-report (%stub-api) :ok :kind "both")))
       (ok (eq :unsupported (getf report :status)))
       (ok (search "list-specs" (getf report :message))))))
+
+(deftest list-report-gates-on-what-the-kind-needs
+  (testing "a contract listing does not wait on the property listing API"
+    ;; kind=function-specs reads neither LIST-SPECS nor LIST-PROPERTIES, and
+    ;; the blanket guard predating it refused a listing it could produce --
+    ;; while reporting function_specs_listable true three keys later.
+    (let ((report (list-report (%contract-listing-api) :ok
+                               :kind "function-specs")))
+      (ok (eq :ok (getf report :status)))
+      (ok (getf report :function-specs-listable))
+      (ok (= 1 (length (getf report :function-specs))))))
+  (testing "while both still needs both"
+    (let ((report (list-report (%contract-listing-api) :ok :kind "both")))
+      (ok (eq :unsupported (getf report :status))))))
 
 (deftest list-report-rejects-an-unknown-kind
   (testing "kind is constrained"

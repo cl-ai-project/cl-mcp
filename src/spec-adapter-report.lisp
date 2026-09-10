@@ -476,11 +476,19 @@ different answers."
               :message (format nil "kind must be one of specs, properties, ~
 function-specs or both; got ~S" kind)
               :environment environment)))
-    (unless (and (api-has-p api :list-specs) (api-has-p api :list-properties))
-      (return-from list-report
-        (list :status :unsupported
-              :message +listing-unsupported-message+
-              :environment environment)))
+    ;; Gated on what THIS kind needs.  The blanket check predates
+    ;; kind="function-specs", which reads neither of these two, and refused a
+    ;; listing it could have produced -- while reporting
+    ;; function_specs_listable true three keys later.
+    (let ((needed (cond ((string= kind "specs") '(:list-specs))
+                        ((string= kind "properties") '(:list-properties))
+                        ((string= kind "both") '(:list-specs :list-properties))
+                        (t '()))))
+      (unless (every (lambda (name) (api-has-p api name)) needed)
+        (return-from list-report
+          (list :status :unsupported
+                :message +listing-unsupported-message+
+                :environment environment))))
     (multiple-value-bind (package-object package-error)
         (%listing-package-filter package)
       (when package-error
@@ -636,8 +644,9 @@ answers."
              ;; renderer can tell a contract with no :PRE from one whose :PRE
              ;; is the literal NIL.
              (when forms
-               (multiple-value-bind (text complete) (%print-bounded-form forms max-chars)
-                 (list text complete)))))
+               (multiple-value-bind (text complete omitted)
+                   (%print-bounded-form forms max-chars)
+                 (list text complete omitted)))))
       (let ((pre (clause (getf data :preconditions)))
             (post (clause (getf data :postconditions))))
         (multiple-value-bind (source source-complete source-omitted)
@@ -653,8 +662,10 @@ answers."
                 :returns (%spec-tree (getf data :returns))
                 :preconditions (first pre)
                 :preconditions-complete (if pre (second pre) t)
+                :preconditions-omitted-chars (third pre)
                 :postconditions (first post)
                 :postconditions-complete (if post (second post) t)
+                :postconditions-omitted-chars (third post)
                 :source-form source
                 :source-form-complete source-complete
                 :source-form-omitted-chars source-omitted
@@ -896,33 +907,44 @@ no registered property can select a trial count for it. Use a profile that ~
 appears in the property's trials table (see spec-describe)."
                         profile)))))
 
-(defun %registered-property-p (api name registry)
-  "Return (values FOUND-P MESSAGE) for property NAME in REGISTRY."
+(defun %registered-p (api data-key name registry)
+  "Return (values FOUND-P MESSAGE) for NAME under the API reader DATA-KEY.
+
+DATA-KEY is :PROPERTY-DATA or :FUNCTION-SPEC-DATA.  Every error is read as
+\"not registered\", which is true of cl-spec's unknown-name conditions and an
+approximation for anything else it might signal; the message is carried so the
+approximation is at least visible."
   (handler-case
-      (progn (funcall (api-fn api :property-data) name :registry registry)
+      (progn (funcall (api-fn api data-key) name :registry registry)
              (values t nil))
     (error (condition) (values nil (princ-to-string condition)))))
 
-(defun %select-explicit (api property package registry)
-  "Return (values NAMES SELECTION ERROR) for an explicit property request."
+(defun %select-named (api designator package registry
+                      &key data-key mode requested-key source coverage)
+  "Return (values NAMES SELECTION ERROR) for one explicitly named definition.
+
+Serves both explicit selections -- a property by name and a contract by name.
+They resolve, check and describe identically, and differ only in the reader
+they ask and the five literals they put in the selection plist; kept apart,
+each fix to one had to be remembered for the other."
   (multiple-value-bind (name reason)
-      (resolve-symbol-designator property :package package)
+      (resolve-symbol-designator designator :package package)
     (if (null name)
         (values nil nil (list :status :unresolved-symbol :reason reason
-                              :input property))
+                              :input designator))
         (multiple-value-bind (found-p message)
-            (%registered-property-p api name registry)
+            (%registered-p api data-key name registry)
           (if (not found-p)
               (values nil nil (list :status :not-registered
                                     :name (symbol-data name)
                                     :message message))
               (values (list name)
-                      (list :mode "explicit"
-                            :requested (list :property (symbol-data name))
+                      (list :mode mode
+                            :requested (list requested-key (symbol-data name))
                             :selected (list (symbol-data name))
                             :count 1
-                            :source "explicit property argument"
-                            :coverage +explicit-coverage-note+)
+                            :source source
+                            :coverage coverage)
                       nil))))))
 
 (defun %select-about (api symbol package registry)
@@ -1011,35 +1033,6 @@ refused only for a profile that was actually asked for."
        (list :status :invalid-arguments
              :message +profile-needs-a-property-message+)))))
 
-(defun %registered-contract-p (api name registry)
-  "Return (values FOUND-P MESSAGE) for the contract registered for NAME."
-  (handler-case
-      (progn (funcall (api-fn api :function-spec-data) name :registry registry)
-             (values t nil))
-    (error (condition) (values nil (princ-to-string condition)))))
-
-(defun %select-contract (api function package registry)
-  "Return (values NAMES SELECTION ERROR) for an explicit contract request."
-  (multiple-value-bind (name reason)
-      (resolve-symbol-designator function :package package)
-    (if (null name)
-        (values nil nil (list :status :unresolved-symbol :reason reason
-                              :input function))
-        (multiple-value-bind (found-p message)
-            (%registered-contract-p api name registry)
-          (if (not found-p)
-              (values nil nil (list :status :not-registered
-                                    :name (symbol-data name)
-                                    :message message))
-              (values (list name)
-                      (list :mode "contract"
-                            :requested (list :function (symbol-data name))
-                            :selected (list (symbol-data name))
-                            :count 1
-                            :source "explicit function argument"
-                            :coverage +contract-coverage-note+)
-                      nil))))))
-
 (defun %select-properties (api property symbol function package registry)
   "Return (values NAMES SELECTION ERROR KIND) for the requested selection.
 
@@ -1055,11 +1048,21 @@ learns it exists rather than being left to assume the run covered it."
   (cond
     (function
      (multiple-value-bind (names selection error)
-         (%select-contract api function package registry)
+         (%select-named api function package registry
+                        :data-key :function-spec-data
+                        :mode "contract"
+                        :requested-key :function
+                        :source "explicit function argument"
+                        :coverage +contract-coverage-note+)
        (values names selection error :contract)))
     (property
      (multiple-value-bind (names selection error)
-         (%select-explicit api property package registry)
+         (%select-named api property package registry
+                        :data-key :property-data
+                        :mode "explicit"
+                        :requested-key :property
+                        :source "explicit property argument"
+                        :coverage +explicit-coverage-note+)
        (values names selection error :property)))
     (t
      (multiple-value-bind (names selection error)
@@ -1213,30 +1216,46 @@ admit, and a trial count that includes them overstates the work.  It is
 reported with REJECTED-MEASURED beside it, because a cl-spec whose readers this
 adapter could not resolve gives NIL, which must not read as zero rejections.
 
+REJECTED can exceed EXECUTED, so the difference is floored at zero and the
+overshoot reported rather than published as a negative count.  cl-spec stops
+counting refusals at the first failure it recognizes, but a target that
+SIGNALS unwinds past that point with the counter still running, and shrinking
+then re-runs the predicate over candidates its :PRE refuses.  Measured at 3
+runs in 8 against a contract whose function signals inside its :PRE region,
+one of them reporting 1 trial and 2 rejections.
+
 FAILURE-REASON names which half of the contract broke; EXPLANATION carries
 cl-spec's structured account of a return value that missed its spec."
   (flet ((read-slot (key)
            (when (api-has-p api key)
              (handler-case (funcall (api-fn api key) result)
                (error () nil)))))
-    (let ((rejected (read-slot :check-rejected))
-          (reason (read-slot :check-failure-reason))
-          (explanation (read-slot :check-explanation)))
-      (list :rejected rejected
-            :rejected-measured (and (integerp rejected) t)
-            :effective-trials (when (and (integerp executed) (integerp rejected))
-                                (- executed rejected))
-            :failure-reason reason
-            ;; Whether the reader resolved, not whether it returned something.
-            ;; NIL is a legitimate answer from cl-spec -- a passing run, or a
-            ;; failing one whose counterexample did not reproduce -- so it
-            ;; cannot double as "this adapter could not ask".  Reported for
-            ;; the same reason REJECTED-MEASURED is: without it a renderer
-            ;; tells the caller their function is non-deterministic on the
-            ;; evidence of a name this image could not find.
-            :failure-reason-readable (and (api-has-p api :check-failure-reason) t)
-            :explanation (when explanation
-                           (print-form-bounded explanation max-value-chars))))))
+    (let* ((rejected (read-slot :check-rejected))
+           (reason (read-slot :check-failure-reason))
+           (explanation (read-slot :check-explanation))
+           (countable (and (integerp executed) (integerp rejected)))
+           (overcounted (and countable (> rejected executed))))
+      (multiple-value-bind (explanation-text explanation-complete
+                            explanation-omitted)
+          (if explanation
+              (print-form-bounded explanation max-value-chars)
+              (values nil t nil))
+        (list :rejected rejected
+              :rejected-measured (and (integerp rejected) t)
+              :rejected-overcounted (and overcounted t)
+              :effective-trials (when countable (max 0 (- executed rejected)))
+              :failure-reason reason
+              ;; Whether the reader resolved, not whether it returned something.
+              ;; NIL is a legitimate answer from cl-spec -- a passing run, or a
+              ;; failing one whose counterexample did not reproduce -- so it
+              ;; cannot double as "this adapter could not ask".  Reported for
+              ;; the same reason REJECTED-MEASURED is: without it a renderer
+              ;; tells the caller their function is non-deterministic on the
+              ;; evidence of a name this image could not find.
+              :failure-reason-readable (and (api-has-p api :check-failure-reason) t)
+              :explanation explanation-text
+              :explanation-complete explanation-complete
+              :explanation-omitted-chars explanation-omitted)))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
