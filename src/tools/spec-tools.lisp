@@ -65,6 +65,14 @@ tag names a keyword. A tag no loaded code mentions is reported as
 no-such-keyword rather than as an empty result -- 'nothing carries this tag'
 and 'this tag does not exist here' are different answers.
 
+WHAT THIS CL-SPEC COULD LOOK AT
+specs_listable, properties_listable and function_specs_listable say whether
+the loaded cl-spec can enumerate each half at all, and tag_filterable whether
+it can filter by tag. False is NOT 'this project has none': it is 'this
+revision cannot answer'. The matching counts entry is then null, never 0 --
+0 would say the registry holds none, which is a fact nothing here established.
+A kind whose halves are all unlistable is refused outright instead.
+
 Examples:
   (no arguments) -- everything registered
   kind='properties', package='my-app'
@@ -252,7 +260,10 @@ verification_gaps names what the run could not establish. Values:
   related-properties-unknown  whether any property is registered about the
                               symbol could not be read at all.
   no-properties-selected      the selection was empty. Nothing ran.
-A non-verdict result status (timeout, not-run, *-error) appears here as itself.
+A result status that is not a verdict appears here as itself: skipped,
+pending, timeout, not-run, generator-error, backend-error, not-registered,
+undefined-function, unsupported, internal-error. Only passed, failed and error
+are verdicts and none of them is a gap.
 
 counts has a field for the five common statuses plus other, and by_status,
 which covers every status that occurred; selected always equals their sum. A
@@ -289,6 +300,13 @@ calls the function, then checks :returns and :post. results[].contract carries:
   has_precondition false when the contract has no :pre at all, so nothing
                    could be refused and rejected 0 is not a shortfall. Null
                    when the definition could not be read.
+  rejected_contradicted
+                   true when refusals were reported for a contract with no
+                   :pre. Two readers disagreeing, so neither figure is usable.
+  rejected_usable  the one field to branch on: false whenever the refusal
+                   count may not be subtracted with, for any of the reasons
+                   above. effective_trials is null exactly when this is false,
+                   and verified is false with it.
   failure_reason   which half broke: return-spec, postcondition, precondition,
                    condition. Absent has two meanings, told apart by
                    failure_reason_readable: true means cl-spec could not

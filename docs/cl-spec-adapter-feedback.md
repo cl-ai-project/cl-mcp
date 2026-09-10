@@ -192,7 +192,7 @@ consumer から見ると、この 2 つが同形であることが projection �
 
 ---
 
-### 2.5 `check-function` の `rejected` が試行数を超える【実測】
+### 2.5 `check-function` の `rejected` が試行数を超える【実測・修正済み】
 
 `src/function-spec.lisp` の合成 property は、`:pre` に弾かれた入力を数えるため
 `countingp` を立てたまま実行し、**認識できた失敗**（`:returns` 違反 /
@@ -214,10 +214,16 @@ run 4: status=:ERROR trials=7  rejected=8    effective=-1
 `executed` も負になります（`:skipped` 判定の `(zerop executed)` はその場合
 成立しません）。
 
-cl-mcp 側は `effective_trials` を出さず `rejected_overcounted` を立てて
-「差は導出できない」と報告する回避を入れましたが、根本は
-`(apply target arguments)` の周りで `countingp` を落とすこと（`unwind-protect`
-か handler）1 箇所です。そちらが直れば cl-mcp のこの分岐は不要になります。
+**修正済み（cl-spec `6d9b6b1`, 2026-09-10 21:42）**。合成 property の本体が
+`handler-bind` で包まれ、対象が signal した時点で `countingp` が落ちるように
+なりました。あわせて `:skipped` 判定が `(zerop executed)` から
+`(not (plusp executed))` になっています。同じ probe を現行 cl-spec で再測定した
+結果、8 回すべてで `effective` が正になりました（修正前は 3/8 が負）。
+
+この節は再現条件と実測値の記録として残します。cl-mcp 側の
+`rejected_overcounted` / `rejected_usable` は削除していません — アダプタは
+インストールされている revision を選べず、この修正より前の cl-spec に対しても
+負の呼び出し回数を報告しないためです。cl-spec 側で対応が必要な項目ではありません。
 
 ## 3. P3: 外部表現に効く観測
 

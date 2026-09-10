@@ -205,16 +205,23 @@ are what a test about the message has to look at."
     (let ((response (%call "spec-check" "{\"function\":\"cl:car\",\"trials\":0}")))
       (ok (search "positive" (string-downcase (%text response))))))
   (testing "while an absent trials stays absent rather than becoming a budget"
-    ;; The default is NIL, not a number: a contract with no trials= must fall
-    ;; through to the backend's own count, and a property must reach its
-    ;; :TRIALS table.
+    ;; Asserted on the value, not on a status that would be something else
+    ;; anyway.  A numeric default here would send cl-spec a budget the caller
+    ;; never asked for, and "the call was not refused" cannot see that: the
+    ;; status is cl-spec-not-loaded or not-registered either way.
     (%ensure-tools)
-    (let* ((params (make-hash-table :test #'equal))
-           (response (progn (setf (gethash "property" params) "cl:car")
-                            (funcall (find-symbol "SPEC-CHECK-RESPONSE"
-                                                  "CL-MCP/SRC/TOOLS/SPEC-ENTRY")
-                                     params))))
-      (ok (not (string= "invalid-arguments" (gethash "status" response)))))))
+    (let ((params (make-hash-table :test #'equal))
+          (read-arg (find-symbol "%POSITIVE-INTEGER-ARG"
+                                 "CL-MCP/SRC/TOOLS/SPEC-ENTRY")))
+      (multiple-value-bind (value message) (funcall read-arg params "trials" nil)
+        (ok (null value))
+        (ok (null message)))
+      (testing "and a value that is there still has to be positive"
+        (setf (gethash "trials" params) 0)
+        (multiple-value-bind (value message)
+            (funcall read-arg params "trials" nil)
+          (ok (null value))
+          (ok (search "positive" message)))))))
 
 (deftest read-tools-accept-a-timeout
   (testing "spec-symbol and spec-describe take timeout_seconds"

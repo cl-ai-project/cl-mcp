@@ -514,18 +514,22 @@ function-specs or both; got ~S" kind)
            (reachable (remove-if-not
                        (lambda (row)
                          (every (lambda (key) (api-has-p api key)) (fourth row)))
-                       asked))
-           (wanted (mapcar (lambda (row)
+                       asked)))
+      (unless reachable
+        (return-from list-report
+          (list :status :unsupported
+                ;; Built here rather than above: it is used only on this
+                ;; branch, and formatting a message for every successful
+                ;; listing is work inside the caller's introspection deadline.
+                :message (%listing-unsupported-message
+                          (mapcar
+                           (lambda (row)
                              (format nil "~{~A~^ with ~}"
                                      (mapcar (lambda (key)
                                                (string-downcase (symbol-name key)))
                                              (fourth row))))
-                           (set-difference asked reachable :test #'eq))))
-      (unless reachable
-        (return-from list-report
-          (list :status :unsupported
-                :message (%listing-unsupported-message wanted)
-                :environment environment))))
+                           (set-difference asked reachable :test #'eq)))
+                :environment environment)))
     (multiple-value-bind (package-object package-error)
         (%listing-package-filter package)
       (when package-error
@@ -533,24 +537,19 @@ function-specs or both; got ~S" kind)
           (append package-error (list :environment environment))))
       (let* ((registry (funcall (api-fn api :registry)))
              (tag-keyword (and tag (find-keyword tag)))
-             (want-specs (listing-kind-wanted-p (assoc "specs" +listing-kinds+
-                                                       :test #'string=)
-                                                kind))
-             (want-properties (listing-kind-wanted-p
-                               (assoc "properties" +listing-kinds+
-                                      :test #'string=)
-                               kind))
-             (want-function-specs (listing-kind-wanted-p
-                                   (assoc "function-specs" +listing-kinds+
-                                          :test #'string=)
-                                   kind))
+             (want-specs (assoc "specs" asked :test #'string=))
+             (want-properties (assoc "properties" asked :test #'string=))
+             (want-function-specs (assoc "function-specs" asked :test #'string=))
              ;; Listed only when cl-spec can enumerate them.  Absence is
              ;; reported as its own answer below rather than as an empty
              ;; list: "this revision cannot enumerate contracts" and "there
              ;; are none" are different, and only one of them is a fact
              ;; about the project.
-             (function-specs-listable (and (api-has-p api :list-function-specs)
-                                           (api-has-p api :function-spec-data)))
+             ;; Off REACHABLE, which the gate above already computed from
+             ;; the same rows and the same handles.  Re-running API-HAS-P here
+             ;; was the fourth copy of the mapping the table exists to hold.
+             (function-specs-listable (assoc "function-specs" reachable
+                                             :test #'string=))
              (function-spec-names
                (when (and want-function-specs function-specs-listable)
                  (remove-if-not
@@ -561,8 +560,8 @@ function-specs or both; got ~S" kind)
              ;; could not look at comes back as a null count beside a false
              ;; listable flag -- never as an empty list, which would say the
              ;; registry holds none.
-             (specs-listable (api-has-p api :list-specs))
-             (properties-listable (api-has-p api :list-properties))
+             (specs-listable (assoc "specs" reachable :test #'string=))
+             (properties-listable (assoc "properties" reachable :test #'string=))
              (spec-names
                (when (and want-specs specs-listable)
                  (remove-if-not (lambda (name) (%in-package-p name package-object))
@@ -626,7 +625,7 @@ function-specs or both; got ~S" kind)
                                                  (tag-keyword t)
                                                  (t nil)))
               :coverage +listing-coverage-note+
-              :environment environment)))))
+              :environment environment))))))
 
 (defparameter +function-spec-unsupported-message+
   (concatenate 'string
@@ -767,15 +766,17 @@ answers."
              ;; NIL rather than the string "NIL" for an absent clause, so a
              ;; renderer can tell a contract with no :PRE from one whose :PRE
              ;; is the literal NIL.
-             ;; A single clause prints as the clause.  :PRECONDITIONS is a
-             ;; list of forms, so (:pre (<= low high)) arrives as
-             ;; ((<= low high)) and printing the list gave the reader a form
-             ;; they cannot paste back: a call to the list.
+             ;; What cl-spec evaluates, not the list it stores.
+             ;; :PRECONDITIONS is a list of forms -- (:pre (<= low high))
+             ;; arrives as ((<= low high)) -- and DEFSPEC-FUNCTION compiles
+             ;; them as (and ,@pre), so one clause prints as the clause and
+             ;; several print as that AND.  Printing the bare list gave the
+             ;; reader a form they cannot paste back: a call to the list.
              (when forms
                (multiple-value-bind (text complete omitted)
                    (%print-bounded-form (if (null (rest forms))
                                             (first forms)
-                                            forms)
+                                            (cons 'and forms))
                                         max-chars)
                  (list text complete omitted)))))
       (let ((pre (clause (getf data :preconditions)))
@@ -1504,7 +1505,16 @@ cl-spec's structured account of a return value that missed its spec."
              (contradicted (and countable
                                 (null precondition-p)
                                 (plusp rejected)))
-             (usable (and countable (not overcounted) (not contradicted))))
+             (usable (and countable
+                          (not overcounted)
+                          (not contradicted)
+                          ;; :UNKNOWN too.  The text already says a refusal
+                          ;; count cannot be interpreted without knowing
+                          ;; whether there is a :pre to have produced it;
+                          ;; leaving the subtraction in the payload let the
+                          ;; same response publish the figure and verify off
+                          ;; it while saying that.
+                          (not (eq :unknown precondition-p)))))
         (multiple-value-bind (explanation-text explanation-complete
                               explanation-omitted)
             (if explanation

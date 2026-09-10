@@ -760,7 +760,8 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
   - `verification_gaps` values: `zero-trials`, `effective-trials-unknown`,
     `rejection-counts-unmeasured`, `input-coverage-unmeasured`,
     `contract-not-run`, `properties-not-run`, `related-properties-unknown`,
-    `no-properties-selected`, and any non-terminal result status. The tool's
+    `no-properties-selected`, and any result status that is not a verdict
+    (`skipped`, `pending`, `timeout`, `not-run`, the `*-error` statuses). The tool's
     own description defines each one, and `tests/spec-tools-test.lisp` checks
     that description against the code's list so the two cannot drift.
   - `selection.properties_not_run` is `null`, not `[]`, for a selection that

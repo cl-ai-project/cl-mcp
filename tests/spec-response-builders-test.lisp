@@ -741,7 +741,7 @@
       (ok (eql 0 (gethash "properties" counts))))))
 
 (deftest list-response-says-whether-the-tag-narrowed-anything
-  (flet ((header (kind)
+  (flet ((header (kind &key (tag-filterable t))
            (first-text
             (build-spec-list-response
              (list :status :ok :kind kind
@@ -749,6 +749,7 @@
                    :properties nil :function-specs nil
                    :specs-listable t :properties-listable t
                    :function-specs-listable t
+                   :tag-filterable tag-filterable
                    :counts (list :specs 1)
                    :filters (list :tag "critical" :tag-resolved t)
                    :coverage "everything registered here"
@@ -766,7 +767,14 @@
         (ok (not (search "(properties only)" text)))))
     (testing "and a mixed listing says which half it narrowed"
       (let ((text (header "both")))
-        (ok (search "tagged critical (properties only)" text))))))
+        (ok (search "tagged critical (properties only)" text))))
+    (testing "while a cl-spec that cannot filter by tag says that instead"
+      ;; Keyed on properties_listable, this printed "tagged critical" over a
+      ;; listing the tag never touched -- read as "no property carries it".
+      (let ((text (header "properties" :tag-filterable nil)))
+        (ok (search "was NOT applied" text))
+        (ok (search "properties-with-tag" text))
+        (ok (not (search "tagged critical" text)))))))
 
 (deftest check-response-unsupported-reaches-the-text
   (testing "a contract cl-spec cannot run says so where a client can see it"

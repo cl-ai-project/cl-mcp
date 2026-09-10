@@ -1082,8 +1082,22 @@ it came out."
         ;; header that says the filter ran.
         (let ((narrowed (and (member (getf report :kind) '("properties" "both")
                                      :test #'equal)
-                             (getf report :properties-listable))))
+                             (getf report :properties-listable)
+                             ;; The flag that answers whether the filter ran.
+                             ;; Keyed on PROPERTIES-LISTABLE, a revision with
+                             ;; no PROPERTIES-WITH-TAG printed "tagged
+                             ;; critical" over a listing the tag never
+                             ;; touched -- the "no property carries this tag"
+                             ;; reading the flags exist to prevent.
+                             (getf report :tag-filterable))))
           (cond
+            ((and (not narrowed)
+                  (member (getf report :kind) '("properties" "both")
+                          :test #'equal)
+                  (getf report :properties-listable))
+             (format stream "  tag ~A was NOT applied: the loaded cl-spec ~
+exports no properties-with-tag, so nothing here was filtered by it"
+                     (getf filters :tag)))
             ((not narrowed)
              (format stream "  tag ~A was NOT applied: it narrows properties, ~
 and this kind lists none"
@@ -1143,8 +1157,8 @@ project it here"
               (format stream "~&      ~A" (getf contract :documentation))))))
       (dolist (half +listing-kinds+)
         (destructuring-bind (name label flag keys) half
-          (declare (ignore keys))
-          (when (and (listing-kind-wanted-p (list name) (getf report :kind))
+          (declare (ignore name keys))
+          (when (and (listing-kind-wanted-p half (getf report :kind))
                      (not (getf report flag)))
             (format stream "~&~%~A: the loaded cl-spec cannot enumerate them, ~
 so none are listed here. This is not evidence that none are registered."
@@ -1158,9 +1172,9 @@ so none are listed here. This is not evidence that none are registered."
                  (null (getf report :function-specs))
                  (every (lambda (half)
                           (destructuring-bind (name label flag keys) half
-                            (declare (ignore label keys))
+                            (declare (ignore name label keys))
                             (or (not (listing-kind-wanted-p
-                                      (list name) (getf report :kind)))
+                                      half (getf report :kind)))
                                 (getf report flag))))
                         +listing-kinds+))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
@@ -1192,6 +1206,7 @@ has not been loaded into this worker is not here."))
                 "specs_listable" (json-bool (getf report :specs-listable))
                 "properties_listable" (json-bool
                                        (getf report :properties-listable))
+                "tag_filterable" (json-bool (getf report :tag-filterable))
                 "function_specs_listable"
                 (json-bool (getf report :function-specs-listable))
                 ;; NIL for a kind that was not requested, which yason
