@@ -192,6 +192,33 @@ consumer から見ると、この 2 つが同形であることが projection �
 
 ---
 
+### 2.5 `check-function` の `rejected` が試行数を超える【実測】
+
+`src/function-spec.lisp` の合成 property は、`:pre` に弾かれた入力を数えるため
+`countingp` を立てたまま実行し、**認識できた失敗**（`:returns` 違反 /
+postcondition 違反）でのみ `countingp` を NIL にしています。対象関数が
+**signal** した場合、その 2 つの `setf` を飛び越えて unwind するので
+`countingp` は T のまま残り、続く shrink が `:pre` に弾かれる候補を試すたび
+`rejected` が増え続けます。
+
+実測（`:pre (> value 80)` を持ち value > 90 で signal する契約、`trials 40`、8 回）:
+
+```
+run 0: status=:ERROR trials=13 rejected=13   effective=0
+run 1: status=:ERROR trials=1  rejected=2    effective=-1
+run 3: status=:ERROR trials=4  rejected=5    effective=-1
+run 4: status=:ERROR trials=7  rejected=8    effective=-1
+```
+
+`function-spec.lisp:278` の `executed` も同じ式なので、cl-spec 自身の
+`executed` も負になります（`:skipped` 判定の `(zerop executed)` はその場合
+成立しません）。
+
+cl-mcp 側は `effective_trials` を出さず `rejected_overcounted` を立てて
+「差は導出できない」と報告する回避を入れましたが、根本は
+`(apply target arguments)` の周りで `countingp` を落とすこと（`unwind-protect`
+か handler）1 箇所です。そちらが直れば cl-mcp のこの分岐は不要になります。
+
 ## 3. P3: 外部表現に効く観測
 
 ### 3.1 生成 seed の範囲と受理 seed の範囲が違う【実測】
