@@ -627,6 +627,52 @@ listing functions are not -- the shape the blanket listing guard refused."
       (ok (eq :completed (getf report :status)))
       (ok (eq :thorough (getf report :profile))))))
 
+(deftest check-report-does-not-blame-itself-for-a-missing-function
+  (testing "a contract whose function is not defined says which fact that is"
+    ;; cl-spec's FUNCTION-SPEC-TARGET signals CL:UNDEFINED-FUNCTION on purpose,
+    ;; so that a project can adopt cl-spec one function at a time.  Read as
+    ;; :INTERNAL-ERROR -- documented as "this adapter failed" -- it told the
+    ;; caller cl-mcp was broken when they had simply not written the function.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (error 'undefined-function :name 'no-such-function)))
+                    :ok
+                    :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"))
+           (result (first (getf report :results))))
+      (ok (eq :undefined-function (getf result :status)))
+      (ok (not (eq :internal-error (getf result :status))))
+      (testing "and the call did not reach a verdict"
+        (ok (eq :incomplete (getf report :status)))
+        (ok (not (getf report :verified)))))))
+
+(deftest check-report-lists-an-unrun-contract-as-a-gap
+  (testing "the contract an :about selection left alone reaches the gap list"
+    ;; The headline says it; verification_gaps is the machine-readable half of
+    ;; the same statement, and a consumer branching on verified plus this list
+    ;; read full coverage for a function whose contract never ran.
+    (let* ((api (%api-with-run (lambda (&rest ignored)
+                                 (declare (ignore ignored))
+                                 (%result-stub))
+                               :semantic-data
+                               (lambda (symbol &key registry)
+                                 (declare (ignore registry))
+                                 (list :symbol symbol
+                                       :package (package-name
+                                                 (symbol-package symbol))
+                                       :spec nil :property nil
+                                       :function-spec (%sym "ADD")
+                                       :properties-about
+                                       (list (%sym "ADD-COMMUTES"))))))
+           (report (check-report api :ok
+                                 :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (member :contract-not-run (getf report :verification-gaps)))
+      (testing "and it is named in the selection as data, not only in prose"
+        (ok (string= "ADD" (getf (getf (getf report :selection)
+                                       :contract-not-run)
+                                 :name)))))))
+
 (deftest check-report-digest-mismatch-is-loud
   (testing "an unexpected definition is reported as an unfaithful replay"
     (let ((report (check-report

@@ -715,8 +715,11 @@ max_value_chars to see the rest."
     (when condition
       (format stream "~&    condition: [~A] ~A"
               (getf condition :type) (getf condition :message))))
+  ;; Profile only when there was one.  A contract run has none, and printing
+  ;; the :NORMAL that leaks off cl-spec's synthetic property named a setting
+  ;; the run did not use -- which is why profile= is refused there.
   (when (getf result :seed)
-    (format stream "~&    seed: ~A   profile: ~A"
+    (format stream "~&    seed: ~A~@[   profile: ~A~]"
             (getf result :seed)
             (%keyword-string (getf result :profile))))
   (when (getf result :definition-digest)
@@ -935,8 +938,14 @@ it came out."
 (defun %function-spec-entry-ht (data)
   "Return one function spec listing entry as a hash-table."
   (make-ht "name" (%symbol-ht (getf data :name))
-           "parameters" (%symbol-hts (getf data :parameters))
-           "returns_specified" (json-bool (getf data :returns-specified))
+           ;; NIL rather than [] and false when the projection failed: an
+           ;; empty list and an unset flag are answers about the contract,
+           ;; and nothing was read to support either.
+           "read_failed" (json-bool (getf data :read-failed))
+           "parameters" (unless (getf data :read-failed)
+                          (%symbol-hts (getf data :parameters)))
+           "returns_specified" (unless (getf data :read-failed)
+                                 (json-bool (getf data :returns-specified)))
            "precondition_count" (getf data :precondition-count)
            "postcondition_count" (getf data :postcondition-count)
            "documentation" (sanitize-for-json (getf data :documentation))))
@@ -986,11 +995,17 @@ carry it -- this is not the same as no property having it)")))
         (when contracts
           (format stream "~&~%function specs:")
           (dolist (contract contracts)
-            (format stream "~&  ~A (~{~A~^ ~})~:[~;  -> :returns~]"
-                    (getf (getf contract :name) :qualified)
-                    (mapcar (lambda (parameter) (getf parameter :name))
-                            (getf contract :parameters))
-                    (getf contract :returns-specified))
+            (if (getf contract :read-failed)
+                ;; Never as "()": an empty parameter list is a claim about
+                ;; the contract, and this entry has no evidence for one.
+                (format stream "~&  ~A  -- registered, but cl-spec could not ~
+project it here"
+                        (getf (getf contract :name) :qualified))
+                (format stream "~&  ~A (~{~A~^ ~})~:[~;  -> :returns~]"
+                        (getf (getf contract :name) :qualified)
+                        (mapcar (lambda (parameter) (getf parameter :name))
+                                (getf contract :parameters))
+                        (getf contract :returns-specified)))
             (when (or (plusp (or (getf contract :precondition-count) 0))
                       (plusp (or (getf contract :postcondition-count) 0)))
               (format stream "~&      :pre ~D, :post ~D"

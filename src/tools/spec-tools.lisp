@@ -218,6 +218,10 @@ Per property, results[].status:
   generator-error no value could be generated. Nothing was checked.
   backend-error   cl-spec signalled something else. Nothing was checked.
   not-registered  the name resolved but nothing is registered under it.
+  undefined-function
+                  the contract is registered but the function it names is not
+                  defined in this image. Write it, or load its system.
+  unsupported     the loaded cl-spec cannot run this. Nothing was checked.
   internal-error  this adapter failed. NOT a statement about the property.
 
 For the whole call, status:

@@ -45,7 +45,10 @@
   "Return a completed contract check report whose single result failed."
   (list :status :completed
         :verified nil
-        :selection (list :mode "function" :count 1
+        ;; "contract", the mode %SELECT-NAMED actually emits for a function
+        ;; selection -- %SELECTION-NOUN keys on it, and "function" here sent
+        ;; every test built on this fixture down the property branch.
+        :selection (list :mode "contract" :count 1
                          :selected (list (%symbol-data "PROBE" "WIDEN"))
                          :source "explicit function argument"
                          :coverage "Only the contract named.")
@@ -62,7 +65,10 @@
                                     :failure-reason failure-reason
                                     :failure-reason-readable
                                     failure-reason-readable)
-                    :seed "7" :profile :normal
+                    ;; No :PROFILE: a contract run has none, and production
+                    ;; now leaves the key out rather than publishing the
+                    ;; :NORMAL that leaks off cl-spec's synthetic property.
+                    :seed "7"
                     :counterexample nil
                     :counterexample-status :present
                     :shrunk-counterexample nil
@@ -744,7 +750,7 @@
     ;; function was called -1 times".
     (let* ((response (build-spec-check-response
                       (%contract-check-report :rejected 2
-                                              :effective-trials 0
+                                              :effective-trials nil
                                               :rejected-overcounted t
                                               :failure-reason :condition
                                               :failure-reason-readable t)))
@@ -753,7 +759,15 @@
       (ok (eq t (gethash "rejected_overcounted" contract)))
       (ok (search "more refusals than trials" text))
       (ok (not (search "-1" text)))
-      (ok (not (search "called 0 time" text)))))
+      (ok (not (search "called 0 time" text)))
+      (testing "and the JSON withholds the figure rather than saying zero"
+        ;; 0 is itself the claim the text refuses to make.
+        (ok (null (gethash "effective_trials" contract))))
+      (testing "while the line calls a contract a contract"
+        (ok (search "Selected 1 contract" text))
+        (ok (not (search "Selected 1 property" text))))
+      (testing "and prints no profile, which a contract run does not have"
+        (ok (not (search "profile:" text))))))
   (testing "and an ordinary count still reads as one"
     (let ((text (first-text
                  (build-spec-check-response
