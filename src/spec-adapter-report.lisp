@@ -1197,9 +1197,9 @@ cl-spec's structured account of a return value that missed its spec."
            (when (api-has-p api key)
              (handler-case (funcall (api-fn api key) result)
                (error () nil)))))
-    (let* ((rejected (read-slot :check-rejected))
-           (reason (read-slot :check-failure-reason))
-           (explanation (read-slot :check-explanation)))
+    (let ((rejected (read-slot :check-rejected))
+          (reason (read-slot :check-failure-reason))
+          (explanation (read-slot :check-explanation)))
       (list :rejected rejected
             :rejected-measured (and (integerp rejected) t)
             :effective-trials (when (and (integerp executed) (integerp rejected))
