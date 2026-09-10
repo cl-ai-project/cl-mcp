@@ -251,11 +251,14 @@ A contract check generates arguments from :args, drops the ones :pre refuses,
 calls the function, then checks :returns and :post. results[].contract carries:
   rejected         generated argument lists :pre refused
   effective_trials trials minus rejected -- what the function was ACTUALLY
-                   called with. A passing run whose effective_trials is 0
-                   checked nothing; cl-spec reports that as skipped, not
-                   passed. NULL means the figure could not be derived, NOT
-                   zero calls: read rejected_measured and rejected_overcounted
-                   to see which.
+                   called with. NULL means the figure could not be derived,
+                   NOT zero calls: read rejected_measured and
+                   rejected_overcounted to see which. Do NOT read a passed
+                   verdict as proof the function ran: verified is false
+                   whenever this is 0 or null, and verification_gaps carries
+                   zero-trials or effective-trials-unknown, because cl-spec's
+                   own skipped-not-passed rule is computed from the same
+                   count and does not hold when that count is wrong.
   rejected_measured
                    false when this cl-spec exports no reader for the refused
                    count. rejected is then null and the trial count above is

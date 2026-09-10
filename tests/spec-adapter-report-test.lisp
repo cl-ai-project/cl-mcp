@@ -709,7 +709,35 @@ listing functions are not -- the shape the blanket listing guard refused."
         (ok (null (getf contract :effective-trials))))
       (ok (not (getf report :verified)))
       (ok (member :rejection-counts-unmeasured
-                  (getf report :verification-gaps))))))
+                  (getf report :verification-gaps)))
+      (testing "and the gap says the count is unknown, not that it was zero"
+        ;; zero-trials is documented as a budget that resolved to nothing.
+        ;; This run executed trials; only the correction is missing.
+        (ok (member :effective-trials-unknown
+                    (getf report :verification-gaps)))
+        (ok (not (member :zero-trials (getf report :verification-gaps)))))))
+  (testing "and a cl-spec with no refused-input reader verifies nothing either"
+    ;; The raw trial count is not a fallback: a :PRE that admits nothing still
+    ;; generates its full budget, so counting those would let a contract the
+    ;; function never saw report itself evaluated.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed :trials 100))
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil
+                            :preconditions '((> value 1000)))))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (let ((contract (getf (first (getf report :results)) :contract)))
+        (ok (not (getf contract :rejected-measured)))
+        (ok (null (getf contract :effective-trials))))
+      (ok (not (getf report :verified))))))
 
 (deftest check-report-lists-an-unrun-contract-as-a-gap
   (testing "the contract an :about selection left alone reaches the gap list"
@@ -762,7 +790,34 @@ listing functions are not -- the shape the blanket listing guard refused."
         (ok (string= "ADD-COMMUTES" (getf (first left) :name))))
       (testing "and says so in a note rather than only in the coverage prose"
         (ok (find-if (lambda (note) (search "NOT covered" note))
-                     (getf (getf report :selection) :notes)))))))
+                     (getf (getf report :selection) :notes))))))
+  (testing "a lookup that failed is not an empty list of related properties"
+    ;; "nothing else is registered" and "this could not be read" are the
+    ;; distinction every other flag in this module carries.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed))
+                    :check-rejected (lambda (result) (declare (ignore result)) 0)
+                    :semantic-data
+                    (lambda (symbol &key registry)
+                      (declare (ignore symbol registry))
+                      (error 'fixture-unknown-name))
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil :preconditions nil)))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (null (getf (getf report :selection) :properties-not-run)))
+      (ok (not (getf (getf report :selection) :properties-not-run-read)))
+      (ok (member :related-properties-unknown
+                  (getf report :verification-gaps)))
+      (ok (not (member :properties-not-run
+                       (getf report :verification-gaps)))))))
 
 (deftest check-report-digest-mismatch-is-loud
   (testing "an unexpected definition is reported as an unfaithful replay"

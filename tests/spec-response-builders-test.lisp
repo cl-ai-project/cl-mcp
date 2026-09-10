@@ -658,6 +658,50 @@
       (ok (search "62 more characters" text))
       (ok (search "17 more characters" text)))))
 
+(deftest describe-response-renders-an-argument-spec-in-full
+  (testing "an argument's own bounds, values and class reach the text"
+    ;; The arguments block used to print the node's kind and recurse into its
+    ;; children, so everything that says what the input actually admits was
+    ;; dropped -- the half spec-describe kind=function-spec exists for.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "function-spec"
+                            :name (%symbol-data "PROBE" "BUCKET")
+                            :documentation nil
+                            :arguments
+                            (list (list :variable (%symbol-data "PROBE" "V")
+                                        :spec (list :kind :range :min "0"
+                                                    :max "100"
+                                                    :base-type "INTEGER"))
+                                  (list :variable (%symbol-data "PROBE" "LO")
+                                        :spec (list :kind :member
+                                                    :values "(1 2 3)"))
+                                  (list :variable (%symbol-data "PROBE" "ACC")
+                                        :spec
+                                        (list :kind :class
+                                              :class-name
+                                              (%symbol-data "PROBE" "ACCOUNT"))))
+                            :returns nil
+                            :source-form "(DEFSPEC-FUNCTION" :source-form-complete t
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "V : range [0, 100]  base: INTEGER" text))
+      (ok (search "LO : member  values: (1 2 3)" text))
+      (testing "and a class prints its name, not SYMBOL-DATA's plist"
+        (ok (search "ACC : class PROBE::ACCOUNT" text))
+        (ok (not (search "QUALIFIED" text))))))
+  (testing "a contract with no :pre claims nothing about its completeness"
+    (let ((response (build-spec-describe-response
+                     (list :status :ok :kind "function-spec"
+                           :name (%symbol-data "PROBE" "WIDEN")
+                           :documentation nil :arguments nil :returns nil
+                           :preconditions nil
+                           :preconditions-complete :not-applicable
+                           :source-form "(DEFSPEC-FUNCTION"
+                           :source-form-complete t
+                           :environment *environment*))))
+      (ok (null (gethash "preconditions" response)))
+      (ok (null (gethash "preconditions_complete" response))))))
+
 (deftest list-response-omits-a-kind-that-was-not-requested
   (testing "the header names only what was counted"
     (flet ((text-for (kind specs properties)

@@ -23,7 +23,6 @@
            #:clamp-is-idempotent
            #:clamp-is-wrong-on-purpose
            #:register-corrected-property
-           #:function-specs-supported-p
            #:contracts-registered-p))
 
 (in-package #:cl-mcp/tests/fixtures/spec-fixture)
@@ -133,6 +132,13 @@ signals at run time on a revision that exports it."
 ;; tests down that the split was written to protect.  Reported rather than
 ;; swallowed, and CONTRACTS-REGISTERED-P tells a test which happened.
 (when (function-specs-supported-p)
+  ;; Cleared first.  This file is loaded once per registry, and a flag left
+  ;; standing from an earlier load describes a registry that is no longer the
+  ;; one in effect: a second load whose contract half signalled would keep
+  ;; answering "registered" while the fresh registry holds none, and the
+  ;; contract tests would run against it and report the failures as adapter
+  ;; bugs.
+  (setf *contracts-registered* nil)
   (handler-case
       (progn
         (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"

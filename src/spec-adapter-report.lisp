@@ -488,12 +488,20 @@ function-specs or both; got ~S" kind)
     ;; reported as its own null count, the way FUNCTION-SPECS-LISTABLE already
     ;; reports the third half.
     (let ((wanted (remove nil
-                          (list (unless (api-has-p api :list-specs)
+                          (list (when (and (member kind '("specs" "both")
+                                                   :test #'string=)
+                                           (not (api-has-p api :list-specs)))
                                   "list-specs")
-                                (unless (api-has-p api :list-properties)
+                                (when (and (member kind '("properties" "both")
+                                                   :test #'string=)
+                                           (not (api-has-p api :list-properties)))
                                   "list-properties")
-                                (unless (and (api-has-p api :list-function-specs)
-                                             (api-has-p api :function-spec-data))
+                                (when (and (member kind '("function-specs" "both")
+                                                   :test #'string=)
+                                           (not (and (api-has-p
+                                                      api :list-function-specs)
+                                                     (api-has-p
+                                                      api :function-spec-data))))
                                   "list-function-specs with function-spec-data"))))
           (reachable
              (remove nil
@@ -766,10 +774,14 @@ answers."
                                                :spec (%spec-tree (getf argument :spec))))
                 :returns (%spec-tree (getf data :returns))
                 :preconditions (first pre)
-                :preconditions-complete (if pre (second pre) t)
+                ;; Only when there is a clause.  "complete: true" about a
+                ;; :PRE the contract does not have is a claim, and the
+                ;; response has %OPTIONAL-BOOL to carry an absent flag as
+                ;; null -- which is what this PR added it for.
+                :preconditions-complete (if pre (second pre) :not-applicable)
                 :preconditions-omitted-chars (third pre)
                 :postconditions (first post)
-                :postconditions-complete (if post (second post) t)
+                :postconditions-complete (if post (second post) :not-applicable)
                 :postconditions-omitted-chars (third post)
                 :source-form source
                 :source-form-complete source-complete
@@ -1170,10 +1182,17 @@ alone.  The mirror of what an :ABOUT selection reports about the contract it
 did not run: both are coverage a caller would otherwise have to infer from
 prose, and the argument for naming one is the argument for naming the other."
   (handler-case
-      (mapcar #'symbol-data
-              (getf (funcall (api-fn api :semantic-data) name :registry registry)
-                    :properties-about))
-    (error () nil)))
+      (values (mapcar #'symbol-data
+                      (getf (funcall (api-fn api :semantic-data) name
+                                     :registry registry)
+                            :properties-about))
+              t)
+    ;; (values NIL NIL) rather than NIL: an empty list here says the symbol has
+    ;; no properties registered about it, and a read that failed has no
+    ;; evidence for that.  Reported as its own fact, the way every sibling in
+    ;; this module is -- FUNCTION-SPECS-LISTABLE, REJECTED-MEASURED,
+    ;; FAILURE-REASON-READABLE, HAS-PRECONDITION.
+    (error () (values nil nil))))
 
 (defun %select-properties (api property symbol function package registry)
   "Return (values NAMES SELECTION ERROR KIND DATA) for the requested selection.
@@ -1201,15 +1220,28 @@ learns it exists rather than being left to assume the run covered it."
                         :coverage +contract-coverage-note+)
        (values names
                (if names
-                   (let ((about (%properties-about api (first names) registry)))
+                   (multiple-value-bind (about read)
+                       (%properties-about api (first names) registry)
                      (append selection
-                             (list :properties-not-run about)
-                             (when about
-                               (list :notes
-                                     (list (format nil "~D propert~:@P ~
+                             (list :properties-not-run about
+                                   :properties-not-run-read (and read t))
+                             (cond
+                               (about
+                                (list :notes
+                                      (list (format nil "~D propert~:@P ~
 registered (:about this symbol) ~:*~[~;is~:;are~] NOT covered by a contract ~
 run: run them with spec-check symbol=<this symbol>."
-                                                   (length about)))))))
+                                                    (length about)))))
+                               ((not read)
+                                (list :notes
+                                      (list (concatenate 'string
+                                                         "whether any property "
+                                                         "is registered about "
+                                                         "this symbol could "
+                                                         "not be read, so "
+                                                         "this run's coverage "
+                                                         "is unknown beyond "
+                                                         "the contract")))))))
                    selection)
                error :contract data)))
     (property
@@ -1425,11 +1457,18 @@ one of them reporting 1 trial and 2 rejections.
 FAILURE-REASON names which half of the contract broke; EXPLANATION carries
 cl-spec's structured account of a return value that missed its spec."
   (flet ((read-slot (key)
-           (when (api-has-p api key)
-             (handler-case (funcall (api-fn api key) result)
-               (error () nil)))))
+           ;; (values VALUE OK-P).  Resolving the symbol is not the same as
+           ;; calling it: a reader that signals -- a result type that drifted,
+           ;; an argument count that moved -- also gives NIL, and a flag
+           ;; recording only that the name existed then told the caller their
+           ;; function was non-deterministic on the strength of an adapter
+           ;; read that failed.
+           (if (api-has-p api key)
+               (handler-case (values (funcall (api-fn api key) result) t)
+                 (error () (values nil nil)))
+               (values nil nil))))
+    (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
     (let* ((rejected (read-slot :check-rejected))
-           (reason (read-slot :check-failure-reason))
            (explanation (read-slot :check-explanation))
            (countable (and (integerp executed) (integerp rejected)))
            (overcounted (and countable (> rejected executed))))
@@ -1462,10 +1501,10 @@ cl-spec's structured account of a return value that missed its spec."
               ;; the same reason REJECTED-MEASURED is: without it a renderer
               ;; tells the caller their function is non-deterministic on the
               ;; evidence of a name this image could not find.
-              :failure-reason-readable (and (api-has-p api :check-failure-reason) t)
+              :failure-reason-readable (and reason-read t)
               :explanation explanation-text
               :explanation-complete explanation-complete
-              :explanation-omitted-chars explanation-omitted)))))
+              :explanation-omitted-chars explanation-omitted))))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1702,22 +1741,20 @@ cl-spec reports :PASSED for a property whose profile resolves to a budget of
 zero -- the trial loop simply never runs -- and a passing status with nothing
 behind it is precisely the shape of a verification that did not happen.
 
-For a contract the number that counts is the one with the rejected inputs taken
-out.  A generated argument list its :PRE refused was never passed to the
-function, so counting it here would let a contract nothing exercised report
-itself evaluated."
+For a contract the effective count is the only count that answers this, and
+there is no falling back to the raw one when it is missing.  The raw count is
+what the effective count exists to correct: it includes every argument list
+the :PRE refused, so a contract whose precondition admitted nothing at all
+reads as a hundred evaluated trials.  Missing means unknown, and unknown is
+not evidence -- whether it went missing because this cl-spec exports no
+refused-input reader, because that reader signalled, or because cl-spec
+counted more refusals than trials."
   (let* ((contract (getf result :contract))
          (effective (getf contract :effective-trials))
          (executed (getf (getf result :trials) :executed)))
-    (cond
-      ;; The raw trial count is not a fallback here.  It is the number the
-      ;; rejection count was supposed to correct, and a run whose correction
-      ;; could not be computed has no usable count at all -- falling back to
-      ;; the uncorrected one let VERIFIED read true for a run whose own text
-      ;; says how often the function was called cannot be derived.
-      ((getf contract :rejected-overcounted) nil)
-      ((integerp effective) (plusp effective))
-      (t (and (integerp executed) (plusp executed))))))
+    (if contract
+        (and (integerp effective) (plusp effective))
+        (and (integerp executed) (plusp executed)))))
 
 (defun %verification-gaps (results &optional selection)
   "Return the reasons RESULTS fall short of a complete verification.
@@ -1754,13 +1791,30 @@ establish -- read full coverage for a function whose contract never ran."
           (setf rejections-measured nil)))
       (let ((status (getf result :status)))
         (case status
-          (:passed (unless (%evaluated-p result) (pushnew :zero-trials gaps)))
+          (:passed
+           (unless (%evaluated-p result)
+             ;; Two different shortfalls.  ZERO-TRIALS is documented as a
+             ;; budget that resolved to nothing; a contract whose effective
+             ;; count could not be derived did run trials, and saying its
+             ;; budget was zero sends the reader to raise a number that was
+             ;; never the problem.
+             (pushnew (if (and (getf result :contract)
+                               (not (integerp
+                                     (getf (getf result :contract)
+                                           :effective-trials))))
+                          :effective-trials-unknown
+                          :zero-trials)
+                      gaps)))
           ((:failed :error) nil)
           (t (pushnew status gaps)))))
     (append (nreverse gaps)
             (when (getf selection :contract-not-run) (list :contract-not-run))
             (when (getf selection :properties-not-run)
               (list :properties-not-run))
+            (when (and (getf selection :kind)
+                       (eq :contract (getf selection :kind))
+                       (not (getf selection :properties-not-run-read)))
+              (list :related-properties-unknown))
             (unless rejections-measured (list :rejection-counts-unmeasured))
             (list :input-coverage-unmeasured))))
 

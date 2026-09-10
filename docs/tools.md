@@ -747,9 +747,16 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     running when the function signals); `has_precondition` false means the
     contract has no `:pre`, so nothing could be refused, and `null` means the
     definition could not be read. A 0 there would read as "never called".
-  - An overcounted run is also not evidence: `verified` is false and
-    `verification_gaps` carries `rejection-counts-unmeasured`, because the
-    count the response would have corrected by is not usable.
+  - A contract run whose effective count is unknown is not evidence:
+    `verified` is false and `verification_gaps` carries
+    `effective-trials-unknown` (plus `rejection-counts-unmeasured` when the
+    refusal count is the reason). The raw trial count is never used as a
+    fallback — it is the number the refusal count exists to correct, and a
+    `:pre` that admits nothing would otherwise read as a hundred trials.
+  - `verification_gaps` values: `zero-trials`, `effective-trials-unknown`,
+    `rejection-counts-unmeasured`, `input-coverage-unmeasured`,
+    `contract-not-run`, `properties-not-run`, `related-properties-unknown`,
+    `no-properties-selected`, and any non-terminal result status.
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported

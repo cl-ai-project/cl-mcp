@@ -339,7 +339,11 @@ the :RETURNS spec four lines below showed all three."
             (or (getf (getf node :name) :qualified)
                 (getf node :type)
                 (getf node :predicate)
-                (getf node :class-name))
+                ;; Read like :NAME and :TARGET two lines up.  %SPEC-TREE
+                ;; stores a class as SYMBOL-DATA's plist, and printing it raw
+                ;; put "(PACKAGE MY-APP NAME ACCOUNT ...)" into the text --
+                ;; unreachable until argument specs began rendering here.
+                (getf (getf node :class-name) :qualified))
             (getf (getf node :target) :qualified))
     (let ((minimum (getf node :min))
           (maximum (getf node :max))
@@ -460,8 +464,14 @@ shrink_enabled false -- shrinking is off for this contract, which contradicts
 what spec-check function= then does -- and body_complete false, the body was
 cut, about a definition that has none.  A property describe did the same to
 preconditions_complete.  Absent has to reach the consumer as null."
-  (when (get-properties report (list key))
-    (json-bool (getf report key))))
+  (let ((found (get-properties report (list key))))
+    (when found
+      ;; :NOT-APPLICABLE is the third answer a plist built positionally cannot
+      ;; give by leaving the key out: "this definition has no such clause", as
+      ;; distinct from "the clause is there and was cut".  NIL is the second
+      ;; of those and has to stay false.
+      (unless (eq :not-applicable (getf report key))
+        (json-bool (getf report key))))))
 
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
@@ -683,19 +693,11 @@ count suggests, and that shortfall is invisible in every other line."
   (let ((contract (getf result :contract)))
     (when contract
       (cond
-        ((null (getf contract :precondition-p))
-         ;; No :PRE, so nothing could be refused and there is no shortfall to
-         ;; report.  The refusal line named a clause the author never wrote.
-         (format stream "~&    contract: no :pre, so every generated input ~
-was passed to the function"))
-        ((eq :unknown (getf contract :precondition-p))
-         ;; Neither "it has one" nor "it has none".  Folded into the branch
-         ;; below, the text asserted a :pre while has_precondition beside it
-         ;; came back null -- the two halves of one response disagreeing on
-         ;; whether the clause exists.
-         (format stream "~&    contract: whether it has a :pre could not be ~
-read, so ~A refused input~:P is a count this response cannot interpret"
-                 (or (getf contract :rejected) "an unknown number of")))
+        ;; The two uncertainty branches first.  "no :pre, so every generated
+        ;; input was passed to the function" is an affirmative claim that the
+        ;; effective count equals the executed one, and it must not be made
+        ;; over a refusal count that is missing or unusable -- whichever of
+        ;; the two the response is carrying.
         ((getf contract :rejected-overcounted)
          ;; More refusals than trials, so the difference says nothing.  Left
          ;; as its own line rather than folded into the one below: printing
@@ -705,15 +707,38 @@ read, so ~A refused input~:P is a count this response cannot interpret"
 ~A trials -- cl-spec counted more refusals than trials, so how often the ~
 function was actually called cannot be derived here"
                  (getf contract :rejected)
-                 (or (getf (getf result :trials) :executed) "an unknown number of")))
-        ((getf contract :rejected-measured)
+                 (or (getf (getf result :trials) :executed)
+                     "an unknown number of")))
+        ((not (getf contract :rejected-measured))
+         (format stream "~&    contract: the refused-input count could not be ~
+read, so the trial count above is an upper bound on what was checked"))
+        ((null (getf contract :precondition-p))
+         ;; No :PRE, so nothing could be refused and there is no shortfall to
+         ;; report.  The refusal line named a clause the author never wrote.
+         (if (eql 0 (getf contract :rejected))
+             (format stream "~&    contract: no :pre, so every generated ~
+input was passed to the function")
+             ;; A refusal against a contract with nothing to refuse with.  The
+             ;; two facts came from different readers and they disagree; the
+             ;; affirmative claim is the one that has to go.
+             (format stream "~&    contract: ~A input~:P refused although ~
+this contract has no :pre -- the two do not agree, so how often the function ~
+was called cannot be read off them"
+                     (getf contract :rejected))))
+        ((eq :unknown (getf contract :precondition-p))
+         ;; Neither "it has one" nor "it has none".  Folded into the branch
+         ;; below, the text asserted a :pre while has_precondition beside it
+         ;; came back null -- the two halves of one response disagreeing on
+         ;; whether the clause exists.
+         (format stream "~&    contract: whether it has a :pre could not be ~
+read, so ~A refused input~:P is a count this response cannot interpret"
+                 (or (getf contract :rejected) "an unknown number of")))
+        (t
          (format stream "~&    contract: ~A of them refused by :pre, ~
 so the function was called ~A time~:P"
                  (getf contract :rejected)
-                 (or (getf contract :effective-trials) "an unknown number of")))
-        (t
-         (format stream "~&    contract: the refused-input count could not be ~
-read, so the trial count above is an upper bound on what was checked")))
+                 (or (getf contract :effective-trials)
+                     "an unknown number of"))))
       ;; An absent reason has two causes and they are opposite accusations:
       ;; cl-spec saying the counterexample would not reproduce, and this
       ;; adapter never having had a reader to ask.  Printing the first for
@@ -948,6 +973,8 @@ it came out."
                                              (getf selection :contract-not-run))
                          "properties_not_run"
                          (%symbol-hts (getf selection :properties-not-run))
+                         "properties_not_run_read"
+                         (%optional-bool selection :properties-not-run-read)
                          "notes" (%strings (getf selection :notes)))
                 "results" (coerce (mapcar #'%result-ht (getf report :results))
                                   'vector)
