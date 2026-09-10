@@ -762,7 +762,10 @@ listing functions are not -- the shape the blanket listing guard refused."
                     :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
            (result (first (getf report :results))))
       (ok (not (eq :internal-error (getf result :status))))
-      (ok (eq :unmeasured (getf (getf result :contract) :rejection-status)))
+      ;; :TRIALS-UNCOUNTED, not :UNMEASURED: the refusal count was read and
+      ;; the trial count was not, and the two are different sentences.
+      (ok (eq :trials-uncounted
+              (getf (getf result :contract) :rejection-status)))
       (ok (null (getf (getf result :contract) :effective-trials)))
       (ok (not (getf report :verified)))))
   (testing "and a projection that came back NIL is not a readable contract"
@@ -792,9 +795,20 @@ listing functions are not -- the shape the blanket listing guard refused."
     ;; The headline says it; verification_gaps is the machine-readable half of
     ;; the same statement, and a consumer branching on verified plus this list
     ;; read full coverage for a function whose contract never ran.
+    ;; The stub has the contract API: this response tells the caller to run
+    ;; the contract, and it now names one only when this cl-spec could.
     (let* ((api (%api-with-run (lambda (&rest ignored)
                                  (declare (ignore ignored))
                                  (%result-stub))
+                               :check-function
+                               (lambda (&rest ignored)
+                                 (declare (ignore ignored))
+                                 (%result-stub))
+                               :function-spec-data
+                               (lambda (name &key registry)
+                                 (declare (ignore registry))
+                                 (list :name name :arguments nil
+                                       :preconditions nil))
                                :semantic-data
                                (lambda (symbol &key registry)
                                  (declare (ignore registry))

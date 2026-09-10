@@ -157,6 +157,15 @@ trailing spaces into every message and every JSON field carrying one.")
                "change the verdict.")
   "Said when the loaded cl-spec makes a verified contract run impossible.")
 
+(defun %rejections-countable-p (api)
+  "Return true when this cl-spec can be asked for a refused-input count.
+
+Only the presence of the reader can be checked before a run; whether it
+answers is a fact about the run, and %CONTRACT-PLIST's REJECTED-READABLE
+records it there.  Both cases end in the same place -- no contract run can
+reach VERIFIED -- so the note is worded for that rather than for one of them."
+  (api-has-p api :check-rejected))
+
 (defparameter +related-unknown-note+
   (concatenate 'string
                "whether any property is registered about this symbol could "
@@ -437,14 +446,17 @@ this cl-spec cannot enumerate.  One table, read by all four.
 
 (defparameter +contract-operations+
   '((:describe :function-spec-data)
-    (:run :check-function :function-spec-data)
-    (:list :list-function-specs :function-spec-data))
+    (:run :check-function :function-spec-data))
   "The cl-spec handles each contract operation needs.
 
-Written out by hand in three places -- DESCRIBE-REPORT's gate, CHECK-REPORT's
-gate and +LISTING-KINDS+ -- which is the arrangement +LISTING-KINDS+'s own
-docstring says had already disagreed twice on this branch.  Adding a handle to
-one operation is an edit here, not three ANDs no table checks.")
+Written out by hand in DESCRIBE-REPORT's gate and CHECK-REPORT's gate, which
+is the arrangement +LISTING-KINDS+'s own docstring says had already disagreed
+twice on this branch.  Adding a handle to one operation is an edit here, not
+two ANDs no table checks.
+
+The listing is not here: +LISTING-KINDS+ carries the handles for all three
+listing halves, including the contract one, and a second row for it would be
+the duplication both tables exist to remove.")
 
 (defun contract-operation-missing (api operation)
   "Return the handles OPERATION needs that API does not have."
@@ -1241,8 +1253,18 @@ while listing the properties about this symbol: ~A" condition)))))))
                         ;; the headline can say it and a JSON consumer can act
                         ;; on it.  A note several lines under a bare "VERIFIED"
                         ;; is read after the reader has already stopped.
-                        :contract-not-run (let ((contract (getf routing :function-spec)))
-                                            (when contract (symbol-data contract)))
+                        ;; Named only when this cl-spec could run it.  The
+                        ;; prose note qualifies itself for a revision that
+                        ;; cannot; the headline, the gap and this field are
+                        ;; the channels added so the fact need not be read out
+                        ;; of prose, and they were sending the caller to an
+                        ;; operation CHECK-REPORT answers :unsupported.
+                        :contract-not-run (let ((contract
+                                                  (getf routing :function-spec)))
+                                            (when (and contract
+                                                       (not (contract-operation-missing
+                                                             api :run)))
+                                              (symbol-data contract)))
                         :notes (append
                                 (when (getf routing :property)
                                   (list +symbol-is-a-property-not-selected-note+))
@@ -1366,7 +1388,7 @@ learns it exists rather than being left to assume the run covered it."
                                     ;; say so where the caller reads it, or
                                     ;; they retry with a larger trials=
                                     ;; against a gate no budget reaches.
-                                    (unless (api-has-p api :check-rejected)
+                                    (unless (%rejections-countable-p api)
                                       (list +unverifiable-contract-note+))
                                     (when about
                                       (list (format nil "~D propert~:@P ~
@@ -1655,14 +1677,28 @@ cl-spec's structured account of a return value that missed its spec."
                ;; verdict read a sixth.  The booleans below are published from
                ;; this, not computed beside it.
                (rejection-status
-                 ;; COUNTABLE first, and before every clause below it: each of
-                 ;; the others ends in a subtraction, and cl-spec can report a
-                 ;; result whose trial count is NIL -- its own check-function
-                 ;; writes (- (or (property-result-trials result) 0) rejected)
-                 ;; for that reason.  Ordered after :NO-PRECONDITION, a contract
-                 ;; without a :pre reached (- NIL 0) and the TYPE-ERROR was
-                 ;; reported to the caller as "this adapter failed".
-                 (cond ((not countable) :unmeasured)
+                 ;; The countability clauses first, before every one below
+                 ;; them: each of those ends in a subtraction, and cl-spec can
+                 ;; report a result whose trial count is NIL -- its own
+                 ;; check-function writes
+                 ;; (- (or (property-result-trials result) 0) rejected) for
+                 ;; that reason.  Ordered after :NO-PRECONDITION, a contract
+                 ;; without a :pre reached (- NIL 0) and the TYPE-ERROR came
+                 ;; back to the caller as "this adapter failed".
+                 ;;
+                 ;; :UNMEASURED and :TRIALS-UNCOUNTED are separate because
+                 ;; they are separate sentences: one says the refusal count
+                 ;; could not be read, the other that it was read and the
+                 ;; trial count was not.  One keyword for both had the text
+                 ;; denying a number the JSON was publishing beside it.
+                 (cond ((not (integerp rejected)) :unmeasured)
+                       ((not (integerp executed)) :trials-uncounted)
+                       ;; Both directions.  The premise of this plist is that
+                       ;; cl-spec's refusal counter cannot be trusted, and a
+                       ;; count below zero passed every gate: it subtracted to
+                       ;; MORE trials than the budget and carried a verified
+                       ;; verdict on the difference.
+                       ((minusp rejected) :negative)
                        (overcounted :overcounted)
                        ((eq :unknown precondition-p) :precondition-unknown)
                        (contradicted :contradicted)
@@ -1754,12 +1790,17 @@ arguments, or that a failure was somehow argument-free."
           ;; that carries it.
           :trials (let ((recorded (and (eq kind :contract)
                                        (%recorded-budget api result))))
-                    (list* :executed executed
-                           (if recorded
-                               (list :budget recorded
-                                     :budget-source "cl-spec result"
-                                     :budget-derivation nil)
-                               trials)))
+                    ;; Prepended, not substituted.  GETF finds the first
+                    ;; occurrence, so the recorded budget wins while the
+                    ;; derived plist keeps the keys it alone carries --
+                    ;; :BACKEND-DEFAULT among them, which a caller compares
+                    ;; against exactly when a trials= was in play.
+                    (append (list :executed executed)
+                            (when recorded
+                              (list :budget recorded
+                                    :budget-source "cl-spec result"
+                                    :budget-derivation nil))
+                            trials))
           ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
           ;; consumer holding it as a number would round it, which turns a
           ;; reproducible failure into one that cannot be reproduced.
@@ -2009,6 +2050,11 @@ counted more refusals than trials."
         (and (integerp effective) (plusp effective))
         (and (integerp executed) (plusp executed)))))
 
+(defun %effective-unknown-p (result)
+  "Return true when RESULT is a contract run whose effective count is missing."
+  (let ((contract (getf result :contract)))
+    (and contract (not (integerp (getf contract :effective-trials))))))
+
 (defun %verification-gaps (results &optional selection)
   "Return the reasons RESULTS fall short of a complete verification.
 
@@ -2047,9 +2093,7 @@ establish -- read full coverage for a function whose contract never ran."
         ;; A contract run that timed out or never started carries no
         ;; contract half at all, so it is neither "measured" nor a property
         ;; run: nothing was counted, and the gap says so.
-        (when (or (null contract)
-                  (not (member (getf contract :rejection-status)
-                               '(:usable :no-precondition))))
+        (when (or (null contract) (not (getf contract :rejected-usable)))
           (setf rejections-measured nil)))
       (let ((status (getf result :status)))
         (case status
@@ -2060,15 +2104,17 @@ establish -- read full coverage for a function whose contract never ran."
              ;; count could not be derived did run trials, and saying its
              ;; budget was zero sends the reader to raise a number that was
              ;; never the problem.
-             (pushnew (if (and (getf result :contract)
-                               (not (integerp
-                                     (getf (getf result :contract)
-                                           :effective-trials))))
+             (pushnew (if (%effective-unknown-p result)
                           :effective-trials-unknown
                           :zero-trials)
                       gaps)))
           ((:failed :error) nil)
-          (t (pushnew status gaps)))))
+          (t (pushnew status gaps))))
+      ;; On every status, not only :PASSED.  A skipped or failed contract run
+      ;; whose count could not be derived is the case where it is least known,
+      ;; and the docs promise the gap is there whenever it is unknown.
+      (when (%effective-unknown-p result)
+        (pushnew :effective-trials-unknown gaps)))
     (append (nreverse gaps)
             (when (getf selection :contract-not-run) (list :contract-not-run))
             (when (or (getf selection :properties-not-run)

@@ -394,9 +394,13 @@ to name the budget at all -- and two of the four were added in the same change
 that added the fields.  EXTRA carries what a particular field has to add."
   (unless (eq t (getf report complete-key))
     (unless (eq :not-applicable (getf report complete-key))
-      (format stream "~&~vT... truncated, ~D more character~:P. Raise ~A to ~
-see the rest.~@[ ~A~]"
-              indent (getf report omitted-key) budget extra))))
+      ;; ~vT past its column advances to the next tab stop, so an indent of
+      ;; zero emitted one space -- every cut body and source form gained a
+      ;; leading space no other line in the block has.
+      (format stream "~&~@[~vT~]... truncated, ~D more character~:P. Raise ~A ~
+to see the rest.~@[ ~A~]"
+              (when (plusp indent) indent)
+              (getf report omitted-key) budget extra))))
 
 (defun %format-describe-text (report)
   "Render the spec-describe report as text."
@@ -728,6 +732,15 @@ no :pre, so it should have refused none~]"
         (:unmeasured
          (format stream "~&    contract: the refused-input count could not be ~
 read, so the trial count above is an upper bound on what was checked"))
+        (:trials-uncounted
+         (format stream "~&    contract: ~A input~:P refused, but cl-spec ~
+reported no trial count, so how often the function was called cannot be ~
+derived from them"
+                 (getf contract :rejected)))
+        (:negative
+         (format stream "~&    contract: cl-spec reported ~A refused inputs, ~
+which is not a count -- the figure is not one this response can subtract with"
+                 (getf contract :rejected)))
         (:contradicted
          (format stream "~&    contract: ~A input~:P refused although this ~
 contract has no :pre -- the two do not agree, so how often the function was ~
@@ -1107,11 +1120,23 @@ symbol could not be read)"
         ;; enumerate properties" into the kind test gave kind=both the answer
         ;; "this kind lists none" two lines above a block saying the revision
         ;; cannot enumerate them -- one response, two reasons, one fact.
+        ;; Whether the filter ran is FILTERS.TAG-APPLIED, which LIST-REPORT
+        ;; computed from these same three facts and this function reads again
+        ;; twenty lines down.  The flags below pick which reason to print; two
+        ;; implementations of one predicate in one function is how the header
+        ;; and the payload come to disagree.
         (let ((kind-lists-properties (and (member (getf report :kind)
                                                   '("properties" "both")
                                                   :test #'equal)
                                           t)))
           (cond
+            ((getf filters :tag-applied)
+             (format stream "  tagged ~A~:[~; (properties only)~]"
+                     (getf filters :tag)
+                     (equal "both" (getf report :kind)))
+             (unless (eq t (getf filters :tag-resolved))
+               (format stream " (NO SUCH TAG exists in this image, so nothing ~
+can carry it -- this is not the same as no property having it)")))
             ((not kind-lists-properties)
              (format stream "  tag ~A was NOT applied: it narrows properties, ~
 and this kind lists none"
@@ -1125,12 +1150,7 @@ cannot enumerate properties, so there was nothing for it to narrow"
 exports no properties-with-tag, so nothing here was filtered by it"
                      (getf filters :tag)))
             (t
-             (format stream "  tagged ~A~:[~; (properties only)~]"
-                     (getf filters :tag)
-                     (equal "both" (getf report :kind)))
-             (unless (eq t (getf filters :tag-resolved))
-               (format stream " (NO SUCH TAG exists in this image, so nothing ~
-can carry it -- this is not the same as no property having it)"))))))
+             (format stream "  tag ~A was NOT applied" (getf filters :tag))))))
       (when (getf report :truncated)
         (format stream "~&Showing at most ~D of each; raise limit for more."
                 (getf report :limit)))

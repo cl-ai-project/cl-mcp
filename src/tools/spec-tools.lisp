@@ -319,9 +319,12 @@ calls the function, then checks :returns and :post. results[].contract carries:
                    null explanation then says nothing about the run.
                    explanation_complete and explanation_omitted_chars report a
                    cut, like every other bounded field.
-  rejection_status the keyword the five booleans above are derived from, and
-                   the one to branch on: usable, no-precondition, unmeasured,
-                   overcounted, contradicted, precondition-unknown.
+  rejection_status the keyword the booleans above are derived from, and the
+                   one to branch on: usable, no-precondition, unmeasured (the
+                   refusal count could not be read), trials-uncounted (it was,
+                   and the trial count was not), negative (cl-spec reported a
+                   count below zero), overcounted, contradicted,
+                   precondition-unknown.
   rejected_readable
                    false when the refused-input reader is absent or signalled,
                    as against rejected_measured, which is also false when it
@@ -412,7 +415,9 @@ Contract runs only -- a property takes its count from its own :trials table,
 selected by profile -- and given with property= or symbol= it is refused, not
 ignored. The ceiling is there because the run happens on a deadline thread
 that cannot always be stopped: a budget that outlives its timeout goes on
-calling your function inside this session's worker.")
+calling your function inside this session's worker. It caps the number of
+calls, not the time -- size the run with timeout_seconds as well, and check
+worker_reuse afterwards.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string

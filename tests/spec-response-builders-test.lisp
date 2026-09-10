@@ -753,7 +753,15 @@
                    :function-specs-listable t
                    :tag-filterable tag-filterable
                    :counts (list :specs 1)
-                   :filters (list :tag "critical" :tag-resolved t)
+                   ;; TAG-APPLIED as LIST-REPORT computes it: the kind lists
+                   ;; properties, this cl-spec can enumerate them, and it can
+                   ;; filter by tag.
+                   :filters (list :tag "critical" :tag-resolved t
+                                  :tag-applied
+                                  (and (member kind '("properties" "both")
+                                               :test #'equal)
+                                       tag-filterable
+                                       t))
                    :coverage "everything registered here"
                    :environment *environment*)))))
     (testing "a kind that lists no properties says the tag was not applied"

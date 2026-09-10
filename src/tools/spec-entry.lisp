@@ -77,13 +77,16 @@ not registered\"."
 (defvar *maximum-trials* 1000000
   "Largest trial count spec-check will pass to a contract run.
 
-An upper bound because the run happens on a deadline thread that cannot always
-be stopped: a budget of a hundred million outlives its timeout, keeps calling
-the target, and does it inside the worker this session's repl-eval and
-load-system share.  The deadline bounds how long the caller waits; only this
-bounds what the worker is left doing afterwards.  PROFILE never offered a
-caller-supplied number, so TRIALS is the first argument on this path that
-needed one.")
+A ceiling, not a bound on the work.  The run happens on a deadline thread that
+cannot always be stopped, so a budget outliving its timeout keeps calling the
+target inside the worker this session's repl-eval and load-system share; this
+caps how many calls that can be, and a million calls of an arbitrary function
+is still unbounded wall-clock time.  What would actually bound it is a
+cooperative deadline the run checks, or retiring a worker on a leaked thread
+-- which WORKER-REUSE already reports and nothing acts on -- and both are at a
+layer below this argument.  Recorded rather than implied, because a number
+that lets the bad case through is worth having only if nobody reads it as a
+guarantee.")
 
 (defun %bounded-integer-arg (params name maximum)
   "Return (values N NIL) for a positive integer at most MAXIMUM, else an error."
