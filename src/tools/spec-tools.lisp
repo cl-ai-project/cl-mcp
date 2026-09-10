@@ -264,7 +264,10 @@ A contract has no :trials table for profile to select from, so its budget is
 the backend default unless you pass trials. Raise it when effective_trials
 comes back small: a :pre that refuses most of what is generated leaves the
 interesting inputs unreached, and cl-spec does not yet reflect a precondition
-into the generator (its specification 19).
+into the generator (its specification 19). Raise timeout_seconds alongside it:
+that budget covers the WHOLE call and defaults to 60 seconds, so a run sized
+past it comes back as a timeout with worker_reuse unknown -- not as a result,
+and not as a smaller run.
 
 REPRODUCING A RUN
 Every result carries seed (decimal TEXT, because a cl-spec seed can exceed

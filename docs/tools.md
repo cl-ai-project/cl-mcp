@@ -675,17 +675,21 @@ is what is missing.
 
 ### Group `cl-spec` — `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`
 
-Fetch the [cl-spec](https://github.com/cl-ai-project/cl-spec) Spec/Property
-registered about a symbol, read one in full, and run it for a structured
-counterexample. cl-mcp does not depend on cl-spec: these tools resolve it at
-call time and report `cl-spec-not-loaded` when it is absent.
+Fetch the [cl-spec](https://github.com/cl-ai-project/cl-spec) Spec, Property or
+function spec registered about a symbol, read one in full, and run it for a
+structured counterexample. cl-mcp does not depend on cl-spec: these tools
+resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
+`unsupported` when the loaded revision lacks the API an operation needs.
 
 - `spec-list` — what is registered at all. The entry point when you do not yet
   know a name: the other three all take one you already have. Returns names,
   and for each property its kind, tags, `(:about ...)` targets and docstring —
   not bodies.
-  - `kind` (`specs` | `properties` | `both`, default `both`), `package`, `tag`,
-    `limit` (positive integer, default 200), `timeout_seconds`
+  - `kind` (`specs` | `properties` | `function-specs` | `both`, default
+    `both`), `package`, `tag`, `limit` (positive integer, default 200),
+    `timeout_seconds`
+  - `function_specs_listable` says whether this cl-spec can enumerate
+    contracts at all. False there is not "this project has none".
   - `tag` names a keyword. A tag no loaded code mentions comes back as
     `tag_resolved: "no-such-keyword"` rather than as an empty result — "nothing
     carries this tag" and "this tag does not exist here" are different answers.
@@ -703,15 +707,30 @@ call time and report `cl-spec-not-loaded` when it is absent.
   - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
     `package`, `max_chars` (positive integer, default 8000),
     `timeout_seconds` (number, default 30)
-  - `function-spec` answers `unsupported`: the cl-spec revision this was built
-    against has no `function-spec-data`.
-- `spec-check` — run one property, or every property registered `(:about
-  <symbol>)`.
-  - `property` **or** `symbol` (exactly one), `package`, `profile` (default
-    `normal`), `seed` (decimal digits **as a string**),
-    `expect_definition_digest`, `timeout_seconds` (number, default 60 — the
-    budget for the whole call), `max_value_chars` (positive integer, default
-    2000)
+  - `function-spec` projects the contract: the spec of each argument, the spec
+    of the return value, and the `:pre` / `:post` forms. It answers
+    `unsupported` only when the loaded cl-spec exports no `function-spec-data`
+    — a statement about that revision, not about whether a contract exists.
+  - `:pre` and `:post` are cut at `max_chars` with the cut reported, like
+    `body` and `source_form`.
+- `spec-check` — run one property, every property registered `(:about
+  <symbol>)`, or one function spec against its function.
+  - `property` **or** `symbol` **or** `function` (exactly one), `package`,
+    `profile` (default `normal`), `trials` (positive integer),
+    `seed` (decimal digits **as a string**), `expect_definition_digest`,
+    `timeout_seconds` (number, default 60 — the budget for the whole call),
+    `max_value_chars` (positive integer, default 2000)
+  - `function` runs the contract. A `symbol` selection does **not** include it
+    — `:about` covers properties only — and the response names the contract it
+    left alone rather than letting the verdict read as full coverage.
+  - `trials` sizes a contract run and `profile` sizes a property run; each is
+    **refused**, not ignored, against the other. A contract has no `:trials`
+    table for a profile to select from, and `run-property` takes no trial
+    override, so honouring either would report a setting the run did not use.
+  - A contract run reports `rejected` and `effective_trials`: cl-spec's checker
+    refuses inputs `:pre` does not admit, and a trial count that includes them
+    overstates the work. Raise `trials` — and `timeout_seconds` with it — when
+    `effective_trials` comes back small.
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported
