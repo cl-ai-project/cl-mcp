@@ -49,24 +49,28 @@ with stub API handles; this file needs the real system."
   "Return the CL-SPEC:*REGISTRY* symbol."
   (find-symbol "*REGISTRY*" "CL-SPEC"))
 
-(defun %ensure-fixture ()
-  "Load the fixture into a registry of its own, once.
+(defun %load-fixture ()
+  "Load the fixture into a registry of its own and return that registry.
 
 The global registry is swapped rather than rebound: the run thread a deadline
 spawns does not inherit dynamic bindings, and the adapter reads the registry
 on the calling thread precisely so it can hand it across.  Swapping keeps the
 two paths agreeing whichever one a test exercises."
+  (let* ((registry-symbol (%registry-symbol))
+         (make (find-symbol "MAKE-HASH-TABLE-REGISTRY" "CL-SPEC"))
+         (previous (symbol-value registry-symbol))
+         (fresh (funcall make)))
+    (setf (symbol-value registry-symbol) fresh)
+    (unwind-protect
+         (load (merge-pathnames "tests/fixtures/spec-fixture.lisp"
+                                (asdf:system-source-directory "cl-mcp")))
+      (setf (symbol-value registry-symbol) previous))
+    fresh))
+
+(defun %ensure-fixture ()
+  "Load the shared fixture registry, once."
   (unless *fixture-registry*
-    (let* ((registry-symbol (%registry-symbol))
-           (make (find-symbol "MAKE-HASH-TABLE-REGISTRY" "CL-SPEC"))
-           (previous (symbol-value registry-symbol))
-           (fresh (funcall make)))
-      (setf (symbol-value registry-symbol) fresh)
-      (unwind-protect
-           (load (merge-pathnames "tests/fixtures/spec-fixture.lisp"
-                                  (asdf:system-source-directory "cl-mcp")))
-        (setf (symbol-value registry-symbol) previous))
-      (setf *fixture-registry* fresh))))
+    (setf *fixture-registry* (%load-fixture))))
 
 (defmacro with-fixture-registry (&body body)
   "Run BODY with the fixture's registry installed as CL-SPEC:*REGISTRY*."
@@ -201,8 +205,12 @@ reached the caller."
 (deftest cl-spec-adapter-sees-a-redefinition
   (if (not (%cl-spec-available-p))
       (skip +skip-reason+)
-      (progn
-        (%ensure-fixture)
+      ;; A registry of its own, not the shared one.  This test replaces one of
+      ;; the fixture's properties with a corrected version, and the shared
+      ;; registry would carry that replacement into whichever test ran next --
+      ;; which is what happens when the suite is run twice in one image: the
+      ;; property written to fail passes, and four other tests fail with it.
+      (let ((*fixture-registry* (%load-fixture)))
         (with-fixture-registry
           (testing "re-registering a property changes its digest and its verdict"
             (let* ((before (spec-check-response
