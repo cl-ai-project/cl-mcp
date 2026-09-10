@@ -14,6 +14,7 @@
 (defpackage #:cl-mcp/tests/fixtures/spec-fixture
   (:use #:cl)
   (:export #:clamp
+           #:function-specs-supported-p
            #:magnitude
            #:widen
            #:never-callable
@@ -78,12 +79,6 @@ exactly what loading an edited file produces."
     (= (clamp (clamp value 10 90) 10 90)
        (clamp value 10 90))))
 
-(cl-spec:defspec-function clamp
-  "CLAMP returns a value inside the interval it was given."
-  (:args (value small-int) (low small-int) (high small-int))
-  (:pre (<= low high))
-  (:returns small-int)
-  (:post (and (<= low result) (<= result high))))
 
 (defun widen (value)
   "Return VALUE moved one step away from zero.
@@ -92,27 +87,51 @@ Written to break its own contract at the top of SMALL-INT's range, so a test
 can see a contract failure that is not a property failure."
   (1+ value))
 
-(cl-spec:defspec-function widen
-  "WIDEN stays inside SMALL-INT, which it does not."
-  (:args (value small-int))
-  (:returns small-int)
-  (:post (> result value)))
 
 (defun never-callable (value)
   "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
   value)
 
-(cl-spec:defspec-function never-callable
-  "A contract whose precondition no generated value can satisfy."
-  (:args (value small-int))
-  (:pre (> value 1000))
-  (:returns small-int))
 
 (defun magnitude (value)
   "Return the absolute value of VALUE."
   (abs value))
 
-(cl-spec:defspec-function magnitude
-  "The magnitude is never negative, and has no upper bound worth naming."
-  (:args (value small-int))
-  (:returns (range integer 0 *)))
+(defun function-specs-supported-p ()
+  "Return true when the loaded cl-spec implements function specs.
+
+FUNCTION-SPEC-DATA is the discriminator, not CHECK-FUNCTION: a cl-spec that
+predates function specs still has CHECK-FUNCTION fbound, as a stub that
+signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
+  (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
+    (and data (fboundp data) t)))
+
+;; Guarded because this file is LOADed, not compiled: against a cl-spec whose
+;; DEFSPEC-FUNCTION is still a stub, one signalling form aborts the load and
+;; every test in the file fails -- including the three that have nothing to do
+;; with contracts.  cl-mcp does not depend on cl-spec and must stay green
+;; against whichever revision happens to be installed.
+(when (function-specs-supported-p)
+  (cl-spec:defspec-function clamp
+    "CLAMP returns a value inside the interval it was given."
+    (:args (value small-int) (low small-int) (high small-int))
+    (:pre (<= low high))
+    (:returns small-int)
+    (:post (and (<= low result) (<= result high))))
+
+  (cl-spec:defspec-function widen
+    "WIDEN stays inside SMALL-INT, which it does not."
+    (:args (value small-int))
+    (:returns small-int)
+    (:post (> result value)))
+
+  (cl-spec:defspec-function never-callable
+    "A contract whose precondition no generated value can satisfy."
+    (:args (value small-int))
+    (:pre (> value 1000))
+    (:returns small-int))
+
+  (cl-spec:defspec-function magnitude
+    "The magnitude is never negative, and has no upper bound worth naming."
+    (:args (value small-int))
+    (:returns (range integer 0 *))))

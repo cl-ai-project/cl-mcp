@@ -45,6 +45,23 @@ with stub API handles; this file needs the real system."
              t))
     (error () nil)))
 
+(defparameter +no-contracts-reason+
+  "the cl-spec in this image predates function specs: it exports no
+function-spec-data, so there is no contract to describe or run. The adapter's
+own answer to that -- an unsupported status naming the missing API -- is
+covered by tests/spec-adapter-report-test.lisp."
+  "Printed instead of running the contract tests against a cl-spec that has none.")
+
+(defun %contracts-available-p ()
+  "Return true when the loaded cl-spec implements function specs.
+
+FUNCTION-SPEC-DATA is the discriminator, not CHECK-FUNCTION: a cl-spec that
+predates function specs still has CHECK-FUNCTION fbound, as a stub that
+signals NOT-IMPLEMENTED."
+  (and (%cl-spec-available-p)
+       (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
+         (and data (fboundp data) t))))
+
 (defun %registry-symbol ()
   "Return the CL-SPEC:*REGISTRY* symbol."
   (find-symbol "*REGISTRY*" "CL-SPEC"))
@@ -234,8 +251,8 @@ reached the caller."
                                     (gethash "definition_digest" after-result))))))))))))
 
 (deftest cl-spec-adapter-reads-a-contract
-  (if (not (%cl-spec-available-p))
-      (skip +skip-reason+)
+  (if (not (%contracts-available-p))
+      (skip (if (%cl-spec-available-p) +no-contracts-reason+ +skip-reason+))
       (progn
         (%ensure-fixture)
         (with-fixture-registry
@@ -273,8 +290,8 @@ reached the caller."
                 (ok (search "RESULT" text)))))))))
 
 (deftest cl-spec-adapter-runs-a-contract
-  (if (not (%cl-spec-available-p))
-      (skip +skip-reason+)
+  (if (not (%contracts-available-p))
+      (skip (if (%cl-spec-available-p) +no-contracts-reason+ +skip-reason+))
       (progn
         (%ensure-fixture)
         (with-fixture-registry
