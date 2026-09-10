@@ -688,8 +688,11 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
   - `kind` (`specs` | `properties` | `function-specs` | `both`, default
     `both`), `package`, `tag`, `limit` (positive integer, default 200),
     `timeout_seconds`
-  - `function_specs_listable` says whether this cl-spec can enumerate
-    contracts at all. False there is not "this project has none".
+  - `specs_listable`, `properties_listable` and `function_specs_listable` say
+    whether this cl-spec can enumerate each half at all. False there is not
+    "this project has none" — and the matching entry in `counts` is `null`,
+    never `0`. `kind=both` lists the halves it can and reports the rest this
+    way rather than failing the whole call.
   - `tag` names a keyword. A tag no loaded code mentions comes back as
     `tag_resolved: "no-such-keyword"` rather than as an empty result — "nothing
     carries this tag" and "this tag does not exist here" are different answers.
@@ -722,7 +725,13 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     `max_value_chars` (positive integer, default 2000)
   - `function` runs the contract. A `symbol` selection does **not** include it
     — `:about` covers properties only — and the response names the contract it
-    left alone rather than letting the verdict read as full coverage.
+    left alone rather than letting the verdict read as full coverage. The
+    reverse holds too: `function=` runs the contract and none of the properties
+    registered about the symbol. Both directions are reported in three places —
+    the headline qualifier, `selection.contract_not_run` /
+    `selection.properties_not_run`, and `verification_gaps`
+    (`contract-not-run` / `properties-not-run`) — so neither has to be read
+    out of prose.
   - `trials` sizes a contract run and `profile` sizes a property run; each is
     **refused**, not ignored, against the other. A contract has no `:trials`
     table for a profile to select from, and `run-property` takes no trial
@@ -732,11 +741,15 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     overstates the work. Raise `trials` — and `timeout_seconds` with it — when
     `effective_trials` comes back small.
   - `effective_trials` is **null**, never 0, when it could not be derived.
-    `rejected_measured` false means this cl-spec exports no reader for the
-    refused count; `rejected_overcounted` true means cl-spec reported more
-    refusals than trials (its counter keeps running when the function
-    signals); `has_precondition` false means the contract has no `:pre`, so
-    nothing could be refused. A 0 there would read as "never called".
+    `rejected_measured` false means no refused count came back — this cl-spec
+    exports no reader for it, or the reader signalled; `rejected_overcounted`
+    true means cl-spec reported more refusals than trials (its counter keeps
+    running when the function signals); `has_precondition` false means the
+    contract has no `:pre`, so nothing could be refused, and `null` means the
+    definition could not be read. A 0 there would read as "never called".
+  - An overcounted run is also not evidence: `verified` is false and
+    `verification_gaps` carries `rejection-counts-unmeasured`, because the
+    count the response would have corrected by is not usable.
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported

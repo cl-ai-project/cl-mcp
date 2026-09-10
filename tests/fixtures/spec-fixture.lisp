@@ -22,7 +22,9 @@
            #:clamp-is-within-bounds
            #:clamp-is-idempotent
            #:clamp-is-wrong-on-purpose
-           #:register-corrected-property))
+           #:register-corrected-property
+           #:function-specs-supported-p
+           #:contracts-registered-p))
 
 (in-package #:cl-mcp/tests/fixtures/spec-fixture)
 
@@ -106,12 +108,36 @@ signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
   (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
     (and data (fboundp data) t)))
 
+(defvar *contracts-registered* nil
+  "True once the contract half of this fixture loaded without signalling.")
+
+(defun contracts-registered-p ()
+  "Return true when this fixture's function specs are in the registry.
+
+What a test should ask before running contract coverage.  FUNCTION-SPECS-
+SUPPORTED-P says the loaded cl-spec has the API; this says the definitions
+actually made it in, which is not the same answer when DEFSPEC-FUNCTION
+signals at run time on a revision that exports it."
+  (and *contracts-registered* t))
+
 ;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
 ;; and LOAD reads each top-level form before evaluating it -- so a
 ;; CL-SPEC:DEFSPEC-FUNCTION form written here is resolved by the reader
 ;; whatever a guard around it says, and against a revision that does not
 ;; export the symbol the reader error takes the whole fixture down, CLAMP and
 ;; the properties with it.  Only a separate file is left unread.
+;;
+;; HANDLER-CASE for the other half of the same promise: a revision that reads
+;; the file and then signals while registering -- a normalization change, a
+;; duplicate registration -- would otherwise take the same three unrelated
+;; tests down that the split was written to protect.  Reported rather than
+;; swallowed, and CONTRACTS-REGISTERED-P tells a test which happened.
 (when (function-specs-supported-p)
-  (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
-                         (asdf:system-source-directory "cl-mcp"))))
+  (handler-case
+      (progn
+        (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
+                               (asdf:system-source-directory "cl-mcp")))
+        (setf *contracts-registered* t))
+    (error (condition)
+      (format *error-output*
+              "~&;; spec-fixture: contracts NOT registered: ~A~%" condition))))

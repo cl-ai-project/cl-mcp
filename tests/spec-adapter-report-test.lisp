@@ -682,6 +682,35 @@ listing functions are not -- the shape the blanket listing guard refused."
            (result (first (getf report :results))))
       (ok (eq :undefined-function (getf result :status))))))
 
+(deftest check-report-will-not-verify-an-uncountable-contract-run
+  (testing "more refusals than trials is not evidence, in either gate"
+    ;; %CONTRACT-PLIST withholds effective_trials for this case and the text
+    ;; says the call count cannot be derived.  %EVALUATED-P used to fall back
+    ;; to the raw trial count -- the number the rejection count exists to
+    ;; correct -- so verified came back true for a run the same response
+    ;; declared unmeasurable, and the gap list said nothing at all.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed :trials 1))
+                    :check-rejected (lambda (result) (declare (ignore result)) 2)
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil
+                            :preconditions '((> value 0)))))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (let ((contract (getf (first (getf report :results)) :contract)))
+        (ok (getf contract :rejected-overcounted))
+        (ok (null (getf contract :effective-trials))))
+      (ok (not (getf report :verified)))
+      (ok (member :rejection-counts-unmeasured
+                  (getf report :verification-gaps))))))
+
 (deftest check-report-lists-an-unrun-contract-as-a-gap
   (testing "the contract an :about selection left alone reaches the gap list"
     ;; The headline says it; verification_gaps is the machine-readable half of
@@ -707,6 +736,33 @@ listing functions are not -- the shape the blanket listing guard refused."
         (ok (string= "ADD" (getf (getf (getf report :selection)
                                        :contract-not-run)
                                  :name)))))))
+
+(deftest check-report-lists-the-properties-a-contract-run-left-alone
+  (testing "function= names the properties it did not run, both ways"
+    ;; The mirror of :CONTRACT-NOT-RUN. A contract that holds is not a clean
+    ;; bill for a function whose properties were never run, and the argument
+    ;; for putting one direction in the gap list is the argument for the other.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed))
+                    :check-rejected (lambda (result) (declare (ignore result)) 0)
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil :preconditions nil)))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (member :properties-not-run (getf report :verification-gaps)))
+      (let ((left (getf (getf report :selection) :properties-not-run)))
+        (ok (= 1 (length left)))
+        (ok (string= "ADD-COMMUTES" (getf (first left) :name))))
+      (testing "and says so in a note rather than only in the coverage prose"
+        (ok (find-if (lambda (note) (search "NOT covered" note))
+                     (getf (getf report :selection) :notes)))))))
 
 (deftest check-report-digest-mismatch-is-loud
   (testing "an unexpected definition is reported as an unfaithful replay"

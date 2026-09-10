@@ -32,17 +32,37 @@ cl-spec-facing behaviour is covered by tests/spec-adapter-report-test.lisp
 with stub API handles; this file needs the real system."
   "Printed instead of running, so an absent cl-spec is visible rather than silent.")
 
+(defun %backend-installed-p ()
+  "Return true when CL-SPEC is present with a generator backend installed.
+
+The backend, not the package: cl-spec loads without one, and introspection
+works while nothing can be executed.  This file runs properties, so the
+package alone is not the question it needs answered."
+  (let ((package (find-package "CL-SPEC")))
+    (when package
+      (let ((backend (find-symbol "*GENERATOR-BACKEND*" "CL-SPEC")))
+        (and backend (boundp backend) (symbol-value backend) t)))))
+
 (defun %cl-spec-available-p ()
-  "Return true when cl-spec/check-it can be loaded into this image."
+  "Return true when cl-spec/check-it is usable in this image.
+
+The load is attempted whenever the backend is missing, not only when the
+CL-SPEC package is absent.  Gated on the package, an image that had loaded
+plain cl-spec -- no backend -- never reached the load, every test in this file
+skipped, and the suite reported itself green: the file's own coverage depended
+on which system happened to be quickloaded first, and a claim that these tests
+ran was a claim about load order rather than about the code.
+
+Called once per test and cheap after the first: ASDF answers a loaded system
+without recompiling, and the answer here is the backend, which either got
+installed or did not."
   (handler-case
       (progn
-        (unless (find-package "CL-SPEC")
+        (unless (%backend-installed-p)
           (let ((*standard-output* (make-broadcast-stream))
                 (*error-output* (make-broadcast-stream)))
             (asdf:load-system "cl-spec/check-it")))
-        (and (find-package "CL-SPEC")
-             (symbol-value (find-symbol "*GENERATOR-BACKEND*" "CL-SPEC"))
-             t))
+        (%backend-installed-p))
     (error () nil)))
 
 (defparameter +no-contracts-reason+
@@ -55,21 +75,21 @@ covered by tests/spec-adapter-report-test.lisp."
 (defun %contracts-available-p ()
   "Return true when the fixture registered its contracts in this image.
 
-Asks the fixture's own predicate rather than carrying a second copy of it.
-The two decide the same thing -- whether this cl-spec implements function
-specs -- and the fixture is the half that acts on the answer, so a copy here
-that drifted would skip the tests while the contracts loaded, or run them
-while the file left them out, and the skip reason would say the opposite of
-what the registry holds.
+Asks the fixture rather than carrying a second copy of the discriminator, and
+asks it the question these tests need answered: not whether this cl-spec has
+the function-spec API, but whether the definitions are in the registry.  The
+two differ when DEFSPEC-FUNCTION exists and signals -- the fixture reports
+that and keeps its other half -- and a predicate that only checked the API
+would then run contract tests against an empty registry and blame the adapter.
 
 Loading the fixture first is safe whatever the answer: the contract half lives
 in a file of its own precisely so that an older cl-spec leaves it unread."
   (and (%cl-spec-available-p)
        (progn
          (%ensure-fixture)
-         (let ((supported (find-symbol "FUNCTION-SPECS-SUPPORTED-P"
-                                       "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")))
-           (and supported (fboundp supported) (funcall supported) t)))))
+         (let ((registered (find-symbol "CONTRACTS-REGISTERED-P"
+                                        "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")))
+           (and registered (fboundp registered) (funcall registered) t)))))
 
 (defun %registry-symbol ()
   "Return the CL-SPEC:*REGISTRY* symbol."

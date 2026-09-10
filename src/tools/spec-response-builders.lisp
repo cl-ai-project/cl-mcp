@@ -345,12 +345,13 @@ the :RETURNS spec four lines below showed all three."
           (maximum (getf node :max))
           (values* (getf node :values))
           (base (getf node :base-type)))
-      ;; Both ends or neither: cl-spec gives a range node an :UNBOUNDED
-      ;; initform on each side, which %RANGE-BOUND has already spelled "*", so
-      ;; there is no half-open node to render and nothing here has to invent
-      ;; a bound or repeat the IR's word for an open one.
-      (when (and minimum maximum)
-        (format stream " [~A, ~A]" minimum maximum))
+      ;; Whatever is there is printed.  %RANGE-BOUND spells an absent end on
+      ;; a RANGE node as "*", and on any other node an absent end is an absent
+      ;; bound, which reads the same way -- so a node carrying one bound keeps
+      ;; it instead of losing the pair.  Requiring both ends dropped a present
+      ;; bound and showed a wider domain than the author wrote.
+      (when (or minimum maximum)
+        (format stream " [~A, ~A]" (or minimum "*") (or maximum "*")))
       (when base (format stream "  base: ~A" base))
       (when values* (format stream "  values: ~A" values*)))
     ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
@@ -687,6 +688,14 @@ count suggests, and that shortfall is invisible in every other line."
          ;; report.  The refusal line named a clause the author never wrote.
          (format stream "~&    contract: no :pre, so every generated input ~
 was passed to the function"))
+        ((eq :unknown (getf contract :precondition-p))
+         ;; Neither "it has one" nor "it has none".  Folded into the branch
+         ;; below, the text asserted a :pre while has_precondition beside it
+         ;; came back null -- the two halves of one response disagreeing on
+         ;; whether the clause exists.
+         (format stream "~&    contract: whether it has a :pre could not be ~
+read, so ~A refused input~:P is a count this response cannot interpret"
+                 (or (getf contract :rejected) "an unknown number of")))
         ((getf contract :rejected-overcounted)
          ;; More refusals than trials, so the difference says nothing.  Left
          ;; as its own line rather than folded into the one below: printing
@@ -856,11 +865,20 @@ it came out."
   (let ((verdict (cond ((getf report :verified) "✓ VERIFIED")
                        ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
                        (t "⚠ NOT VERIFIED")))
-        (contract (getf (getf report :selection) :contract-not-run)))
-    (if contract
-        (format nil "~A (properties only -- the function spec for ~A was NOT run)"
-                verdict (getf contract :qualified))
-        verdict)))
+        (contract (getf (getf report :selection) :contract-not-run))
+        (properties (getf (getf report :selection) :properties-not-run)))
+    (cond
+      (contract
+       (format nil "~A (properties only -- the function spec for ~A was NOT run)"
+               verdict (getf contract :qualified)))
+      ;; The mirror, and it needs saying for the same reason: a contract that
+      ;; holds is not a clean bill for a function whose properties were never
+      ;; run, and the headline is where a reader stops.
+      (properties
+       (format nil "~A (contract only -- ~D propert~:@P about this symbol ~
+~:*~[~;was~:;were~] NOT run)"
+               verdict (length properties)))
+      (t verdict))))
 
 (defun %format-check-text (report)
   "Render the spec-check report as the text an MCP client will show."
@@ -928,6 +946,8 @@ it came out."
                          "coverage" (getf selection :coverage)
                          "contract_not_run" (%symbol-ht
                                              (getf selection :contract-not-run))
+                         "properties_not_run"
+                         (%symbol-hts (getf selection :properties-not-run))
                          "notes" (%strings (getf selection :notes)))
                 "results" (coerce (mapcar #'%result-ht (getf report :results))
                                   'vector)
@@ -996,6 +1016,18 @@ it came out."
     (:not-requested "not-requested")
     (t "resolved")))
 
+(defparameter +listing-halves+
+  '(("specs" :specs-listable ("specs" "both"))
+    ("properties" :properties-listable ("properties" "both"))
+    ("function specs" :function-specs-listable ("function-specs" "both")))
+  "Each listing half: its label, its listable flag, and the kinds that ask for it.
+
+One table rather than two.  The notes saying a half could not be enumerated
+and the gate on \"Nothing registered matches\" read the same three facts, and
+written twice they could disagree -- printing the empty claim about a half the
+listing never looked at, which is the conflation the second one exists to
+prevent.")
+
 (defun %format-list-text (report)
   "Render the spec-list report as the text an MCP client will show."
   (with-output-to-string (stream)
@@ -1024,8 +1056,9 @@ it came out."
         ;; on a kind that lists no properties it narrowed nothing whatever,
         ;; which the caller has to be told rather than left to infer from a
         ;; header that says the filter ran.
-        (let ((narrowed (member (getf report :kind) '("properties" "both")
-                                :test #'equal)))
+        (let ((narrowed (and (member (getf report :kind) '("properties" "both")
+                                     :test #'equal)
+                             (getf report :properties-listable))))
           (cond
             ((not narrowed)
              (format stream "  tag ~A was NOT applied: it narrows properties, ~
@@ -1084,11 +1117,7 @@ project it here"
                       (or (getf contract :postcondition-count) 0)))
             (when (getf contract :documentation)
               (format stream "~&      ~A" (getf contract :documentation))))))
-      (dolist (half '(("specs" :specs-listable ("specs" "both"))
-                      ("properties" :properties-listable
-                       ("properties" "both"))
-                      ("function specs" :function-specs-listable
-                       ("function-specs" "both"))))
+      (dolist (half +listing-halves+)
         (destructuring-bind (label flag kinds) half
           (when (and (member (getf report :kind) kinds :test #'equal)
                      (not (getf report flag)))
@@ -1103,14 +1132,12 @@ so none are listed here. This is not evidence that none are registered."
                  (null (getf report :properties))
                  (null (getf report :function-specs))
                  (every (lambda (half)
-                          (destructuring-bind (flag kinds) half
+                          (destructuring-bind (label flag kinds) half
+                            (declare (ignore label))
                             (or (not (member (getf report :kind) kinds
                                              :test #'equal))
                                 (getf report flag))))
-                        '((:specs-listable ("specs" "both"))
-                          (:properties-listable ("properties" "both"))
-                          (:function-specs-listable
-                           ("function-specs" "both")))))
+                        +listing-halves+))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
 not evidence that this project has no contracts: a definition whose system ~
 has not been loaded into this worker is not here."))
