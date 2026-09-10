@@ -147,6 +147,15 @@ trailing spaces into every message and every JSON field carrying one.")
                "about the same symbol are NOT included and were not run.")
   "The limit of what an explicit contract selection covers.")
 
+(defparameter +own-property-not-run-note+
+  (concatenate 'string
+               "this symbol is itself a registered property and was NOT run: "
+               "a contract run covers the contract only. Run it with "
+               "spec-check property=<this symbol> -- symbol= will not select "
+               "it, because an :about selection leaves the symbol's own "
+               "property out.")
+  "Said by a contract run about a property registered under the same name.")
+
 (defparameter +about-source+
   (concatenate 'string
                "cl-spec:semantic-data -> :properties-about "
@@ -364,6 +373,18 @@ is registered about this symbol: ~A" failure)
 ;;; spec-describe
 ;;; ---------------------------------------------------------------------------
 
+(defun %describe-condition-status (api condition)
+  "Return the status DESCRIBE-REPORT should answer for CONDITION.
+
+CL:UNDEFINED-FUNCTION gets its own answer here for the reason %REGISTERED-P
+gives it one: cl-spec raises it on purpose for a contract whose target has not
+been written, the contract IS registered, and reporting :INTERNAL-ERROR --
+documented as \"this adapter failed\" -- had the describe path and the run path
+disagreeing about one fact."
+  (cond ((%unknown-registration-p api condition) :not-registered)
+        ((typep condition 'undefined-function) :undefined-function)
+        (t :internal-error)))
+
 (defun %unknown-registration-p (api condition)
   "Return true when CONDITION is cl-spec saying a name is not registered.
 
@@ -442,6 +463,11 @@ return\" at all.  The specs themselves stay in spec-describe: a listing is for
 finding a name, not for reading a contract."
   (handler-case
       (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
+        ;; NIL is not a contract with no parameters and no :returns.  The
+        ;; describe and run paths both refuse to read it as one; only the
+        ;; signalling case was marked here, so a reader that answered nothing
+        ;; came out as a positive claim about the contract's shape.
+        (unless data (error 'unreadable-projection))
         (list :name (symbol-data name)
               :parameters (mapcar (lambda (argument)
                                     (symbol-data (getf argument :variable)))
@@ -522,13 +548,18 @@ function-specs or both; got ~S" kind)
                 ;; Built here rather than above: it is used only on this
                 ;; branch, and formatting a message for every successful
                 ;; listing is work inside the caller's introspection deadline.
+                ;; Only the handles that are absent.  Naming every handle
+                ;; the kind reads told a caller their cl-spec does not export
+                ;; a function it does export -- the statement
+                ;; %CONTRACT-UNSUPPORTED-MESSAGE was rewritten to stop making.
                 :message (%listing-unsupported-message
-                          (mapcar
+                          (mapcan
                            (lambda (row)
-                             (format nil "~{~A~^ with ~}"
-                                     (mapcar (lambda (key)
-                                               (string-downcase (symbol-name key)))
-                                             (fourth row))))
+                             (mapcar (lambda (key)
+                                       (string-downcase (symbol-name key)))
+                                     (remove-if (lambda (key)
+                                                  (api-has-p api key))
+                                                (fourth row))))
                            (set-difference asked reachable :test #'eq)))
                 :environment environment)))
       (multiple-value-bind (package-object package-error)
@@ -931,9 +962,7 @@ function-spec; got ~S" kind)
           ;; failure -- a bad argument, a printer error, a malformed
           ;; :ARGUMENTS entry -- as the absence of a registration, which is
           ;; exactly the false negative this file exists to prevent.
-          (list :status (if (%unknown-registration-p api condition)
-                            :not-registered
-                            :internal-error)
+          (list :status (%describe-condition-status api condition)
                 :kind kind
                 :name (symbol-data symbol)
                 :message (princ-to-string condition)
@@ -1253,16 +1282,21 @@ prose, and the argument for naming one is the argument for naming the other."
         ;; path reports that direction explicitly -- dropping it here let a
         ;; contract run answer "nothing else was left unrun" about a property
         ;; of the same name, off a routing table already in hand.
-        (values (append (let ((own (getf routing :property)))
-                          (when own (list (symbol-data own))))
-                        (mapcar #'symbol-data (getf routing :properties-about)))
-                t))
+        ;; Three values: the :ABOUT registrations, and separately the
+        ;; property registered under the symbol's own name.  Folded together
+        ;; they were counted as :ABOUT ones and the note sent the caller to
+        ;; spec-check symbol=, the selection that deliberately excludes the
+        ;; symbol's own property -- an instruction that returns nothing.
+        (values (mapcar #'symbol-data (getf routing :properties-about))
+                t
+                (let ((own (getf routing :property)))
+                  (when own (symbol-data own)))))
     ;; (values NIL NIL) rather than NIL: an empty list here says the symbol has
     ;; no properties registered about it, and a read that failed has no
     ;; evidence for that.  Reported as its own fact, the way every sibling in
     ;; this module is -- FUNCTION-SPECS-LISTABLE, REJECTED-MEASURED,
     ;; FAILURE-REASON-READABLE, HAS-PRECONDITION.
-    (error () (values nil nil))))
+    (error () (values nil nil nil))))
 
 (defun %select-properties (api property symbol function package registry)
   "Return (values NAMES SELECTION ERROR KIND DATA) for the requested selection.
@@ -1290,18 +1324,23 @@ learns it exists rather than being left to assume the run covered it."
                         :coverage +contract-coverage-note+)
        (values names
                (if names
-                   (multiple-value-bind (about read)
+                   (multiple-value-bind (about read own)
                        (%properties-about api (first names) registry)
                      (append selection
                              (list :properties-not-run about
+                                   :own-property-not-run own
                                    :properties-not-run-read (and read t))
                              (cond
-                               (about
+                               ((or about own)
                                 (list :notes
-                                      (list (format nil "~D propert~:@P ~
+                                      (append
+                                       (when about
+                                         (list (format nil "~D propert~:@P ~
 registered (:about this symbol) ~:*~[~;is~:;are~] NOT covered by a contract ~
 run: run them with spec-check symbol=<this symbol>."
-                                                    (length about)))))
+                                                       (length about))))
+                                       (when own
+                                         (list +own-property-not-run-note+)))))
                                ((not read)
                                 (list :notes
                                       (list (concatenate 'string
@@ -1563,7 +1602,11 @@ cl-spec's structured account of a return value that missed its spec."
     (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
       (multiple-value-bind (explanation explanation-read)
           (read-slot :check-explanation)
-        (let* ((rejected (read-slot :check-rejected))
+        (multiple-value-bind (rejected rejected-read) (read-slot :check-rejected)
+      (let* (;; REJECTED-READ, not (integerp rejected).  "no reader" and "the
+             ;; reader signalled" are different facts about the loaded
+             ;; revision, and the description promises the first.
+             (rejected rejected)
                (countable (and (integerp executed) (integerp rejected)))
                (overcounted (and countable (> rejected executed)))
                ;; A refusal reported against a contract whose projection says it
@@ -1608,7 +1651,8 @@ cl-spec's structured account of a return value that missed its spec."
                   (values nil :not-applicable nil))
             (list :rejected rejected
                   :rejection-status rejection-status
-                  :rejected-measured (and (integerp rejected) t)
+                  :rejected-measured (and rejected-read (integerp rejected) t)
+                :rejected-readable (and rejected-read t)
                   ;; Carried so a renderer does not describe a refusal that
                   ;; cannot happen: "0 of them refused by :pre" told the reader
                   ;; a precondition exists, on a contract written without one.
@@ -1636,7 +1680,19 @@ cl-spec's structured account of a return value that missed its spec."
                   :explanation explanation-text
                   :explanation-readable (and explanation-read t)
                   :explanation-complete explanation-complete
-                  :explanation-omitted-chars explanation-omitted)))))))
+                  :explanation-omitted-chars explanation-omitted))))))))
+
+(defun %recorded-budget (api result)
+  "Return the trial budget cl-spec recorded on RESULT, or NIL.
+
+A contract result carries the budget the run was given.  Preferred over the
+figure %TRIALS-BUDGET derives, which is the adapter's reconstruction and says
+so: when the recorded one is there, the derivation note is not the truth about
+that run.  NIL for a property result, which records no budget, and for a
+cl-spec that does not export the reader."
+  (when (api-has-p api :check-budget)
+    (handler-case (funcall (api-fn api :check-budget) result)
+      (error () nil))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1663,7 +1719,18 @@ arguments, or that a failure was somehow argument-free."
                       (%contract-plist api result executed max-value-chars
                                        (getf facts :precondition-p)))
           :status status
-          :trials (list* :executed executed trials)
+          ;; The recorded budget wins over the derived one, and takes the
+          ;; derivation note off with it: the note says cl-spec does not
+          ;; expose the resolved budget, which is false of a contract result
+          ;; that carries it.
+          :trials (let ((recorded (and (eq kind :contract)
+                                       (%recorded-budget api result))))
+                    (list* :executed executed
+                           (if recorded
+                               (list :budget recorded
+                                     :budget-source "cl-spec result"
+                                     :budget-derivation nil)
+                               trials)))
           ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
           ;; consumer holding it as a number would round it, which turns a
           ;; reproducible failure into one that cannot be reproduced.
@@ -1933,7 +2000,10 @@ here the only place that said so was the headline: a consumer branching on
 VERIFIED and this list -- the documented pair for what a run could not
 establish -- read full coverage for a function whose contract never ran."
   (let ((gaps '())
-        (rejections-measured t))
+        ;; Zero results measured nothing.  Initialised true and only cleared
+        ;; inside the loop, a call that selected nothing came back asserting
+        ;; the refusal counts were measured -- by a run that did not happen.
+        (rejections-measured (and results t)))
     (dolist (result results)
       ;; Keyed on REJECTED-USABLE, the one flag that answers "may this
       ;; response subtract with the refusal count".  Keyed on the reader
@@ -1969,7 +2039,8 @@ establish -- read full coverage for a function whose contract never ran."
           (t (pushnew status gaps)))))
     (append (nreverse gaps)
             (when (getf selection :contract-not-run) (list :contract-not-run))
-            (when (getf selection :properties-not-run)
+            (when (or (getf selection :properties-not-run)
+                      (getf selection :own-property-not-run))
               (list :properties-not-run))
             (when (and (getf selection :kind)
                        (eq :contract (getf selection :kind))
@@ -2105,6 +2176,9 @@ anything holds."
                      (budget-plist (%trials-budget api facts profile-keyword
                                                    backend trials))
                      (digest (append (%digest-facts api name registry facts)
+                                     ;; On every branch, not only the one that
+                                     ;; ran: a timeout publishes the digest too
+                                     ;; and would print it bare.
                                      (list :covers (if (eq kind :contract)
                                                        :contract
                                                        :property))))

@@ -386,7 +386,7 @@ max_chars -- which is to say, by luck."
               (getf report :shrink-enabled)))))
 
 (defun %report-cut (stream report complete-key omitted-key
-                    &key (budget "max_chars") extra)
+                    &key (budget "max_chars") extra (indent 0))
   "Write REPORT's truncation notice for one field, or nothing when it is whole.
 
 Four copies of this line had drifted into three wordings and one that forgot
@@ -394,9 +394,9 @@ to name the budget at all -- and two of the four were added in the same change
 that added the fields.  EXTRA carries what a particular field has to add."
   (unless (eq t (getf report complete-key))
     (unless (eq :not-applicable (getf report complete-key))
-      (format stream "~&... truncated, ~D more character~:P. Raise ~A to see ~
-the rest.~@[ ~A~]"
-              (getf report omitted-key) budget extra))))
+      (format stream "~&~vT... truncated, ~D more character~:P. Raise ~A to ~
+see the rest.~@[ ~A~]"
+              indent (getf report omitted-key) budget extra))))
 
 (defun %format-describe-text (report)
   "Render the spec-describe report as text."
@@ -487,7 +487,8 @@ preconditions_complete.  Absent has to reach the consumer as null."
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
-    ((:not-registered :unsupported :invalid-arguments :internal-error :timeout)
+    ((:not-registered :undefined-function :unsupported :invalid-arguments
+      :internal-error :timeout)
      (%simple-status-response report))
     (t
      (make-ht "schema_version" +schema-version+
@@ -764,10 +765,9 @@ a finding about the function"))))
       (let ((explanation (getf contract :explanation)))
         (when explanation
           (format stream "~&    return value: ~A" explanation)
-          (unless (getf contract :explanation-complete)
-            (format stream "~&    ... truncated, ~D more character~:P. Raise ~
-max_value_chars to see the rest."
-                    (getf contract :explanation-omitted-chars))))))))
+          (%report-cut stream contract :explanation-complete
+                       :explanation-omitted-chars
+                       :budget "max_value_chars" :indent 4))))))
 
 (defun %format-one-result (stream result index)
   "Write one per-property result to STREAM."

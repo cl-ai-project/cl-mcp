@@ -97,7 +97,8 @@ and fbound for the adapter to report itself usable.")
     (:check-function . "CHECK-FUNCTION")
     (:check-rejected . "FUNCTION-CHECK-RESULT-REJECTED")
     (:check-failure-reason . "FUNCTION-CHECK-RESULT-FAILURE-REASON")
-    (:check-explanation . "FUNCTION-CHECK-RESULT-EXPLANATION"))
+    (:check-explanation . "FUNCTION-CHECK-RESULT-EXPLANATION")
+    (:check-budget . "FUNCTION-CHECK-RESULT-BUDGET"))
   "Adapter key to cl-spec function name, resolved when present.
 
 Absence costs one operation rather than the whole adapter: a cl-spec without

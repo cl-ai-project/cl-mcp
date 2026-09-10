@@ -314,6 +314,15 @@ calls the function, then checks :returns and :post. results[].contract carries:
                    false when this cl-spec exports no reader for cl-spec's
                    account of the return value, or that reader signalled. A
                    null explanation then says nothing about the run.
+                   explanation_complete and explanation_omitted_chars report a
+                   cut, like every other bounded field.
+  rejection_status the keyword the five booleans above are derived from, and
+                   the one to branch on: usable, no-precondition, unmeasured,
+                   overcounted, contradicted, precondition-unknown.
+  rejected_readable
+                   false when the refused-input reader is absent or signalled,
+                   as against rejected_measured, which is also false when it
+                   returned something that is not a count.
   failure_reason   which half broke: return-spec, postcondition, precondition,
                    condition. Absent has two meanings, told apart by
                    failure_reason_readable: true means cl-spec could not
@@ -395,9 +404,12 @@ symbol's function spec; the response names it when one exists.")
 property and symbol.")
    (trials :type :integer
     :description
-    "Trial count for a contract run, a POSITIVE integer. Contract runs only: a
-property takes its count from its own :trials table, selected by profile.
-Given with property= or symbol= it is refused, not ignored.")
+    "Trial count for a contract run: a positive integer, at most 1,000,000.
+Contract runs only -- a property takes its count from its own :trials table,
+selected by profile -- and given with property= or symbol= it is refused, not
+ignored. The ceiling is there because the run happens on a deadline thread
+that cannot always be stopped: a budget that outlives its timeout goes on
+calling your function inside this session's worker.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string

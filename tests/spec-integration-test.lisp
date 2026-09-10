@@ -353,8 +353,13 @@ reached the caller."
               (ok (eq t (gethash "verified" response)))
               (ok (string= "contract" (gethash "kind" result)))
               (ok (= 200 (gethash "budget" (gethash "trials" result))))
-              (ok (string= "requested" (gethash "budget_source"
-                                                (gethash "trials" result))))
+              (testing "and the budget comes off cl-spec's own result"
+                ;; Not the adapter's reconstruction: check-function records
+                ;; the budget the run was given, so the derivation note does
+                ;; not apply to a contract run.
+                (ok (string= "cl-spec result"
+                             (gethash "budget_source"
+                                      (gethash "trials" result)))))
               (testing "the run says how many inputs :pre refused"
                 (ok (eq t (gethash "rejected_measured" contract)))
                 (ok (integerp (gethash "rejected" contract)))

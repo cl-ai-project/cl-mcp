@@ -722,7 +722,7 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
 - `spec-check` — run one property, every property registered `(:about
   <symbol>)`, or one function spec against its function.
   - `property` **or** `symbol` **or** `function` (exactly one), `package`,
-    `profile` (default `normal`), `trials` (positive integer),
+    `profile` (default `normal`), `trials` (positive integer, max 1,000,000),
     `seed` (decimal digits **as a string**), `expect_definition_digest`,
     `timeout_seconds` (number, default 60 — the budget for the whole call),
     `max_value_chars` (positive integer, default 2000)

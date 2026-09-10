@@ -216,6 +216,14 @@ are what a test about the message has to look at."
       (multiple-value-bind (value message) (funcall read-arg params "trials" nil)
         (ok (null value))
         (ok (null message)))
+      (testing "and a budget past the ceiling is refused with the reason"
+        ;; The ceiling bounds what a leaked deadline thread is left doing in
+        ;; the worker, so it has to be reachable through the entry point the
+        ;; worker handler calls, not only through the schema.
+        (let ((response (%call "spec-check"
+                               "{\"function\":\"cl:car\",\"trials\":5000000}")))
+          (ok (search "at most" (%text response)))
+          (ok (search "1,000,000" (%text response)))))
       (testing "and a value that is there still has to be positive"
         (setf (gethash "trials" params) 0)
         (multiple-value-bind (value message)
