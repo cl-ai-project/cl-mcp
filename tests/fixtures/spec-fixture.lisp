@@ -107,17 +107,31 @@ signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
   (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
     (and data (fboundp data) t)))
 
-(defvar *contracts-registered* nil
-  "True once the contract half of this fixture loaded without signalling.")
+(defvar *contracts-registered-in* '()
+  "Every registry the contract half of this fixture has loaded into.
 
-(defun contracts-registered-p ()
-  "Return true when this fixture's function specs are in the registry.
+A list rather than one value: this file is loaded once per registry and the
+loads interleave with the tests that read the answer, so recording only the
+latest let a private load clobber the shared registry's entry -- and the
+contract tests then skipped against a registry that holds them.")
+
+(defun contracts-registered-p (&optional (registry (symbol-value
+                                                    (find-symbol "*REGISTRY*"
+                                                                 "CL-SPEC"))))
+  "Return true when this fixture's function specs are in REGISTRY.
 
 What a test should ask before running contract coverage.  FUNCTION-SPECS-
 SUPPORTED-P says the loaded cl-spec has the API; this says the definitions
 actually made it in, which is not the same answer when DEFSPEC-FUNCTION
-signals at run time on a revision that exports it."
-  (and *contracts-registered* t))
+signals at run time on a revision that exports it.
+
+Keyed on the registry, not on a boolean.  This file is loaded once per
+registry and one test loads a private copy of it: a flag that only said
+\"yes\" answered for whichever load ran last, so a private load that failed
+could skip the contract tests against a shared registry that holds them, or a
+private load that succeeded could send them at one that does not.  Recording
+one registry rather than all of them has the same fault one step in."
+  (and registry (member registry *contracts-registered-in*) t))
 
 ;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
 ;; and LOAD reads each top-level form before evaluating it -- so a
@@ -132,18 +146,16 @@ signals at run time on a revision that exports it."
 ;; tests down that the split was written to protect.  Reported rather than
 ;; swallowed, and CONTRACTS-REGISTERED-P tells a test which happened.
 (when (function-specs-supported-p)
-  ;; Cleared first.  This file is loaded once per registry, and a flag left
-  ;; standing from an earlier load describes a registry that is no longer the
-  ;; one in effect: a second load whose contract half signalled would keep
-  ;; answering "registered" while the fresh registry holds none, and the
-  ;; contract tests would run against it and report the failures as adapter
-  ;; bugs.
-  (setf *contracts-registered* nil)
+  ;; The registry is recorded, not a boolean.  This file is loaded once per
+  ;; registry and one test loads a private copy: a flag that only said "yes"
+  ;; described whichever load ran last, and the contract tests read it while a
+  ;; different registry was installed.
   (handler-case
       (progn
         (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
                                (asdf:system-source-directory "cl-mcp")))
-        (setf *contracts-registered* t))
+        (pushnew (symbol-value (find-symbol "*REGISTRY*" "CL-SPEC"))
+                 *contracts-registered-in*))
     (error (condition)
       (format *error-output*
               "~&;; spec-fixture: contracts NOT registered: ~A~%" condition))))

@@ -307,6 +307,10 @@ calls the function, then checks :returns and :post. results[].contract carries:
                    count may not be subtracted with, for any of the reasons
                    above. effective_trials is null exactly when this is false,
                    and verified is false with it.
+  explanation_readable
+                   false when this cl-spec exports no reader for cl-spec's
+                   account of the return value, or that reader signalled. A
+                   null explanation then says nothing about the run.
   failure_reason   which half broke: return-spec, postcondition, precondition,
                    condition. Absent has two meanings, told apart by
                    failure_reason_readable: true means cl-spec could not

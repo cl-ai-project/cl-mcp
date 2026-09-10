@@ -42,7 +42,8 @@
 (defun %contract-check-report (&key failure-reason failure-reason-readable
                                     rejected-overcounted (rejected 3)
                                     (effective-trials 27)
-                                    (precondition-p t))
+                                    (precondition-p t)
+                                    (rejection-status :usable))
   "Return a completed contract check report whose single result failed."
   (list :status :completed
         :verified nil
@@ -60,6 +61,7 @@
                     :trials (list :executed 30 :budget 30
                                   :budget-source "requested")
                     :contract (list :rejected rejected
+                                    :rejection-status rejection-status
                                     :precondition-p precondition-p
                                     :rejected-measured t
                                     :rejected-overcounted rejected-overcounted
@@ -833,6 +835,7 @@
     (let* ((response (build-spec-check-response
                       (%contract-check-report :rejected 2
                                               :effective-trials nil
+                                              :rejection-status :overcounted
                                               :rejected-overcounted t
                                               :failure-reason :condition
                                               :failure-reason-readable t)))
@@ -866,6 +869,7 @@
     ;; trials on the strength of a number that cannot mean anything.
     (let* ((response (build-spec-check-response
                       (%contract-check-report :precondition-p nil
+                                              :rejection-status :no-precondition
                                               :rejected 0
                                               :effective-trials 30
                                               :failure-reason :postcondition

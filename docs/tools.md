@@ -690,7 +690,9 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     `timeout_seconds`
   - `specs_listable`, `properties_listable`, `function_specs_listable` and
     `tag_filterable` say whether this cl-spec can enumerate each half, and
-    whether it can filter by tag at all. False there is not
+    whether it can filter by tag at all — facts about the loaded revision, not
+    about what this call asked for. `filters.tag_applied` says whether the tag
+    actually narrowed this listing. False there is not
     "this project has none" — and the matching entry in `counts` is `null`,
     never `0`. `kind=both` lists the halves it can and reports the rest this
     way rather than failing the whole call.

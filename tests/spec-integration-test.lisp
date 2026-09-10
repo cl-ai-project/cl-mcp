@@ -99,9 +99,16 @@ in a file of its own precisely so that an older cl-spec leaves it unread."
   (and (%cl-spec-available-p)
        (progn
          (%ensure-fixture)
+         ;; Asked about the shared registry by name.  These tests read the
+         ;; answer outside WITH-FIXTURE-REGISTRY, where the installed registry
+         ;; is the global one, and another test loads a private copy of the
+         ;; fixture -- so the question has to name which registry it is about.
          (let ((registered (find-symbol "CONTRACTS-REGISTERED-P"
                                         "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")))
-           (and registered (fboundp registered) (funcall registered) t)))))
+           (and registered
+                (fboundp registered)
+                (funcall registered *fixture-registry*)
+                t)))))
 
 (defun %registry-symbol ()
   "Return the CL-SPEC:*REGISTRY* symbol."

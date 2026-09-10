@@ -591,6 +591,8 @@ not be read."
              "failure_reason_readable" (json-bool
                                         (getf contract :failure-reason-readable))
              "explanation" (sanitize-for-json (getf contract :explanation))
+             "explanation_readable" (json-bool
+                                     (getf contract :explanation-readable))
              "rejected_contradicted" (json-bool
                                       (getf contract :rejected-contradicted))
              "rejected_usable" (json-bool (getf contract :rejected-usable))
@@ -698,44 +700,31 @@ The effective trial count is the one a reader should act on: a contract whose
 count suggests, and that shortfall is invisible in every other line."
   (let ((contract (getf result :contract)))
     (when contract
-      (cond
-        ;; The two uncertainty branches first.  "no :pre, so every generated
-        ;; input was passed to the function" is an affirmative claim that the
-        ;; effective count equals the executed one, and it must not be made
-        ;; over a refusal count that is missing or unusable -- whichever of
-        ;; the two the response is carrying.
-        ((getf contract :rejected-overcounted)
-         ;; More refusals than trials, so the difference says nothing.  Left
-         ;; as its own line rather than folded into the one below: printing
-         ;; "the function was called 0 times" for a run that did call it is a
-         ;; different wrong answer, not a smaller one.
+      (case (getf contract :rejection-status)
+        ;; One CASE on the keyword the report decided, rather than five
+        ;; booleans re-tested in an order that must not change.
+        (:overcounted
          (format stream "~&    contract: ~A inputs refused by :pre against ~
 ~A trials -- cl-spec counted more refusals than trials, so how often the ~
 function was actually called cannot be derived here"
                  (getf contract :rejected)
                  (or (getf (getf result :trials) :executed)
                      "an unknown number of")))
-        ((not (getf contract :rejected-measured))
+        (:unmeasured
          (format stream "~&    contract: the refused-input count could not be ~
 read, so the trial count above is an upper bound on what was checked"))
-        ((getf contract :rejected-contradicted)
+        (:contradicted
          (format stream "~&    contract: ~A input~:P refused although this ~
 contract has no :pre -- the two do not agree, so how often the function was ~
 called cannot be read off them"
                  (getf contract :rejected)))
-        ((null (getf contract :precondition-p))
-         ;; No :PRE, so nothing could be refused and there is no shortfall to
-         ;; report.  The refusal line named a clause the author never wrote.
-         (format stream "~&    contract: no :pre, so every generated input ~
-was passed to the function"))
-        ((eq :unknown (getf contract :precondition-p))
-         ;; Neither "it has one" nor "it has none".  Folded into the branch
-         ;; below, the text asserted a :pre while has_precondition beside it
-         ;; came back null -- the two halves of one response disagreeing on
-         ;; whether the clause exists.
+        (:precondition-unknown
          (format stream "~&    contract: whether it has a :pre could not be ~
 read, so ~A refused input~:P is a count this response cannot interpret"
                  (or (getf contract :rejected) "an unknown number of")))
+        (:no-precondition
+         (format stream "~&    contract: no :pre, so every generated input ~
+was passed to the function"))
         (t
          (format stream "~&    contract: ~A of them refused by :pre, ~
 so the function was called ~A time~:P"
@@ -906,6 +895,14 @@ it came out."
        (format nil "~A (contract only -- ~D propert~:@P about this symbol ~
 ~:*~[~;was~:;were~] NOT run)"
                verdict (length properties)))
+      ;; And the case where coverage is least known needs it most: the
+      ;; lookup that would have said what else is registered failed, so the
+      ;; bare verdict would be the only line that did not admit it.
+      ((and (eq :contract (getf (getf report :selection) :kind))
+            (not (getf (getf report :selection) :properties-not-run-read)))
+       (format nil "~A (contract only -- what else is registered about this ~
+symbol could not be read)"
+               verdict))
       (t verdict))))
 
 (defun %format-check-text (report)
@@ -949,8 +946,8 @@ it came out."
     ;; of a run renders "Selected NIL properties via NIL" while the one thing
     ;; the caller needs -- why cl-spec could not run the contract -- never
     ;; reaches content[].text.
-    ((:not-registered :unsupported :invalid-arguments :backend-not-loaded
-      :internal-error :timeout)
+    ((:not-registered :undefined-function :unsupported :invalid-arguments
+      :backend-not-loaded :internal-error :timeout)
      (let ((response (%simple-status-response report)))
        (setf (gethash "verified" response) (json-bool nil))
        response))
@@ -1222,7 +1219,10 @@ has not been loaded into this worker is not here."))
                                    "tag" (getf filters :tag)
                                    "tag_resolved"
                                    (%tag-resolved-string
-                                    (getf filters :tag-resolved)))
+                                    (getf filters :tag-resolved))
+                                   "tag_applied"
+                                   (when (getf filters :tag)
+                                     (json-bool (getf filters :tag-applied))))
                 "coverage" (getf report :coverage)
                 "environment" (%environment-ht (getf report :environment))
                 "content" (text-content (%format-list-text report)))))))

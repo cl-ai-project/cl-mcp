@@ -509,12 +509,13 @@ function-specs or both; got ~S" kind)
     ;; this gate was narrowed to stop giving.  A half it cannot list is
     ;; reported as its own null count, the way FUNCTION-SPECS-LISTABLE already
     ;; reports the third half.
-    (let* ((asked (remove-if-not (lambda (row) (listing-kind-wanted-p row kind))
-                                 +listing-kinds+))
-           (reachable (remove-if-not
+    (let* ((available (remove-if-not
                        (lambda (row)
                          (every (lambda (key) (api-has-p api key)) (fourth row)))
-                       asked)))
+                       +listing-kinds+))
+           (asked (remove-if-not (lambda (row) (listing-kind-wanted-p row kind))
+                                 +listing-kinds+))
+           (reachable (intersection asked available :test #'eq)))
       (unless reachable
         (return-from list-report
           (list :status :unsupported
@@ -530,102 +531,117 @@ function-specs or both; got ~S" kind)
                                              (fourth row))))
                            (set-difference asked reachable :test #'eq)))
                 :environment environment)))
-    (multiple-value-bind (package-object package-error)
-        (%listing-package-filter package)
-      (when package-error
-        (return-from list-report
-          (append package-error (list :environment environment))))
-      (let* ((registry (funcall (api-fn api :registry)))
-             (tag-keyword (and tag (find-keyword tag)))
-             (want-specs (assoc "specs" asked :test #'string=))
-             (want-properties (assoc "properties" asked :test #'string=))
-             (want-function-specs (assoc "function-specs" asked :test #'string=))
-             ;; Listed only when cl-spec can enumerate them.  Absence is
-             ;; reported as its own answer below rather than as an empty
-             ;; list: "this revision cannot enumerate contracts" and "there
-             ;; are none" are different, and only one of them is a fact
-             ;; about the project.
-             ;; Off REACHABLE, which the gate above already computed from
-             ;; the same rows and the same handles.  Re-running API-HAS-P here
-             ;; was the fourth copy of the mapping the table exists to hold.
-             (function-specs-listable (assoc "function-specs" reachable
-                                             :test #'string=))
-             (function-spec-names
-               (when (and want-function-specs function-specs-listable)
-                 (remove-if-not
-                  (lambda (name) (%in-package-p name package-object))
-                  (funcall (api-fn api :list-function-specs) registry))))
-             ;; Each half asks only for the reader it uses.  A revision
-             ;; missing one of them still lists the others, and the half it
-             ;; could not look at comes back as a null count beside a false
-             ;; listable flag -- never as an empty list, which would say the
-             ;; registry holds none.
-             (specs-listable (assoc "specs" reachable :test #'string=))
-             (properties-listable (assoc "properties" reachable :test #'string=))
-             (spec-names
-               (when (and want-specs specs-listable)
-                 (remove-if-not (lambda (name) (%in-package-p name package-object))
-                                (funcall (api-fn api :list-specs) registry))))
-             ;; A tag needs a reader of its own, and a revision without one
-             ;; cannot answer the question at all.  Falling through to an
-             ;; empty list published "no property carries this tag" on the
-             ;; evidence of a missing function -- the conflation the three
-             ;; listable flags exist to prevent, for the one filter that had
-             ;; no flag.
-             (tag-filterable (or (null tag)
-                                 (api-has-p api :properties-with-tag)))
-             (property-names
-               (when (and want-properties properties-listable tag-filterable)
-                 (remove-if-not
-                  (lambda (name) (%in-package-p name package-object))
-                  (cond
-                    ((null tag) (funcall (api-fn api :list-properties) registry))
-                    ((null tag-keyword) '())
-                    (t (funcall (api-fn api :properties-with-tag)
-                                tag-keyword registry)))))))
-        (list :status :ok
-              :kind kind
-              :specs (mapcar #'symbol-data (%take spec-names limit))
-              :properties (loop for name in (%take property-names limit)
-                                collect (%property-listing api name registry))
-              :function-specs (loop for name in (%take function-spec-names limit)
-                                    collect (%function-spec-listing api name registry))
-              :function-specs-listable (and function-specs-listable t)
-              :specs-listable (and specs-listable t)
-              :properties-listable (and properties-listable t)
-              :tag-filterable (and tag-filterable t)
-              ;; NIL, not 0, for a kind that was not asked for.  The count
-              ;; is a fact about the registry and the list is what this
-              ;; response carries; not looking leaves the first unknown, and
-              ;; reporting it as zero says the registry holds none -- the
-              ;; same conflation the tag and no-properties answers go out of
-              ;; their way to avoid.
-              :counts (list :specs (when (and want-specs specs-listable)
-                                     (length spec-names))
-                            :properties (when (and want-properties
-                                                   properties-listable
-                                                   tag-filterable)
-                                          (length property-names))
-                            :function-specs (when (and want-function-specs
-                                                       function-specs-listable)
-                                              (length function-spec-names)))
-              :truncated (or (> (length spec-names) limit)
-                             (> (length property-names) limit)
-                             (> (length function-spec-names) limit))
-              :limit limit
-              :filters (list :package (when package-object
-                                        (package-name package-object))
-                             :tag tag
-                             ;; A tag that names no keyword in this image
-                             ;; cannot be carried by any registered property,
-                             ;; so an empty result is correct -- but saying
-                             ;; only "empty" would read as "no property has
-                             ;; it" rather than "no such tag exists here".
-                             :tag-resolved (cond ((null tag) :not-requested)
-                                                 (tag-keyword t)
-                                                 (t nil)))
-              :coverage +listing-coverage-note+
-              :environment environment))))))
+      (multiple-value-bind (package-object package-error)
+          (%listing-package-filter package)
+        (when package-error
+          (return-from list-report
+            (append package-error (list :environment environment))))
+        (let* ((registry (funcall (api-fn api :registry)))
+               (tag-keyword (and tag (find-keyword tag)))
+               (want-specs (assoc "specs" asked :test #'string=))
+               (want-properties (assoc "properties" asked :test #'string=))
+               (want-function-specs (assoc "function-specs" asked :test #'string=))
+               ;; Listed only when cl-spec can enumerate them.  Absence is
+               ;; reported as its own answer below rather than as an empty
+               ;; list: "this revision cannot enumerate contracts" and "there
+               ;; are none" are different, and only one of them is a fact
+               ;; about the project.
+               ;; Off AVAILABLE, not REACHABLE.  REACHABLE is filtered to the
+               ;; kind this call asked for, and these three flags answer a
+               ;; question about the loaded revision: "can it enumerate this
+               ;; half at all".  Read off the filtered list, kind=function-specs
+               ;; reported that properties cannot be listed -- a client that
+               ;; asks contracts first would conclude the revision has no
+               ;; property listing and never ask again.
+               (function-specs-listable (assoc "function-specs" available
+                                               :test #'string=))
+               (function-spec-names
+                 (when (and want-function-specs function-specs-listable)
+                   (remove-if-not
+                    (lambda (name) (%in-package-p name package-object))
+                    (funcall (api-fn api :list-function-specs) registry))))
+               ;; Each half asks only for the reader it uses.  A revision
+               ;; missing one of them still lists the others, and the half it
+               ;; could not look at comes back as a null count beside a false
+               ;; listable flag -- never as an empty list, which would say the
+               ;; registry holds none.
+               (specs-listable (assoc "specs" available :test #'string=))
+               (properties-listable (assoc "properties" available :test #'string=))
+               (spec-names
+                 (when (and want-specs specs-listable)
+                   (remove-if-not (lambda (name) (%in-package-p name package-object))
+                                  (funcall (api-fn api :list-specs) registry))))
+               ;; A tag needs a reader of its own, and a revision without one
+               ;; cannot answer the question at all.  Falling through to an
+               ;; empty list published "no property carries this tag" on the
+               ;; evidence of a missing function -- the conflation the three
+               ;; listable flags exist to prevent, for the one filter that had
+               ;; no flag.
+               (tag-filterable (or (null tag)
+                                   (api-has-p api :properties-with-tag)))
+               (property-names
+                 (when (and want-properties properties-listable tag-filterable)
+                   (remove-if-not
+                    (lambda (name) (%in-package-p name package-object))
+                    (cond
+                      ((null tag) (funcall (api-fn api :list-properties) registry))
+                      ((null tag-keyword) '())
+                      (t (funcall (api-fn api :properties-with-tag)
+                                  tag-keyword registry)))))))
+          (list :status :ok
+                :kind kind
+                :specs (mapcar #'symbol-data (%take spec-names limit))
+                :properties (loop for name in (%take property-names limit)
+                                  collect (%property-listing api name registry))
+                :function-specs (loop for name in (%take function-spec-names limit)
+                                      collect (%function-spec-listing api name registry))
+                :function-specs-listable (and function-specs-listable t)
+                :specs-listable (and specs-listable t)
+                :properties-listable (and properties-listable t)
+                :tag-filterable (and tag-filterable t)
+                ;; NIL, not 0, for a kind that was not asked for.  The count
+                ;; is a fact about the registry and the list is what this
+                ;; response carries; not looking leaves the first unknown, and
+                ;; reporting it as zero says the registry holds none -- the
+                ;; same conflation the tag and no-properties answers go out of
+                ;; their way to avoid.
+                :counts (list :specs (when (and want-specs specs-listable)
+                                       (length spec-names))
+                              :properties (when (and want-properties
+                                                     properties-listable
+                                                     tag-filterable)
+                                            (length property-names))
+                              :function-specs (when (and want-function-specs
+                                                         function-specs-listable)
+                                                (length function-spec-names)))
+                :truncated (or (> (length spec-names) limit)
+                               (> (length property-names) limit)
+                               (> (length function-spec-names) limit))
+                :limit limit
+                :filters (list :package (when package-object
+                                          (package-name package-object))
+                               :tag tag
+                               ;; A tag that names no keyword in this image
+                               ;; cannot be carried by any registered property,
+                               ;; so an empty result is correct -- but saying
+                               ;; only "empty" would read as "no property has
+                               ;; it" rather than "no such tag exists here".
+                               :tag-resolved (cond ((null tag) :not-requested)
+                                                   (tag-keyword t)
+                                                   (t nil))
+                               ;; Whether the tag narrowed anything at all.  The
+                               ;; text said so and the payload did not, so a
+                               ;; JSON consumer reading filters.tag beside
+                               ;; tag_filterable concluded the listing had been
+                               ;; filtered -- the reading SELECTION.CONTRACT_
+                               ;; NOT_RUN was made data to avoid.
+                               :tag-applied (and tag
+                                                 want-properties
+                                                 properties-listable
+                                                 tag-filterable
+                                                 t))
+                :coverage +listing-coverage-note+
+                :environment environment))))))
 
 (defparameter +function-spec-unsupported-message+
   (concatenate 'string
@@ -759,6 +775,21 @@ cl-spec's answer to give, not this adapter's to assemble.
 projected: a function cannot be read, and whether they hold is what spec-check
 answers."
   (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
+    ;; NIL is not a contract with no arguments and no :returns.  It renders
+    ;; byte-identically to one, which is the reading %FUNCTION-SPEC-LISTING
+    ;; carries :READ-FAILED to prevent -- and this is the path where a caller
+    ;; actually reads the contract before editing the function.
+    (unless data
+      (return-from %describe-function-spec
+        (list :status :unsupported
+              :kind "function-spec"
+              :name (symbol-data name)
+              :message
+              (concatenate 'string
+                           "cl-spec returned no projection for this contract. "
+                           "It is registered; what it says could not be read, "
+                           "and an empty description would read as a contract "
+                           "with no arguments and no :returns."))))
     (flet ((clause (forms)
              ;; Bounded like the body a property describe carries.  A :PRE or
              ;; :POST form is short in practice, but "in practice" is not a
@@ -1049,7 +1080,7 @@ appears in the property's trials table (see spec-describe)."
                         profile)))))
 
 (defun %registered-p (api data-key name registry)
-  "Return (values FOUND-P MESSAGE DATA) for NAME under the API reader DATA-KEY.
+  "Return (values FOUND-P MESSAGE DATA STATUS) for NAME under DATA-KEY.
 
 DATA-KEY is :PROPERTY-DATA or :FUNCTION-SPEC-DATA.  Every error is read as
 \"not registered\", which is true of cl-spec's unknown-name conditions and an
@@ -1062,7 +1093,16 @@ and FUNCTION-SPEC-DATA normalizes every argument spec and the return spec on
 each call.  Same reason DEFINITION-DIGEST takes a :PROPERTY."
   (handler-case
       (values t nil (funcall (api-fn api data-key) name :registry registry))
-    (error (condition) (values nil (princ-to-string condition) nil))))
+    ;; CL:UNDEFINED-FUNCTION gets its own status rather than being read as
+    ;; "not registered".  cl-spec raises it on purpose for a contract whose
+    ;; target has not been written yet -- the contract IS registered, and the
+    ;; run path already answers :UNDEFINED-FUNCTION for the same condition.
+    ;; Answering not-registered here made the two paths disagree about one
+    ;; fact, and told the caller to register something they already had.
+    (undefined-function (condition)
+      (values nil (princ-to-string condition) nil :undefined-function))
+    (error (condition)
+      (values nil (princ-to-string condition) nil :not-registered))))
 
 (defun %select-named (api designator package registry
                       &key data-key mode requested-key source coverage)
@@ -1081,10 +1121,10 @@ name in NAMES and to no other."
     (if (null name)
         (values nil nil (list :status :unresolved-symbol :reason reason
                               :input designator))
-        (multiple-value-bind (found-p message data)
+        (multiple-value-bind (found-p message data status)
             (%registered-p api data-key name registry)
           (if (not found-p)
-              (values nil nil (list :status :not-registered
+              (values nil nil (list :status (or status :not-registered)
                                     :name (symbol-data name)
                                     :message message))
               (values (list name)
@@ -1462,7 +1502,12 @@ report text is a rendering, not the value."
 
 (defun %contract-plist (api result executed max-value-chars
                         &optional (precondition-p :unknown))
-  "Return the contract-specific half of a CHECK-FUNCTION result, or NIL.
+  "Return the contract-specific half of a CHECK-FUNCTION result.
+
+Always a plist: %RESULT-PLIST decides whether a run had a contract half and
+calls this only then, and %EVALUATED-P reads a non-NIL :CONTRACT as \"this was
+a contract run\" -- a NIL return here would put it back on the raw trial count
+this function exists to withhold.
 
 REJECTED is what separates a run that checked the function from one that only
 generated arguments for it: cl-spec's checker refuses inputs its :PRE does not
@@ -1492,8 +1537,9 @@ cl-spec's structured account of a return value that missed its spec."
                  (error () (values nil nil)))
                (values nil nil))))
     (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
+      (multiple-value-bind (explanation explanation-read)
+          (read-slot :check-explanation)
       (let* ((rejected (read-slot :check-rejected))
-             (explanation (read-slot :check-explanation))
              (countable (and (integerp executed) (integerp rejected)))
              (overcounted (and countable (> rejected executed)))
              ;; A refusal reported against a contract whose projection says it
@@ -1505,16 +1551,22 @@ cl-spec's structured account of a return value that missed its spec."
              (contradicted (and countable
                                 (null precondition-p)
                                 (plusp rejected)))
-             (usable (and countable
-                          (not overcounted)
-                          (not contradicted)
-                          ;; :UNKNOWN too.  The text already says a refusal
-                          ;; count cannot be interpreted without knowing
-                          ;; whether there is a :pre to have produced it;
-                          ;; leaving the subtraction in the payload let the
-                          ;; same response publish the figure and verify off
-                          ;; it while saying that.
-                          (not (eq :unknown precondition-p)))))
+             ;; One keyword for one three-valued question, decided in one
+             ;; place.  Five booleans meant the renderer re-derived which
+             ;; reason applied by testing them in an order that could not
+             ;; change -- :UNKNOWN is not NULL, so its clause had to precede
+             ;; the no-:pre one, silently -- while the gap list and the
+             ;; verdict read a sixth.  The booleans below are published from
+             ;; this, not computed beside it.
+             (rejection-status
+               (cond ((not (integerp rejected)) :unmeasured)
+                     (overcounted :overcounted)
+                     ((eq :unknown precondition-p) :precondition-unknown)
+                     (contradicted :contradicted)
+                     ((null precondition-p) :no-precondition)
+                     ((not countable) :unmeasured)
+                     (t :usable)))
+             (usable (member rejection-status '(:usable :no-precondition))))
         (multiple-value-bind (explanation-text explanation-complete
                               explanation-omitted)
             (if explanation
@@ -1525,6 +1577,7 @@ cl-spec's structured account of a return value that missed its spec."
                 (%print-bounded-form explanation max-value-chars)
                 (values nil :not-applicable nil))
           (list :rejected rejected
+                :rejection-status rejection-status
                 :rejected-measured (and (integerp rejected) t)
                 ;; Carried so a renderer does not describe a refusal that
                 ;; cannot happen: "0 of them refused by :pre" told the reader
@@ -1551,8 +1604,9 @@ cl-spec's structured account of a return value that missed its spec."
                 ;; could not find.
                 :failure-reason-readable (and reason-read t)
                 :explanation explanation-text
+                :explanation-readable (and explanation-read t)
                 :explanation-complete explanation-complete
-                :explanation-omitted-chars explanation-omitted))))))
+                :explanation-omitted-chars explanation-omitted)))))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1742,7 +1796,8 @@ the run's own machinery."
 (defparameter +call-statuses+
   '(:no-properties :completed :incomplete :unsupported
     :cl-spec-not-loaded :cl-spec-incomplete :backend-not-loaded
-    :unresolved-symbol :not-registered :invalid-arguments :internal-error)
+    :unresolved-symbol :not-registered :undefined-function
+    :invalid-arguments :internal-error)
   "Every status a whole spec-check call can carry.")
 
 (defparameter +verification-gap-values+
@@ -1849,7 +1904,9 @@ establish -- read full coverage for a function whose contract never ran."
       ;; shortfall whatever.  A property has no contract half at all, and its
       ;; rejections happen inside the generator where nothing counts them.
       (let ((contract (getf result :contract)))
-        (when (or (null contract) (not (getf contract :rejected-usable)))
+        (when (or (null contract)
+                  (not (member (getf contract :rejection-status)
+                               '(:usable :no-precondition))))
           (setf rejections-measured nil)))
       (let ((status (getf result :status)))
         (case status
