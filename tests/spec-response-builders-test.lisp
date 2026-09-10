@@ -696,6 +696,34 @@
       (ok (null (gethash "specs" counts)))
       (ok (eql 0 (gethash "properties" counts))))))
 
+(deftest list-response-says-whether-the-tag-narrowed-anything
+  (flet ((header (kind)
+           (first-text
+            (build-spec-list-response
+             (list :status :ok :kind kind
+                   :specs (list (%symbol-data "PROBE" "SMALL-INT"))
+                   :properties nil :function-specs nil
+                   :specs-listable t :properties-listable t
+                   :function-specs-listable t
+                   :counts (list :specs 1)
+                   :filters (list :tag "critical" :tag-resolved t)
+                   :coverage "everything registered here"
+                   :environment *environment*)))))
+    (testing "a kind that lists no properties says the tag was not applied"
+      ;; "1 spec  tagged critical" asserts a filter that narrowed nothing:
+      ;; LIST-REPORT never offers the tag to the spec or contract listings.
+      (let ((text (header "specs")))
+        (ok (search "was NOT applied" text))
+        (ok (not (search "tagged critical" text)))))
+    (testing "a properties listing says it plainly"
+      (let ((text (header "properties")))
+        (ok (search "tagged critical" text))
+        (ok (not (search "was NOT applied" text)))
+        (ok (not (search "(properties only)" text)))))
+    (testing "and a mixed listing says which half it narrowed"
+      (let ((text (header "both")))
+        (ok (search "tagged critical (properties only)" text))))))
+
 (deftest check-response-unsupported-reaches-the-text
   (testing "a contract cl-spec cannot run says so where a client can see it"
     ;; The report carries a message and no selection, results or counts.  Read

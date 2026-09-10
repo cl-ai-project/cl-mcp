@@ -479,9 +479,24 @@ listing functions are not -- the shape the blanket listing guard refused."
       (ok (eq :ok (getf report :status)))
       (ok (getf report :function-specs-listable))
       (ok (= 1 (length (getf report :function-specs))))))
-  (testing "while both still needs both"
+  (testing "and the default kind lists the half it can rather than refusing"
+    ;; "both" is what a caller gets with no arguments.  Failing it outright on
+    ;; a revision that can still enumerate contracts gave back the same
+    ;; "nothing can be enumerated" answer this gate exists to stop giving.
     (let ((report (list-report (%contract-listing-api) :ok :kind "both")))
-      (ok (eq :unsupported (getf report :status))))))
+      (ok (eq :ok (getf report :status)))
+      (ok (= 1 (length (getf report :function-specs))))
+      (testing "naming the halves it could not look at"
+        (ok (not (getf report :specs-listable)))
+        (ok (not (getf report :properties-listable)))
+        (testing "whose counts are null, not zero"
+          (ok (null (getf (getf report :counts) :specs)))
+          (ok (null (getf (getf report :counts) :properties)))
+          (ok (eql 1 (getf (getf report :counts) :function-specs)))))))
+  (testing "while a kind with no reachable half is still unsupported"
+    (let ((report (list-report (%contract-listing-api) :ok :kind "properties")))
+      (ok (eq :unsupported (getf report :status)))
+      (ok (search "list-properties" (getf report :message))))))
 
 (deftest list-report-rejects-an-unknown-kind
   (testing "kind is constrained"
@@ -628,11 +643,35 @@ listing functions are not -- the shape the blanket listing guard refused."
       (ok (eq :thorough (getf report :profile))))))
 
 (deftest check-report-does-not-blame-itself-for-a-missing-function
+  ;; cl-spec's FUNCTION-SPEC-TARGET signals CL:UNDEFINED-FUNCTION on purpose,
+  ;; so that a project can adopt cl-spec one function at a time.  Read as
+  ;; :INTERNAL-ERROR -- documented as "this adapter failed" -- it told the
+  ;; caller cl-mcp was broken when they had simply not written the function.
   (testing "a contract whose function is not defined says which fact that is"
-    ;; cl-spec's FUNCTION-SPEC-TARGET signals CL:UNDEFINED-FUNCTION on purpose,
-    ;; so that a project can adopt cl-spec one function at a time.  Read as
-    ;; :INTERNAL-ERROR -- documented as "this adapter failed" -- it told the
-    ;; caller cl-mcp was broken when they had simply not written the function.
+    ;; Driven through function=, the path that actually raises it: a property
+    ;; selection reaches the same clause by a different route and would leave
+    ;; the contract path untested.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (error 'undefined-function :name (%sym "ADD")))
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore registry))
+                       (list :name name :arguments nil :preconditions nil)))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (eq :contract (getf result :kind)))
+      (ok (eq :undefined-function (getf result :status)))
+      (ok (not (eq :internal-error (getf result :status))))
+      (testing "and the call did not reach a verdict"
+        (ok (eq :incomplete (getf report :status)))
+        (ok (not (getf report :verified))))))
+  (testing "a property body calling an undefined function reads the same way"
     (let* ((report (check-report
                     (%api-with-run
                      (lambda (&rest ignored)
@@ -641,11 +680,7 @@ listing functions are not -- the shape the blanket listing guard refused."
                     :ok
                     :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"))
            (result (first (getf report :results))))
-      (ok (eq :undefined-function (getf result :status)))
-      (ok (not (eq :internal-error (getf result :status))))
-      (testing "and the call did not reach a verdict"
-        (ok (eq :incomplete (getf report :status)))
-        (ok (not (getf report :verified)))))))
+      (ok (eq :undefined-function (getf result :status))))))
 
 (deftest check-report-lists-an-unrun-contract-as-a-gap
   (testing "the contract an :about selection left alone reaches the gap list"

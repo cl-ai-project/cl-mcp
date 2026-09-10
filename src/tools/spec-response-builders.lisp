@@ -450,6 +450,18 @@ to see the rest; the text above is a preview, not a form that can be read back."
          (format stream "~&~%defined at a REPL, in package ~A"
                  (getf location :package)))))))
 
+(defun %optional-bool (report key)
+  "Return KEY's value as a JSON boolean, or NIL when REPORT does not carry KEY.
+
+JSON-BOOL renders an absent key as false, and false is a claim.  A contract
+describe carries no :SHRINK-ENABLED and no :BODY, so it published
+shrink_enabled false -- shrinking is off for this contract, which contradicts
+what spec-check function= then does -- and body_complete false, the body was
+cut, about a definition that has none.  A property describe did the same to
+preconditions_complete.  Absent has to reach the consumer as null."
+  (when (get-properties report (list key))
+    (json-bool (getf report key))))
+
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
   (case (getf report :status)
@@ -467,7 +479,7 @@ to see the rest; the text above is a preview, not a form that can be read back."
               "targets" (%symbol-hts (getf report :targets))
               "documentation" (sanitize-for-json (getf report :documentation))
               "trials_table" (sanitize-for-json (getf report :trials-table))
-              "shrink_enabled" (json-bool (getf report :shrink-enabled))
+              "shrink_enabled" (%optional-bool report :shrink-enabled)
               "arguments"
               (coerce (mapcar (lambda (argument)
                                 (make-ht "variable"
@@ -479,18 +491,18 @@ to see the rest; the text above is a preview, not a form that can be read back."
               "spec" (%spec-tree-ht (getf report :spec))
               "returns" (%spec-tree-ht (getf report :returns))
               "preconditions" (sanitize-for-json (getf report :preconditions))
-              "preconditions_complete" (json-bool (getf report :preconditions-complete))
+              "preconditions_complete" (%optional-bool report :preconditions-complete)
               "preconditions_omitted_chars" (getf report
                                                   :preconditions-omitted-chars)
               "postconditions" (sanitize-for-json (getf report :postconditions))
-              "postconditions_complete" (json-bool (getf report :postconditions-complete))
+              "postconditions_complete" (%optional-bool report :postconditions-complete)
               "postconditions_omitted_chars" (getf report
                                                    :postconditions-omitted-chars)
               "body" (sanitize-for-json (getf report :body))
-              "body_complete" (json-bool (getf report :body-complete))
+              "body_complete" (%optional-bool report :body-complete)
               "body_omitted_chars" (getf report :body-omitted-chars)
               "source_form" (sanitize-for-json (getf report :source-form))
-              "source_form_complete" (json-bool (getf report :source-form-complete))
+              "source_form_complete" (%optional-bool report :source-form-complete)
               "source_form_omitted_chars" (getf report :source-form-omitted-chars)
               "source_location" (%source-location-ht (getf report :source-location))
               "definition_digest" (getf report :definition-digest)
@@ -1008,13 +1020,24 @@ it came out."
       (when (getf filters :tag)
         ;; Named as narrowing properties, because that is all it narrows.
         ;; "4 function specs  tagged critical" read as four tagged contracts,
-        ;; and LIST-REPORT never offers TAG to the contract listing at all.
-        (format stream "  tagged ~A~:[ (properties only)~;~]"
-                (getf filters :tag)
-                (equal "properties" (getf report :kind)))
-        (unless (eq t (getf filters :tag-resolved))
-          (format stream " (NO SUCH TAG exists in this image, so nothing can ~
-carry it -- this is not the same as no property having it)")))
+        ;; and LIST-REPORT never offers TAG to the contract listing at all --
+        ;; on a kind that lists no properties it narrowed nothing whatever,
+        ;; which the caller has to be told rather than left to infer from a
+        ;; header that says the filter ran.
+        (let ((narrowed (member (getf report :kind) '("properties" "both")
+                                :test #'equal)))
+          (cond
+            ((not narrowed)
+             (format stream "  tag ~A was NOT applied: it narrows properties, ~
+and this kind lists none"
+                     (getf filters :tag)))
+            (t
+             (format stream "  tagged ~A~:[~; (properties only)~]"
+                     (getf filters :tag)
+                     (equal "both" (getf report :kind)))
+             (unless (eq t (getf filters :tag-resolved))
+               (format stream " (NO SUCH TAG exists in this image, so nothing ~
+can carry it -- this is not the same as no property having it)"))))))
       (when (getf report :truncated)
         (format stream "~&Showing at most ~D of each; raise limit for more."
                 (getf report :limit)))
@@ -1061,13 +1084,17 @@ project it here"
                       (or (getf contract :postcondition-count) 0)))
             (when (getf contract :documentation)
               (format stream "~&      ~A" (getf contract :documentation))))))
-      (when (and (getf report :kind)
-                 (member (getf report :kind) '("function-specs" "both")
-                         :test #'string=)
-                 (not (getf report :function-specs-listable)))
-        (format stream "~&~%function specs: the loaded cl-spec cannot ~
-enumerate them, so none are listed here. This is not evidence that none are ~
-registered."))
+      (dolist (half '(("specs" :specs-listable ("specs" "both"))
+                      ("properties" :properties-listable
+                       ("properties" "both"))
+                      ("function specs" :function-specs-listable
+                       ("function-specs" "both"))))
+        (destructuring-bind (label flag kinds) half
+          (when (and (member (getf report :kind) kinds :test #'equal)
+                     (not (getf report flag)))
+            (format stream "~&~%~A: the loaded cl-spec cannot enumerate them, ~
+so none are listed here. This is not evidence that none are registered."
+                    label))))
       ;; Only when every requested kind was in fact looked at.  Printed
       ;; after "the loaded cl-spec cannot enumerate them", it turned "cannot
       ;; look" back into "none here" -- the distinction function_specs_listable
@@ -1075,9 +1102,15 @@ registered."))
       (when (and (null (getf report :specs))
                  (null (getf report :properties))
                  (null (getf report :function-specs))
-                 (or (not (member (getf report :kind) '("function-specs" "both")
-                                  :test #'equal))
-                     (getf report :function-specs-listable)))
+                 (every (lambda (half)
+                          (destructuring-bind (flag kinds) half
+                            (or (not (member (getf report :kind) kinds
+                                             :test #'equal))
+                                (getf report flag))))
+                        '((:specs-listable ("specs" "both"))
+                          (:properties-listable ("properties" "both"))
+                          (:function-specs-listable
+                           ("function-specs" "both")))))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
 not evidence that this project has no contracts: a definition whose system ~
 has not been loaded into this worker is not here."))
@@ -1104,6 +1137,9 @@ has not been loaded into this worker is not here."))
                 "function_specs" (coerce (mapcar #'%function-spec-entry-ht
                                                  (getf report :function-specs))
                                          'vector)
+                "specs_listable" (json-bool (getf report :specs-listable))
+                "properties_listable" (json-bool
+                                       (getf report :properties-listable))
                 "function_specs_listable"
                 (json-bool (getf report :function-specs-listable))
                 ;; NIL for a kind that was not requested, which yason

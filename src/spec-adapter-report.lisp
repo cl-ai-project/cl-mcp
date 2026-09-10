@@ -370,7 +370,7 @@ is registered about this symbol: ~A" failure)
                         (when (getf routing :property)
                           (list +symbol-is-a-property-note+))
                         (when (getf routing :function-spec)
-                          (list +symbol-has-a-contract-note+)))
+                          (list (%symbol-contract-note api))))
                 :environment environment)))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -497,18 +497,37 @@ function-specs or both; got ~S" kind)
     ;; kind="function-specs", which reads neither of these two, and refused a
     ;; listing it could have produced -- while reporting
     ;; function_specs_listable true three keys later.
-    (let* ((needed (cond ((string= kind "specs") '(:list-specs))
-                         ((string= kind "properties") '(:list-properties))
-                         ((string= kind "both") '(:list-specs :list-properties))
-                         (t '())))
-           (missing (remove-if (lambda (key) (api-has-p api key)) needed)))
-      (when missing
+    ;; Refused only when NOTHING the kind asks for can be listed.  "both" is
+    ;; the default kind, and failing it outright on a revision that can still
+    ;; enumerate contracts reproduced the "nothing can be enumerated" answer
+    ;; this gate was narrowed to stop giving.  A half it cannot list is
+    ;; reported as its own null count, the way FUNCTION-SPECS-LISTABLE already
+    ;; reports the third half.
+    (let ((wanted (cond ((string= kind "specs") '("list-specs"))
+                        ((string= kind "properties") '("list-properties"))
+                        ((string= kind "function-specs")
+                         '("list-function-specs with function-spec-data"))
+                        (t '("list-specs" "list-properties"
+                             "list-function-specs with function-spec-data"))))
+          (reachable
+             (remove nil
+                     (list (when (and (member kind '("specs" "both")
+                                              :test #'string=)
+                                      (api-has-p api :list-specs))
+                             t)
+                           (when (and (member kind '("properties" "both")
+                                              :test #'string=)
+                                      (api-has-p api :list-properties))
+                             t)
+                           (when (and (member kind '("function-specs" "both")
+                                              :test #'string=)
+                                      (api-has-p api :list-function-specs)
+                                      (api-has-p api :function-spec-data))
+                             t)))))
+      (unless reachable
         (return-from list-report
           (list :status :unsupported
-                :message (%listing-unsupported-message
-                          (mapcar (lambda (key)
-                                    (string-downcase (symbol-name key)))
-                                  missing))
+                :message (%listing-unsupported-message wanted)
                 :environment environment))))
     (multiple-value-bind (package-object package-error)
         (%listing-package-filter package)
@@ -533,12 +552,19 @@ function-specs or both; got ~S" kind)
                  (remove-if-not
                   (lambda (name) (%in-package-p name package-object))
                   (funcall (api-fn api :list-function-specs) registry))))
+             ;; Each half asks only for the reader it uses.  A revision
+             ;; missing one of them still lists the others, and the half it
+             ;; could not look at comes back as a null count beside a false
+             ;; listable flag -- never as an empty list, which would say the
+             ;; registry holds none.
+             (specs-listable (api-has-p api :list-specs))
+             (properties-listable (api-has-p api :list-properties))
              (spec-names
-               (when want-specs
+               (when (and want-specs specs-listable)
                  (remove-if-not (lambda (name) (%in-package-p name package-object))
                                 (funcall (api-fn api :list-specs) registry))))
              (property-names
-               (when want-properties
+               (when (and want-properties properties-listable)
                  (remove-if-not
                   (lambda (name) (%in-package-p name package-object))
                   (cond
@@ -556,14 +582,18 @@ function-specs or both; got ~S" kind)
               :function-specs (loop for name in (%take function-spec-names limit)
                                     collect (%function-spec-listing api name registry))
               :function-specs-listable (and function-specs-listable t)
+              :specs-listable (and specs-listable t)
+              :properties-listable (and properties-listable t)
               ;; NIL, not 0, for a kind that was not asked for.  The count
               ;; is a fact about the registry and the list is what this
               ;; response carries; not looking leaves the first unknown, and
               ;; reporting it as zero says the registry holds none -- the
               ;; same conflation the tag and no-properties answers go out of
               ;; their way to avoid.
-              :counts (list :specs (when want-specs (length spec-names))
-                            :properties (when want-properties
+              :counts (list :specs (when (and want-specs specs-listable)
+                                     (length spec-names))
+                            :properties (when (and want-properties
+                                                   properties-listable)
                                           (length property-names))
                             :function-specs (when (and want-function-specs
                                                        function-specs-listable)
@@ -618,6 +648,39 @@ contract cannot be executed.~@[ ~A~]"
                            "Its text can still be read with spec-describe "
                            "kind=function-spec.")))))
 
+(defun %symbol-contract-note (api)
+  "Return spec-symbol's note about a registered contract, matched to the API.
+
+Every message this module prints is meant to be a true statement about the
+loaded revision, and an instruction is a statement too: sending a caller to
+spec-describe kind=function-spec on a cl-spec with no FUNCTION-SPEC-DATA, or
+to spec-check function= with no CHECK-FUNCTION, is a dead end issued by the
+one place that can see it is a dead end."
+  (let ((readable (api-has-p api :function-spec-data))
+        (runnable (api-has-p api :check-function)))
+    (cond
+      ((and readable runnable) +symbol-has-a-contract-note+)
+      (readable
+       (concatenate 'string
+                    "a function spec is registered for this symbol: read it "
+                    "with spec-describe kind=function-spec. The loaded "
+                    "cl-spec cannot run it -- it exports no check-function."))
+      (t
+       (concatenate 'string
+                    "a function spec is registered for this symbol. The "
+                    "loaded cl-spec exports no function-spec-data, so this "
+                    "adapter can neither project nor run it.")))))
+
+(defun %contract-not-selected-note (api)
+  "Return spec-check's note about the contract an :ABOUT selection left alone."
+  (if (and (api-has-p api :function-spec-data) (api-has-p api :check-function))
+      +contract-not-selected-note+
+      (concatenate 'string
+                   "a function spec is registered for this symbol and was NOT "
+                   "run: an :about selection covers properties only. The "
+                   "loaded cl-spec cannot run it either, so there is nothing "
+                   "to re-run it with.")))
+
 (defun %spec-tree (spec-plist)
   "Return SPEC-PLIST with its symbols externalized, or NIL when there is none.
 
@@ -642,22 +705,30 @@ to the caller as one that exists."
                     (when values (printed-for-display values)))
           :base-type (let ((base (getf spec-plist :base-type)))
                        (when base (printed-for-display base)))
-          :min (%range-bound (getf spec-plist :min))
-          :max (%range-bound (getf spec-plist :max))
+          :min (%range-bound (getf spec-plist :min) (getf spec-plist :kind))
+          :max (%range-bound (getf spec-plist :max) (getf spec-plist :kind))
           :class-name (let ((name (getf spec-plist :class-name)))
                         (when name (symbol-data name)))
           :source-form (printed-for-display (getf spec-plist :source-form))
           :source-location (getf spec-plist :source-location)
           :children (mapcar #'%spec-tree (getf spec-plist :children)))))
 
-(defun %range-bound (value)
-  "Return a range end as text, or NIL when the node has none.
+(defun %range-bound (value kind)
+  "Return a range end as text, or NIL when the node has no such end.
 
 cl-spec spells an open end :UNBOUNDED.  Mapped back to the * the author wrote,
 here rather than in a renderer, so the text and the JSON agree and neither has
-to know the IR's word for it."
-  (when value
-    (if (eq :unbounded value) "*" (printed-for-display value))))
+to know the IR's word for it.
+
+On a RANGE node an absent end is an open end, so NIL maps to * as well.  A
+revision that spells one that way -- and this adapter exists to tolerate
+revisions -- would otherwise give (range integer 0 *) one printable bound, and
+a renderer showing only the pair it could complete would drop the 0 with it:
+a wider input domain than the author wrote, silently.  On any other node there
+is no end to report and NIL stays NIL."
+  (cond ((eq :unbounded value) "*")
+        (value (printed-for-display value))
+        ((eq :range kind) "*")))
 
 (defun %describe-function-spec (api name registry max-chars)
   "Return the detail plist for the contract registered for NAME.
@@ -1029,6 +1100,11 @@ while listing the properties about this symbol: ~A" condition)))))))
                (about (getf routing :properties-about)))
           (values about
                   (list :mode "about"
+                        ;; The keyword every consumer of this plist reads --
+                        ;; %SELECTION-NOUN among them, which would otherwise
+                        ;; reach the property branch by falling through rather
+                        ;; than by being told.
+                        :kind :property
                         :requested (list :symbol (symbol-data name))
                         :selected (mapcar #'symbol-data about)
                         :count (length about)
@@ -1044,7 +1120,7 @@ while listing the properties about this symbol: ~A" condition)))))))
                                 (when (getf routing :property)
                                   (list +symbol-is-a-property-not-selected-note+))
                                 (when (getf routing :function-spec)
-                                  (list +contract-not-selected-note+))))
+                                  (list (%contract-not-selected-note api)))))
                   nil)))))
 
 (defparameter +trials-needs-a-contract-message+
@@ -1496,9 +1572,16 @@ budget computed from one backend and the trials run under another."
                (progv names settings
                  (%result-plist api
                                 (if (eq kind :contract)
-                                    (funcall (api-fn api :check-function) name
-                                             :trials (getf trials :budget)
-                                             :seed seed :registry registry)
+                                    ;; The keyword only when there is a
+                                    ;; number.  :TRIALS NIL is not "use your
+                                    ;; default", it is an override that
+                                    ;; suppresses it -- and the budget is NIL
+                                    ;; whenever BACKEND-DEFAULT-TRIALS could
+                                    ;; not be read.
+                                    (apply (api-fn api :check-function) name
+                                           :seed seed :registry registry
+                                           (let ((budget (getf trials :budget)))
+                                             (when budget (list :trials budget))))
                                     (funcall (api-fn api :run-property) name
                                              :profile profile :seed seed
                                              :registry registry))
@@ -1617,10 +1700,14 @@ nothing reports which parts of the input domain were reached, so a caller must
 not read a trial count as that (cl-spec specification 72.1).
 
 Rejection counts are listed whenever they were not measured, which is every
-property run -- a property has no precondition, so there is no refused-input
-count to have and nothing here can say how much of the generated input the
-body actually exercised.  A contract check measures it, and claiming the gap
-where the number is right there would train a reader to ignore the list.
+property run and no contract run.  The asymmetry is not an oversight: a
+property's inputs are refused inside the generator, where check-it retries a
+guard without reporting how often, so how much of the generated domain the
+body actually saw is unknown.  A contract's are refused by the checker, which
+counts them -- so the gap is listed where the number is missing and left off
+where it is present, including on a contract with no :PRE, where the honest
+count is zero.  Claiming a gap whose answer is right there trains a reader to
+ignore the list.
 
 SELECTION is read for what did not run at all.  A contract an :ABOUT selection
 left alone is a coverage shortfall like any other, and until it was listed

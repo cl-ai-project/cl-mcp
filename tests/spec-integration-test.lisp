@@ -53,14 +53,23 @@ covered by tests/spec-adapter-report-test.lisp."
   "Printed instead of running the contract tests against a cl-spec that has none.")
 
 (defun %contracts-available-p ()
-  "Return true when the loaded cl-spec implements function specs.
+  "Return true when the fixture registered its contracts in this image.
 
-FUNCTION-SPEC-DATA is the discriminator, not CHECK-FUNCTION: a cl-spec that
-predates function specs still has CHECK-FUNCTION fbound, as a stub that
-signals NOT-IMPLEMENTED."
+Asks the fixture's own predicate rather than carrying a second copy of it.
+The two decide the same thing -- whether this cl-spec implements function
+specs -- and the fixture is the half that acts on the answer, so a copy here
+that drifted would skip the tests while the contracts loaded, or run them
+while the file left them out, and the skip reason would say the opposite of
+what the registry holds.
+
+Loading the fixture first is safe whatever the answer: the contract half lives
+in a file of its own precisely so that an older cl-spec leaves it unread."
   (and (%cl-spec-available-p)
-       (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
-         (and data (fboundp data) t))))
+       (progn
+         (%ensure-fixture)
+         (let ((supported (find-symbol "FUNCTION-SPECS-SUPPORTED-P"
+                                       "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")))
+           (and supported (fboundp supported) (funcall supported) t)))))
 
 (defun %registry-symbol ()
   "Return the CL-SPEC:*REGISTRY* symbol."

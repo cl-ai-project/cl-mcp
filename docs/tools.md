@@ -731,6 +731,12 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
     refuses inputs `:pre` does not admit, and a trial count that includes them
     overstates the work. Raise `trials` — and `timeout_seconds` with it — when
     `effective_trials` comes back small.
+  - `effective_trials` is **null**, never 0, when it could not be derived.
+    `rejected_measured` false means this cl-spec exports no reader for the
+    refused count; `rejected_overcounted` true means cl-spec reported more
+    refusals than trials (its counter keeps running when the function
+    signals); `has_precondition` false means the contract has no `:pre`, so
+    nothing could be refused. A 0 there would read as "never called".
   - `verified` is true only when at least one property was selected, all of
     them passed, and each evaluated at least one trial. Zero properties,
     a timeout, a generator failure and a zero-trial budget are each reported

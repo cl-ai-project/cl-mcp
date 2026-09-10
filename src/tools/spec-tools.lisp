@@ -253,7 +253,21 @@ calls the function, then checks :returns and :post. results[].contract carries:
   effective_trials trials minus rejected -- what the function was ACTUALLY
                    called with. A passing run whose effective_trials is 0
                    checked nothing; cl-spec reports that as skipped, not
-                   passed.
+                   passed. NULL means the figure could not be derived, NOT
+                   zero calls: read rejected_measured and rejected_overcounted
+                   to see which.
+  rejected_measured
+                   false when this cl-spec exports no reader for the refused
+                   count. rejected is then null and the trial count above is
+                   an upper bound on what was checked.
+  rejected_overcounted
+                   true when cl-spec reported more refusals than trials, which
+                   its counter can do when the function signals. The
+                   difference is withheld rather than published as a negative
+                   or clamped to a zero that would read as never called.
+  has_precondition false when the contract has no :pre at all, so nothing
+                   could be refused and rejected 0 is not a shortfall. Null
+                   when the definition could not be read.
   failure_reason   which half broke: return-spec, postcondition, precondition,
                    condition. Absent has two meanings, told apart by
                    failure_reason_readable: true means cl-spec could not
