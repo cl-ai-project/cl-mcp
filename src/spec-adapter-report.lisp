@@ -599,15 +599,22 @@ to the caller as one that exists."
                     (when values (printed-for-display values)))
           :base-type (let ((base (getf spec-plist :base-type)))
                        (when base (printed-for-display base)))
-          :min (let ((minimum (getf spec-plist :min)))
-                 (when minimum (printed-for-display minimum)))
-          :max (let ((maximum (getf spec-plist :max)))
-                 (when maximum (printed-for-display maximum)))
+          :min (%range-bound (getf spec-plist :min))
+          :max (%range-bound (getf spec-plist :max))
           :class-name (let ((name (getf spec-plist :class-name)))
                         (when name (symbol-data name)))
           :source-form (printed-for-display (getf spec-plist :source-form))
           :source-location (getf spec-plist :source-location)
           :children (mapcar #'%spec-tree (getf spec-plist :children)))))
+
+(defun %range-bound (value)
+  "Return a range end as text, or NIL when the node has none.
+
+cl-spec spells an open end :UNBOUNDED.  Mapped back to the * the author wrote,
+here rather than in a renderer, so the text and the JSON agree and neither has
+to know the IR's word for it."
+  (when value
+    (if (eq :unbounded value) "*" (printed-for-display value))))
 
 (defun %describe-function-spec (api name registry max-chars)
   "Return the detail plist for the contract registered for NAME.

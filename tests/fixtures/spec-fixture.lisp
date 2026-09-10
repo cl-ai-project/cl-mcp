@@ -14,6 +14,7 @@
 (defpackage #:cl-mcp/tests/fixtures/spec-fixture
   (:use #:cl)
   (:export #:clamp
+           #:magnitude
            #:widen
            #:never-callable
            #:small-int
@@ -106,3 +107,12 @@ can see a contract failure that is not a property failure."
   (:args (value small-int))
   (:pre (> value 1000))
   (:returns small-int))
+
+(defun magnitude (value)
+  "Return the absolute value of VALUE."
+  (abs value))
+
+(cl-spec:defspec-function magnitude
+  "The magnitude is never negative, and has no upper bound worth naming."
+  (:args (value small-int))
+  (:returns (range integer 0 *)))

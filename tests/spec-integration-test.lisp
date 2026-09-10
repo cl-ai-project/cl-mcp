@@ -248,6 +248,16 @@ reached the caller."
                                              (gethash "registry" response)))))
               (ok (search "spec-describe kind=function-spec" (%text response)))))
 
+          (testing "an open range end reads as the * the author wrote"
+            ;; cl-spec spells it :UNBOUNDED internally. Printing the keyword
+            ;; puts an IR detail in front of a reader who wrote * and will
+            ;; write * again.
+            (let ((text (%text (spec-describe-response
+                                (make-ht "kind" "function-spec"
+                                         "name" (%fixture-name "MAGNITUDE"))))))
+              (ok (search "[0, *]" text))
+              (ok (not (search "UNBOUNDED" text)))))
+
           (testing "spec-describe projects which inputs it takes and what it returns"
             (let* ((response (spec-describe-response
                               (make-ht "kind" "function-spec"
@@ -366,6 +376,11 @@ reached the caller."
                    (text (%text response)))
               (ok (string= "ok" (gethash "status" response)))
               (ok (eq t (gethash "function_specs_listable" response)))
-              (ok (= 3 (gethash "function_specs" (gethash "counts" response))))
+              ;; The count is what the registry holds, not a magic number:
+              ;; asserted against the listing beside it so adding a fixture
+              ;; contract does not make this a puzzle to re-derive.
+              (ok (<= 4 (gethash "function_specs" (gethash "counts" response))))
+              (ok (= (length (gethash "function_specs" response))
+                     (gethash "function_specs" (gethash "counts" response))))
               (ok (search "function specs:" text))
               (ok (search "CLAMP" text))))))))

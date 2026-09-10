@@ -333,12 +333,9 @@ renders only content[].text is the same as not reaching it at all."
                 (getf node :predicate)
                 (getf node :class-name))
             (getf (getf node :target) :qualified))
-    (flet ((bound (value)
-             ;; cl-spec spells an open end :UNBOUNDED. Printing the keyword
-             ;; puts an IR detail in front of a reader who wrote "*" and will
-             ;; read "*" back; and a bound of 0 is a bound, so OR is not the
-             ;; test for whether one is there.
-             (if (or (null value) (eq :unbounded value)) "*" value)))
+    ;; A bound of 0 is a bound, so OR is not the test for whether one is
+    ;; there.  An open end arrives already spelled "*"; see %RANGE-BOUND.
+    (flet ((bound (value) (or value "*")))
       (let ((minimum (getf node :min))
             (maximum (getf node :max))
             (values* (getf node :values))
