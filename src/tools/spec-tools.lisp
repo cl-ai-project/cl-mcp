@@ -236,6 +236,24 @@ For the whole call, status:
                   the call did not get as far as running anything. None of
                   these is evidence about the symbol or the property.
 
+verification_gaps names what the run could not establish. Values:
+  input-coverage-unmeasured   always present: nothing reports which parts of
+                              the input domain were reached.
+  zero-trials                 a passing run whose budget resolved to nothing.
+  effective-trials-unknown    a contract run whose real call count could not
+                              be derived. NOT the same as a budget of zero.
+  rejection-counts-unmeasured no usable refused-input count. Always present on
+                              a property run: its inputs are refused inside
+                              the generator, which does not report how often.
+  contract-not-run            a function spec is registered for the symbol and
+                              an :about selection did not run it.
+  properties-not-run          properties are registered about the symbol and a
+                              function= run did not run them.
+  related-properties-unknown  whether any property is registered about the
+                              symbol could not be read at all.
+  no-properties-selected      the selection was empty. Nothing ran.
+A non-verdict result status (timeout, not-run, *-error) appears here as itself.
+
 counts has a field for the five common statuses plus other, and by_status,
 which covers every status that occurred; selected always equals their sum. A
 status without a field of its own is in by_status, never dropped.

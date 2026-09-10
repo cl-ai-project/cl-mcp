@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/tools/spec-entry #:parse-seed-string)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+result-statuses+
-                #:+call-statuses+)
+                #:+call-statuses+
+                #:+verification-gap-values+)
   (:import-from #:cl-mcp/src/tools/registry
                 #:*enabled-tool-groups*
                 #:disabled-tool-group)
@@ -265,7 +266,15 @@ are what a test about the message has to look at."
         (dolist (status +call-statuses+)
           (ok (search (string-downcase (symbol-name status)) description)
               (format nil "spec-check description must name the ~(~A~) call status"
-                      status)))))))
+                      status))))
+      (testing "and every verification gap it can report"
+        ;; The gap set grew four times in one branch while the description
+        ;; explained two of the values.  Checked from the code's own list for
+        ;; the same reason the statuses are.
+        (dolist (gap +verification-gap-values+)
+          (ok (search (string-downcase (symbol-name gap)) description)
+              (format nil "spec-check description must name the ~(~A~) gap"
+                      gap)))))))
 
 (deftest spec-check-description-states-the-current-rules
   (testing "verified's third condition and the four-valued match are stated"

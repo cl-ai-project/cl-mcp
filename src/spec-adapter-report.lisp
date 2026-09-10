@@ -40,6 +40,9 @@
   (:export #:list-report
            #:+result-statuses+
            #:+call-statuses+
+           #:+verification-gap-values+
+           #:+listing-kinds+
+           #:listing-kind-wanted-p
            #:environment-data
            #:unavailable-report
            #:symbol-report
@@ -375,6 +378,25 @@ UNKNOWN-SPEC reports the failure as a failure."
         (is-a :unknown-property)
         (is-a :unknown-function-spec))))
 
+(defparameter +listing-kinds+
+  '(("specs" "specs" :specs-listable (:list-specs))
+    ("properties" "properties" :properties-listable (:list-properties))
+    ("function-specs" "function specs" :function-specs-listable
+     (:list-function-specs :function-spec-data)))
+  "One row per listing half: KIND name, label, listable key, required API keys.
+
+The kind-to-handle mapping was written four times -- the refusal message, the
+reachability gate, the per-half bindings here and the renderer's notes -- and
+two of those four have already disagreed in this branch: a gate that refused a
+kind reading neither handle, and a tag header claiming a filter over a half
+this cl-spec cannot enumerate.  One table, read by all four.
+
+\"both\" asks for every row; any other KIND asks for the row it names.")
+
+(defun listing-kind-wanted-p (row kind)
+  "Return true when KIND asks for the listing half ROW describes."
+  (or (string= kind "both") (string= kind (first row))))
+
 (defun %listing-unsupported-message (missing)
   "Return the message for a listing kind this cl-spec cannot enumerate.
 
@@ -487,37 +509,18 @@ function-specs or both; got ~S" kind)
     ;; this gate was narrowed to stop giving.  A half it cannot list is
     ;; reported as its own null count, the way FUNCTION-SPECS-LISTABLE already
     ;; reports the third half.
-    (let ((wanted (remove nil
-                          (list (when (and (member kind '("specs" "both")
-                                                   :test #'string=)
-                                           (not (api-has-p api :list-specs)))
-                                  "list-specs")
-                                (when (and (member kind '("properties" "both")
-                                                   :test #'string=)
-                                           (not (api-has-p api :list-properties)))
-                                  "list-properties")
-                                (when (and (member kind '("function-specs" "both")
-                                                   :test #'string=)
-                                           (not (and (api-has-p
-                                                      api :list-function-specs)
-                                                     (api-has-p
-                                                      api :function-spec-data))))
-                                  "list-function-specs with function-spec-data"))))
-          (reachable
-             (remove nil
-                     (list (when (and (member kind '("specs" "both")
-                                              :test #'string=)
-                                      (api-has-p api :list-specs))
-                             t)
-                           (when (and (member kind '("properties" "both")
-                                              :test #'string=)
-                                      (api-has-p api :list-properties))
-                             t)
-                           (when (and (member kind '("function-specs" "both")
-                                              :test #'string=)
-                                      (api-has-p api :list-function-specs)
-                                      (api-has-p api :function-spec-data))
-                             t)))))
+    (let* ((asked (remove-if-not (lambda (row) (listing-kind-wanted-p row kind))
+                                 +listing-kinds+))
+           (reachable (remove-if-not
+                       (lambda (row)
+                         (every (lambda (key) (api-has-p api key)) (fourth row)))
+                       asked))
+           (wanted (mapcar (lambda (row)
+                             (format nil "~{~A~^ with ~}"
+                                     (mapcar (lambda (key)
+                                               (string-downcase (symbol-name key)))
+                                             (fourth row))))
+                           (set-difference asked reachable :test #'eq))))
       (unless reachable
         (return-from list-report
           (list :status :unsupported
@@ -530,10 +533,17 @@ function-specs or both; got ~S" kind)
           (append package-error (list :environment environment))))
       (let* ((registry (funcall (api-fn api :registry)))
              (tag-keyword (and tag (find-keyword tag)))
-             (want-specs (member kind '("specs" "both") :test #'string=))
-             (want-properties (member kind '("properties" "both") :test #'string=))
-             (want-function-specs (member kind '("function-specs" "both")
-                                          :test #'string=))
+             (want-specs (listing-kind-wanted-p (assoc "specs" +listing-kinds+
+                                                       :test #'string=)
+                                                kind))
+             (want-properties (listing-kind-wanted-p
+                               (assoc "properties" +listing-kinds+
+                                      :test #'string=)
+                               kind))
+             (want-function-specs (listing-kind-wanted-p
+                                   (assoc "function-specs" +listing-kinds+
+                                          :test #'string=)
+                                   kind))
              ;; Listed only when cl-spec can enumerate them.  Absence is
              ;; reported as its own answer below rather than as an empty
              ;; list: "this revision cannot enumerate contracts" and "there
@@ -557,17 +567,23 @@ function-specs or both; got ~S" kind)
                (when (and want-specs specs-listable)
                  (remove-if-not (lambda (name) (%in-package-p name package-object))
                                 (funcall (api-fn api :list-specs) registry))))
+             ;; A tag needs a reader of its own, and a revision without one
+             ;; cannot answer the question at all.  Falling through to an
+             ;; empty list published "no property carries this tag" on the
+             ;; evidence of a missing function -- the conflation the three
+             ;; listable flags exist to prevent, for the one filter that had
+             ;; no flag.
+             (tag-filterable (or (null tag)
+                                 (api-has-p api :properties-with-tag)))
              (property-names
-               (when (and want-properties properties-listable)
+               (when (and want-properties properties-listable tag-filterable)
                  (remove-if-not
                   (lambda (name) (%in-package-p name package-object))
                   (cond
                     ((null tag) (funcall (api-fn api :list-properties) registry))
                     ((null tag-keyword) '())
-                    ((api-has-p api :properties-with-tag)
-                     (funcall (api-fn api :properties-with-tag)
-                              tag-keyword registry))
-                    (t '()))))))
+                    (t (funcall (api-fn api :properties-with-tag)
+                                tag-keyword registry)))))))
         (list :status :ok
               :kind kind
               :specs (mapcar #'symbol-data (%take spec-names limit))
@@ -578,6 +594,7 @@ function-specs or both; got ~S" kind)
               :function-specs-listable (and function-specs-listable t)
               :specs-listable (and specs-listable t)
               :properties-listable (and properties-listable t)
+              :tag-filterable (and tag-filterable t)
               ;; NIL, not 0, for a kind that was not asked for.  The count
               ;; is a fact about the registry and the list is what this
               ;; response carries; not looking leaves the first unknown, and
@@ -587,7 +604,8 @@ function-specs or both; got ~S" kind)
               :counts (list :specs (when (and want-specs specs-listable)
                                      (length spec-names))
                             :properties (when (and want-properties
-                                                   properties-listable)
+                                                   properties-listable
+                                                   tag-filterable)
                                           (length property-names))
                             :function-specs (when (and want-function-specs
                                                        function-specs-listable)
@@ -818,7 +836,12 @@ answers."
               :source-form-complete source-complete
               :source-form-omitted-chars source-omitted
               :source-location (getf data :source-location)
-              :definition-digest (definition-digest api name registry))))))
+              ;; The plist this function already read.  Without it the digest
+              ;; reads PROPERTY-DATA a second time and re-normalizes every
+              ;; argument spec -- the 2N that :PROPERTY exists to avoid, in
+              ;; the one describe path that was not passing it.
+              :definition-digest (definition-digest api name registry
+                                                    :property data))))))
 
 (defun %describe-spec (api name registry max-chars)
   "Return the detail plist for spec NAME."
@@ -1468,43 +1491,58 @@ cl-spec's structured account of a return value that missed its spec."
                  (error () (values nil nil)))
                (values nil nil))))
     (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
-    (let* ((rejected (read-slot :check-rejected))
-           (explanation (read-slot :check-explanation))
-           (countable (and (integerp executed) (integerp rejected)))
-           (overcounted (and countable (> rejected executed))))
-      (multiple-value-bind (explanation-text explanation-complete
-                            explanation-omitted)
-          (if explanation
-              ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
-              ;; non-positive budget lives in the wrapper, and this was the
-              ;; one bounded print in the file reaching the stream without it.
-              (%print-bounded-form explanation max-value-chars)
-              (values nil t nil))
-        (list :rejected rejected
-              :rejected-measured (and (integerp rejected) t)
-              ;; Carried so a renderer does not describe a refusal that
-              ;; cannot happen: "0 of them refused by :pre" told the reader a
-              ;; precondition exists, on a contract written without one.
-              :precondition-p precondition-p
-              :rejected-overcounted (and overcounted t)
-              ;; Absent, not floored, when the two cannot be subtracted: 0 is
-              ;; itself a claim -- "the function was never called" -- about a
-              ;; run that did call it, and the text says the number cannot be
-              ;; derived while the JSON would have said zero.
-              :effective-trials (when (and countable (not overcounted))
-                                  (- executed rejected))
-              :failure-reason reason
-              ;; Whether the reader resolved, not whether it returned something.
-              ;; NIL is a legitimate answer from cl-spec -- a passing run, or a
-              ;; failing one whose counterexample did not reproduce -- so it
-              ;; cannot double as "this adapter could not ask".  Reported for
-              ;; the same reason REJECTED-MEASURED is: without it a renderer
-              ;; tells the caller their function is non-deterministic on the
-              ;; evidence of a name this image could not find.
-              :failure-reason-readable (and reason-read t)
-              :explanation explanation-text
-              :explanation-complete explanation-complete
-              :explanation-omitted-chars explanation-omitted))))))
+      (let* ((rejected (read-slot :check-rejected))
+             (explanation (read-slot :check-explanation))
+             (countable (and (integerp executed) (integerp rejected)))
+             (overcounted (and countable (> rejected executed)))
+             ;; A refusal reported against a contract whose projection says it
+             ;; has nothing to refuse with.  Two readers disagreeing, like the
+             ;; overcount above, and handled the same way rather than only in
+             ;; the text: a subtraction over figures that contradict each
+             ;; other is not a call count, and publishing it while the text
+             ;; says it cannot be derived leaves one response saying both.
+             (contradicted (and countable
+                                (null precondition-p)
+                                (plusp rejected)))
+             (usable (and countable (not overcounted) (not contradicted))))
+        (multiple-value-bind (explanation-text explanation-complete
+                              explanation-omitted)
+            (if explanation
+                ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
+                ;; non-positive budget lives in the wrapper, and this was the
+                ;; one bounded print in the file reaching the stream without
+                ;; it.
+                (%print-bounded-form explanation max-value-chars)
+                (values nil :not-applicable nil))
+          (list :rejected rejected
+                :rejected-measured (and (integerp rejected) t)
+                ;; Carried so a renderer does not describe a refusal that
+                ;; cannot happen: "0 of them refused by :pre" told the reader
+                ;; a precondition exists, on a contract written without one.
+                :precondition-p precondition-p
+                :rejected-overcounted (and overcounted t)
+                :rejected-contradicted (and contradicted t)
+                ;; The single question every consumer of this plist asks: is
+                ;; the refusal count one this response may subtract with.
+                :rejected-usable (and usable t)
+                ;; Absent, not floored, when the two cannot be subtracted: 0
+                ;; is itself a claim -- "the function was never called" --
+                ;; about a run that did call it, and the text says the number
+                ;; cannot be derived while the JSON would have said zero.
+                :effective-trials (when usable (- executed rejected))
+                :failure-reason reason
+                ;; Whether the reader resolved, not whether it returned it.
+                ;; NIL is a legitimate answer from cl-spec -- a passing run,
+                ;; or a failing one whose counterexample did not reproduce --
+                ;; so it cannot double as "this adapter could not ask".
+                ;; Reported for the same reason REJECTED-MEASURED is: without
+                ;; it a renderer tells the caller their function is
+                ;; non-deterministic on the evidence of a name this image
+                ;; could not find.
+                :failure-reason-readable (and reason-read t)
+                :explanation explanation-text
+                :explanation-complete explanation-complete
+                :explanation-omitted-chars explanation-omitted))))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1697,6 +1735,19 @@ the run's own machinery."
     :unresolved-symbol :not-registered :invalid-arguments :internal-error)
   "Every status a whole spec-check call can carry.")
 
+(defparameter +verification-gap-values+
+  '(:zero-trials :effective-trials-unknown :rejection-counts-unmeasured
+    :input-coverage-unmeasured :contract-not-run :properties-not-run
+    :related-properties-unknown :no-properties-selected)
+  "Every verification_gaps value that is not a per-result status.
+
+A result status that is not a verdict is pushed into the list as itself, and
+those are documented through +RESULT-STATUSES+.  These are the rest, kept here
+for the same reason the status lists are: the tool description is the only
+documentation a model ever sees, this set has grown four times in one branch,
+and a value the code can emit that the description does not name is a value the
+caller has to guess at.")
+
 (defparameter +named-count-statuses+
   '((:passed . :passed) (:failed . :failed) (:error . :errored)
     (:timeout . :timed-out) (:not-run . :not-run))
@@ -1781,13 +1832,14 @@ establish -- read full coverage for a function whose contract never ran."
   (let ((gaps '())
         (rejections-measured t))
     (dolist (result results)
-      ;; Overcounted counts as unmeasured: an integer came back, and it is not
-      ;; a number this response can subtract with.  Keyed on the reader alone,
-      ;; the one case %CONTRACT-PLIST's overcount branch exists for reported
-      ;; no shortfall whatever.
+      ;; Keyed on REJECTED-USABLE, the one flag that answers "may this
+      ;; response subtract with the refusal count".  Keyed on the reader
+      ;; alone, every case %CONTRACT-PLIST withholds the figure for -- an
+      ;; overcount, a refusal against a contract with no :pre -- reported no
+      ;; shortfall whatever.  A property has no contract half at all, and its
+      ;; rejections happen inside the generator where nothing counts them.
       (let ((contract (getf result :contract)))
-        (when (or (not (getf contract :rejected-measured))
-                  (getf contract :rejected-overcounted))
+        (when (or (null contract) (not (getf contract :rejected-usable)))
           (setf rejections-measured nil)))
       (let ((status (getf result :status)))
         (case status
@@ -1891,10 +1943,13 @@ anything holds."
             (return-from check-report
               (list :status :no-properties
                     :verified nil
+                    ;; Through %VERIFICATION-GAPS like every other branch,
+                    ;; rather than assembled here: built by hand this list
+                    ;; omitted input-coverage-unmeasured, which the tool
+                    ;; description says is always in it.
                     :verification-gaps
-                    (append (list :no-properties-selected)
-                            (when (getf selection :contract-not-run)
-                              (list :contract-not-run)))
+                    (cons :no-properties-selected
+                          (%verification-gaps nil selection))
                     :selection selection
                     :results nil
                     :counts (%counts nil)

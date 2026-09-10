@@ -15,6 +15,9 @@
                 #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/spec-adapter-report
+                #:+listing-kinds+
+                #:listing-kind-wanted-p)
   (:export #:build-spec-list-response
            #:build-spec-symbol-response
            #:build-spec-describe-response
@@ -588,8 +591,11 @@ not be read."
              "failure_reason_readable" (json-bool
                                         (getf contract :failure-reason-readable))
              "explanation" (sanitize-for-json (getf contract :explanation))
-             "explanation_complete" (json-bool
-                                     (getf contract :explanation-complete))
+             "rejected_contradicted" (json-bool
+                                      (getf contract :rejected-contradicted))
+             "rejected_usable" (json-bool (getf contract :rejected-usable))
+             "explanation_complete" (%optional-bool contract
+                                                   :explanation-complete)
              "explanation_omitted_chars" (getf contract
                                                :explanation-omitted-chars))))
 
@@ -712,19 +718,16 @@ function was actually called cannot be derived here"
         ((not (getf contract :rejected-measured))
          (format stream "~&    contract: the refused-input count could not be ~
 read, so the trial count above is an upper bound on what was checked"))
+        ((getf contract :rejected-contradicted)
+         (format stream "~&    contract: ~A input~:P refused although this ~
+contract has no :pre -- the two do not agree, so how often the function was ~
+called cannot be read off them"
+                 (getf contract :rejected)))
         ((null (getf contract :precondition-p))
          ;; No :PRE, so nothing could be refused and there is no shortfall to
          ;; report.  The refusal line named a clause the author never wrote.
-         (if (eql 0 (getf contract :rejected))
-             (format stream "~&    contract: no :pre, so every generated ~
-input was passed to the function")
-             ;; A refusal against a contract with nothing to refuse with.  The
-             ;; two facts came from different readers and they disagree; the
-             ;; affirmative claim is the one that has to go.
-             (format stream "~&    contract: ~A input~:P refused although ~
-this contract has no :pre -- the two do not agree, so how often the function ~
-was called cannot be read off them"
-                     (getf contract :rejected))))
+         (format stream "~&    contract: no :pre, so every generated input ~
+was passed to the function"))
         ((eq :unknown (getf contract :precondition-p))
          ;; Neither "it has one" nor "it has none".  Folded into the branch
          ;; below, the text asserted a :pre while has_precondition beside it
@@ -971,8 +974,14 @@ it came out."
                          "coverage" (getf selection :coverage)
                          "contract_not_run" (%symbol-ht
                                              (getf selection :contract-not-run))
+                         ;; NIL, not [], for a selection that never looks:
+                         ;; an empty array is the claim that nothing was left
+                         ;; unrun, and property= and symbol= leave three
+                         ;; properties and a contract unrun without ever
+                         ;; populating this key.
                          "properties_not_run"
-                         (%symbol-hts (getf selection :properties-not-run))
+                         (when (getf selection :properties-not-run-read)
+                           (%symbol-hts (getf selection :properties-not-run)))
                          "properties_not_run_read"
                          (%optional-bool selection :properties-not-run-read)
                          "notes" (%strings (getf selection :notes)))
@@ -1042,18 +1051,6 @@ it came out."
     ((nil) "no-such-keyword")
     (:not-requested "not-requested")
     (t "resolved")))
-
-(defparameter +listing-halves+
-  '(("specs" :specs-listable ("specs" "both"))
-    ("properties" :properties-listable ("properties" "both"))
-    ("function specs" :function-specs-listable ("function-specs" "both")))
-  "Each listing half: its label, its listable flag, and the kinds that ask for it.
-
-One table rather than two.  The notes saying a half could not be enumerated
-and the gate on \"Nothing registered matches\" read the same three facts, and
-written twice they could disagree -- printing the empty claim about a half the
-listing never looked at, which is the conflation the second one exists to
-prevent.")
 
 (defun %format-list-text (report)
   "Render the spec-list report as the text an MCP client will show."
@@ -1144,9 +1141,10 @@ project it here"
                       (or (getf contract :postcondition-count) 0)))
             (when (getf contract :documentation)
               (format stream "~&      ~A" (getf contract :documentation))))))
-      (dolist (half +listing-halves+)
-        (destructuring-bind (label flag kinds) half
-          (when (and (member (getf report :kind) kinds :test #'equal)
+      (dolist (half +listing-kinds+)
+        (destructuring-bind (name label flag keys) half
+          (declare (ignore keys))
+          (when (and (listing-kind-wanted-p (list name) (getf report :kind))
                      (not (getf report flag)))
             (format stream "~&~%~A: the loaded cl-spec cannot enumerate them, ~
 so none are listed here. This is not evidence that none are registered."
@@ -1159,12 +1157,12 @@ so none are listed here. This is not evidence that none are registered."
                  (null (getf report :properties))
                  (null (getf report :function-specs))
                  (every (lambda (half)
-                          (destructuring-bind (label flag kinds) half
-                            (declare (ignore label))
-                            (or (not (member (getf report :kind) kinds
-                                             :test #'equal))
+                          (destructuring-bind (name label flag keys) half
+                            (declare (ignore label keys))
+                            (or (not (listing-kind-wanted-p
+                                      (list name) (getf report :kind)))
                                 (getf report flag))))
-                        +listing-halves+))
+                        +listing-kinds+))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
 not evidence that this project has no contracts: a definition whose system ~
 has not been loaded into this worker is not here."))

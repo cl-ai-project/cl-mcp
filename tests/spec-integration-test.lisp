@@ -32,6 +32,9 @@ cl-spec-facing behaviour is covered by tests/spec-adapter-report-test.lisp
 with stub API handles; this file needs the real system."
   "Printed instead of running, so an absent cl-spec is visible rather than silent.")
 
+(defvar *backend-load-attempted* nil
+  "Set once the cl-spec/check-it load has been tried in this image.")
+
 (defun %backend-installed-p ()
   "Return true when CL-SPEC is present with a generator backend installed.
 
@@ -56,14 +59,23 @@ ran was a claim about load order rather than about the code.
 Called once per test and cheap after the first: ASDF answers a loaded system
 without recompiling, and the answer here is the backend, which either got
 installed or did not."
-  (handler-case
-      (progn
-        (unless (%backend-installed-p)
-          (let ((*standard-output* (make-broadcast-stream))
-                (*error-output* (make-broadcast-stream)))
-            (asdf:load-system "cl-spec/check-it")))
-        (%backend-installed-p))
-    (error () nil)))
+  (case *backend-load-attempted*
+    ((:done) (%backend-installed-p))
+    (t
+     (handler-case
+         (progn
+           (unless (%backend-installed-p)
+             (let ((*standard-output* (make-broadcast-stream))
+                   (*error-output* (make-broadcast-stream)))
+               (asdf:load-system "cl-spec/check-it")))
+           (setf *backend-load-attempted* :done)
+           (%backend-installed-p))
+       (error ()
+         ;; Remembered, so a machine without cl-spec/check-it pays one failed
+         ;; ASDF resolution rather than one per test.  The success path is
+         ;; cheap on its own; this is the path the rewrite was for.
+         (setf *backend-load-attempted* :done)
+         nil)))))
 
 (defparameter +no-contracts-reason+
   "the cl-spec in this image predates function specs: it exports no
