@@ -642,7 +642,8 @@ differing only past the cut would digest the same -- so a caller comparing
 digests has to be told.
 
 The digest covers the property's own data and the data of every named spec
-reachable from its arguments, transitively.  Covering only the property would
+reachable from its arguments -- and, for a contract, its return spec --
+transitively.  Covering only the property would
 miss the case that matters most in practice: the property text is untouched
 but the spec it generates from was widened, so the same seed now explores a
 different input domain and the run is not a reproduction of the earlier one.
@@ -659,6 +660,12 @@ than skipped, so the digest still changes if it is defined later."
             (specs '()))
         (dolist (argument (getf property :arguments))
           (setf pending (%collect-spec-references (getf argument :spec) pending)))
+        ;; :RETURNS as well, for a function spec.  The contract's own data
+        ;; holds only a reference node naming the spec, so widening that spec
+        ;; leaves every byte of the contract identical -- and the run whose
+        ;; output domain just moved would come back "faithful".  Absent from a
+        ;; property's data, where this is a no-op.
+        (setf pending (%collect-spec-references (getf property :returns) pending))
         (loop while pending
               for name = (pop pending)
               unless (gethash name seen)
