@@ -106,7 +106,7 @@
 
 ;;;; Main Macro
 
-(defmacro define-tool (name &key description args body)
+(defmacro define-tool (name &key description args body group)
   "Define an MCP tool with descriptor, handler, and registration.
 
 NAME is the tool name string (e.g., \"fs-list-directory\").
@@ -123,6 +123,13 @@ ARGS is a list of argument specifications. Each spec can be:
     - default: Default value (for :boolean only)
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
     - description: Schema description
+
+GROUP, when given, is a keyword naming an optional tool group.  The tool is
+registered either way but stays out of tools/list and refuses calls until the
+group is switched on -- see CL-MCP/SRC/TOOLS/REGISTRY:*ENABLED-TOOL-GROUPS*.
+Use it for a tool that only makes sense alongside another system, so that
+everyone else is not charged a line in tools/list and a description in the
+model's context for it.
 
 BODY is the handler body. It has access to:
   - All argument names as local variables
@@ -179,7 +186,7 @@ Example:
                                  ,name (sanitize-error-message e)))))))
 
        ;; Registration
-       (register-tool ,name (,descriptor-name) #',handler-name)
+       (register-tool ,name (,descriptor-name) #',handler-name :group ,group)
 
        ;; Return the handler name for reference
        ',handler-name)))

@@ -1,0 +1,929 @@
+# cl-spec 仕様取得・Property 検証アダプタ設計
+
+- 日付: 2026-09-09
+- ステータス: 設計承認済み(ブランチ `feat/cl-spec-adapter`)
+- 対象 cl-spec revision: `d1cf1af`(v0.2-draft, MVP vertical slice)。
+  設計時は `8ab6ffb`。`d1cf1af` は仕様書のみの変更で `src/`・`main.lisp`・
+  `cl-spec.asd` は同一なので、本設計が照合した API に差はない
+- 参照: `/home/wiz/.roswell/local-projects/cl-spec/docs/cl-spec-specification-v0.2-draft.md`
+  §0, §14〜16, §27〜31, §38, §47〜49, §60, §72, §73
+- 想定受益者: cl-mcp を利用する AI エージェント
+
+## 1. 背景と問い
+
+cl-spec は Common Lisp 向けの実行可能な意味論 IR と Property framework である。
+MVP vertical slice として、正規化・検証・structured explain・introspection・
+check-it generator backend・`defproperty`・seed / replay / shrinking を実装済み。
+一方 **cl-mcp adapter は未実装**(cl-spec `AGENTS.md`、仕様書 §0.2 実装状況表)。
+
+cl-spec 仕様書 §73.2「次の実証順」の 2 番目が、
+「既存の `semantic-data`・`property-data`・runner を最小限の cl-mcp adapter へ
+接続する。初回は副作用のない対象を選び、実行ホストで時間上限を設ける」である。
+本設計はこれを実装する。
+
+解く問いは 1 つ。**LLM が Common Lisp の関数を変更するとき、
+「関連する契約を取得する → Property を実行する → 反例を確認する →
+修正後に再検証する」というループを cl-mcp の tool として回せるようにする。**
+
+### 1.1 今回の範囲
+
+1. 対象 symbol について、登録された Spec・Property を発見する
+2. 必要な Spec・Property の詳細を取得する
+3. 指定した Property、または対象 symbol に直接関連する Property を実行する
+4. 構造化された実行結果と反例を取得する
+5. seed と実行設定を指定して Property を再実行する
+
+### 1.2 今回の範囲外
+
+Function checker (`check-function` は stub)、custom generator DSL
+(`defgenerator` は stub)、instrumentation、state-machine testing。
+`cl-spec:run-property` の `:timeout` 引数(未実装)。
+保存反例を直接入力する再検査 API(cl-spec 側 §73 D3 が未決定)。
+
+**未実装の cl-spec API に依存して完成扱いにしない。**
+
+## 2. 現状調査
+
+### 2.1 cl-spec 側で実際に使える API
+
+公開 symbol の存在ではなくソースと実機で確認した(2026-09-09、新規 SBCL プロセス)。
+
+| API | 確認した挙動 |
+|---|---|
+| `semantic-data` (symbol &key registry) | `(:symbol :package :spec :function-spec :property :properties-about)` の固定キー plist。**登録名の routing table であり本文・signature・methods は返さない**。未登録 symbol でも同じキー集合を返し signal しない |
+| `spec-data` (designator &key registry) | `(:name :kind <node固有> :source-form :source-location)`、子があれば `:children`。未登録名は `unknown-spec` を signal |
+| `property-data` (designator &key registry) | `(:name :kind :targets :tags :documentation :trials :arguments :body :source-form :source-location :metadata)`。`:arguments` は `(:variable <sym> :spec <spec-data plist>)` の list。未登録名は `unknown-property` |
+| `properties-for` (target &optional registry) | `:about` 逆索引。sorted |
+| `run-property` (designator &key profile seed options registry) | `property-result` を返す |
+| `replay-property` (designator seed &key profile options registry) | seed は整数または `property-result`。`run-property` に委譲 |
+| `property-result-{status,property,trials,seed,profile,counterexample,shrunk-counterexample,condition,elapsed}` | 実測: status `:PASSED` / `:FAILED`。counterexample は `(A 68 B 85)` の名前付き plist |
+| `property-trials` / `backend-default-trials` | 予算導出に必要な素材。**解決済み予算を返す API は無い** |
+| `*generator-backend*` / `*registry*` | special |
+
+実測ログ(抜粋):
+
+```
+PASS   status=:PASSED trials=100 seed=3827825384193791716 profile=:NORMAL
+FAIL   status=:FAILED trials=1   seed=3963993791726803706 profile=:NORMAL
+       ce=(A 68 B 85) sce=(A 0 B 0) cond=NIL
+REPLAY status=:FAILED trials=1   seed=3963993791726803706 ce=(A 68 B 85) sce=(A 0 B 0)
+```
+
+### 2.2 stub である API(利用しない)
+
+`describe-spec` / `describe-property` / `defspec-function` /
+`check-function` / `defgenerator` は `not-implemented` を signal する。
+`function-spec-data` に相当する projection API は**存在しない**。
+
+### 2.3 cl-spec 側の制約で判明した事実
+
+- **`make-seed` が生成する seed は `(expt 2 62)` 未満**
+  (`src/utils/random.lisp` `+seed-limit+`)。実測値 `3963993791726803706` は
+  JSON の安全整数 2^53 を超える。JSON number で往復させると JavaScript
+  クライアントで丸められ、**再現できない seed を再現できると誤報告する**。
+  これは**自動生成 seed の範囲であって入力 seed の上限ではない**。
+  `seed->random-state` は `(integer 0)` を受け、実測で 2^80 も受理される。
+  したがって文字列表現は「2^62 に収まらないから」ではなく
+  「任意精度の整数を JSON number に載せられないから」必要である。
+- `check-it` backend の `run-generated-test` が返す status は
+  `:passed` / `:failed` / `:error` の 3 つのみ。
+  `property-result` の docstring が挙げる `:skipped` / `:pending` は
+  現 backend からは出ない。仕様書 §14 も「すべての候補を現在の backend が
+  返すとは限らない」と明記している。
+- `run-property` は `options` を `(list* :trials trials :registry registry options)`
+  と組むため、呼び出し側 options の `:trials` は先頭の値に隠れる。
+  check-it backend は `:trials` と `:registry` しか読まない。
+- 整数 seed 対応は SBCL のみ(`unsupported-seed`)。cl-mcp は SBCL 専用なので
+  実害はないが、環境情報として報告する。
+
+### 2.4 cl-mcp 側で再利用する仕組み
+
+| 仕組み | 場所 | 用途 |
+|---|---|---|
+| `define-tool` | `src/tools/define-tool.lisp` | descriptor + handler + 登録の一括生成 |
+| `with-proxy-dispatch` | `src/proxy.lisp` | worker routing と inline fallback |
+| `call-with-deadline-thread` | `src/utils/deadline.lisp` | 時間上限。leaked thread の記録まで面倒を見る |
+| worker 退役ゲート | `src/worker/server.lisp` `%retire-if-carrying-leaked-threads` | 停止不能 thread を抱えた worker は次の要求前に退役 |
+| `register-object` / `generate-result-preview` | `src/object-registry.lisp`, `src/inspect.lisp` | 巨大値を `object_id` 経由で `inspect-object` に委譲 |
+| `json-bool` | `src/tools/helpers.lisp` | 汎用 boolean → 厳密 JSON boolean |
+| `sanitize-for-json` | `src/utils/sanitize.lisp` | 制御文字除去 |
+| `code-describe-symbol` | `src/code-core.lisp` | §28 の signature / source location join |
+
+**制約(過去の計測より)**: MCP クライアントは `content[].text` しか描画しない。
+兄弟 JSON フィールドに置いた情報は人間にもモデルにも見えない。
+したがって判断に必要な情報は必ず content text にも出す。
+
+## 3. アーキテクチャ
+
+```
+MCP client
+  │  tools/call  spec-symbol / spec-describe / spec-check
+  ▼
+parent  src/tools/spec-tools.lisp          define-tool ×3 + with-proxy-dispatch
+  │  worker/spec-symbol | worker/spec-describe | worker/spec-check
+  ▼
+worker  src/worker/handlers.lisp           3 メソッド追加
+  ├─ src/spec-adapter-core.lisp            cl-spec 遅延解決 / symbol 解決 /
+  │                                        値の外部表現 / digest / 実行 + deadline
+  └─ src/tools/spec-response-builders.lisp plist → hash-table + content text
+        │
+        ▼ 関数呼び出しのみ
+      cl-spec:semantic-data / spec-data / property-data / properties-for
+      cl-spec:run-property / property-result-* / *registry* / *generator-backend*
+```
+
+### 3.1 責務分離
+
+| 側 | 担当 |
+|---|---|
+| cl-spec | Spec・Property・registry・実行 backend |
+| cl-mcp | tool 公開、symbol 解決、ソース/実行時情報との統合、外部表現への変換、worker での実行管理と時間上限 |
+
+- registry の内部索引(`properties-by-target` 等)を cl-mcp に複製しない。
+  入口は常に `cl-spec:semantic-data`、本文は `spec-data` / `property-data`。
+- **cl-spec core に cl-mcp や check-it への依存を追加しない。**
+- **cl-mcp.asd に cl-spec を追加しない。** アダプタは呼び出しごとに
+  `find-package "CL-SPEC"` + `find-symbol`(固定リテラル名のみ)で API を解決する。
+  これは `src/proxy.lisp` の `%resolve` と `src/code-core.lisp` の
+  `%ensure-sb-introspect` が既に採っているパターンである。
+  cl-spec を使わないプロジェクトでも既存 tool は無変更で動く。
+
+### 3.1b オプトイン(既定で無効)
+
+**3 つの tool は既定で無効**とし、オプショナルな tool group `cl-spec` に属させる。
+cl-mcp は cl-spec に依存せず、大半の利用者は cl-spec を使わない。使えない tool を
+3 つ `tools/list` に出し、長い説明文をモデルのコンテキストに載せるのは、
+その利用者にとって費用だけで見返りがない。
+
+gating は registry 側の**汎用機構**として実装する。cl-spec 専用フラグにすると
+`registry.lisp` が cl-spec を知ることになり(層の逆転)、それを避けようとすると
+結局同じ汎用機構になる。
+
+| 要素 | 内容 |
+|---|---|
+| `define-tool` の `:group` | tool をオプショナルグループに属させる |
+| `*enabled-tool-groups*` | 有効なグループ名(大文字文字列)。既定は空 |
+| `MCP_ENABLE_TOOL_GROUPS` | ロード時に読む。カンマ/空白区切り。**MCP クライアントは command + env で起動するので実用上こちらが主** |
+| 各起動関数の `:tool-groups` | `(list :cl-spec)`。`worker-pool` と同じ supplied-p 意味論。**`worker-pool` を取る公開入口 5 つすべて**に置く: `run` / `start-http-server` / `serve-tcp` / `start-tcp-server-thread` / `ensure-tcp-server-thread`。`run` は `:stdio` と `:tcp` しか扱わないので、HTTP で起動する利用者は `run` を通らない |
+
+- **登録は無条件**に行い、表示と呼び出しの時点で絞る。ロード後に有効化しても
+  届くようにするため。
+- グループ名は**文字列で突き合わせる**。keyword と環境変数の文字列がどこかで
+  出会う必要があるが、設定値を根拠に image へ symbol を intern しない。
+  未登録のグループ名は「何にも一致しない名前」で済む。
+- 無効な tool を呼んだ場合は `Tool ~A not found` ではなく、
+  **グループ名と有効化方法**を返す。tool は実在し、足りないのは設定である。
+- worker 側の `worker/spec-*` メソッドは無条件に登録したままにする。
+  parent が tool を隠している以上到達しないので、二重に gate しても
+  失敗経路が増えるだけである。
+
+### 3.2 実行場所
+
+registry は `load-system` を実行した worker image に載る。
+したがって**発見・取得・実行のすべてを worker で行う**。
+これにより「定義のロードと Property 実行が同じ worker / session」が
+構造的に保証され、`load-system` で再ロードした変更が次の `spec-check` に反映される。
+プール無効時(`MCP_NO_WORKER_POOL=1`)は既存 tool と同じ inline fallback。
+
+**実行スレッドへ引き継ぐ実行環境を明示する。**
+`call-with-deadline-thread` が起こす新スレッドは dynamic binding を継承しない。
+
+| 対象 | 引き継ぎ方 |
+|---|---|
+| `*registry*` | 呼び出しスレッドで読み、`run-property` の `:registry` に明示的に渡す。加えてスレッド内で `progv` 束縛する |
+| `*generator-backend*` | 呼び出しスレッドで 1 回読み、**予算導出と実行の両方に同じ値を使う**。`run-property` は実行スレッドで `current-generator-backend` を読むため、`progv` で束縛しないと「予算を導いた backend」と「実際に走った backend」が食い違う |
+| `check-it:*num-trials*` / `*size*` | 引き継がない。backend が実行スレッドで読む global を使う。**保証対象外**として報告する |
+| `*print-*` 等の印字設定 | 引き継がない。値の印字はアダプタが自前の束縛で行う(§8.7) |
+| その他の dynamic 変数 | 引き継がない。cl-spec が将来追加した special は自動では反映されない。**保証対象外** |
+
+`progv` には special の**シンボル**が要るので、API 構造体は読み取り関数だけで
+なくシンボルそのものも保持する。
+
+### 3.3 新規ファイル
+
+`cl-mcp.asd` は package-inferred-system なので編集不要。
+登録先は `src/tools/all.lisp`(load 副作用)、`main.lisp`(export)、
+`tests.lisp`(テストスイート)。
+
+| ファイル | 責務 |
+|---|---|
+| `src/spec-adapter-core.lisp` | cl-spec API 遅延解決、symbol 解決、値の外部表現、digest |
+| `src/spec-adapter-report.lisp` | 発見・取得・実行の 3 操作を plist で組み立てる。deadline と予算配分もここ |
+| `src/tools/spec-response-builders.lisp` | plist → hash-table、content text 生成 |
+| `src/tools/spec-entry.lisp` | API 解決 → report → hash-table の入口。tool と worker handler の共通部 |
+| `src/tools/spec-tools.lisp` | `define-tool` ×3 |
+| `tests/spec-adapter-core-test.lisp` | 単体(cl-spec 非依存) |
+| `tests/spec-worker-test.lisp` | pool 有効の worker 経由(§10.4) |
+| `tests/spec-response-builders-test.lisp` | 応答形状 |
+| `tests/spec-tools-test.lisp` | tool 経由(cl-spec があれば実物、無ければ skip) |
+
+### 3.4 cl-spec API の遅延解決
+
+```lisp
+(defstruct cl-spec-api
+  semantic-data spec-data property-data properties-for
+  run-property property-result-readers registry backend ...)
+```
+
+`resolve-cl-spec-api` が `find-package` → `find-symbol` → `fdefinition` /
+`symbol-value` を 1 回で行い、欠けているものがあれば NIL と欠落理由を返す。
+**テストはこの構造体に lambda を差し込むことで、cl-spec が無い環境でも
+実行系の全分岐を検証できる。**
+
+## 4. 4 つの状態の区別
+
+推測で埋めない。ゼロ・false・空の結果と、取得できない値を区別する。
+
+| 状態 | 判定 | `status` | content text の要点 |
+|---|---|---|---|
+| cl-spec 未ロード | `CL-SPEC` package 不在 / 必須 symbol 欠落 | `cl-spec-not-loaded` | `load-system` で `cl-spec/check-it`(実行込み)か `cl-spec`(取得のみ)を先に。**対象に契約が無い証拠ではない** |
+| backend 未ロード | `cl-spec:*generator-backend*` が NIL | `backend-not-loaded` | 取得系は動く。実行は不可。**成功ではない** |
+| 定義未登録 | `semantic-data` の**登録関係フィールド**(`:spec` `:function-spec` `:property` `:properties-about`)がすべて空。`:symbol` と `:package` は常に値を持つので判定に含めない | `not-registered` | registry に登録が無い。未ロードの可能性があり、契約不要を意味しない |
+| 機能未対応 | 例: `function-spec-data` が cl-spec に無い | `unsupported` | 欠けている cl-spec API 名を明示 |
+| 内部エラー | cl-spec が想定外に signal した(署名が食い違う revision 等) | `internal-error` | condition の内容をそのまま。**「登録が無い」と混同しない** |
+
+`not-registered` を名乗るのは cl-spec 自身の `unknown-spec` / `unknown-property`
+のときだけにする。あらゆる error を `not-registered` に畳むと、内部の不具合が
+「その名前は登録されていない」として報告され、この adapter が防ぐべき偽陰性に
+なる。condition クラスが取得できない image では `internal-error` 側へ倒す。
+
+全応答に `environment` を付ける。
+
+```json
+{"cl_spec_loaded": true,
+ "cl_spec_version": "0.1.0",
+ "cl_spec_system_directory": "/home/wiz/.roswell/local-projects/cl-spec/",
+ "generator_backend": "CL-SPEC/SRC/BACKENDS/CHECK-IT:CHECK-IT-BACKEND",
+ "lisp": "SBCL 2.4.x",
+ "registry": "#<HASH-TABLE-REGISTRY {1004A2B3}>"}
+```
+
+`cl_spec_version` は `(asdf:component-version (asdf:find-system "cl-spec" nil))`。
+取得できない場合は null とし、推測しない。
+
+## 5. symbol 解決(reader 評価・動的 intern を使わない)
+
+tool 入力の symbol 文字列を解決するために任意の reader 評価や
+`intern` を使わない(§72.6)。
+
+```
+"PKG:SYM"  → package PKG の external symbol のみ許可
+"PKG::SYM" → internal も許可
+"SYM"      → 引数 package、無ければ CL-USER
+```
+
+- package 名・symbol 名とも **exact → `string-upcase` の順**で `find-package` /
+  `find-symbol` を試す。exact を先にするのは、小文字名で作られた package や
+  symbol を上書きしないため。
+- `find-symbol` のみを使い、`intern` は決して呼ばない。
+  存在しない名前を解決しようとしても image に symbol が増えない。
+- 失敗は `unresolved-symbol` + 理由
+  (`package-not-found` / `symbol-not-found` / `not-external` / `malformed`)。
+- 応答の symbol は常に `{"package": "PROBE", "name": "ADD", "qualified": "PROBE::ADD"}`。
+  **package の異なる同名 symbol を取り違えない**ための最小形式。
+- 表示文字列を reader 入力として評価し直すことはない。
+
+## 5b. tool 0: `spec-list` — 一覧(名前を知らない段階の入口)
+
+他の 3 tool は**対象 symbol 名を既に知っていることが前提**である。
+リポジトリに入ったばかりの LLM が「ここには何の仕様があるのか」を問う入口が
+無いと、発見のフローが閉じない。cl-spec は `list-specs` / `list-properties` /
+`properties-with-tag` を export しているので、薄く載る。
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `kind` | `both` | `specs` / `properties` / `both` |
+| `package` | — | home package で絞る。存在しない package は `unresolved-package` |
+| `tag` | — | Property のみ。keyword を `find-symbol` で解決(intern しない) |
+| `limit` | 200 | 各 kind の上限。正の整数のみ |
+| `timeout_seconds` | 30 | registry 読み取りの上限 |
+
+- **本文も digest も返さない。** 名前・kind・tags・`:about` の対象・docstring
+  まで。`property-data` は 1 件 1 回で済み、digest の推移的走査は行わない
+  (「何があるか」の問いは安いままであるべき)。
+- **tag が未解決であることを空の結果と区別する。** その keyword が image に
+  存在しなければどの Property も持ちえないので空が正しいが、
+  「誰も持っていない」と「そのタグ自体が存在しない」は別の答えである。
+- **空の一覧を「契約が無い」と読ませない。** 表示しているのはこの worker の
+  registry であり、system 未ロードの定義はここに無い。
+- **要求しなかった種別を 0 件として数えない。** `counts` は `null`、text は
+  その行を省く。`kind=properties` で「0 specs」と出すと「この registry に
+  spec は無い」と読めるが、意味は「数えていない」である。件数は registry に
+  ついての事実、配列はこの応答が運ぶもので、見ていない以上前者は不明である。
+- cl-spec 側の listing API は **optional** として解決する。無い revision では
+  この 1 操作が `unsupported` になるだけで、他の tool は動く。
+
+## 6. tool 1: `spec-symbol` — 発見
+
+対象 symbol について、registry が知っていることと cl-mcp が知っていることを
+1 回で返す(§27〜28 の `describe_symbol` join)。
+
+### 6.1 引数
+
+| 引数 | 型 | 既定 | 意味 |
+|---|---|---|---|
+| `symbol` | string(必須) | — | 対象 symbol |
+| `package` | string | `COMMON-LISP-USER` | 未修飾名のときのみ使用 |
+| `include_runtime` | boolean | true | §28 の signature / source location join |
+| `timeout_seconds` | number | 30 | registry 読み取りの上限。**読むだけでも無料ではない**: 1 symbol の listing は関連 Property ごとに transitive spec closure を歩いて印字する |
+
+### 6.2 応答
+
+```json
+{"status": "ok",
+ "symbol": {"package":"PROBE","name":"ADD","qualified":"PROBE::ADD"},
+ "runtime": {"type":"function","arglist":"(A B)","documentation":null,
+             "source_file":"probe.lisp","source_line":42},
+ "runtime_unavailable_reason": null,
+ "registry": {"spec": null, "function_spec": null, "property": null,
+              "properties_about": [{"package":"PROBE","name":"ADD-COMMUTES"}]},
+ "properties": [
+   {"name": {"package":"PROBE","name":"ADD-COMMUTES"},
+    "kind": "commutativity",
+    "tags": ["math"],
+    "targets": [{"package":"PROBE","name":"ADD"}],
+    "documentation": "Addition commutes.",
+    "arguments": [{"variable": {"package":"PROBE","name":"A"},
+                   "spec_kind": "reference",
+                   "spec_name": null,
+                   "spec_target": {"package":"PROBE","name":"SMALL-INT"}}],
+    "trials_table": "(:NORMAL 100)",
+    "shrink_enabled": true,
+    "source_location": {"file":"probe.lisp","package":"PROBE"},
+    "definition_digest": "a41f9c2b7d0e5518",
+    "body_forms": 1,
+    "body_omitted": true,
+    "detail_via": "spec-describe kind=property"}],
+ "environment": {...},
+ "notes": ["properties_about lists direct (:about ...) registrations only"]}
+```
+
+`runtime` は worker 内で `code-core:code-describe-symbol` を呼ぶ。
+失敗時は `runtime: null` + `runtime_unavailable_reason` に理由を書く
+(**null と「取得しなかった」を区別する**)。
+
+`code-describe-symbol` は文字列引数を reader で読み戻すため、**エスケープが
+必要な名前(コロン・空白・縦棒を含む、あるいは小文字を含む symbol 名や
+package 名)の場合は join を行わず理由を返す**。無理に読ませると別の symbol
+に解決し、その signature をこの symbol の名前で報告しかねない。
+join は registry の事実に対する付加情報であって同一性ではない。
+symbol の解決自体は `find-symbol` の完全一致なので、この種の名前でも
+`spec-symbol` は正しく解決し、`runtime` だけが欠ける。
+
+Property 本文と source-form はここでは返さない(`body_omitted: true`)。
+概要から詳細へ辿れる形にし、省略したことを明示する(§72.6)。
+
+## 7. tool 2: `spec-describe` — 詳細取得
+
+### 7.1 引数
+
+| 引数 | 型 | 既定 | 意味 |
+|---|---|---|---|
+| `kind` | string(必須) | — | `property` / `spec` / `function-spec` |
+| `name` | string(必須) | — | 登録名 |
+| `package` | string | `COMMON-LISP-USER` | 未修飾名のときのみ使用 |
+| `max_chars` | integer | 8000 | 本文 printed 表現の上限。**正の整数のみ**。負値は引数エラー |
+| `timeout_seconds` | number | 30 | registry 読み取りの上限 |
+
+### 7.2 挙動
+
+- `property` → `cl-spec:property-data`。`body` と `source_form` を printed text
+  で返す。上限超過で `truncated: true` + `omitted_chars: N`。
+  引数の spec は `spec-data` の木をそのまま射影(子ノード込み)。
+- `spec` → `cl-spec:spec-data`。
+- `function-spec` → **`unsupported`**。
+  理由: cl-spec に `function-spec-data` に相当する projection API が無く、
+  `defspec-function` は stub。公開 reader から cl-mcp 側で projection を
+  組み立てることは、cl-spec の introspection 責務の複製になるので行わない。
+  必要な cl-spec 側変更として最終報告に挙げる。
+
+**content text にも構造を出す。** 正規化 IR ツリー、tags、trials テーブル、
+shrink の有効/無効は payload だけでなく text に描画する。MCP クライアントは
+`content[].text` しか描画しないので、payload にしか無い情報は存在しないのと
+同じである。特に profile が不正なときのエラーは「Property の trials テーブルを
+spec-describe で見よ」と案内するので、**案内先に案内した情報が無い状態を作らない**。
+
+`unknown-spec` / `unknown-property` は `not-registered` に変換して返し、
+condition を RPC エラーとして漏らさない。
+
+## 8. tool 3: `spec-check` — 実行・再実行
+
+### 8.1 引数
+
+| 引数 | 型 | 既定 | 意味 |
+|---|---|---|---|
+| `property` | string | — | 明示指定。`symbol` と排他 |
+| `symbol` | string | — | `:about` 逆索引で関連 Property を選択 |
+| `package` | string | `COMMON-LISP-USER` | 未修飾名の解決用 |
+| `profile` | string | `normal` | trial 予算の profile |
+| `seed` | string または integer | — | 10 進。再実行用 |
+| `expect_definition_digest` | string | — | 与えると定義変化を検出 |
+| `timeout_seconds` | number | 60 | **呼び出し全体**の予算 |
+| `max_value_chars` | integer | 2000 | 反例 1 値あたりの printed 上限 |
+
+`property` と `symbol` の同時指定、どちらも無しは引数エラー。
+**この検査は cl-spec の可用性判定より前に行う。** 引数が誤っていることは
+cl-spec の状態と無関係であり、先に「cl-spec 未ロード」を返すと呼び出し側を
+誤った修正へ誘導する(`seed` の検査を API 解決より前に置くのと同じ理由)。
+
+### 8.2 seed を文字列で扱う
+
+cl-spec が生成する seed は 2^62 未満で、JSON の安全整数 2^53 を超える。
+入力側に上限はなく、任意の非負整数が受理される(§2.3)。
+**seed は常に 10 進文字列で返す。JSON number としては返さない。**
+入力も文字列のみを受け付け、`parse-integer` で解釈する
+(reader は使わない)。JSON number を受理しないのは仕様であって不便ではない。
+呼び出し側が数値として seed を持っている時点でその値は既に丸められており、
+受理すれば「再現できない seed を再現できる」と報告することになる。
+10 進数字のみでなければ引数エラー。
+
+**拒否は 2 層で行う。** tool schema が `seed` を string に制約し、
+`spec-check-response` の入口でも生の値を検査する。入口で文字列だけを通す
+アクセサを噛ませると、JSON number も空文字列も NIL(=「seed 指定なし」)に
+なり、**新しい乱数 seed で走って、それを呼び出し側の seed として報告する**。
+worker handler は params の hash-table を直接渡すので、schema だけでは足りない。
+
+### 8.3 選択根拠
+
+`mode` は 2 種類。`property` 引数を使ったときは `explicit`、
+`symbol` 引数を使ったときは `about`。
+
+`symbol` mode は `semantic-data` の `:properties-about` のみを使う。
+対象 symbol 自身が登録済み Property でもある場合
+(`semantic-data` の `:property` が非 NIL)、それは `:about` 関連とは
+別の関係なので選択に含めず、`notes` に
+「SYMBOL is itself a registered property; run it with property= instead」
+を出す。**黙って実行対象を広げない。**
+
+```json
+"selection": {
+  "mode": "about",
+  "requested": {"symbol": {"package":"PROBE","name":"ADD"}},
+  "selected": [{"package":"PROBE","name":"ADD-COMMUTES"}],
+  "count": 1,
+  "source": "cl-spec:semantic-data -> :properties-about (registry :about reverse index)",
+  "coverage": "Direct (:about ...) registrations only. Callers, generic-function methods, macro users and shared mutable state are NOT analysed. This is not a change-impact analysis (cl-spec spec §31, §72.5)."}
+```
+
+`:about` による関連取得を完全な変更影響解析と説明しない。
+
+### 8.4 status の語彙
+
+**個別 Property**
+
+| status | 意味 |
+|---|---|
+| `passed` | 生成・検査した範囲で反証されなかった |
+| `failed` | 反例あり |
+| `error` | Property body が condition を signal |
+| `skipped` / `pending` | cl-spec が定義するが現 backend は返さない。来たらそのまま報告 |
+| `timeout` | cl-mcp の deadline に到達 |
+| `generator-error` | `generator-unavailable` / `no-generator-backend` |
+| `backend-error` | その他の `cl-spec-error` |
+| `not-run` | 全体予算切れ(`reason: budget-exhausted`) |
+
+**呼び出し全体**
+
+| status | 条件 |
+|---|---|
+| `no-properties` | 選択が 0 件 |
+| `completed` | 全 Property が verdict に到達 |
+| `incomplete` | timeout / error / not-run を含む |
+
+**呼び出し全体 status の集約規則**
+
+| 個別 status の集合 | 全体 status | `verified` |
+|---|---|---|
+| 選択 0 件 | `no-properties` | false |
+| 全件 `passed`、かつ全件で `trials.executed` が 1 以上 | `completed` | **true** |
+| 全件 `passed` だが `trials.executed` が 0 の件がある | `completed` | false(`zero-trials`) |
+| `failed` / `error` を含み、他は verdict のみ | `completed` | false |
+| `skipped` / `pending` を含む | `completed` | false |
+| `timeout` / `not-run` / `generator-error` / `backend-error` / `internal-error` を含む | `incomplete` | false |
+
+**`verified` は 3 条件**: 選択が 1 件以上、全件 `passed`、
+**かつ全件で実際に 1 件以上の trial が評価された**。3 つ目を落とすと、
+`(:trials (:normal 0))` の Property が `passed` / `trials 0` で返り
+(実測確認済み)、何も評価していない run が verified になる。
+
+**`counts` は全 status を数える。** 名前付きフィールド 5 つ
+(`passed` / `failed` / `errored` / `timed_out` / `not_run`)だけでは
+`generator-error` / `backend-error` / `internal-error` / `not-registered` が
+どこにも数えられず、**1 件選択して実行が失敗した run が「全部ゼロ」**として
+読める。`by_status`(出現した status → 件数)と `other` を併記し、
+`selected` が常に合計と一致するようにする。content text の集計行も
+固定 5 バケットではなく `by_status` から描画する。
+
+**`verification_gaps`** に、この run が確立できなかったことを機械可読で並べる。
+
+| gap | 意味 |
+|---|---|
+| `no-properties-selected` | 選択が 0 件 |
+| `zero-trials` | `passed` だが評価件数 0 |
+| `timeout` / `not-run` / `generator-error` / `backend-error` / `internal-error` / `skipped` / `pending` | その status が 1 件以上ある |
+| `rejection-counts-unmeasured` | **常に付く**。cl-spec は precondition による棄却件数を報告しない |
+| `input-coverage-unmeasured` | **常に付く**。生成 domain の到達範囲は計測していない |
+
+後ろ 2 つが常に付くので、**この adapter は「検証の網羅性」を主張しない**。
+§72.1 の受け入れ条件のうち「棄却件数」「境界値の検査状況」は
+現 runner に情報がなく、不明として報告する(§11 で LLM-01 を部分対応とする理由)。
+
+0 件は必ず `no-properties` + `verified: false` とし、content text に
+`0 properties selected -- this is NOT a successful verification.` を出す。
+skip・timeout・generator error・backend error を Property 成功にまとめない。
+
+### 8.5 時間上限
+
+`timeout_seconds` は proxy が worker の deadline として読む値である
+(`src/proxy.lisp` `%effective-rpc-timeout` / `%clamp-timeout-param`)。
+per-property の値にすると、複数 Property の合計が proxy の待ち時間を超えて
+**まだ働いている worker が kill される**。したがって
+**`timeout_seconds` は呼び出し全体の予算**とする。
+
+- worker 内で `call-with-deadline-thread` を使う(`run-tests` と同じ機構)。
+- 複数 Property は逐次実行し、各 `run-property` には**残予算**を渡す。
+- 残予算が尽きたら以降は `not-run` / `budget-exhausted`。
+- 予算は**生成・評価・shrinking・結果の印字まで**を覆う。反例の印字は
+  値自身の `print-object`(任意のユーザコード)を走らせるので、Property の
+  最後の trial で予算を止めると印字が予算の外に出てしまう。
+- `cl-spec:run-property` に `:timeout` は渡さない(cl-spec 側未実装)。
+
+**timeout 後の image の扱い(§72.4)**
+
+thread が止まったことは、その Property が変更していた状態が戻ったことの
+証拠ではない。cl-spec には adapter から観測できる cleanup が無く、
+巻き戻された Property は共有状態を途中まで変えたまま終わりうる。
+したがって**状態を復元できた証拠がない以上、timeout 後の image は不明として扱う**。
+
+| 条件 | `worker_reuse` | 案内 |
+|---|---|---|
+| timeout なし | `safe` | なし |
+| timeout あり・thread は停止 | `unknown` | pool 有効なら `pool-kill-worker`、inline(`MCP_NO_WORKER_POOL`)なら**プロセス再起動** |
+| thread 停止不能(`thread_leaked`) | `unsafe` | 同上。加えて既存の worker 退役ゲートが次の要求前に退役させる |
+
+**inline 実行には退役ゲートが無い。** `%retire-if-carrying-leaked-threads` は
+worker server の要求受付経路にあり、pool 無効時は通らない。この場合の復旧は
+プロセス再起動しかないので、応答の案内は両方の配備を名指しする。
+
+§48 が将来区別するとしている「全体予算」と「trial 単位予算」のうち、
+今回は全体予算のみを扱う。trial 単位予算は cl-spec 側 API が無いので未対応。
+
+### 8.6 trial の実行数と予算を分離
+
+```json
+"trials": {"executed": 1,
+           "budget": 100,
+           "budget_source": "backend-default",
+           "property_trials": null,
+           "backend_default": 100,
+           "budget_derivation": "derived by cl-mcp from cl-spec:property-trials and cl-spec:backend-default-trials; cl-spec does not expose the resolved budget"}
+```
+
+`property-result-trials` は「停止した試行番号」であって予算ではない。
+予算は cl-mcp が公開 reader 2 つから導出し、**導出であることを明記する**。
+cl-spec が解決済み予算を公開すればこの導出は不要になる(最終報告に記載)。
+
+### 8.7 反例の外部表現
+
+```json
+"counterexample": [
+  {"variable": {"package":"PROBE","name":"A"},
+   "value": {"printed": "68",
+             "printed_complete": true, "omitted_chars": 0,
+             "restorable": true,
+             "print_level": 12, "print_length": 200,
+             "type": "integer", "object_id": null}}],
+"counterexample_status": "present",
+"counterexample_unavailable_reason": null,
+"shrunk_counterexample": [ ... ],
+"shrink_status": "present",
+"shrink_note": "Backend-searched reduction. NOT a guaranteed global minimum ..."
+```
+
+**印字は生成量も制限する。** 保持文字数だけを制限しても、`prin1` は構造を
+最後まで歩く。生成値は generator が作った深さ・長さを持ちうるし、値自身の
+`print-object` は任意のユーザコードである。したがって:
+
+| 制限 | 何を抑えるか |
+|---|---|
+| `*print-level*` = 12 / `*print-length*` = 200(応答に `print_level` / `print_length` として明記) | **走査量**。深い・長い値を最後まで歩かない |
+| `max_value_chars`(既定 2000)+ `bounded-output-stream` | **保持メモリ**。超過分は捨て、`printed_complete: false` と `omitted_chars` を立てる |
+| §8.5 の全体予算 | **時間**。反例の印字は run と同じ deadline の内側で行う |
+| `*digest-print-limit*`(1,000,000 文字) | digest 入力の生成量。到達したら `definition_digest_complete: false` |
+| `print-form-bounded`(本文・source form) | **呼び出し側の `max_chars` で直接打ち切る**。1MB 出してから切ると、その 1MB を確保するうえ `omitted_chars` が「2 つの上限の差」になって実際の残量とずれる |
+
+**表示用と digest 用の印字設定を分ける。** `*print-circle*` は digest では t、
+表示では **nil**。ファイルコンパイラは form の末尾を共有するので、
+`compile-file` 経由(= `load-system` の実際の経路)でロードされた Property の
+本文を `*print-circle*` t で出すと `#1=(LOW . #2=(HIGH))` になり、
+**ドット対の improper list に読める**。共有されているだけで循環していないので
+nil にすれば正しく出る。厄介なのは REPL 定義や source ロードでは共有が起きず
+綺麗に出ることで、**手元検証では気づかず `load-system` で入った定義だけが壊れる**。
+
+`*print-circle*` nil は循環に対して停止しないので、表示側は
+`*print-level*` 50 / `*print-length*` 10000 を停止保証として持つ。
+実在の source form では発火しない値である。表示は pretty print しない
+(`body` / `source_form` はクライアントが比較しうる JSON フィールドで、
+pretty print は改行位置が `*print-right-margin*` に依存する)。
+
+**sink 自身の注記を値に混ぜない。** `bounded-output-string` は切り詰め時に
+`... (truncated, N total chars)` を付ける。これは捕捉ログには正しいが値には
+誤りで、`max_chars` を超え、`omitted_chars` を二重に言い、1 行のはずの
+描画に改行を入れる。切り詰めが起きたときの保持テキストはちょうど上限文字数
+なので、そこで切れば注記だけが落ちる。
+
+digest だけは深さ・長さで切らない。深さで切ると、切り口より下だけが異なる
+2 つの定義が同じ digest になり、digest の存在意義が消える。文字数で切れば
+切ったこと自体を検出できるので、そちらを報告する。
+
+**表示の完全性・取得状態・復元可能性は別のフィールドにする。**
+
+| フィールド | 問い |
+|---|---|
+| `printed_complete` | `max_value_chars` で切られなかったか |
+| `restorable` | このテキストを読み戻すとこの値になるか |
+| `counterexample_status` | 反例を取得できたか |
+
+`printed_complete: true` は復元可能を意味しない。印字は `*print-readably*` nil
+かつ有限の深さで行うので、CLOS インスタンスは `#<FOO {1004}>` として
+**完全に**印字されるが値ではない。`restorable` が true になるのは
+数値・文字・文字列・keyword・`NIL`/`T` に限る。それ以外は `object_id` を付け、
+既存 `inspect-object` で深掘りさせる(同一 worker なので ID が有効)。
+
+**`counterexample_status`**(空配列と「取得できなかった」を分ける)
+
+| 値 | 意味 |
+|---|---|
+| `present` | 反例を取得した。**引数を生成しない Property では空配列が正しい present** |
+| `not-applicable` | run が `passed` で、反例は定義上存在しない |
+| `none` | verdict は出たが backend が反例を返さなかった |
+| `unavailable` | 取得できなかった(timeout / 実行エラー / 未実行)。`counterexample_unavailable_reason` に理由 |
+| `unknown` | Property の引数リストが読めず、空配列と欠損を区別できない |
+
+**`shrink_status`**
+
+| 値 | 意味 |
+|---|---|
+| `present` | 縮小済み反例を取得した |
+| `disabled` | Property が `(:shrink nil)` で定義されている |
+| `none` | 縮小は有効だが、より小さい入力は返らなかった |
+| `not-applicable` | run が `passed` |
+| `unavailable` / `not-run` | verdict に到達していない |
+
+実測で `(:shrink nil)` の失敗も引数ゼロの失敗も cl-spec は `NIL` を返す。
+status を持たなければ両者と timeout が同じ `[]` になる。
+
+- **すべての Lisp 値は printed 文字列で返す。JSON number は使わない。**
+  整数・有理数の正確さを落とさないため。
+- `condition` は `{"type":"DIVISION-BY-ZERO","message":"...","object_id":N}`。
+  message も bounded stream で切り出す(condition の report が生成値を
+  含みうるため)。
+- Property の predicate は単一の汎用 boolean を返すので多値は関与しない。
+  Lisp の `NIL` はフィールドの型で意味が決まる
+  (boolean は `json-bool` で厳密化、list は空配列、未取得は null + 理由フィールド)。
+- **inline と worker 経由で `false` の Lisp 表現が違う**。inline は
+  `yason:false`、worker 経由は JSON へ直列化して再パースされるので `NIL`。
+  クライアントにはどちらも JSON の `false` として届くので外部表現は同一だが、
+  hash-table を直接触るテストは両方を受け入れる必要がある。
+
+### 8.8 再現性
+
+```json
+"reproduce": {
+  "seed": "3963993791726803706",
+  "profile": "normal",
+  "definition_digest": "a41f9c2b7d0e5518",
+  "definition_digest_complete": true,
+  "definition_match": "not-checked",
+  "options": null,
+  "call": {"tool":"spec-check","property":"PROBE::ADD-IS-WRONG",
+           "seed":"3963993791726803706","profile":"normal",
+           "expect_definition_digest":"a41f9c2b7d0e5518"},
+  "scope": "Regenerates the trial sequence from SEED under the same definitions, backend, profile and image. It does NOT reproduce code revision, external I/O, time, or shared mutable state. This is NOT replay of a saved counterexample against a fixed implementation (cl-spec spec §15, §72.3)."}
+```
+
+**definition digest**
+
+- FNV-1a 64bit(依存追加なし、16 桁 hex)。
+- 対象は `property-data` の printed 表現に加え、引数 spec から**推移的に
+  到達可能な名前付き spec の `spec-data`** を名前順に連結したもの。
+  参照先 spec の変更も検出できる。循環は visited 集合で止める。
+- printing は `*package*` を `KEYWORD` に束縛し(symbol が常に package 修飾
+  される)、`*print-pretty*` nil / level・length nil / `*print-base*` 10 /
+  `*print-case*` `:upcase` で決定的にする。
+- printing は `*package*` を `KEYWORD` に束縛し、文字数のみで打ち切る(§8.7)。
+  打ち切られたら `definition_digest_complete: false` とし、
+  その digest を一致判定に使わない(`definition_match` は `mismatch` 側に倒す)。
+
+**`definition_match` は 3 値**で、`expect_definition_digest` を渡さなかった
+場合は `true` ではなく `not-checked` である。
+
+| 値 | 意味 |
+|---|---|
+| `not-checked` | `expect_definition_digest` が指定されなかった。**比較していない** |
+| `match` | 指定値と digest が一致した |
+| `mismatch` | 指定値と digest が**一致しなかった** |
+| `unknown` | digest を計算できなかった、または digest 入力が `*digest-print-limit*` で切られた。**比較不能であって不一致ではない** |
+
+`unknown` を `mismatch` に畳んではならない。畳むと、変わっていない image に
+対して再実行した呼び出し側に「定義が動いた」と伝えることになり、正しい再現を
+破棄させる。`reproduction_faithful` も同じ 4 値(`faithful` / `unfaithful` /
+`unknown` / `not-checked`)で、**値が無いことは `not-checked`** とする
+(0 件選択の run が `unfaithful` を名乗っていた)。
+
+`match` が言うのは「Property とそれが参照する Spec の内容が同じ」だけである。
+**実装・backend・cl-spec の version・Lisp 実装・外部状態の一致は含まない。**
+それらは `environment` に併記するが、digest は覆わない。
+不一致なら status と content text の両方に出し、
+**「元の実行を厳密に再現した」とは報告しない。**
+
+**options**
+
+tool 引数として公開しない。理由は §2.3 のとおり check-it backend が
+`:trials` と `:registry` しか読まず、呼び出し側 options が実質無効なため。
+公開しないことで「黙って元と異なる条件で再実行する」経路自体を作らない。
+応答には `options: null` を明記する。
+
+**replay-property を使わない理由**
+
+`replay-property` は seed と profile を引き継いで `run-property` に委譲する
+だけであり、cl-mcp は seed と profile を明示引数として往復させる。
+整数 seed を渡す場合 `replay-property` は profile を引き継がないので、
+どちらにせよ呼び出し側が profile を指定する必要がある。
+**現在の `replay-property` は生成列の再実行であって、保存反例を修正後の
+実装へ直接入力する操作ではない。** この区別を `scope` 文言で明示する。
+
+## 9. content text
+
+MCP クライアントは `content[].text` しか描画しない。判断に必要な情報は
+必ずここに出す。
+
+見出しは 4 種類にする。既存の `run-tests` の `✓ PASS` / `✗ FAIL` /
+`⚠ NO TESTS RAN` に合わせつつ、**反証された run と完走できなかった run を
+別の語で報告する**。1 語にまとめると timeout が反例のように読める。
+
+| 見出し | 条件 |
+|---|---|
+| `✓ VERIFIED` | 1 件以上選択され、全件 passed |
+| `✗ FAILED` | 1 件以上が failed |
+| `⚠ NOT VERIFIED` | failed は無いが timeout / error / not-run がある |
+| `⚠ NO PROPERTIES` | 選択が 0 件 |
+
+`spec-check` の実出力(§10.3 の実証より、値は実行結果そのもの):
+
+```
+✗ FAILED
+Selected 2 properties via cl-spec:semantic-data -> :properties-about (registry :about reverse index).
+  Direct (:about ...) registrations only. Callers, generic-function methods, macro users and shared mutable state are NOT analysed. This is not a change impact analysis (cl-spec specification 31 and 72.5).
+
+[1] SPEC-DEMO::CLAMP-RESPECTS-HIGH  failed
+    trials: 2 executed of 100 budget (property-profile)
+    counterexample:        VALUE = 62
+    shrunk counterexample: VALUE = 51
+      Backend-searched reduction. NOT a guaranteed global minimum, and the backend does not report whether shrinking completed, exhausted its budget or was interrupted (cl-spec specification 16 and 72.4).
+    seed: 3013752598065164257   profile: normal
+    definition_digest: aa4b67c3804d69b0
+
+[2] SPEC-DEMO::CLAMP-RESPECTS-LOW  passed
+    trials: 100 executed of 100 budget (backend-default)
+    seed: 2441597211547797803   profile: normal
+    definition_digest: 030c291c2298a4b5
+
+verified: false   1 passed, 1 failed, 0 errored, 0 timed out, 0 not run
+Replay: spec-check property=SPEC-DEMO::CLAMP-RESPECTS-HIGH seed=3013752598065164257 profile=normal expect_definition_digest=aa4b67c3804d69b0
+Regenerates the trial sequence from this seed under the same definitions, backend, profile and image. ...
+```
+
+`Replay:` 行は**最初に passed でなかった結果**を指す。3 件中 3 件目が失敗した
+とき、1 件目の seed を返しても再現する理由がない。
+
+0 件の場合:
+
+```
+⚠ NO PROPERTIES  COMMON-LISP::CAR
+Selected 0 properties via cl-spec:semantic-data -> :properties-about (registry :about reverse index).
+0 properties selected -- this is NOT a successful verification. Nothing was executed, and a registry with no property registered about this symbol says nothing about whether it is correct.
+verified: false
+```
+
+## 10. テスト計画
+
+### 10.1 単体(cl-spec 非依存)
+
+`cl-spec-api` 構造体に lambda を差し込むので、cl-spec が無くても
+実行系の全分岐を検証できる。
+
+1. **package の異なる同名 symbol** — `A::FOO` と `B::FOO` を作り、
+   `spec-symbol` が取り違えないこと。未定義名の解決後に
+   `find-symbol` が NIL のままであること(intern していない証拠)
+2. **4 状態の区別** — 未ロード / backend 未 / 未登録 / 未対応
+3. **0 件** — `no-properties` かつ `verified: false`、text に警告文
+4. **成功に畳まない** — failed / error / timeout / generator-error / not-run
+5. **評価件数ゼロ** — `passed` / `trials 0` が `verified: false` になり、
+   `verification_gaps` に `zero-trials` が出ること
+6. **反例の取得状態** — 引数ゼロの失敗が `present`、timeout が `unavailable`、
+   `(:shrink nil)` が `disabled`
+7. **seed 往復** — 2^62 級整数が文字列で欠損なく往復
+8. **値の外部表現** — `printed_complete` と `restorable` が別の答えであること、
+   `object_id` の付与
+9. **backend の引き継ぎ** — 実行スレッドが、呼び出し側で捕捉した backend を
+   `progv` 経由で見ること(global を見ていたら赤になる回帰テスト)
+10. **digest** — 決定性、参照 spec 変更時に変化、`definition_match: mismatch`
+11. **deadline** — 停止しない thunk で `timeout`、`worker_reuse: unknown`
+
+**`forget-leaked-threads` は記録を消すだけでスレッドを止めない**
+(`src/utils/deadline.lisp`)。したがって「image を元に戻す」道具ではなく、
+記録簿を汚さないための後始末にすぎない。**本当にスレッドが漏れる検証は
+使い捨てプロセスで行う**。上記 11 の `sleep` は割り込み可能なので
+協調的巻き戻しで停止し、スレッドは漏れない。
+
+### 10.2 統合(cl-spec 実物・inline)
+
+`tests/integration-test.lisp` と同じ `process-json-line` 経由、
+`*use-worker-pool*` nil。cl-spec が解決できない環境ではスキップ理由を
+明示して skip する(cl-mcp のテストを cl-spec 必須にしない)。
+仕様取得 → 失敗取得 → 再実行の一周。
+
+**skip されたら統合確認済みとしない。** cl-spec 実物を使う検証
+(§10.2・§10.3、および §10.2b の一部)がすべて skip された実行は、
+「cl-spec との統合は未検証」と報告する。skip は緑だが証拠ではない。
+
+### 10.2b worker 経由(pool 有効)
+
+inline では検証できない保証がある。`tests/spec-worker-test.lisp` は
+`with-pool` で実 worker を起動し、次を確認する。
+
+1. **session affinity** — 同一 session で cl-spec ロード → fixture ロード →
+   `spec-symbol` が 3 件を見る → `spec-check` が反例を返す
+2. **worker 間の分離** — 別 session の worker が同じ symbol を解決できない
+3. **object ID の有効性** — 反例の `object_id` が同じ session の
+   `inspect-object` で解決できる
+4. **timeout 後の扱い** — `worker_reuse` が `unknown` / `unsafe` になり、
+   案内に `pool-kill-worker` が出る
+
+worker 起動と cl-spec ロードを伴うので遅い。worker を起動できない環境、
+cl-spec を解決できない環境では理由付きで skip する。
+
+### 10.3 実 tool 経由の実証
+
+新規プロセス、**worker pool 有効**、scratchpad の使い捨て fixture。
+外部 I/O も共有可変状態も持たない小関数を対象にする。
+
+1. `spec-symbol` で契約を発見
+2. `spec-describe` で Property 本文を取得
+3. `spec-check` で意図的失敗と反例を取得
+4. 実装を修正して保存する。**既存 Lisp ファイルの修正は
+   `lisp-edit-form` / `lisp-patch-form` を使う**(開発指針どおり。
+   `fs-write-file` は新規ファイルのみ)。`repl-eval` の `load` か
+   `load-system` で同じ worker へ再ロード
+5. 同一 seed で `spec-check` を再実行し、解消を確認。
+   実装だけを直したなら digest は変わらないので `definition_match: match` /
+   `reproduction: faithful` になる。Property を書き換えた場合は `mismatch`
+
+fixture は scratchpad にのみ置き、cl-mcp / cl-spec のソースツリーにも
+稼働中の MCP worker にも残さない。
+
+### 10.4 既存機能の非破壊
+
+- `mallet src/*.lisp src/*/*.lisp tests/*.lisp`
+- 新規プロセスで `(asdf:compile-system :cl-mcp :force :all)`
+- 新規プロセスで `rove cl-mcp.asd` 全スイート
+- cl-spec を一切ロードしない状態で既存 tool が動くこと
+
+## 11. §72 の到達範囲
+
+| 要件 | 今回 | 備考 |
+|---|---|---|
+| LLM-01 検証結果と検証範囲 | **部分対応** | 0 件・timeout・error・評価件数ゼロを成功に畳まない。選択根拠と網羅範囲、予算が導出であることを明記。**未対応: 棄却件数と生成 domain の到達範囲**。cl-spec の runner が報告しないので `verification_gaps` に `rejection-counts-unmeasured` / `input-coverage-unmeasured` を常に付け、不明として返す |
+| LLM-02 契約の由来と変更 | **未対応** | registry が由来・レビュー状態・version を持たない。cl-spec 側 §73 D8。`definition_digest` は内容の同一性のみで trust 状態ではない |
+| LLM-03 再生成と反例の再検査 | 部分対応 | 生成列 replay と digest 不一致検出は対応。**保存反例の直接再検査は未対応**(cl-spec §73 D3 未決定)。fixture 復元条件と backend/framework version の artifact 化も未対応 |
+| LLM-04 状態・縮小・時間上限 | 部分対応 | 全体予算(印字を含む)、timeout 後の `worker_reuse: unknown`、leaked thread 時の退役は対応。**未対応**: trial 単位予算、縮小の完了/予算切れ/中断の区別、縮小候補の入力妥当性と失敗同一性 — いずれも cl-spec backend が情報を返さない |
+| LLM-05 変更影響と image の整合性 | 部分対応 | `:about` 直接関連のみと明示。同一 worker でのロードと実行は保証し、pool 有効テストで確認。registry 世代・cache invalidation は cl-spec §73 D6 |
+| LLM-06 機械可読境界 | **対応(cl-mcp が所有する範囲)** | package 区別、省略の明示、値の正確さ、`printed_complete` と `restorable` の分離、reader 非使用は対応。**`schema_version` を最初から付ける**(下記)。cl-spec 本体の capability API は別課題 |
+
+**schema version は cl-spec を待たない。** ここで定義する JSON は
+cl-mcp adapter が所有する外部表現であり、その version 付与を cl-spec 本体の
+API 追加に依存させる理由はない。全応答が `schema_version` を持つ。
+利用可能な操作は既存の `tools/list` の inputSchema から、未対応機能は
+`status: unsupported` と `environment.missing` から取得できる。
+cl-spec 側の capability API(§73 D7)は、cl-spec が自身の実装状況を
+機械可読に返す別の話として残す。
+
+## 12. cl-spec 側に必要な変更(報告のみ、今回は実装しない)
+
+1. `function-spec-data` — `spec-data` / `property-data` と同形の projection。
+   無いと cl-mcp が公開 reader から projection を組み立てることになり、
+   introspection 責務の複製になる。
+2. 解決済み trial 予算の公開 — `resolve-trials` は内部関数で、
+   `property-result` にも予算が載らない。cl-mcp が
+   `property-trials` + `backend-default-trials` から導出している。
+3. `run-property` の `:timeout`(§48)と trial 単位予算 — 今は実行ホスト側で
+   全体予算だけを扱っている。
+4. **棄却件数と実評価件数の分離**(§72.1)。現在の `property-result-trials` は
+   停止した試行番号であり、前提条件で棄却された生成の数は分からない。
+5. **縮小の完了状態**(完了 / 予算切れ / 中断)と、縮小結果と元の失敗の同一性
+   (§73 D4)。現在は `shrunk-counterexample` の有無しか分からない。
+6. **timeout 後の cleanup と状態復元の契約**(§73 D5)。現在は
+   「復元できた証拠がない」としか言えず、実行ホストが image を不明扱いにする
+   しかない。
+7. 保存反例の直接再検査 API と replay artifact schema(§73 D3)。

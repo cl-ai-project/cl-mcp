@@ -44,6 +44,11 @@
                 #:build-code-find-references-response
                 #:build-inspect-response
                 #:expand-and-build-response)
+  (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-list-response
+                #:spec-symbol-response
+                #:spec-describe-response
+                #:spec-check-response)
   (:import-from #:cl-mcp/src/worker/server
                 #:register-method)
   (:import-from #:cl-mcp/src/worker/init-hook
@@ -382,18 +387,59 @@ Returns a success payload."
 ;;; Public API
 ;;; ---------------------------------------------------------------------------
 
+;;; ---------------------------------------------------------------------------
+;;; worker/spec-symbol, worker/spec-describe, worker/spec-check
+;;; ---------------------------------------------------------------------------
+;;;
+;;; These run in the worker because the cl-spec registry lives here: the
+;;; load-system that defined the properties ran in this image, so this is the
+;;; only process that can see them.  Running them in the parent would answer
+;;; from an empty registry and report "nothing registered" for every symbol.
+
+(defun %handle-spec-list (params)
+  "List the cl-spec specs and properties registered in this worker."
+  (spec-list-response params))
+
+(defun %handle-spec-symbol (params)
+  "Find the cl-spec contracts registered about a symbol."
+  (unless (gethash "symbol" params)
+    (error "symbol is required"))
+  (spec-symbol-response params))
+
+(defun %handle-spec-describe (params)
+  "Read one registered cl-spec definition in full."
+  (unless (and (gethash "kind" params) (gethash "name" params))
+    (error "kind and name are required"))
+  (spec-describe-response params))
+
+(defun %handle-spec-check (params)
+  "Run cl-spec properties and return structured results."
+  (spec-check-response params))
+
 (defun register-all-handlers (server)
-  "Register all worker method handlers on SERVER."
-  (register-method server "worker/eval" #'%handle-eval)
-  (register-method server "worker/load-system" #'%handle-load-system)
-  (register-method server "worker/run-tests" #'%handle-run-tests)
-  (register-method server "worker/code-find" #'%handle-code-find)
-  (register-method server "worker/code-describe" #'%handle-code-describe)
-  (register-method server "worker/code-find-references" #'%handle-code-find-references)
-  (register-method server "worker/inspect-object" #'%handle-inspect-object)
-  (register-method server "worker/macroexpand" #'%handle-macroexpand)
-  (register-method server "worker/set-project-root" #'%handle-set-project-root)
-  (register-method server "worker/init-start" #'handle-init-start)
-  (register-method server "worker/init-status" #'handle-init-status)
-  (log-event :info "worker.handlers.registered" "count" 11)
+  "Register all worker method handlers on SERVER.
+
+The logged count is derived from the table rather than written out beside it.
+It had said 11 since before three more methods were added, so anyone
+diagnosing a missing handler from the logs was told the wrong number -- and a
+hand-maintained count is wrong again the next time a method is added."
+  (loop for (method . handler)
+          in (list (cons "worker/eval" #'%handle-eval)
+                   (cons "worker/load-system" #'%handle-load-system)
+                   (cons "worker/run-tests" #'%handle-run-tests)
+                   (cons "worker/code-find" #'%handle-code-find)
+                   (cons "worker/code-describe" #'%handle-code-describe)
+                   (cons "worker/code-find-references" #'%handle-code-find-references)
+                   (cons "worker/inspect-object" #'%handle-inspect-object)
+                   (cons "worker/macroexpand" #'%handle-macroexpand)
+                   (cons "worker/spec-list" #'%handle-spec-list)
+                   (cons "worker/spec-symbol" #'%handle-spec-symbol)
+                   (cons "worker/spec-describe" #'%handle-spec-describe)
+                   (cons "worker/spec-check" #'%handle-spec-check)
+                   (cons "worker/set-project-root" #'%handle-set-project-root)
+                   (cons "worker/init-start" #'handle-init-start)
+                   (cons "worker/init-status" #'handle-init-status))
+        count (register-method server method handler) into registered
+        finally (log-event :info "worker.handlers.registered"
+                           "count" registered))
   server)

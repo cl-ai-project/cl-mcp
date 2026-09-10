@@ -53,6 +53,14 @@ mallet src/*.lisp src/*/*.lisp tests/*.lisp
 | Code Intel | `src/code.lisp` | Symbol lookup, describe, xref via sb-introspect |
 | Validation | `src/validate.lisp`, `src/parinfer.lisp` | Paren checking, auto-repair |
 | Pool Mgmt | `src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp` | Worker diagnostics and lifecycle |
+| cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Spec/Property listing, discovery and execution (`spec-list` / `spec-symbol` / `spec-describe` / `spec-check`). **Optional tool group `cl-spec`, off by default** |
+
+**Optional tool groups:** a tool declared with `define-tool`'s `:group` stays
+out of `tools/list` and refuses calls until its group is enabled, via
+`MCP_ENABLE_TOOL_GROUPS=cl-spec` in the server's environment or the
+`:tool-groups` argument of any server entry point (`run`, `start-http-server`,
+`serve-tcp`, `start-tcp-server-thread`, `ensure-tcp-server-thread`). cl-mcp has no dependency on
+cl-spec; the adapter resolves it at call time. See `docs/tools.md`.
 
 ## Code Style
 

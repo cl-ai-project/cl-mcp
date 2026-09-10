@@ -9,7 +9,13 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content)
   (:import-from #:cl-mcp/src/tools/registry
-                #:get-tool-handler)
+                #:get-tool-handler
+                #:get-all-tool-descriptors
+                #:disabled-tool-group
+                #:parse-tool-groups
+                #:normalize-tool-group
+                #:tool-group-enabled-p
+                #:*enabled-tool-groups*)
   (:import-from #:cl-mcp/src/state
                 #:make-state))
 
@@ -210,3 +216,49 @@
                          '(content :required t :json-name "content"))))
            (required (cl-mcp/src/tools/define-tool::%collect-required-args specs)))
       (ok (equal required '("path" "content"))))))
+
+;;; Optional tool groups
+
+(define-tool "test-optional-tool"
+  :group :test-only-group
+  :description "A tool in an optional group, for the group mechanism's tests."
+  :args ()
+  :body
+  (result id (make-ht "content" (text-content "optional"))))
+
+(deftest optional-group-is-off-by-default
+  (testing "a grouped tool is registered but hidden"
+    (ok (null (get-tool-handler "test-optional-tool")))
+    (ok (eq :test-only-group (disabled-tool-group "test-optional-tool")))
+    (testing "and it stays out of the descriptor list"
+      (ok (not (find "test-optional-tool" (get-all-tool-descriptors)
+                     :key (lambda (d) (gethash "name" d)) :test #'string=)))))
+  (testing "an ungrouped tool is unaffected"
+    (ok (get-tool-handler "test-echo"))
+    (ok (null (disabled-tool-group "test-echo")))))
+
+(deftest optional-group-appears-once-enabled
+  (testing "switching the group on reaches the handler and the listing"
+    (let ((*enabled-tool-groups* (list "TEST-ONLY-GROUP")))
+      (ok (get-tool-handler "test-optional-tool"))
+      (ok (null (disabled-tool-group "test-optional-tool")))
+      (ok (find "test-optional-tool" (get-all-tool-descriptors)
+                :key (lambda (d) (gethash "name" d)) :test #'string=)))))
+
+(deftest tool-group-names-meet-as-strings
+  (testing "a keyword and the text of an environment variable agree"
+    (ok (string= "CL-SPEC" (normalize-tool-group :cl-spec)))
+    (ok (string= "CL-SPEC" (normalize-tool-group "cl-spec")))
+    (ok (null (normalize-tool-group nil))))
+  (testing "the environment value parses on commas and spaces"
+    (ok (equal '("CL-SPEC") (parse-tool-groups "cl-spec")))
+    (ok (equal '("CL-SPEC" "OTHER") (parse-tool-groups "cl-spec, other")))
+    (ok (equal '("CL-SPEC" "OTHER") (parse-tool-groups " cl-spec  other ")))
+    (ok (null (parse-tool-groups "")))
+    (ok (null (parse-tool-groups nil))))
+  (testing "an unregistered group name matches nothing rather than interning"
+    (let ((*enabled-tool-groups* (list "NO-SUCH-GROUP-XYZ")))
+      (ok (not (tool-group-enabled-p :test-only-group))))
+    ;; The point: naming a group in configuration must not put a symbol in
+    ;; the image on that value's say-so.
+    (ok (null (find-symbol "NO-SUCH-GROUP-XYZ" "KEYWORD")))))

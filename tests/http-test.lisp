@@ -476,3 +476,34 @@ Uses Connection: close to avoid keep-alive hanging."
           "Should contain jsonrpc version")
       (ok (search "\"error\"" json)
           "Should contain error object"))))
+
+(deftest start-http-server-applies-tool-groups
+  (testing "the tool-groups keyword reaches the registry"
+    ;; cl-mcp:run is not the only way a server is started, and the optional
+    ;; group would otherwise be reachable from the environment alone for
+    ;; anyone starting the HTTP transport programmatically.
+    (if (not (http-port-available-p))
+        (ok t "port unavailable")
+        (let ((groups-symbol (find-symbol "*ENABLED-TOOL-GROUPS*"
+                                          "CL-MCP/SRC/TOOLS/REGISTRY")))
+          (let ((previous (symbol-value groups-symbol)))
+            (unwind-protect
+                 (progn
+                   (setf (symbol-value groups-symbol) nil)
+                   (unwind-protect
+                        (progn
+                          (start-http-server :host "127.0.0.1" :port 0 :token nil
+                                             :worker-pool nil
+                                             :tool-groups (list :cl-spec))
+                          (ok (equal '("CL-SPEC") (symbol-value groups-symbol))))
+                     (stop-http-server))
+                   (testing "and omitting it leaves the setting alone"
+                     (setf (symbol-value groups-symbol) (list "SOMETHING"))
+                     (unwind-protect
+                          (progn
+                            (start-http-server :host "127.0.0.1" :port 0
+                                               :token nil :worker-pool nil)
+                            (ok (equal '("SOMETHING")
+                                       (symbol-value groups-symbol))))
+                       (stop-http-server))))
+              (setf (symbol-value groups-symbol) previous)))))))

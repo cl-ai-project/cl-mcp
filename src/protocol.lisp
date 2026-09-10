@@ -15,7 +15,8 @@
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/tools/registry
                 #:get-all-tool-descriptors
-                #:get-tool-handler)
+                #:get-tool-handler
+                #:disabled-tool-group)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:result
@@ -310,9 +311,21 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
          (local (and name (%normalize-tool-alias name))))
     (when name (log-event :debug "tools.call" "name" name "local" local))
     (let ((handler (and local (get-tool-handler local))))
-      (if handler
-          (funcall handler state id args)
-          (rpc-error id -32601 (format nil "Tool ~A not found" name))))))
+      (cond
+        (handler (funcall handler state id args))
+        ;; A tool that exists but is switched off is a setting to change, not
+        ;; a name to correct, and saying "not found" sends the caller looking
+        ;; for a spelling mistake that is not there.
+        ((and local (disabled-tool-group local))
+         (let ((group (string-downcase
+                       (string (disabled-tool-group local)))))
+           (rpc-error id -32601
+                      (format nil "Tool ~A belongs to the optional tool group ~
+'~A', which is not enabled in this server. Enable it by setting ~
+MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
+:tool-groups (list :~A) to cl-mcp:run."
+                              name group group group))))
+        (t (rpc-error id -32601 (format nil "Tool ~A not found" name)))))))
 
 (defun handle-request (state id method params)
   (cond

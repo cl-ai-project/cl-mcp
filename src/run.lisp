@@ -5,6 +5,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:process-json-line #:make-state)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:%warn-if-init-without-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
@@ -22,7 +24,7 @@
                                 (:in stream) (:out stream)
                                 (:host string) (:port (or integer null))
                                 (:accept-once t) (:on-listening function)
-                                (:worker-pool t))
+                                (:worker-pool t) (:tool-groups t))
                           (values boolean &optional))
                 run))
 
@@ -115,15 +117,28 @@ no such binding."
 
 (defun run (&key (transport :stdio) (in *standard-input*) (out *standard-output*)
                  (host "127.0.0.1") (port 0) (accept-once t) on-listening
-                 (worker-pool nil worker-pool-supplied-p))
+                 (worker-pool nil worker-pool-supplied-p)
+                 (tool-groups nil tool-groups-supplied-p))
   "Start the MCP server loop. For :stdio, reads newline-delimited JSON from IN
 and writes responses to OUT. Returns T when input is exhausted (EOF).
 
 WORKER-POOL controls process isolation: T enables the worker pool (default),
 NIL runs all tools in-process.  When not supplied, the current value of
-*use-worker-pool* is used (which defaults to T unless MCP_NO_WORKER_POOL=1)."
+*use-worker-pool* is used (which defaults to T unless MCP_NO_WORKER_POOL=1).
+
+TOOL-GROUPS switches on optional tool groups, as a list of keywords or
+strings, for example (list :cl-spec).  Optional groups are off by default: a
+tool that only makes sense alongside another system should not cost every
+other user a line in tools/list and a description in the model's context.
+When not supplied, the current value of *ENABLED-TOOL-GROUPS* is used, which
+comes from MCP_ENABLE_TOOL_GROUPS -- the same arrangement WORKER-POOL has with
+MCP_NO_WORKER_POOL, and the one that matters in practice, since an MCP client
+launches the server with a command and an environment rather than a Lisp
+call."
   (when worker-pool-supplied-p
     (setf *use-worker-pool* worker-pool))
+  (when tool-groups-supplied-p
+    (set-enabled-tool-groups tool-groups))
   (%warn-if-init-without-pool *use-worker-pool*)
   (ecase transport
     (:stdio

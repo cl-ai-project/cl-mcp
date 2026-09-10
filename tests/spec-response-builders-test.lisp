@@ -1,0 +1,574 @@
+;;;; tests/spec-response-builders-test.lisp
+;;;;
+;;;; The cl-spec tool responses, checked for the two things that actually
+;;;; reach a client: the structured fields, and the content text.  An MCP
+;;;; client renders only content[].text, so anything a caller must not miss --
+;;;; a zero-property selection, a timeout, a definition mismatch -- has to be
+;;;; in the text as well as in the payload.
+
+(defpackage #:cl-mcp/tests/spec-response-builders-test
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
+  (:import-from #:yason
+                #:false)
+  (:import-from #:cl-mcp/src/tools/spec-response-builders
+                #:build-spec-list-response
+                #:build-spec-symbol-response
+                #:build-spec-describe-response
+                #:build-spec-check-response))
+
+(in-package #:cl-mcp/tests/spec-response-builders-test)
+
+(defun first-text (response)
+  "Pull the text of the first content part out of RESPONSE, or NIL."
+  (let ((content (gethash "content" response)))
+    (when (and (vectorp content) (plusp (length content)))
+      (gethash "text" (aref content 0)))))
+
+(defparameter *environment*
+  (list :cl-spec-loaded t :cl-spec-status :ok :cl-spec-version "0.1.0"
+        :cl-spec-system-directory "/tmp/cl-spec/"
+        :generator-backend "CL-SPEC/SRC/BACKENDS/CHECK-IT:CHECK-IT-BACKEND"
+        :backend-available t :registry "#<HASH-TABLE-REGISTRY>"
+        :missing nil :lisp "SBCL 2.4.0")
+  "A healthy environment plist, shared by the cases that are not about it.")
+
+(defun %symbol-data (package name)
+  "Return the symbol plist for PACKAGE and NAME."
+  (list :package package :name name
+        :qualified (format nil "~A::~A" package name)))
+
+(deftest not-loaded-response-says-what-to-load
+  (testing "the cl-spec-not-loaded answer is actionable in the text itself"
+    (let* ((response (build-spec-symbol-response
+                      (list :status :cl-spec-not-loaded
+                            :message "cl-spec is not loaded ... load-system ..."
+                            :environment (list :cl-spec-loaded nil
+                                               :cl-spec-status :not-loaded
+                                               :lisp "SBCL 2.4.0"))))
+           (text (first-text response)))
+      (ok (string= "cl-spec-not-loaded" (gethash "status" response)))
+      (ok (search "load-system" text)))))
+
+(deftest symbol-response-lists-properties-in-text
+  (testing "the property names reach the text, not only the payload"
+    (let* ((response (build-spec-symbol-response
+                      (list :status :ok
+                            :symbol (%symbol-data "PROBE" "ADD")
+                            :runtime (list :type "function" :arglist "(A B)"
+                                           :documentation nil
+                                           :source-file "probe.lisp"
+                                           :source-line 42)
+                            :registry (list :spec nil :function-spec nil
+                                            :property nil
+                                            :properties-about
+                                            (list (%symbol-data "PROBE"
+                                                                "ADD-COMMUTES")))
+                            :properties
+                            (list (list :name (%symbol-data "PROBE" "ADD-COMMUTES")
+                                        :kind :commutativity
+                                        :tags (list :math)
+                                        :documentation "Addition commutes."
+                                        :definition-digest "a41f9c2b7d0e5518"
+                                        :body-forms 1 :body-omitted t
+                                        :shrink-enabled t))
+                            :nothing-registered nil
+                            :notes (list (concatenate
+                                          'string
+                                          "properties_about lists direct "
+                                          "(:about ...) registrations only"))
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (string= "ok" (gethash "status" response)))
+      (ok (search "PROBE::ADD-COMMUTES" text))
+      (ok (search "commutativity" text))
+      (ok (search "a41f9c2b7d0e5518" text))
+      (testing "and the omission of the body is stated"
+        (ok (search "spec-describe" text)))
+      (testing "the payload keeps package and name apart"
+        (ok (string= "PROBE" (gethash "package" (gethash "symbol" response))))
+        (ok (string= "ADD" (gethash "name" (gethash "symbol" response))))))))
+
+(deftest symbol-response-nothing-registered
+  (testing "an empty registry answer says it is not a clean bill of health"
+    (let* ((response (build-spec-symbol-response
+                      (list :status :ok
+                            :symbol (%symbol-data "PROBE" "HELPER")
+                            :runtime nil
+                            :runtime-unavailable-reason "not fbound"
+                            :registry (list :spec nil :function-spec nil
+                                            :property nil :properties-about nil)
+                            :properties nil
+                            :nothing-registered t
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (eq t (gethash "nothing_registered" response)))
+      (ok (search "Nothing is registered" text))
+      (ok (search "not evidence" text)))))
+
+(deftest check-response-zero-properties-warns-in-text
+  (testing "a zero selection is loud in the text, not only in a status field"
+    (let* ((response (build-spec-check-response
+                      (list :status :no-properties
+                            :verified nil
+                            :selection (list :mode "about"
+                                             :requested (list :symbol (%symbol-data
+                                                                       "PROBE" "HELPER"))
+                                             :selected nil :count 0
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results nil
+                            :counts (list :selected 0 :passed 0 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :message (concatenate
+                                      'string
+                                      "0 properties selected -- this is "
+                                      "NOT a successful verification.")
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (string= "no-properties" (gethash "status" response)))
+      (ok (eq yason:false (gethash "verified" response)))
+      (ok (search "NO PROPERTIES" text))
+      (ok (search "NOT a successful verification" text)))))
+
+(deftest check-response-failure-shows-both-counterexamples
+  (testing "original and shrunk arguments both reach the text"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified nil
+                            :selection (list :mode "explicit"
+                                             :selected (list (%symbol-data
+                                                              "PROBE" "ADD-IS-WRONG"))
+                                             :count 1
+                                             :source "explicit property argument"
+                                             :coverage "Only the property named.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "ADD-IS-WRONG")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "3963993791726803706"
+                                        :profile :normal
+                                        :counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "A")
+                                                    :value (list :printed "68"
+                                                                 :printed-complete t
+                                                                 :omitted-chars 0
+                                                                 :type "integer"
+                                                                 :object-id nil)))
+                                        :shrunk-counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "A")
+                                                    :value (list :printed "0"
+                                                                 :printed-complete t
+                                                                 :omitted-chars 0
+                                                                 :type "integer"
+                                                                 :object-id nil)))
+                                        :counterexample-status :present
+                                        :shrink-status :present
+                                        :shrink-note "Backend-searched reduction."
+                                        :definition-digest "a41f9c2b7d0e5518"
+                                        :definition-digest-complete t
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :profile :normal :timeout-seconds 60
+                            :thread-leaked nil :elapsed 0.02
+                            :reproduction-faithful :not-checked
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "FAILED" text))
+      (ok (search "A = 68" text))
+      (ok (search "A = 0" text))
+      (ok (search "3963993791726803706" text))
+      (testing "and the replay call is spelled out"
+        (ok (search "spec-check" text))
+        (ok (search "expect_definition_digest" text)))
+      (testing "seed stays a string in the payload"
+        (let ((result (aref (gethash "results" response) 0)))
+          (ok (stringp (gethash "seed" result))))))))
+
+(deftest check-response-timeout-is-not-a-pass
+  (testing "a timeout is named in the text and never counted as passing"
+    (let* ((response (build-spec-check-response
+                      (list :status :incomplete
+                            :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :selected (list (%symbol-data
+                                                              "PROBE" "SLOW"))
+                                             :source "explicit property argument"
+                                             :coverage "Only the property named.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "SLOW")
+                                        :status :timeout
+                                        :timeout-seconds 0.3
+                                        :thread-leaked t
+                                        :counterexample-status :unavailable
+                                        :counterexample-unavailable-reason
+                                        "the run did not reach a verdict within its deadline"
+                                        :shrink-status :unavailable
+                                        :trials (list :budget 100
+                                                      :budget-source "backend-default")
+                                        :message "could not be stopped ... pool-kill-worker ..."))
+                            :counts (list :selected 1 :passed 0 :failed 0
+                                          :errored 0 :timed-out 1 :not-run 0)
+                            :thread-leaked t
+                            :worker-reuse :unsafe
+                            :worker-reuse-message
+                            "still executing ... use pool-kill-worker ..."
+                            :verification-gaps (list :timeout)
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (string= "incomplete" (gethash "status" response)))
+      (ok (eq yason:false (gethash "verified" response)))
+      (ok (search "TIMEOUT" (string-upcase text)))
+      (ok (search "pool-kill-worker" text))
+      (testing "and the headline separates it from a falsified property"
+        (ok (search "NOT VERIFIED" text))
+        (ok (not (search "FAILED" text)))))))
+
+(deftest check-response-replays-the-failure-not-the-first-run
+  (testing "the replay line names the property that did not pass"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified nil
+                            :selection (list :mode "about" :count 2
+                                             :selected (list (%symbol-data "PROBE" "GOOD")
+                                                             (%symbol-data "PROBE" "BAD"))
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-digest "aaaaaaaaaaaaaaaa"
+                                        :definition-match :not-checked)
+                                  (list :property (%symbol-data "PROBE" "BAD")
+                                        :status :failed
+                                        :trials (list :executed 3 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "222" :profile :normal
+                                        :definition-digest "bbbbbbbbbbbbbbbb"
+                                        :definition-match :not-checked))
+                            :counts (list :selected 2 :passed 1 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "property=PROBE::BAD" text))
+      (ok (search "seed=222" text))
+      (testing "and not the one that already holds"
+        (ok (not (search "seed=111" text)))))))
+
+(deftest check-response-distinguishes-empty-from-unavailable
+  (testing "a zero-argument failure and a timeout do not read the same"
+    (let* ((response (build-spec-check-response
+                      (list :status :incomplete
+                            :verified nil
+                            :selection (list :mode "about" :count 2
+                                             :selected nil
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "NO-ARGS")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :seed "7" :profile :normal
+                                        :counterexample nil
+                                        :counterexample-status :present
+                                        :shrunk-counterexample nil
+                                        :shrink-status :present
+                                        :definition-match :not-checked)
+                                  (list :property (%symbol-data "PROBE" "SLOW")
+                                        :status :timeout
+                                        :trials (list :budget 100)
+                                        :counterexample nil
+                                        :counterexample-status :unavailable
+                                        :counterexample-unavailable-reason
+                                        "the run did not reach a verdict within its deadline"
+                                        :shrunk-counterexample nil
+                                        :shrink-status :unavailable
+                                        :definition-match :not-checked))
+                            :counts (list :selected 2 :passed 0 :failed 1
+                                          :errored 0 :timed-out 1 :not-run 0)
+                            :worker-reuse :unknown
+                            :worker-reuse-message "state unknown; replace the worker"
+                            :verification-gaps (list :timeout
+                                                     :rejection-counts-unmeasured)
+                            :environment *environment*)))
+           (text (first-text response))
+           (results (gethash "results" response)))
+      (testing "the empty counterexample is reported as present, not missing"
+        (ok (string= "present" (gethash "counterexample_status" (aref results 0))))
+        (ok (search "generates no arguments" text)))
+      (testing "the timeout says why there is nothing to show"
+        (ok (string= "unavailable"
+                     (gethash "counterexample_status" (aref results 1))))
+        (ok (search "UNAVAILABLE" text)))
+      (testing "the worker is not silently assumed reusable"
+        (ok (string= "unknown" (gethash "worker_reuse" response)))
+        (ok (search "worker_reuse: unknown" text)))
+      (testing "and the gaps are named"
+        (ok (search "rejection-counts-unmeasured" text))))))
+
+(deftest check-response-carries-a-schema-version
+  (testing "every response names the version of the shape it is in"
+    (let ((response (build-spec-check-response
+                     (list :status :no-properties :verified nil
+                           :selection (list :mode "about" :count 0
+                                            :source "s" :coverage "c")
+                           :results nil
+                           :counts (list :selected 0 :passed 0 :failed 0
+                                         :errored 0 :timed-out 0 :not-run 0)
+                           :message "0 properties selected"
+                           :environment *environment*))))
+      (ok (stringp (gethash "schema_version" response))))))
+
+(deftest value-response-separates-complete-from-restorable
+  (testing "complete text is not the same claim as readable-back text"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :counterexample-status :present
+                                        :counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "OBJ")
+                                                    :value (list :printed "#<THING {1004}>"
+                                                                 :printed-complete t
+                                                                 :omitted-chars 0
+                                                                 :restorable nil
+                                                                 :print-level 12
+                                                                 :print-length 200
+                                                                 :type "thing"
+                                                                 :object-id 7)))
+                                        :shrink-status :none
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (value (gethash "value"
+                           (aref (gethash "counterexample"
+                                          (aref (gethash "results" response) 0))
+                                 0))))
+      (ok (eq t (gethash "printed_complete" value)))
+      (ok (eq yason:false (gethash "restorable" value)))
+      (ok (= 12 (gethash "print_level" value)))
+      (ok (= 7 (gethash "object_id" value))))))
+
+(deftest check-response-renders-every-status-in-the-tally
+  (testing "a status with no field of its own still reaches the summary line"
+    (let* ((response (build-spec-check-response
+                      (list :status :incomplete :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :generator-error
+                                        :trials (list :budget 100)
+                                        :counterexample-status :unavailable
+                                        :shrink-status :unavailable
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0
+                                          :other 1
+                                          :by-status '((:generator-error . 1)))
+                            :environment *environment*)))
+           (text (first-text response))
+           (counts (gethash "counts" response)))
+      (ok (= 1 (gethash "other" counts)))
+      (ok (= 1 (gethash "generator-error" (gethash "by_status" counts))))
+      (testing "and the text does not say zero of everything"
+        (ok (search "1 generator-error" text))
+        (ok (not (search "0 errored" text)))))))
+
+(deftest check-response-not-checked-is-not-unfaithful
+  (testing "an absent reproduction verdict is not-checked"
+    (let ((response (build-spec-check-response
+                     (list :status :completed :verified t
+                           :selection (list :mode "explicit" :count 1
+                                            :source "s" :coverage "c")
+                           :results
+                           (list (list :property (%symbol-data "PROBE" "P")
+                                       :status :passed
+                                       :trials (list :executed 100 :budget 100)
+                                       :counterexample-status :not-applicable
+                                       :shrink-status :not-applicable
+                                       :definition-match :not-checked))
+                           :counts (list :selected 1 :passed 1 :failed 0
+                                         :errored 0 :timed-out 0 :not-run 0
+                                         :other 0 :by-status '((:passed . 1)))
+                           :environment *environment*))))
+      (ok (string= "not-checked" (gethash "reproduction_faithful" response)))))
+  (testing "an unreadable digest is unknown, and a real disagreement unfaithful"
+    (flet ((faithful (value)
+             (gethash "reproduction_faithful"
+                      (build-spec-check-response
+                       (list :status :completed :verified nil
+                             :selection (list :mode "explicit" :count 1
+                                              :source "s" :coverage "c")
+                             :results nil
+                             :counts (list :selected 0 :passed 0 :failed 0
+                                           :errored 0 :timed-out 0 :not-run 0
+                                           :other 0 :by-status nil)
+                             :reproduction-faithful value
+                             :environment *environment*)))))
+      (ok (string= "unknown" (faithful :unknown)))
+      (ok (string= "unfaithful" (faithful :false)))
+      (ok (string= "faithful" (faithful :true))))))
+
+(deftest value-response-carries-no-truncation-note
+  (testing "the printed value is the value, not the sink's commentary"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed :verified nil
+                            :selection (list :mode "explicit" :count 1
+                                             :source "s" :coverage "c")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "P")
+                                        :status :failed
+                                        :trials (list :executed 1 :budget 100)
+                                        :counterexample-status :present
+                                        :counterexample
+                                        (list (list :variable (%symbol-data "PROBE" "V")
+                                                    :value (list :printed "(1 2 3"
+                                                                 :printed-complete nil
+                                                                 :omitted-chars 900
+                                                                 :restorable nil
+                                                                 :print-level 12
+                                                                 :print-length 200
+                                                                 :type "cons"
+                                                                 :object-id 3)))
+                                        :shrink-status :none
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 0 :failed 1
+                                          :errored 0 :timed-out 0 :not-run 0
+                                          :other 0 :by-status '((:failed . 1)))
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "V = (1 2 3" text))
+      (testing "the whole value sits on the counterexample line"
+        (let* ((start (search "counterexample:" text))
+               (end (or (position #\Newline text :start start) (length text)))
+               (line (subseq text start end)))
+          (ok (search "V = (1 2 3" line)))))))
+
+(deftest describe-response-renders-the-spec-tree
+  (testing "kind=spec shows the normalized IR tree the description promises"
+    ;; The tree was reaching the payload and not the text, which for a client
+    ;; that renders only content[].text is the same as not existing.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "spec"
+                            :name (%symbol-data "PROBE" "SMALL-INT")
+                            :spec (list :kind :and
+                                        :name (%symbol-data "PROBE" "SMALL-INT")
+                                        :children
+                                        (list (list :kind :type :type "INTEGER")
+                                              (list :kind :range :min "0"
+                                                    :max "100")))
+                            :source-form "(AND INTEGER (RANGE 0 100))"
+                            :source-form-complete t
+                            :source-form-omitted-chars 0
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "normalized IR tree" text))
+      (ok (search "and" text))
+      (ok (search "INTEGER" text))
+      (ok (search "[0, 100]" text)))))
+
+(deftest describe-response-shows-tags-trials-and-shrinking
+  (testing "the facts the profile error message points at are actually shown"
+    ;; %RESOLVE-PROFILE tells a caller to look at the property's trials table
+    ;; "see spec-describe", so spec-describe has to show it rather than leave
+    ;; it to whether the raw source form survived max_chars.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "property"
+                            :name (%symbol-data "PROBE" "P")
+                            :property-kind :invariant
+                            :tags (list :bounds :demo)
+                            :trials-table "(:NORMAL 200 :SMOKE 10)"
+                            :shrink-enabled nil
+                            :targets nil :arguments nil
+                            :body "((= 1 1))" :body-complete t
+                            :body-omitted-chars 0
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "tags: BOUNDS, DEMO" text))
+      (ok (search ":NORMAL 200 :SMOKE 10" text))
+      (testing "and shrinking says which of the two it is"
+        (ok (search "shrinking: disabled" text))))))
+
+(deftest describe-response-does-not-claim-a-file-that-is-nil
+  (testing "a REPL definition is not reported as defined in NIL"
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "property"
+                            :name (%symbol-data "PROBE" "P")
+                            :property-kind :invariant
+                            :targets nil :arguments nil
+                            :body "((= 1 1))" :body-complete t
+                            :body-omitted-chars 0
+                            :source-location (list :file nil :package "PROBE")
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (not (search "defined in NIL" text)))
+      (ok (search "defined at a REPL, in package PROBE" text)))))
+
+(deftest describe-response-marks-truncation
+  (testing "a cut body says so in the text"
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "property"
+                            :name (%symbol-data "PROBE" "ADD-COMMUTES")
+                            :property-kind :commutativity
+                            :tags nil :targets nil :documentation nil
+                            :arguments nil
+                            :body "((= (ADD" :body-complete nil
+                            :body-omitted-chars 31
+                            :source-form "(DEFPROPERTY" :source-form-complete nil
+                            :source-form-omitted-chars 40
+                            :definition-digest "a41f9c2b7d0e5518"
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (eq yason:false (gethash "body_complete" response)))
+      (ok (search "truncated" text))
+      (ok (search "31" text)))))
+
+(deftest list-response-omits-a-kind-that-was-not-requested
+  (testing "the header names only what was counted"
+    (flet ((text-for (kind specs properties)
+             (first-text
+              (build-spec-list-response
+               (list :status :ok :kind kind
+                     :specs (when specs (list (%symbol-data "PROBE" "S")))
+                     :properties nil
+                     :counts (list :specs specs :properties properties)
+                     :truncated nil :limit 200
+                     :filters (list :tag-resolved :not-requested)
+                     :coverage "coverage note"
+                     :environment *environment*)))))
+      (let ((properties-only (text-for "properties" nil 3)))
+        (ok (search "3 properties" properties-only))
+        (ok (not (search "spec" (subseq properties-only 0
+                                        (position #\Newline properties-only))))))
+      (let ((specs-only (text-for "specs" 2 nil)))
+        (ok (search "2 specs" specs-only))
+        (ok (not (search "propert" (subseq specs-only 0
+                                           (position #\Newline specs-only))))))
+      (testing "while a requested kind that matched nothing still says zero"
+        (let ((both (text-for "both" 0 0)))
+          (ok (search "0 specs" both))
+          (ok (search "0 properties" both))))))
+  (testing "the payload leaves an uncounted kind null rather than zero"
+    (let* ((response (build-spec-list-response
+                      (list :status :ok :kind "properties"
+                            :specs nil :properties nil
+                            :counts (list :specs nil :properties 0)
+                            :truncated nil :limit 200
+                            :filters (list :tag-resolved :not-requested)
+                            :coverage "coverage note"
+                            :environment *environment*)))
+           (counts (gethash "counts" response)))
+      (ok (null (gethash "specs" counts)))
+      (ok (eql 0 (gethash "properties" counts))))))

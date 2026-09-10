@@ -1,0 +1,214 @@
+;;;; tests/spec-integration-test.lisp
+;;;;
+;;;; The adapter against a real cl-spec: fetch the contract, take a real
+;;;; counterexample, re-run from the seed, and see a redefinition reflected.
+;;;;
+;;;; Skipped, loudly, when cl-spec cannot be resolved.  cl-mcp does not depend
+;;;; on cl-spec and its suite must stay green without it -- but a silent skip
+;;;; would let this file rot unnoticed, so the skip says why.
+
+(defpackage #:cl-mcp/tests/spec-integration-test
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok #:skip)
+  (:import-from #:yason
+                #:false)
+  (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-symbol-response
+                #:spec-describe-response
+                #:spec-check-response)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht))
+
+(in-package #:cl-mcp/tests/spec-integration-test)
+
+(defvar *fixture-registry* nil
+  "The registry the fixture definitions were registered in, once loaded.")
+
+(defparameter +skip-reason+
+  "cl-spec/check-it could not be loaded in this image. The adapter's
+cl-spec-facing behaviour is covered by tests/spec-adapter-report-test.lisp
+with stub API handles; this file needs the real system."
+  "Printed instead of running, so an absent cl-spec is visible rather than silent.")
+
+(defun %cl-spec-available-p ()
+  "Return true when cl-spec/check-it can be loaded into this image."
+  (handler-case
+      (progn
+        (unless (find-package "CL-SPEC")
+          (let ((*standard-output* (make-broadcast-stream))
+                (*error-output* (make-broadcast-stream)))
+            (asdf:load-system "cl-spec/check-it")))
+        (and (find-package "CL-SPEC")
+             (symbol-value (find-symbol "*GENERATOR-BACKEND*" "CL-SPEC"))
+             t))
+    (error () nil)))
+
+(defun %registry-symbol ()
+  "Return the CL-SPEC:*REGISTRY* symbol."
+  (find-symbol "*REGISTRY*" "CL-SPEC"))
+
+(defun %ensure-fixture ()
+  "Load the fixture into a registry of its own, once.
+
+The global registry is swapped rather than rebound: the run thread a deadline
+spawns does not inherit dynamic bindings, and the adapter reads the registry
+on the calling thread precisely so it can hand it across.  Swapping keeps the
+two paths agreeing whichever one a test exercises."
+  (unless *fixture-registry*
+    (let* ((registry-symbol (%registry-symbol))
+           (make (find-symbol "MAKE-HASH-TABLE-REGISTRY" "CL-SPEC"))
+           (previous (symbol-value registry-symbol))
+           (fresh (funcall make)))
+      (setf (symbol-value registry-symbol) fresh)
+      (unwind-protect
+           (load (merge-pathnames "tests/fixtures/spec-fixture.lisp"
+                                  (asdf:system-source-directory "cl-mcp")))
+        (setf (symbol-value registry-symbol) previous))
+      (setf *fixture-registry* fresh))))
+
+(defmacro with-fixture-registry (&body body)
+  "Run BODY with the fixture's registry installed as CL-SPEC:*REGISTRY*."
+  `(let* ((registry-symbol (%registry-symbol))
+          (previous (symbol-value registry-symbol)))
+     (setf (symbol-value registry-symbol) *fixture-registry*)
+     (unwind-protect (progn ,@body)
+       (setf (symbol-value registry-symbol) previous))))
+
+(defun %fixture-name (name)
+  "Return the qualified designator for a fixture symbol named NAME."
+  (format nil "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE::~A" name))
+
+(defun %first-result (response)
+  "Return the first per-property result of a spec-check RESPONSE."
+  (aref (gethash "results" response) 0))
+
+(deftest cl-spec-adapter-discovers-and-describes
+  (if (not (%cl-spec-available-p))
+      (skip +skip-reason+)
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (testing "discovery finds the properties registered about CLAMP"
+            (let* ((response (spec-symbol-response
+                              (make-ht "symbol" (%fixture-name "CLAMP"))))
+                   (properties (gethash "properties" response)))
+              (ok (string= "ok" (gethash "status" response)))
+              (ok (= 3 (length properties)))
+              (ok (string= "CLAMP" (gethash "name" (gethash "symbol" response))))
+              (testing "the runtime join carries the signature"
+                (ok (search "VALUE"
+                            (string-upcase
+                             (or (gethash "arglist" (gethash "runtime" response))
+                                 "")))))
+              (testing "and each body is omitted with a pointer to the detail"
+                (ok (every (lambda (property)
+                             (eq t (gethash "body_omitted" property)))
+                           properties)))))
+
+          (testing "detail returns the body the listing omitted"
+            (let ((response (spec-describe-response
+                             (make-ht "kind" "property"
+                                      "name" (%fixture-name "CLAMP-IS-IDEMPOTENT")))))
+              (ok (string= "ok" (gethash "status" response)))
+              (ok (search "CLAMP" (string-upcase (gethash "body" response))))
+              (ok (eq t (gethash "body_complete" response)))))))))
+
+(deftest cl-spec-adapter-runs-and-replays
+  (if (not (%cl-spec-available-p))
+      (skip +skip-reason+)
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (testing "a true property passes and is verified"
+            (let ((response (spec-check-response
+                             (make-ht "property"
+                                      (%fixture-name "CLAMP-IS-WITHIN-BOUNDS")))))
+              (ok (string= "completed" (gethash "status" response)))
+              (ok (eq t (gethash "verified" response)))
+              (let ((result (%first-result response)))
+                (ok (string= "passed" (gethash "status" result)))
+                (ok (= 100 (gethash "budget" (gethash "trials" result)))))))
+
+          (let (seed digest)
+            (testing "a false property yields a real counterexample"
+              (let* ((response (spec-check-response
+                                (make-ht "property"
+                                         (%fixture-name "CLAMP-IS-WRONG-ON-PURPOSE"))))
+                     (result (%first-result response)))
+                (ok (string= "completed" (gethash "status" response)))
+                (ok (eq yason:false (gethash "verified" response)))
+                (ok (string= "failed" (gethash "status" result)))
+                (ok (plusp (length (gethash "counterexample" result))))
+                (setf seed (gethash "seed" result)
+                      digest (gethash "definition_digest" result))
+                (testing "and the seed is text rather than a JSON number"
+                  (ok (stringp seed))
+                  (ok (every #'digit-char-p seed)))))
+
+            (testing "the same seed reproduces the same counterexample"
+              (let* ((response (spec-check-response
+                                (make-ht "property"
+                                         (%fixture-name "CLAMP-IS-WRONG-ON-PURPOSE")
+                                         "seed" seed
+                                         "profile" "normal"
+                                         "expect_definition_digest" digest)))
+                     (result (%first-result response)))
+                (ok (string= "failed" (gethash "status" result)))
+                (ok (string= seed (gethash "seed" result)))
+                (ok (string= "match" (gethash "definition_match" result)))
+                (ok (string= "faithful"
+                             (gethash "reproduction_faithful" response)))))
+
+            (testing "a digest from a different definition is reported, not ignored"
+              (let ((response (spec-check-response
+                               (make-ht "property"
+                                        (%fixture-name "CLAMP-IS-WRONG-ON-PURPOSE")
+                                        "seed" seed
+                                        "profile" "normal"
+                                        "expect_definition_digest" "0000000000000000"))))
+                (ok (string= "unfaithful"
+                             (gethash "reproduction_faithful" response)))
+                (ok (string= "mismatch"
+                             (gethash "definition_match"
+                                      (%first-result response)))))))
+
+          (testing "selecting by symbol runs all three and is not verified"
+            (let ((response (spec-check-response
+                             (make-ht "symbol" (%fixture-name "CLAMP")))))
+              (ok (= 3 (gethash "count" (gethash "selection" response))))
+              (ok (eq yason:false (gethash "verified" response)))
+              (ok (= 1 (gethash "failed" (gethash "counts" response))))
+              (ok (= 2 (gethash "passed" (gethash "counts" response))))))
+
+          (testing "a symbol with nothing registered is not a clean bill"
+            (let ((response (spec-check-response (make-ht "symbol" "cl:car"))))
+              (ok (string= "no-properties" (gethash "status" response)))
+              (ok (eq yason:false (gethash "verified" response)))))))))
+
+(deftest cl-spec-adapter-sees-a-redefinition
+  (if (not (%cl-spec-available-p))
+      (skip +skip-reason+)
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (testing "re-registering a property changes its digest and its verdict"
+            (let* ((before (spec-check-response
+                            (make-ht "property"
+                                     (%fixture-name "CLAMP-IS-WRONG-ON-PURPOSE"))))
+                   (before-result (%first-result before))
+                   (before-digest (gethash "definition_digest" before-result)))
+              (ok (string= "failed" (gethash "status" before-result)))
+              ;; Re-register the property as a statement that holds, exactly
+              ;; as editing the file and loading it again would.
+              (funcall (find-symbol "REGISTER-CORRECTED-PROPERTY"
+                                    "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+              (let* ((after (spec-check-response
+                             (make-ht "property"
+                                      (%fixture-name "CLAMP-IS-WRONG-ON-PURPOSE"))))
+                     (after-result (%first-result after)))
+                (ok (string= "passed" (gethash "status" after-result)))
+                (ok (eq t (gethash "verified" after)))
+                (testing "and the digest moved, so an old seed is not faithful"
+                  (ok (not (string= before-digest
+                                    (gethash "definition_digest" after-result))))))))))))

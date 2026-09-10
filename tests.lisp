@@ -57,6 +57,12 @@
   (:import-from #:cl-mcp/tests/pool-kill-worker-test)
   (:import-from #:cl-mcp/tests/pool-init-config-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test)
+  (:import-from #:cl-mcp/tests/spec-adapter-core-test)
+  (:import-from #:cl-mcp/tests/spec-adapter-report-test)
+  (:import-from #:cl-mcp/tests/spec-response-builders-test)
+  (:import-from #:cl-mcp/tests/spec-tools-test)
+  (:import-from #:cl-mcp/tests/spec-integration-test)
+  (:import-from #:cl-mcp/tests/spec-worker-test)
   (:import-from #:cl-mcp/tests/lisp-macroexpand-test))
 
 (in-package #:cl-mcp/tests)
