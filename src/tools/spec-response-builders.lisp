@@ -529,6 +529,8 @@ not be read."
              "rejected_measured" (json-bool (getf contract :rejected-measured))
              "effective_trials" (getf contract :effective-trials)
              "failure_reason" (%keyword-string (getf contract :failure-reason))
+             "failure_reason_readable" (json-bool
+                                        (getf contract :failure-reason-readable))
              "explanation" (sanitize-for-json (getf contract :explanation)))))
 
 (defun %result-ht (result)
@@ -637,14 +639,24 @@ so the function was called ~A time~:P"
                   (or (getf contract :effective-trials) "an unknown number of"))
           (format stream "~&    contract: the refused-input count could not be ~
 read, so the trial count above is an upper bound on what was checked"))
+      ;; An absent reason has two causes and they are opposite accusations:
+      ;; cl-spec saying the counterexample would not reproduce, and this
+      ;; adapter never having had a reader to ask.  Printing the first for
+      ;; both tells the caller their function is non-deterministic on the
+      ;; evidence of a missing name.
       (let ((reason (getf contract :failure-reason)))
-        (when reason
-          (format stream "~&    broken half: ~A" (%keyword-string reason))))
-      (when (and (member (getf result :status) '(:failed :error))
-                 (null (getf contract :failure-reason)))
-        (format stream "~&    broken half: not determined -- re-running the ~
+        (cond
+          (reason
+           (format stream "~&    broken half: ~A" (%keyword-string reason)))
+          ((not (member (getf result :status) '(:failed :error))) nil)
+          ((getf contract :failure-reason-readable)
+           (format stream "~&    broken half: not determined -- re-running the ~
 reported counterexample did not fail again, so the function is not ~
 deterministic"))
+          (t
+           (format stream "~&    broken half: could not be read -- this ~
+cl-spec does not export the reader. Which half broke is unknown; this is NOT ~
+a finding about the function"))))
       (let ((explanation (getf contract :explanation)))
         (when explanation
           (format stream "~&    return value: ~A" explanation))))))
@@ -808,8 +820,13 @@ it came out."
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
-    ((:not-registered :invalid-arguments :backend-not-loaded :internal-error
-      :timeout)
+    ;; :UNSUPPORTED belongs here and not in the branch below: like the other
+    ;; five it carries a message and no selection, and reading it as a report
+    ;; of a run renders "Selected NIL properties via NIL" while the one thing
+    ;; the caller needs -- why cl-spec could not run the contract -- never
+    ;; reaches content[].text.
+    ((:not-registered :unsupported :invalid-arguments :backend-not-loaded
+      :internal-error :timeout)
      (let ((response (%simple-status-response report)))
        (setf (gethash "verified" response) (json-bool nil))
        response))

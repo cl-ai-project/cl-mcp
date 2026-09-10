@@ -192,6 +192,29 @@ are what a test about the message has to look at."
       (ok (search "max_chars" (%text response)))
       (ok (search "positive" (string-downcase (%text response)))))))
 
+(deftest spec-check-refuses-a-non-positive-trials
+  (testing "a negative trial count is refused before anything runs"
+    ;; The schema's :INTEGER admits 0 and negatives, and cl-spec runs
+    ;; (loop for trial from 1 to -5) without complaint: zero trials, which the
+    ;; response then asserts as "-5 executed of -5 budget (requested)".
+    (let ((response (%call "spec-check" "{\"function\":\"cl:car\",\"trials\":-5}")))
+      (ok (search "trials" (%text response)))
+      (ok (search "positive" (string-downcase (%text response))))))
+  (testing "and so is zero"
+    (let ((response (%call "spec-check" "{\"function\":\"cl:car\",\"trials\":0}")))
+      (ok (search "positive" (string-downcase (%text response))))))
+  (testing "while an absent trials stays absent rather than becoming a budget"
+    ;; The default is NIL, not a number: a contract with no trials= must fall
+    ;; through to the backend's own count, and a property must reach its
+    ;; :TRIALS table.
+    (%ensure-tools)
+    (let* ((params (make-hash-table :test #'equal))
+           (response (progn (setf (gethash "property" params) "cl:car")
+                            (funcall (find-symbol "SPEC-CHECK-RESPONSE"
+                                                  "CL-MCP/SRC/TOOLS/SPEC-ENTRY")
+                                     params))))
+      (ok (not (string= "invalid-arguments" (gethash "status" response)))))))
+
 (deftest read-tools-accept-a-timeout
   (testing "spec-symbol and spec-describe take timeout_seconds"
     (%ensure-tools)

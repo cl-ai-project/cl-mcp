@@ -189,7 +189,10 @@ cl-mcp: ~A" value)
   "Return the spec-check response hash-table for PARAMS.
 
 An unusable seed is answered here rather than passed on: a run started with a
-seed the caller did not mean is a run whose result means nothing."
+seed the caller did not mean is a run whose result means nothing.  TRIALS is
+checked in the same place and for the same reason: the tool schema's :INTEGER
+admits 0 and negative numbers, and cl-spec runs (loop for trial from 1 to -5)
+without complaint -- zero trials, reported as \"-5 executed of -5 budget\"."
   ;; The raw value, not %STRING-ARG's: that filter turned a JSON number or an
   ;; empty string into NIL, and NIL means "no seed given" -- so the run went
   ;; ahead with a fresh random seed and reported it as though it were the
@@ -199,20 +202,25 @@ seed the caller did not mean is a run whose result means nothing."
       (parse-seed-string (and params (gethash "seed" params)))
     (multiple-value-bind (max-value-chars chars-error)
         (%positive-integer-arg params "max_value_chars" 2000)
-      (let ((message (or seed-error chars-error)))
-        (if message
-            (%argument-error-response message #'build-spec-check-response)
-            (multiple-value-bind (api status) (resolve-cl-spec-api)
-              (build-spec-check-response
-               (check-report api status
-                             :property (%string-arg params "property")
-                             :symbol (%string-arg params "symbol")
-                             :function (%string-arg params "function")
-                             :trials (gethash "trials" params)
-                             :package (%string-arg params "package")
-                             :profile (%string-arg params "profile")
-                             :seed seed
-                             :expect-definition-digest
-                             (%string-arg params "expect_definition_digest")
-                             :timeout-seconds (gethash "timeout_seconds" params)
-                             :max-value-chars max-value-chars))))))))
+      ;; A default of NIL, so an absent trials stays absent: the budget then
+      ;; comes from the property's own table or the backend, which is what
+      ;; CHECK-REPORT expects to see.
+      (multiple-value-bind (trials trials-error)
+          (%positive-integer-arg params "trials" nil)
+        (let ((message (or seed-error chars-error trials-error)))
+          (if message
+              (%argument-error-response message #'build-spec-check-response)
+              (multiple-value-bind (api status) (resolve-cl-spec-api)
+                (build-spec-check-response
+                 (check-report api status
+                               :property (%string-arg params "property")
+                               :symbol (%string-arg params "symbol")
+                               :function (%string-arg params "function")
+                               :trials trials
+                               :package (%string-arg params "package")
+                               :profile (%string-arg params "profile")
+                               :seed seed
+                               :expect-definition-digest
+                               (%string-arg params "expect_definition_digest")
+                               :timeout-seconds (gethash "timeout_seconds" params)
+                               :max-value-chars max-value-chars)))))))))

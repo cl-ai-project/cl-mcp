@@ -973,13 +973,29 @@ while listing the properties about this symbol: ~A" condition)))))))
                "use.")
   "Said when trials is given for a property selection.")
 
-(defun %target-argument-error (property symbol function)
+(defparameter +profile-needs-a-property-message+
+  (concatenate 'string
+               "profile applies to a property run only. A contract has no "
+               ":trials table for a profile to select from, and cl-spec's "
+               "check-function takes no profile, so honouring it here would "
+               "report a profile the run did not use -- the mirror of why "
+               "trials is refused with property=. Size a contract run with "
+               "trials= instead.")
+  "Said when profile is given for a contract selection.")
+
+(defun %target-argument-error (property symbol function trials profile)
   "Return the plist for a bad target selection, or NIL when it is fine.
 
 Checked before cl-spec is consulted.  Naming more than one or none of them is
 a mistake in the call itself, and answering \"cl-spec is not loaded\" would
 send the caller to fix the wrong thing -- the same reason SPEC-ENTRY validates
-the seed before it resolves the API."
+the seed before it resolves the API.
+
+TRIALS and PROFILE sit here for that same reason, and as a pair: each sizes
+one kind of run and neither reaches the other, so accepting either against the
+wrong target would publish a budget or a profile the run never used.  PROFILE
+is the caller's own word, NIL when none was given, so a contract run is
+refused only for a profile that was actually asked for."
   (let ((given (count-if-not #'null (list property symbol function))))
     (cond
       ((> given 1)
@@ -987,7 +1003,13 @@ the seed before it resolves the API."
              :message "give exactly one of property, symbol or function"))
       ((zerop given)
        (list :status :invalid-arguments
-             :message "give one of property, symbol or function")))))
+             :message "give one of property, symbol or function"))
+      ((and trials (not function))
+       (list :status :invalid-arguments
+             :message +trials-needs-a-contract-message+))
+      ((and profile function)
+       (list :status :invalid-arguments
+             :message +profile-needs-a-property-message+)))))
 
 (defun %registered-contract-p (api name registry)
   "Return (values FOUND-P MESSAGE) for the contract registered for NAME."
@@ -1205,6 +1227,14 @@ cl-spec's structured account of a return value that missed its spec."
             :effective-trials (when (and (integerp executed) (integerp rejected))
                                 (- executed rejected))
             :failure-reason reason
+            ;; Whether the reader resolved, not whether it returned something.
+            ;; NIL is a legitimate answer from cl-spec -- a passing run, or a
+            ;; failing one whose counterexample did not reproduce -- so it
+            ;; cannot double as "this adapter could not ask".  Reported for
+            ;; the same reason REJECTED-MEASURED is: without it a renderer
+            ;; tells the caller their function is non-deterministic on the
+            ;; evidence of a name this image could not find.
+            :failure-reason-readable (and (api-has-p api :check-failure-reason) t)
             :explanation (when explanation
                            (print-form-bounded explanation max-value-chars))))))
 
@@ -1387,7 +1417,7 @@ could answer with eleven -- and the description is the only documentation a
 model ever sees.")
 
 (defparameter +call-statuses+
-  '(:no-properties :completed :incomplete
+  '(:no-properties :completed :incomplete :unsupported
     :cl-spec-not-loaded :cl-spec-incomplete :backend-not-loaded
     :unresolved-symbol :not-registered :invalid-arguments :internal-error)
   "Every status a whole spec-check call can carry.")
@@ -1500,7 +1530,8 @@ of them passed.  A selection of zero, a timeout, a generator failure and a
 skipped run are each reported as themselves: none of them is evidence that
 anything holds."
   (let ((environment (environment-data api api-status))
-        (argument-error (%target-argument-error property symbol function)))
+        (argument-error (%target-argument-error property symbol function
+                                                trials profile)))
     ;; Before the availability check, deliberately: an argument that is wrong
     ;; is wrong whatever cl-spec is doing, and reporting the load state first
     ;; would send the caller to fix the wrong thing.
@@ -1514,12 +1545,6 @@ anything holds."
         (list :status :backend-not-loaded
               :verified nil
               :message +backend-missing-message+
-              :environment environment)))
-    (when (and trials (not function))
-      (return-from check-report
-        (list :status :invalid-arguments
-              :verified nil
-              :message +trials-needs-a-contract-message+
               :environment environment)))
     (when (and function (not (and (api-has-p api :check-function)
                                   (api-has-p api :function-spec-data))))

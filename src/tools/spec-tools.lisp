@@ -250,8 +250,11 @@ calls the function, then checks :returns and :post. results[].contract carries:
                    checked nothing; cl-spec reports that as skipped, not
                    passed.
   failure_reason   which half broke: return-spec, postcondition, precondition,
-                   condition -- or absent when the counterexample did not
-                   reproduce, which means the function is not deterministic.
+                   condition. Absent has two meanings, told apart by
+                   failure_reason_readable: true means cl-spec could not
+                   reproduce the counterexample, so the function is not
+                   deterministic; false means this cl-spec exports no reader
+                   for it, which says nothing about the function.
   explanation      cl-spec's structured account of a return value that missed
                    its :returns spec.
 Because rejections are counted here, verification_gaps does not claim they are
@@ -319,12 +322,17 @@ symbol's function spec; the response names it when one exists.")
 property and symbol.")
    (trials :type :integer
     :description
-    "Trial count for a contract run. Contract runs only: a property takes its
-count from its own :trials table, selected by profile.")
+    "Trial count for a contract run, a POSITIVE integer. Contract runs only: a
+property takes its count from its own :trials table, selected by profile.
+Given with property= or symbol= it is refused, not ignored.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string
-    :description "Trial-count profile, e.g. 'normal' or 'smoke' (default: normal)")
+    :description
+    "Trial-count profile, e.g. 'normal' or 'smoke' (default: normal). Property
+runs only -- a contract has no :trials table to select from and cl-spec's
+check-function takes no profile, so it is refused with function=, the mirror
+of how trials is refused with property=. Size a contract run with trials=.")
    (seed :type :string
     :description
     "Decimal digits AS A STRING. A JSON number would already have lost digits.")

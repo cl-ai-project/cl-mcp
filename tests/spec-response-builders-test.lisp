@@ -39,6 +39,36 @@
   (list :package package :name name
         :qualified (format nil "~A::~A" package name)))
 
+(defun %contract-check-report (&key failure-reason failure-reason-readable)
+  "Return a completed contract check report whose single result failed."
+  (list :status :completed
+        :verified nil
+        :selection (list :mode "function" :count 1
+                         :selected (list (%symbol-data "PROBE" "WIDEN"))
+                         :source "explicit function argument"
+                         :coverage "Only the contract named.")
+        :results
+        (list (list :property (%symbol-data "PROBE" "WIDEN")
+                    :kind :contract
+                    :status :failed
+                    :trials (list :executed 30 :budget 30
+                                  :budget-source "requested")
+                    :contract (list :rejected 3
+                                    :rejected-measured t
+                                    :effective-trials 27
+                                    :failure-reason failure-reason
+                                    :failure-reason-readable
+                                    failure-reason-readable)
+                    :seed "7" :profile :normal
+                    :counterexample nil
+                    :counterexample-status :present
+                    :shrunk-counterexample nil
+                    :shrink-status :present
+                    :definition-match :not-checked))
+        :counts (list :selected 1 :passed 0 :failed 1
+                      :errored 0 :timed-out 0 :not-run 0)
+        :environment *environment*))
+
 (deftest not-loaded-response-says-what-to-load
   (testing "the cl-spec-not-loaded answer is actionable in the text itself"
     (let* ((response (build-spec-symbol-response
@@ -629,3 +659,50 @@
            (counts (gethash "counts" response)))
       (ok (null (gethash "specs" counts)))
       (ok (eql 0 (gethash "properties" counts))))))
+
+(deftest check-response-unsupported-reaches-the-text
+  (testing "a contract cl-spec cannot run says so where a client can see it"
+    ;; The report carries a message and no selection, results or counts.  Read
+    ;; as a report of a run it renders "Selected NIL properties via NIL" and
+    ;; the one thing the caller needs -- why nothing could be executed --
+    ;; never reaches content[].text.
+    (let* ((response (build-spec-check-response
+                      (list :status :unsupported
+                            :verified nil
+                            :message
+                            (concatenate 'string
+                                         "the cl-spec loaded here does not "
+                                         "export check-function, so a "
+                                         "contract cannot be executed.")
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (string= "unsupported" (gethash "status" response)))
+      (ok (eq yason:false (gethash "verified" response)))
+      (ok (search "check-function" text))
+      (ok (not (search "Selected" text))))))
+
+(deftest check-response-does-not-invent-non-determinism
+  (testing "an unreadable failure reason is not a finding about the function"
+    ;; NIL reaches the renderer from two opposite places: cl-spec saying the
+    ;; counterexample would not reproduce, and this adapter never having had a
+    ;; reader to ask.  Printing the first for both accuses the caller's code.
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason nil
+                                          :failure-reason-readable nil)))))
+      (ok (search "could not be read" text))
+      (ok (not (search "not deterministic" text)))))
+  (testing "but cl-spec's own silence still is one"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason nil
+                                          :failure-reason-readable t)))))
+      (ok (search "not deterministic" text))))
+  (testing "and a reason that was read is printed as itself"
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :failure-reason :return-spec
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0))))
+      (ok (search "broken half: return-spec" (first-text response)))
+      (ok (string= "return-spec" (gethash "failure_reason" contract)))
+      (ok (eq t (gethash "failure_reason_readable" contract))))))

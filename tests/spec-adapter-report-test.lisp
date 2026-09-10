@@ -557,6 +557,40 @@ thread sees the value the caller captured rather than the global one.")
       (ok (eq :invalid-arguments (getf report :status)))
       (ok (search "single" (string-downcase (getf report :message)))))))
 
+(deftest check-report-refuses-a-setting-the-run-cannot-honour
+  (testing "profile with function= is refused, not reported unused"
+    ;; cl-spec's CHECK-FUNCTION takes no profile and a contract has no :TRIALS
+    ;; table for one to select from, so publishing the caller's profile would
+    ;; name a setting the run never used -- the mirror of the trials refusal.
+    (let ((report (check-report (%stub-api) :ok
+                                :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                                :profile "thorough")))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "profile" (string-downcase (getf report :message))))))
+  (testing "trials with symbol= is refused the same way"
+    (let ((report (check-report (%stub-api) :ok
+                                :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                                :trials 100)))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "trials" (string-downcase (getf report :message))))))
+  (testing "and neither waits on cl-spec to be loaded first"
+    ;; An argument that is wrong is wrong whatever cl-spec is doing; answering
+    ;; "cl-spec is not loaded" sends the caller to fix the wrong thing, then
+    ;; hands them the real complaint on the next call.
+    (let ((report (check-report nil :not-loaded :symbol "CL:CAR" :trials 100)))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "trials" (string-downcase (getf report :message))))))
+  (testing "while a profile on a property selection is honoured"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub)))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                   :profile "thorough")))
+      (ok (eq :completed (getf report :status)))
+      (ok (eq :thorough (getf report :profile))))))
+
 (deftest check-report-digest-mismatch-is-loud
   (testing "an unexpected definition is reported as an unfaithful replay"
     (let ((report (check-report
