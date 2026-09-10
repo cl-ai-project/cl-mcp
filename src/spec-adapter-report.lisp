@@ -951,6 +951,12 @@ while listing the properties about this symbol: ~A" condition)))))))
                         :count (length about)
                         :source +about-source+
                         :coverage +about-coverage-note+
+                        ;; Carried as a name, not only as prose in a note, so
+                        ;; the headline can say it and a JSON consumer can act
+                        ;; on it.  A note several lines under a bare "VERIFIED"
+                        ;; is read after the reader has already stopped.
+                        :contract-not-run (let ((contract (getf routing :function-spec)))
+                                            (when contract (symbol-data contract)))
                         :notes (append
                                 (when (getf routing :property)
                                   (list +symbol-is-a-property-not-selected-note+))

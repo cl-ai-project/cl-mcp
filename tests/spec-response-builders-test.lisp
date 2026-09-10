@@ -227,6 +227,63 @@
         (ok (search "NOT VERIFIED" text))
         (ok (not (search "FAILED" text)))))))
 
+(deftest check-response-headline-says-when-a-contract-was-not-run
+  (testing "a passing :about selection that left a contract unrun says so up front"
+    ;; Without this the first line of a run over a broken function reads
+    ;; "✓ VERIFIED": the properties do hold, and the note saying the contract
+    ;; was never executed sits several lines below a reader who has already
+    ;; stopped.
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified t
+                            :selection (list :mode "about" :count 1
+                                             :selected (list (%symbol-data "PROBE" "GOOD"))
+                                             :contract-not-run (%symbol-data "PROBE" "CLAMP")
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 1 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response))
+           (headline (subseq text 0 (or (position #\Newline text) (length text)))))
+      (ok (search "VERIFIED" headline))
+      (ok (search "properties only" headline))
+      (ok (search "NOT run" headline))
+      (testing "and a consumer reading the payload gets the name, not prose"
+        (ok (string= "PROBE::CLAMP"
+                     (gethash "qualified"
+                              (gethash "contract_not_run"
+                                       (gethash "selection" response))))))))
+  (testing "a selection with no contract behind it keeps the bare headline"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified t
+                            :selection (list :mode "about" :count 1
+                                             :selected (list (%symbol-data "PROBE" "GOOD"))
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 1 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response))
+           (headline (subseq text 0 (or (position #\Newline text) (length text)))))
+      (ok (search "VERIFIED" headline))
+      (ok (not (search "properties only" headline))))))
+
 (deftest check-response-replays-the-failure-not-the-first-run
   (testing "the replay line names the property that did not pass"
     (let* ((response (build-spec-check-response

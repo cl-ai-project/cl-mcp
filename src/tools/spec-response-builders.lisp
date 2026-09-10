@@ -755,10 +755,22 @@ which one just ran."
 Three outcomes rather than two.  A property that was falsified and a run that
 could not finish are different news: collapsing them under one word would let
 a timeout read as a counterexample, and it is the timeout that means nothing
-was learned either way."
-  (cond ((getf report :verified) "✓ VERIFIED")
-        ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
-        (t "⚠ NOT VERIFIED")))
+was learned either way.
+
+A verdict is also a claim about coverage.  An :about selection over a symbol
+that has a function spec ran the properties and not the contract, and the bare
+word would be read as a clean bill for the function -- which is exactly what a
+run over a broken function whose properties happen to hold produces.  The
+qualifier goes on all three verdicts: what was covered does not depend on how
+it came out."
+  (let ((verdict (cond ((getf report :verified) "✓ VERIFIED")
+                       ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
+                       (t "⚠ NOT VERIFIED")))
+        (contract (getf (getf report :selection) :contract-not-run)))
+    (if contract
+        (format nil "~A (properties only -- the function spec for ~A was NOT run)"
+                verdict (getf contract :qualified))
+        verdict)))
 
 (defun %format-check-text (report)
   "Render the spec-check report as the text an MCP client will show."
@@ -818,6 +830,8 @@ was learned either way."
                          "count" (getf selection :count)
                          "source" (getf selection :source)
                          "coverage" (getf selection :coverage)
+                         "contract_not_run" (%symbol-ht
+                                             (getf selection :contract-not-run))
                          "notes" (%strings (getf selection :notes)))
                 "results" (coerce (mapcar #'%result-ht (getf report :results))
                                   'vector)

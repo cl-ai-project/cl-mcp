@@ -328,11 +328,20 @@ reached the caller."
               (ok (eql 0 (gethash "effective_trials" (gethash "contract" result))))))
 
           (testing "an :about selection does not quietly run the contract"
-            (let ((response (spec-check-response
-                             (make-ht "symbol" (%fixture-name "CLAMP")))))
+            (let* ((response (spec-check-response
+                              (make-ht "symbol" (%fixture-name "CLAMP"))))
+                   (text (%text response))
+                   (headline (subseq text 0 (or (position #\Newline text)
+                                                (length text)))))
               (ok (every (lambda (result) (string= "property" (gethash "kind" result)))
                          (gethash "results" response)))
-              (ok (search "was NOT run" (%text response)))))
+              (testing "and the first line says so, where a reader who stops will see it"
+                (ok (search "properties only" headline))
+                (ok (search "NOT run" headline))
+                (ok (string= "CLAMP"
+                             (gethash "name"
+                                      (gethash "contract_not_run"
+                                               (gethash "selection" response))))))))
 
           (testing "trials without a contract is refused rather than ignored"
             (let ((response (spec-check-response
