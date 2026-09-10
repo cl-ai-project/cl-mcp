@@ -391,12 +391,17 @@ UNKNOWN-SPEC reports the failure as a failure."
         (is-a :unknown-property)
         (is-a :unknown-function-spec))))
 
-(defparameter +listing-unsupported-message+
-  (concatenate 'string
-               "this cl-spec revision does not export the listing functions "
-               "(list-specs, list-properties); nothing can be enumerated. "
-               "Every other spec tool still works on a name you already have.")
-  "Said when the loaded cl-spec cannot enumerate its registry.")
+(defun %listing-unsupported-message (missing)
+  "Return the message for a listing kind this cl-spec cannot enumerate.
+
+Names the handles the requested kind actually needs.  One sentence covering
+both list functions and claiming \"nothing can be enumerated\" was two false
+statements on a revision that exports one of them: the other kinds still
+enumerate, and contracts enumerate through readers neither of these names."
+  (format nil "this cl-spec revision does not export ~{~A~^ or ~}, so the ~
+requested kind cannot be enumerated. Another kind may still list, and every ~
+other spec tool still works on a name you already have."
+          missing))
 
 (defparameter +listing-coverage-note+
   (concatenate 'string
@@ -492,14 +497,18 @@ function-specs or both; got ~S" kind)
     ;; kind="function-specs", which reads neither of these two, and refused a
     ;; listing it could have produced -- while reporting
     ;; function_specs_listable true three keys later.
-    (let ((needed (cond ((string= kind "specs") '(:list-specs))
-                        ((string= kind "properties") '(:list-properties))
-                        ((string= kind "both") '(:list-specs :list-properties))
-                        (t '()))))
-      (unless (every (lambda (name) (api-has-p api name)) needed)
+    (let* ((needed (cond ((string= kind "specs") '(:list-specs))
+                         ((string= kind "properties") '(:list-properties))
+                         ((string= kind "both") '(:list-specs :list-properties))
+                         (t '())))
+           (missing (remove-if (lambda (key) (api-has-p api key)) needed)))
+      (when missing
         (return-from list-report
           (list :status :unsupported
-                :message +listing-unsupported-message+
+                :message (%listing-unsupported-message
+                          (mapcar (lambda (key)
+                                    (string-downcase (symbol-name key)))
+                                  missing))
                 :environment environment))))
     (multiple-value-bind (package-object package-error)
         (%listing-package-filter package)
@@ -669,9 +678,16 @@ answers."
              ;; NIL rather than the string "NIL" for an absent clause, so a
              ;; renderer can tell a contract with no :PRE from one whose :PRE
              ;; is the literal NIL.
+             ;; A single clause prints as the clause.  :PRECONDITIONS is a
+             ;; list of forms, so (:pre (<= low high)) arrives as
+             ;; ((<= low high)) and printing the list gave the reader a form
+             ;; they cannot paste back: a call to the list.
              (when forms
                (multiple-value-bind (text complete omitted)
-                   (%print-bounded-form forms max-chars)
+                   (%print-bounded-form (if (null (rest forms))
+                                            (first forms)
+                                            forms)
+                                        max-chars)
                  (list text complete omitted)))))
       (let ((pre (clause (getf data :preconditions)))
             (post (clause (getf data :postconditions))))
@@ -974,6 +990,16 @@ name in NAMES and to no other."
                                     :message message))
               (values (list name)
                       (list :mode mode
+                            ;; The keyword, beside the display string.  A
+                            ;; renderer that decides "contract or property"
+                            ;; by matching MODE's text is one typo from
+                            ;; calling a contract a property while every
+                            ;; other line still treats it as a contract --
+                            ;; which is how a fixture written with mode
+                            ;; "function" hid that branch from the suite.
+                            :kind (if (eq requested-key :function)
+                                      :contract
+                                      :property)
                             :requested (list requested-key (symbol-data name))
                             :selected (list (symbol-data name))
                             :count 1
@@ -1128,6 +1154,7 @@ truth is that nothing was read."
                       (funcall (api-fn api :property-data) name
                                :registry registry))))
         (list :argument-count (length (getf data :arguments))
+              :kind :property
               :shrink-enabled (and (getf (getf data :metadata) :shrink) t)
               :trials-table (getf data :trials)
               ;; Carried so the digest beside it does not fetch the same
@@ -1135,8 +1162,8 @@ truth is that nothing was read."
               :data data
               :known t))
     (error ()
-      (list :argument-count nil :shrink-enabled nil :trials-table nil
-            :data nil :known nil))))
+      (list :argument-count nil :kind :property :shrink-enabled nil
+            :trials-table nil :data nil :known nil))))
 
 (defun %contract-facts (api name registry &optional pre-read)
   "Return the facts about the contract for NAME a result needs.
@@ -1153,13 +1180,18 @@ here rather than things read off a definition."
                       (funcall (api-fn api :function-spec-data) name
                                :registry registry))))
         (list :argument-count (length (getf data :arguments))
+              :kind :contract
               :shrink-enabled t
               :trials-table nil
+              ;; :UNKNOWN in the error branch, not NIL.  A contract with no
+              ;; :PRE refuses nothing, and saying so is different from having
+              ;; failed to read whether it has one.
+              :precondition-p (and (getf data :preconditions) t)
               :data data
               :known t))
     (error ()
-      (list :argument-count nil :shrink-enabled t :trials-table nil
-            :data nil :known nil))))
+      (list :argument-count nil :kind :contract :shrink-enabled t
+            :trials-table nil :precondition-p :unknown :data nil :known nil))))
 
 (defun %digest-facts (api name registry facts)
   "Return (:value <string-or-nil> :complete <boolean>) for NAME's digest.
@@ -1169,9 +1201,18 @@ together everywhere: a digest whose input was truncated is not a digest a
 caller may compare, and separating them invites reporting the value without
 the caveat."
   (multiple-value-bind (value complete)
-      (if (getf facts :known)
-          (definition-digest api name registry :property (getf facts :data))
-          (definition-digest api name registry))
+      ;; The fallback reads the definition itself, so it has to ask the reader
+      ;; for the kind being run.  A symbol carrying both a property and a
+      ;; contract would otherwise have the property's digest stamped on the
+      ;; contract's result -- the one field whose job is to say the definition
+      ;; behind this run did not move.
+      (let ((data-key (if (eq :contract (getf facts :kind))
+                          :function-spec-data
+                          :property-data)))
+        (if (getf facts :known)
+            (definition-digest api name registry :property (getf facts :data)
+                                                 :data-key data-key)
+            (definition-digest api name registry :data-key data-key)))
     (list :value value :complete (and value complete t))))
 
 (defun %trials-budget (api facts profile backend &optional requested)
@@ -1270,7 +1311,8 @@ report text is a rendering, not the value."
                       :value (externalize-value value
                                                 :max-chars max-value-chars))))
 
-(defun %contract-plist (api result executed max-value-chars)
+(defun %contract-plist (api result executed max-value-chars
+                        &optional (precondition-p :unknown))
   "Return the contract-specific half of a CHECK-FUNCTION result, or NIL.
 
 REJECTED is what separates a run that checked the function from one that only
@@ -1305,6 +1347,10 @@ cl-spec's structured account of a return value that missed its spec."
               (values nil t nil))
         (list :rejected rejected
               :rejected-measured (and (integerp rejected) t)
+              ;; Carried so a renderer does not describe a refusal that
+              ;; cannot happen: "0 of them refused by :pre" told the reader a
+              ;; precondition exists, on a contract written without one.
+              :precondition-p precondition-p
               :rejected-overcounted (and overcounted t)
               ;; Absent, not floored, when the two cannot be subtracted: 0 is
               ;; itself a claim -- "the function was never called" -- about a
@@ -1347,7 +1393,8 @@ arguments, or that a failure was somehow argument-free."
     (list :property (symbol-data name)
           :kind kind
           :contract (when (eq kind :contract)
-                      (%contract-plist api result executed max-value-chars))
+                      (%contract-plist api result executed max-value-chars
+                                       (getf facts :precondition-p)))
           :status status
           :trials (list* :executed executed trials)
           ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
@@ -1634,18 +1681,23 @@ anything holds."
         (append argument-error (list :verified nil :environment environment))))
     (unless (eq api-status :ok)
       (return-from check-report (unavailable-report api-status environment)))
-    (unless (api-backend-available-p api)
-      (return-from check-report
-        (list :status :backend-not-loaded
-              :verified nil
-              :message +backend-missing-message+
-              :environment environment)))
+    ;; Above the backend check, for the reason the argument check is above
+    ;; both: whether this revision exports the contract API is a fact about
+    ;; the image and does not change when a generator backend is installed.
+    ;; Ordered the other way, a caller was sent to load cl-spec/check-it and
+    ;; only then told that the cl-spec they have cannot run a contract at all.
     (when (and function (not (and (api-has-p api :check-function)
                                   (api-has-p api :function-spec-data))))
       (return-from check-report
         (list :status :unsupported
               :verified nil
               :message (%contract-unsupported-message api)
+              :environment environment)))
+    (unless (api-backend-available-p api)
+      (return-from check-report
+        (list :status :backend-not-loaded
+              :verified nil
+              :message +backend-missing-message+
               :environment environment)))
     (multiple-value-bind (profile-keyword profile-error) (%resolve-profile profile)
       (when profile-error

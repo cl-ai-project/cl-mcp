@@ -41,14 +41,15 @@
 
 (defun %contract-check-report (&key failure-reason failure-reason-readable
                                     rejected-overcounted (rejected 3)
-                                    (effective-trials 27))
+                                    (effective-trials 27)
+                                    (precondition-p t))
   "Return a completed contract check report whose single result failed."
   (list :status :completed
         :verified nil
         ;; "contract", the mode %SELECT-NAMED actually emits for a function
         ;; selection -- %SELECTION-NOUN keys on it, and "function" here sent
         ;; every test built on this fixture down the property branch.
-        :selection (list :mode "contract" :count 1
+        :selection (list :mode "contract" :kind :contract :count 1
                          :selected (list (%symbol-data "PROBE" "WIDEN"))
                          :source "explicit function argument"
                          :coverage "Only the contract named.")
@@ -59,6 +60,7 @@
                     :trials (list :executed 30 :budget 30
                                   :budget-source "requested")
                     :contract (list :rejected rejected
+                                    :precondition-p precondition-p
                                     :rejected-measured t
                                     :rejected-overcounted rejected-overcounted
                                     :effective-trials effective-trials
@@ -775,3 +777,28 @@
                                           :failure-reason-readable t)))))
       (ok (search "called 27 times" text))
       (ok (not (search "more refusals than trials" text))))))
+
+(deftest check-response-does-not-invent-a-precondition
+  (testing "a contract with no :pre is not described as refusing inputs"
+    ;; "0 of them refused by :pre" tells the reader a precondition exists.
+    ;; On a contract written with :args, :returns and :post and no :pre, that
+    ;; is a clause the author never wrote -- and the tool then advises raising
+    ;; trials on the strength of a number that cannot mean anything.
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :precondition-p nil
+                                              :rejected 0
+                                              :effective-trials 30
+                                              :failure-reason :postcondition
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0)))
+           (text (first-text response)))
+      (ok (eq yason:false (gethash "has_precondition" contract)))
+      (ok (search "no :pre" text))
+      (ok (not (search "refused by :pre" text)))))
+  (testing "while one that has a :pre still reports its refusals"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason :return-spec
+                                          :failure-reason-readable t)))))
+      (ok (search "refused by :pre" text))
+      (ok (not (search "no :pre" text))))))

@@ -219,8 +219,9 @@ Per property, results[].status:
   backend-error   cl-spec signalled something else. Nothing was checked.
   not-registered  the name resolved but nothing is registered under it.
   undefined-function
-                  the contract is registered but the function it names is not
-                  defined in this image. Write it, or load its system.
+                  a function the run needed is not defined in this image --
+                  the one a contract names, or one its property body calls.
+                  Write it, or load its system. NOT an adapter fault.
   unsupported     the loaded cl-spec cannot run this. Nothing was checked.
   internal-error  this adapter failed. NOT a statement about the property.
 

@@ -315,35 +315,44 @@ system defining them may simply not be loaded.")
              "children" (coerce (mapcar #'%spec-tree-ht (getf data :children))
                                 'vector))))
 
-(defun %format-spec-node (stream node depth)
+(defun %format-spec-node (stream node depth &optional label)
   "Write one spec-data node and its children to STREAM, indented by DEPTH.
 
 spec-describe's own description promises \"the spec's normalized IR tree\", and
 the tree was reaching the payload but not the text -- which for a client that
-renders only content[].text is the same as not reaching it at all."
+renders only content[].text is the same as not reaching it at all.
+
+LABEL is printed before the node, for the caller that has a name to put on it:
+an argument renders as its variable followed by its own spec.  It is a
+parameter rather than a second renderer because the argument list used to have
+one, printing the node's kind and then recursing into the node's CHILDREN --
+so an argument's own bounds, member values and base type were dropped while
+the :RETURNS spec four lines below showed all three."
   (when node
     ;; The kind is lower-cased like every other keyword this file renders
     ;; (statuses, property kinds, argument spec kinds); an upper-case AND in
     ;; the middle of lower-case prose reads as a different vocabulary.
-    (format stream "~&~vT~A~@[ ~A~]~@[ -> ~A~]"
+    (format stream "~&~vT~@[~A : ~]~A~@[ ~A~]~@[ -> ~A~]"
             (+ 2 (* 2 depth))
+            label
             (or (%keyword-string (getf node :kind)) "node")
             (or (getf (getf node :name) :qualified)
                 (getf node :type)
                 (getf node :predicate)
                 (getf node :class-name))
             (getf (getf node :target) :qualified))
-    ;; A bound of 0 is a bound, so OR is not the test for whether one is
-    ;; there.  An open end arrives already spelled "*"; see %RANGE-BOUND.
-    (flet ((bound (value) (or value "*")))
-      (let ((minimum (getf node :min))
-            (maximum (getf node :max))
-            (values* (getf node :values))
-            (base (getf node :base-type)))
-        (when (or minimum maximum)
-          (format stream " [~A, ~A]" (bound minimum) (bound maximum)))
-        (when base (format stream "  base: ~A" base))
-        (when values* (format stream "  values: ~A" values*))))
+    (let ((minimum (getf node :min))
+          (maximum (getf node :max))
+          (values* (getf node :values))
+          (base (getf node :base-type)))
+      ;; Both ends or neither: cl-spec gives a range node an :UNBOUNDED
+      ;; initform on each side, which %RANGE-BOUND has already spelled "*", so
+      ;; there is no half-open node to render and nothing here has to invent
+      ;; a bound or repeat the IR's word for an open one.
+      (when (and minimum maximum)
+        (format stream " [~A, ~A]" minimum maximum))
+      (when base (format stream "  base: ~A" base))
+      (when values* (format stream "  values: ~A" values*)))
     ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
     ;; where :CHILDREN is a list, while the payload carries a vector.  ACROSS
     ;; signalled a type error on the list, and the deadline wrapper above
@@ -385,12 +394,15 @@ max_chars -- which is to say, by luck."
     (when (getf report :arguments)
       (format stream "~&~%arguments:")
       (dolist (argument (getf report :arguments))
-        (format stream "~&  ~A : ~A~@[ -> ~A~]"
-                (getf (getf argument :variable) :name)
-                (%keyword-string (getf (getf argument :spec) :kind))
-                (getf (getf (getf argument :spec) :target) :qualified))
-        (map nil (lambda (child) (%format-spec-node stream child 1))
-             (or (getf (getf argument :spec) :children) '()))))
+        (let ((spec (getf argument :spec))
+              (name (getf (getf argument :variable) :name)))
+          (if spec
+              ;; The node itself, not its children: the bounds, member values
+              ;; and base type live on the argument's own spec, and rendering
+              ;; only the children dropped exactly the half of a contract the
+              ;; tool promises -- which inputs it accepts.
+              (%format-spec-node stream spec 0 name)
+              (format stream "~&  ~A" name)))))
     ;; Cut and reported, like the body and the source form below.  A silently
     ;; truncated :PRE is worse than either: a reader takes a clause for the
     ;; whole condition and concludes the contract admits inputs it refuses.
@@ -540,7 +552,11 @@ REJECTED_MEASURED travels beside REJECTED because a null rejected count is not
 a count of zero: one says nothing was refused, the other says the number could
 not be read."
   (when contract
-    (make-ht "rejected" (getf contract :rejected)
+    (make-ht "has_precondition" (let ((value (getf contract :precondition-p)))
+                                  (if (eq :unknown value)
+                                      nil
+                                      (json-bool value)))
+             "rejected" (getf contract :rejected)
              "rejected_measured" (json-bool (getf contract :rejected-measured))
              "rejected_overcounted" (json-bool
                                      (getf contract :rejected-overcounted))
@@ -654,6 +670,11 @@ count suggests, and that shortfall is invisible in every other line."
   (let ((contract (getf result :contract)))
     (when contract
       (cond
+        ((null (getf contract :precondition-p))
+         ;; No :PRE, so nothing could be refused and there is no shortfall to
+         ;; report.  The refusal line named a clause the author never wrote.
+         (format stream "~&    contract: no :pre, so every generated input ~
+was passed to the function"))
         ((getf contract :rejected-overcounted)
          ;; More refusals than trials, so the difference says nothing.  Left
          ;; as its own line rather than folded into the one below: printing
@@ -793,8 +814,13 @@ max_value_chars to see the rest."
 A contract run selects a contract, not a property.  The two are different
 instruments -- one is the function's own :args/:returns, the other a relation
 someone asserted about it -- and a line that calls both \"property\" hides
-which one just ran."
-  (let ((contractp (equal "contract" (getf selection :mode)))
+which one just ran.
+
+Keyed on :KIND rather than on the :MODE text.  MODE is a display string and
+matching it made two spellings decide the same fact: a fixture written with
+mode \"function\" rendered every contract as a property while the replay line,
+the kind field and the profile suppression all still behaved as a contract."
+  (let ((contractp (eq :contract (getf selection :kind)))
         (one (eql 1 (getf selection :count))))
     (cond ((and contractp one) "contract")
           (contractp "contracts")
@@ -878,6 +904,7 @@ it came out."
                 "verified" (json-bool (getf report :verified))
                 "selection"
                 (make-ht "mode" (getf selection :mode)
+                         "kind" (%keyword-string (getf selection :kind))
                          "requested"
                          (let ((requested (getf selection :requested)))
                            (make-ht "property" (%symbol-ht (getf requested :property))
@@ -979,7 +1006,12 @@ it came out."
       (when (getf filters :package)
         (format stream "  in package ~A" (getf filters :package)))
       (when (getf filters :tag)
-        (format stream "  tagged ~A" (getf filters :tag))
+        ;; Named as narrowing properties, because that is all it narrows.
+        ;; "4 function specs  tagged critical" read as four tagged contracts,
+        ;; and LIST-REPORT never offers TAG to the contract listing at all.
+        (format stream "  tagged ~A~:[ (properties only)~;~]"
+                (getf filters :tag)
+                (equal "properties" (getf report :kind)))
         (unless (eq t (getf filters :tag-resolved))
           (format stream " (NO SUCH TAG exists in this image, so nothing can ~
 carry it -- this is not the same as no property having it)")))
@@ -991,6 +1023,22 @@ carry it -- this is not the same as no property having it)")))
           (format stream "~&~%specs:")
           (dolist (spec specs)
             (format stream "~&  ~A" (getf spec :qualified)))))
+      (let ((properties (getf report :properties)))
+        (when properties
+          (format stream "~&~%properties:")
+          (dolist (property properties)
+            (format stream "~&  ~A~@[  [~A]~]"
+                    (getf (getf property :name) :qualified)
+                    (%keyword-string (getf property :kind)))
+            (when (getf property :targets)
+              (format stream "~&      about: ~{~A~^, ~}"
+                      (mapcar (lambda (target) (getf target :qualified))
+                              (getf property :targets))))
+            (when (getf property :tags)
+              (format stream "~&      tags: ~{~A~^, ~}"
+                      (mapcar #'%keyword-string (getf property :tags))))
+            (when (getf property :documentation)
+              (format stream "~&      ~A" (getf property :documentation))))))
       (let ((contracts (getf report :function-specs)))
         (when contracts
           (format stream "~&~%function specs:")
@@ -1020,25 +1068,16 @@ project it here"
         (format stream "~&~%function specs: the loaded cl-spec cannot ~
 enumerate them, so none are listed here. This is not evidence that none are ~
 registered."))
-      (let ((properties (getf report :properties)))
-        (when properties
-          (format stream "~&~%properties:")
-          (dolist (property properties)
-            (format stream "~&  ~A~@[  [~A]~]"
-                    (getf (getf property :name) :qualified)
-                    (%keyword-string (getf property :kind)))
-            (when (getf property :targets)
-              (format stream "~&      about: ~{~A~^, ~}"
-                      (mapcar (lambda (target) (getf target :qualified))
-                              (getf property :targets))))
-            (when (getf property :tags)
-              (format stream "~&      tags: ~{~A~^, ~}"
-                      (mapcar #'%keyword-string (getf property :tags))))
-            (when (getf property :documentation)
-              (format stream "~&      ~A" (getf property :documentation))))))
+      ;; Only when every requested kind was in fact looked at.  Printed
+      ;; after "the loaded cl-spec cannot enumerate them", it turned "cannot
+      ;; look" back into "none here" -- the distinction function_specs_listable
+      ;; exists to keep.
       (when (and (null (getf report :specs))
                  (null (getf report :properties))
-                 (null (getf report :function-specs)))
+                 (null (getf report :function-specs))
+                 (or (not (member (getf report :kind) '("function-specs" "both")
+                                  :test #'equal))
+                     (getf report :function-specs-listable)))
         (format stream "~&~%Nothing registered matches. An empty listing is ~
 not evidence that this project has no contracts: a definition whose system ~
 has not been loaded into this worker is not here."))

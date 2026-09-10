@@ -628,10 +628,17 @@ followed *PRINT-CASE*, which a digest must not."
                  "|"
                  (symbol-name symbol))))
 
-(defun definition-digest (api property-name registry &key (property nil property-p))
+(defun definition-digest (api property-name registry
+                          &key (property nil property-p)
+                               (data-key :property-data))
   "Return (values DIGEST COMPLETE-P) for PROPERTY-NAME's definition.
 
-PROPERTY, when supplied, is PROPERTY-DATA's plist for the same name, already
+DATA-KEY names the reader to fall back on when PROPERTY is not supplied.  It
+matters when a name carries both a property and a contract: digesting the
+property and stamping the result on the contract's run would report the
+definitions unchanged on the strength of a definition that was not run.
+
+PROPERTY, when supplied, is DATA-KEY's plist for the same name, already
 fetched by the caller.  Passing it is what keeps a listing of N properties to
 N calls rather than 2N: the digest needs exactly the data the summary beside
 it already read.
@@ -653,7 +660,7 @@ than skipped, so the digest still changes if it is defined later."
   (handler-case
       (let ((property (if property-p
                           property
-                          (funcall (api-fn api :property-data)
+                          (funcall (api-fn api data-key)
                                    property-name :registry registry)))
             (pending '())
             (seen (make-hash-table :test #'eq))
