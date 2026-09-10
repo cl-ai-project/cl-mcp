@@ -74,6 +74,28 @@ not registered\"."
       (t (values nil (format nil "~A must be a positive integer, got ~S"
                              name value))))))
 
+(defvar *maximum-trials* 1000000
+  "Largest trial count spec-check will pass to a contract run.
+
+An upper bound because the run happens on a deadline thread that cannot always
+be stopped: a budget of a hundred million outlives its timeout, keeps calling
+the target, and does it inside the worker this session's repl-eval and
+load-system share.  The deadline bounds how long the caller waits; only this
+bounds what the worker is left doing afterwards.  PROFILE never offered a
+caller-supplied number, so TRIALS is the first argument on this path that
+needed one.")
+
+(defun %bounded-integer-arg (params name maximum)
+  "Return (values N NIL) for a positive integer at most MAXIMUM, else an error."
+  (multiple-value-bind (value message) (%positive-integer-arg params name nil)
+    (cond
+      (message (values nil message))
+      ((and value (> value maximum))
+       (values nil (format nil "~A must be at most ~:D; a larger budget can ~
+outlive its timeout and go on calling the function in this worker"
+                           name maximum)))
+      (t (values value nil)))))
+
 (defun %argument-error-response (message builder)
   "Return BUILDER's response for an argument MESSAGE, before cl-spec is asked."
   (funcall builder
@@ -206,7 +228,7 @@ without complaint -- zero trials, reported as \"-5 executed of -5 budget\"."
       ;; comes from the property's own table or the backend, which is what
       ;; CHECK-REPORT expects to see.
       (multiple-value-bind (trials trials-error)
-          (%positive-integer-arg params "trials" nil)
+          (%bounded-integer-arg params "trials" *maximum-trials*)
         (let ((message (or seed-error chars-error trials-error)))
           (if message
               (%argument-error-response message #'build-spec-check-response)

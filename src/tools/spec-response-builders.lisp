@@ -385,6 +385,19 @@ max_chars -- which is to say, by luck."
       (format stream "~&shrinking: ~:[disabled (:shrink nil)~;enabled~]"
               (getf report :shrink-enabled)))))
 
+(defun %report-cut (stream report complete-key omitted-key
+                    &key (budget "max_chars") extra)
+  "Write REPORT's truncation notice for one field, or nothing when it is whole.
+
+Four copies of this line had drifted into three wordings and one that forgot
+to name the budget at all -- and two of the four were added in the same change
+that added the fields.  EXTRA carries what a particular field has to add."
+  (unless (eq t (getf report complete-key))
+    (unless (eq :not-applicable (getf report complete-key))
+      (format stream "~&... truncated, ~D more character~:P. Raise ~A to see ~
+the rest.~@[ ~A~]"
+              (getf report omitted-key) budget extra))))
+
 (defun %format-describe-text (report)
   "Render the spec-describe report as text."
   (with-output-to-string (stream)
@@ -416,20 +429,14 @@ max_chars -- which is to say, by luck."
     ;; whole condition and concludes the contract admits inputs it refuses.
     (when (getf report :preconditions)
       (format stream "~&~%:pre  ~A" (getf report :preconditions))
-      (unless (getf report :preconditions-complete)
-        (format stream "~&... truncated, ~D more character~:P. Raise max_chars ~
-to see the rest."
-                (getf report :preconditions-omitted-chars))))
+      (%report-cut stream report :preconditions-complete :preconditions-omitted-chars))
     (let ((returns (getf report :returns)))
       (when returns
         (format stream "~&~%returns:")
         (%format-spec-node stream returns 0)))
     (when (getf report :postconditions)
       (format stream "~&~%:post ~A" (getf report :postconditions))
-      (unless (getf report :postconditions-complete)
-        (format stream "~&... truncated, ~D more character~:P. Raise max_chars ~
-to see the rest."
-                (getf report :postconditions-omitted-chars))))
+      (%report-cut stream report :postconditions-complete :postconditions-omitted-chars))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -438,15 +445,14 @@ to see the rest."
       (format stream "~&~%definition_digest: ~A" (getf report :definition-digest)))
     (when (getf report :body)
       (format stream "~&~%body:~%~A" (getf report :body))
-      (unless (getf report :body-complete)
-        (format stream "~&... truncated, ~D more character~:P. Raise max_chars ~
-to see the rest; the text above is a preview, not a form that can be read back."
-                (getf report :body-omitted-chars))))
+      (%report-cut stream report :body-complete :body-omitted-chars
+                   :extra (concatenate 'string
+                                       "The text above is a preview, not a "
+                                       "form that can be read back.")))
     (when (getf report :source-form)
       (format stream "~&~%source form:~%~A" (getf report :source-form))
-      (unless (getf report :source-form-complete)
-        (format stream "~&... truncated, ~D more character~:P."
-                (getf report :source-form-omitted-chars))))
+      (%report-cut stream report :source-form-complete
+                   :source-form-omitted-chars))
     ;; Guarded on the file, not on the plist: a REPL definition has a
     ;; location whose :FILE is NIL, and printing that gave "defined in NIL".
     (let ((location (getf report :source-location)))
@@ -578,7 +584,9 @@ REJECTED_MEASURED travels beside REJECTED because a null rejected count is not
 a count of zero: one says nothing was refused, the other says the number could
 not be read."
   (when contract
-    (make-ht "has_precondition" (let ((value (getf contract :precondition-p)))
+    (make-ht "rejection_status" (%keyword-string
+                                (getf contract :rejection-status))
+             "has_precondition" (let ((value (getf contract :precondition-p)))
                                   (if (eq :unknown value)
                                       nil
                                       (json-bool value)))
@@ -630,6 +638,8 @@ not be read."
            "timeout_seconds" (getf result :timeout-seconds)
            "thread_leaked" (json-bool (getf result :thread-leaked))
            "definition_digest" (getf result :definition-digest)
+           "definition_digest_covers" (%keyword-string
+                                       (getf result :definition-digest-covers))
            "definition_digest_complete" (json-bool
                                          (getf result :definition-digest-complete))
            "definition_match" (%match-string (getf result :definition-match))
@@ -704,12 +714,14 @@ count suggests, and that shortfall is invisible in every other line."
         ;; One CASE on the keyword the report decided, rather than five
         ;; booleans re-tested in an order that must not change.
         (:overcounted
-         (format stream "~&    contract: ~A inputs refused by :pre against ~
-~A trials -- cl-spec counted more refusals than trials, so how often the ~
-function was actually called cannot be derived here"
+         (format stream "~&    contract: ~A input~:P refused against ~A ~
+trial~:P -- cl-spec counted more refusals than trials, so how often the ~
+function was actually called cannot be derived here~@[. This contract has ~
+no :pre, so it should have refused none~]"
                  (getf contract :rejected)
                  (or (getf (getf result :trials) :executed)
-                     "an unknown number of")))
+                     "an unknown number of")
+                 (null (getf contract :precondition-p))))
         (:unmeasured
          (format stream "~&    contract: the refused-input count could not be ~
 read, so the trial count above is an upper bound on what was checked"))
@@ -782,8 +794,11 @@ max_value_chars to see the rest."
             (getf result :seed)
             (%keyword-string (getf result :profile))))
   (when (getf result :definition-digest)
-    (format stream "~&    definition_digest: ~A~@[  (~A)~]"
+    (format stream "~&    definition_digest: ~A~@[ (covers the ~A, not the ~
+function body)~]~@[  (~A)~]"
             (getf result :definition-digest)
+            (when (eq :contract (getf result :definition-digest-covers))
+              "contract")
             (unless (eq :not-checked (getf result :definition-match))
               (%match-string (getf result :definition-match)))))
   (when (getf result :message)
@@ -1077,27 +1092,23 @@ symbol could not be read)"
         ;; on a kind that lists no properties it narrowed nothing whatever,
         ;; which the caller has to be told rather than left to infer from a
         ;; header that says the filter ran.
-        (let ((narrowed (and (member (getf report :kind) '("properties" "both")
-                                     :test #'equal)
-                             (getf report :properties-listable)
-                             ;; The flag that answers whether the filter ran.
-                             ;; Keyed on PROPERTIES-LISTABLE, a revision with
-                             ;; no PROPERTIES-WITH-TAG printed "tagged
-                             ;; critical" over a listing the tag never
-                             ;; touched -- the "no property carries this tag"
-                             ;; reading the flags exist to prevent.
-                             (getf report :tag-filterable))))
+        ;; Three states, tested once each.  The conjunction and the first
+        ;; clause used to re-derive two of the same three facts, so "this
+        ;; kind lists no properties" and "this cl-spec cannot filter by tag"
+        ;; were one edit away from being reported as each other.
+        (let ((lists-properties (and (member (getf report :kind)
+                                             '("properties" "both")
+                                             :test #'equal)
+                                     (getf report :properties-listable)
+                                     t)))
           (cond
-            ((and (not narrowed)
-                  (member (getf report :kind) '("properties" "both")
-                          :test #'equal)
-                  (getf report :properties-listable))
-             (format stream "  tag ~A was NOT applied: the loaded cl-spec ~
-exports no properties-with-tag, so nothing here was filtered by it"
-                     (getf filters :tag)))
-            ((not narrowed)
+            ((not lists-properties)
              (format stream "  tag ~A was NOT applied: it narrows properties, ~
 and this kind lists none"
+                     (getf filters :tag)))
+            ((not (getf report :tag-filterable))
+             (format stream "  tag ~A was NOT applied: the loaded cl-spec ~
+exports no properties-with-tag, so nothing here was filtered by it"
                      (getf filters :tag)))
             (t
              (format stream "  tagged ~A~:[~; (properties only)~]"
@@ -1167,6 +1178,11 @@ so none are listed here. This is not evidence that none are registered."
       (when (and (null (getf report :specs))
                  (null (getf report :properties))
                  (null (getf report :function-specs))
+                 ;; The tag counts as a half that was not looked at: a
+                 ;; listing whose filter never ran has no evidence the
+                 ;; registry is empty, which is the whole point of the flags.
+                 (or (null (getf (getf report :filters) :tag))
+                     (getf (getf report :filters) :tag-applied))
                  (every (lambda (half)
                           (destructuring-bind (name label flag keys) half
                             (declare (ignore name label keys))

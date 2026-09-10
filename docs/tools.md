@@ -742,7 +742,9 @@ resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
   - A contract run reports `rejected` and `effective_trials`: cl-spec's checker
     refuses inputs `:pre` does not admit, and a trial count that includes them
     overstates the work. Raise `trials` — and `timeout_seconds` with it — when
-    `effective_trials` comes back small.
+    `effective_trials` comes back small. `rejection-counts-unmeasured` is left
+    off a contract run only when the count is actually usable; a run that timed
+    out, never started, or whose reader failed still carries it.
   - `effective_trials` is **null**, never 0, when it could not be derived.
     `rejected_measured` false means no refused count came back — this cl-spec
     exports no reader for it, or the reader signalled; `rejected_overcounted`

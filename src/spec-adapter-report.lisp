@@ -1246,11 +1246,17 @@ alone.  The mirror of what an :ABOUT selection reports about the contract it
 did not run: both are coverage a caller would otherwise have to infer from
 prose, and the argument for naming one is the argument for naming the other."
   (handler-case
-      (values (mapcar #'symbol-data
-                      (getf (funcall (api-fn api :semantic-data) name
-                                     :registry registry)
-                            :properties-about))
-              t)
+      (let ((routing (funcall (api-fn api :semantic-data) name
+                              :registry registry)))
+        ;; :PROPERTY as well as :PROPERTIES-ABOUT.  A symbol can be both a
+        ;; contract's subject and a property in its own name, and the :ABOUT
+        ;; path reports that direction explicitly -- dropping it here let a
+        ;; contract run answer "nothing else was left unrun" about a property
+        ;; of the same name, off a routing table already in hand.
+        (values (append (let ((own (getf routing :property)))
+                          (when own (list (symbol-data own))))
+                        (mapcar #'symbol-data (getf routing :properties-about)))
+                t))
     ;; (values NIL NIL) rather than NIL: an empty list here says the symbol has
     ;; no properties registered about it, and a read that failed has no
     ;; evidence for that.  Reported as its own fact, the way every sibling in
@@ -1354,6 +1360,17 @@ truth is that nothing was read."
       (list :argument-count nil :kind :property :shrink-enabled nil
             :trials-table nil :data nil :known nil))))
 
+(define-condition unreadable-projection (error)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (format stream "cl-spec returned no projection for this name.")))
+  (:documentation "Signalled when a cl-spec reader answers NIL for a name.
+
+Caught by the facts readers' own handler-case, which is what turns it into
+:KNOWN NIL -- the state that says nothing about this definition was read,
+rather than a set of answers derived from an empty plist."))
+
 (defun %contract-facts (api name registry &optional pre-read)
   "Return the facts about the contract for NAME a result needs.
 
@@ -1368,6 +1385,13 @@ here rather than things read off a definition."
       (let ((data (or pre-read
                       (funcall (api-fn api :function-spec-data) name
                                :registry registry))))
+        ;; A projection that came back NIL is not a contract with no arguments
+        ;; and no :pre.  %DESCRIBE-FUNCTION-SPEC refuses that inference and
+        ;; %FUNCTION-SPEC-LISTING carries :READ-FAILED for it; read here as a
+        ;; real answer it produced four positive claims -- no :pre, every
+        ;; input passed, a usable refusal count, an effective trial count --
+        ;; and a verified verdict resting on them.
+        (unless data (error 'unreadable-projection))
         (list :argument-count (length (getf data :arguments))
               :kind :contract
               :shrink-enabled t
@@ -1539,74 +1563,80 @@ cl-spec's structured account of a return value that missed its spec."
     (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
       (multiple-value-bind (explanation explanation-read)
           (read-slot :check-explanation)
-      (let* ((rejected (read-slot :check-rejected))
-             (countable (and (integerp executed) (integerp rejected)))
-             (overcounted (and countable (> rejected executed)))
-             ;; A refusal reported against a contract whose projection says it
-             ;; has nothing to refuse with.  Two readers disagreeing, like the
-             ;; overcount above, and handled the same way rather than only in
-             ;; the text: a subtraction over figures that contradict each
-             ;; other is not a call count, and publishing it while the text
-             ;; says it cannot be derived leaves one response saying both.
-             (contradicted (and countable
-                                (null precondition-p)
-                                (plusp rejected)))
-             ;; One keyword for one three-valued question, decided in one
-             ;; place.  Five booleans meant the renderer re-derived which
-             ;; reason applied by testing them in an order that could not
-             ;; change -- :UNKNOWN is not NULL, so its clause had to precede
-             ;; the no-:pre one, silently -- while the gap list and the
-             ;; verdict read a sixth.  The booleans below are published from
-             ;; this, not computed beside it.
-             (rejection-status
-               (cond ((not (integerp rejected)) :unmeasured)
-                     (overcounted :overcounted)
-                     ((eq :unknown precondition-p) :precondition-unknown)
-                     (contradicted :contradicted)
-                     ((null precondition-p) :no-precondition)
-                     ((not countable) :unmeasured)
-                     (t :usable)))
-             (usable (member rejection-status '(:usable :no-precondition))))
-        (multiple-value-bind (explanation-text explanation-complete
-                              explanation-omitted)
-            (if explanation
-                ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
-                ;; non-positive budget lives in the wrapper, and this was the
-                ;; one bounded print in the file reaching the stream without
-                ;; it.
-                (%print-bounded-form explanation max-value-chars)
-                (values nil :not-applicable nil))
-          (list :rejected rejected
-                :rejection-status rejection-status
-                :rejected-measured (and (integerp rejected) t)
-                ;; Carried so a renderer does not describe a refusal that
-                ;; cannot happen: "0 of them refused by :pre" told the reader
-                ;; a precondition exists, on a contract written without one.
-                :precondition-p precondition-p
-                :rejected-overcounted (and overcounted t)
-                :rejected-contradicted (and contradicted t)
-                ;; The single question every consumer of this plist asks: is
-                ;; the refusal count one this response may subtract with.
-                :rejected-usable (and usable t)
-                ;; Absent, not floored, when the two cannot be subtracted: 0
-                ;; is itself a claim -- "the function was never called" --
-                ;; about a run that did call it, and the text says the number
-                ;; cannot be derived while the JSON would have said zero.
-                :effective-trials (when usable (- executed rejected))
-                :failure-reason reason
-                ;; Whether the reader resolved, not whether it returned it.
-                ;; NIL is a legitimate answer from cl-spec -- a passing run,
-                ;; or a failing one whose counterexample did not reproduce --
-                ;; so it cannot double as "this adapter could not ask".
-                ;; Reported for the same reason REJECTED-MEASURED is: without
-                ;; it a renderer tells the caller their function is
-                ;; non-deterministic on the evidence of a name this image
-                ;; could not find.
-                :failure-reason-readable (and reason-read t)
-                :explanation explanation-text
-                :explanation-readable (and explanation-read t)
-                :explanation-complete explanation-complete
-                :explanation-omitted-chars explanation-omitted)))))))
+        (let* ((rejected (read-slot :check-rejected))
+               (countable (and (integerp executed) (integerp rejected)))
+               (overcounted (and countable (> rejected executed)))
+               ;; A refusal reported against a contract whose projection says it
+               ;; has nothing to refuse with.  Two readers disagreeing, like the
+               ;; overcount above, and handled the same way rather than only in
+               ;; the text: a subtraction over figures that contradict each
+               ;; other is not a call count, and publishing it while the text
+               ;; says it cannot be derived leaves one response saying both.
+               (contradicted (and countable
+                                  (null precondition-p)
+                                  (plusp rejected)))
+               ;; One keyword for one three-valued question, decided in one
+               ;; place.  Five booleans meant the renderer re-derived which
+               ;; reason applied by testing them in an order that could not
+               ;; change -- :UNKNOWN is not NULL, so its clause had to precede
+               ;; the no-:pre one, silently -- while the gap list and the
+               ;; verdict read a sixth.  The booleans below are published from
+               ;; this, not computed beside it.
+               (rejection-status
+                 ;; COUNTABLE first, and before every clause below it: each of
+                 ;; the others ends in a subtraction, and cl-spec can report a
+                 ;; result whose trial count is NIL -- its own check-function
+                 ;; writes (- (or (property-result-trials result) 0) rejected)
+                 ;; for that reason.  Ordered after :NO-PRECONDITION, a contract
+                 ;; without a :pre reached (- NIL 0) and the TYPE-ERROR was
+                 ;; reported to the caller as "this adapter failed".
+                 (cond ((not countable) :unmeasured)
+                       (overcounted :overcounted)
+                       ((eq :unknown precondition-p) :precondition-unknown)
+                       (contradicted :contradicted)
+                       ((null precondition-p) :no-precondition)
+                       (t :usable)))
+               (usable (member rejection-status '(:usable :no-precondition))))
+          (multiple-value-bind (explanation-text explanation-complete
+                                explanation-omitted)
+              (if explanation
+                  ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
+                  ;; non-positive budget lives in the wrapper, and this was the
+                  ;; one bounded print in the file reaching the stream without
+                  ;; it.
+                  (%print-bounded-form explanation max-value-chars)
+                  (values nil :not-applicable nil))
+            (list :rejected rejected
+                  :rejection-status rejection-status
+                  :rejected-measured (and (integerp rejected) t)
+                  ;; Carried so a renderer does not describe a refusal that
+                  ;; cannot happen: "0 of them refused by :pre" told the reader
+                  ;; a precondition exists, on a contract written without one.
+                  :precondition-p precondition-p
+                  :rejected-overcounted (and overcounted t)
+                  :rejected-contradicted (and contradicted t)
+                  ;; The single question every consumer of this plist asks: is
+                  ;; the refusal count one this response may subtract with.
+                  :rejected-usable (and usable t)
+                  ;; Absent, not floored, when the two cannot be subtracted: 0
+                  ;; is itself a claim -- "the function was never called" --
+                  ;; about a run that did call it, and the text says the number
+                  ;; cannot be derived while the JSON would have said zero.
+                  :effective-trials (when usable (- executed rejected))
+                  :failure-reason reason
+                  ;; Whether the reader resolved, not whether it returned it.
+                  ;; NIL is a legitimate answer from cl-spec -- a passing run,
+                  ;; or a failing one whose counterexample did not reproduce --
+                  ;; so it cannot double as "this adapter could not ask".
+                  ;; Reported for the same reason REJECTED-MEASURED is: without
+                  ;; it a renderer tells the caller their function is
+                  ;; non-deterministic on the evidence of a name this image
+                  ;; could not find.
+                  :failure-reason-readable (and reason-read t)
+                  :explanation explanation-text
+                  :explanation-readable (and explanation-read t)
+                  :explanation-complete explanation-complete
+                  :explanation-omitted-chars explanation-omitted)))))))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1668,6 +1698,14 @@ counterexample cannot be told from a missing one")
           :elapsed (funcall (api-fn api :result-elapsed) result)
           :definition-digest (getf digest :value)
           :definition-digest-complete (getf digest :complete)
+          ;; What the digest is a digest OF.  It covers the definition
+          ;; cl-spec holds and the specs reachable from it -- which for a
+          ;; property is the thing that ran, and for a contract is not: the
+          ;; code under test is the function, and nothing here reads a
+          ;; function body.  Editing TRANSFER and replaying its contract from
+          ;; the same seed is faithful by this digest and is not a
+          ;; reproduction, so the field has to say which it measured.
+          :definition-digest-covers (getf digest :covers)
           :definition-match (%definition-match digest expected-digest))))
 
 (defun %definition-match (digest expected)
@@ -1904,6 +1942,9 @@ establish -- read full coverage for a function whose contract never ran."
       ;; shortfall whatever.  A property has no contract half at all, and its
       ;; rejections happen inside the generator where nothing counts them.
       (let ((contract (getf result :contract)))
+        ;; A contract run that timed out or never started carries no
+        ;; contract half at all, so it is neither "measured" nor a property
+        ;; run: nothing was counted, and the gap says so.
         (when (or (null contract)
                   (not (member (getf contract :rejection-status)
                                '(:usable :no-precondition))))
@@ -2063,7 +2104,10 @@ anything holds."
                                 (%property-facts api name registry selected-data)))
                      (budget-plist (%trials-budget api facts profile-keyword
                                                    backend trials))
-                     (digest (%digest-facts api name registry facts))
+                     (digest (append (%digest-facts api name registry facts)
+                                     (list :covers (if (eq kind :contract)
+                                                       :contract
+                                                       :property))))
                      (remaining (- budget (%elapsed-since start)))
                      (result (%run-one api name registry kind profile-keyword seed
                                        budget-plist digest

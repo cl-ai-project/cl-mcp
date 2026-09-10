@@ -739,6 +739,54 @@ listing functions are not -- the shape the blanket listing guard refused."
         (ok (null (getf contract :effective-trials))))
       (ok (not (getf report :verified))))))
 
+(deftest check-report-survives-a-result-with-no-trial-count
+  (testing "a NIL trial count is reported, not subtracted"
+    ;; cl-spec writes (- (or (property-result-trials result) 0) rejected) in
+    ;; its own checker, so the count can be NIL.  Reached with no :pre, the
+    ;; adapter subtracted from it and the TYPE-ERROR came back to the caller
+    ;; as internal-error -- "this adapter failed" -- for a run cl-spec had
+    ;; completed.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (%result-stub :status :passed :trials nil))
+                     :check-rejected (lambda (result) (declare (ignore result)) 0)
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore registry))
+                       (list :name name :arguments nil :preconditions nil)))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (not (eq :internal-error (getf result :status))))
+      (ok (eq :unmeasured (getf (getf result :contract) :rejection-status)))
+      (ok (null (getf (getf result :contract) :effective-trials)))
+      (ok (not (getf report :verified)))))
+  (testing "and a projection that came back NIL is not a readable contract"
+    ;; Read as a real answer it produced four positive claims -- no :pre,
+    ;; every input passed, a usable count, an effective trial count -- and a
+    ;; verified verdict resting on them.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (%result-stub :status :passed :trials 100))
+                     :check-rejected (lambda (result) (declare (ignore result)) 0)
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore name registry))
+                       nil))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (eq :unknown (getf (getf result :contract) :precondition-p)))
+      (ok (not (getf report :verified))))))
+
 (deftest check-report-lists-an-unrun-contract-as-a-gap
   (testing "the contract an :about selection left alone reaches the gap list"
     ;; The headline says it; verification_gaps is the machine-readable half of

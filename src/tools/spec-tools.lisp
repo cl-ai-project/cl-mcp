@@ -250,9 +250,12 @@ verification_gaps names what the run could not establish. Values:
   zero-trials                 a passing run whose budget resolved to nothing.
   effective-trials-unknown    a contract run whose real call count could not
                               be derived. NOT the same as a budget of zero.
-  rejection-counts-unmeasured no usable refused-input count. Always present on
-                              a property run: its inputs are refused inside
-                              the generator, which does not report how often.
+  rejection-counts-unmeasured no usable refused-input count. Always on a
+                              property run -- its inputs are refused inside
+                              the generator, which does not report how often
+                              -- and on a contract run whose count could not
+                              be read or never happened at all, a timeout or
+                              a budget-exhausted result included.
   contract-not-run            a function spec is registered for the symbol and
                               an :about selection did not run it.
   properties-not-run          properties are registered about the symbol and a
@@ -337,6 +340,11 @@ what JSON holds exactly as a number), profile, and definition_digest.  Re-run
 with the same property, seed and profile to regenerate the same trial
 sequence.  Pass expect_definition_digest to be told when the definitions moved
 underneath you.
+
+definition_digest_covers says what the digest is a digest OF: the property, or
+the contract. On a contract run it does NOT cover the function body -- nothing
+here reads one -- so editing the function and replaying from the same seed is
+reported faithful and is not a reproduction. Check the function yourself.
 
 definition_match is four-valued: match, mismatch, unknown (the digest could
 not be computed, or its input hit the print limit -- this is NOT a
