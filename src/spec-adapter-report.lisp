@@ -399,7 +399,7 @@ is registered about this symbol: ~A" failure)
 ;;; spec-describe
 ;;; ---------------------------------------------------------------------------
 
-(defun %describe-condition-status (api condition)
+(defun %describe-condition-status (api condition &optional contract-p)
   "Return the status DESCRIBE-REPORT should answer for CONDITION.
 
 CL:UNDEFINED-FUNCTION gets its own answer here for the reason %REGISTERED-P
@@ -408,7 +408,15 @@ been written, the contract IS registered, and reporting :INTERNAL-ERROR --
 documented as \"this adapter failed\" -- had the describe path and the run path
 disagreeing about one fact."
   (cond ((%unknown-registration-p api condition) :not-registered)
-        ((typep condition 'undefined-function) :undefined-function)
+        ;; Contracts only.  cl-spec raises CL:UNDEFINED-FUNCTION on purpose
+        ;; for a contract whose target has not been written; the same
+        ;; condition out of PROPERTY-DATA or SPEC-DATA is a revision that
+        ;; calls something this image lacks, and answering
+        ;; "the function it contracts is not defined" makes a claim about the
+        ;; caller's code out of an adapter fault -- which is the misdiagnosis
+        ;; this clause was added to stop, in the other direction.
+        ((and contract-p (typep condition 'undefined-function))
+         :undefined-function)
         (t :internal-error)))
 
 (defun %unknown-registration-p (api condition)
@@ -887,31 +895,37 @@ answers."
             (post (clause (getf data :postconditions))))
         (multiple-value-bind (source source-complete source-omitted)
             (%print-bounded-form (getf data :source-form) max-chars)
-          (list :status :ok
-                :kind "function-spec"
-                :name (symbol-data name)
-                :documentation (getf data :documentation)
-                :arguments (loop for argument in (getf data :arguments)
-                                 collect (list :variable
-                                               (symbol-data (getf argument :variable))
-                                               :spec (%spec-tree (getf argument :spec))))
-                :returns (%spec-tree (getf data :returns))
-                :preconditions (first pre)
-                ;; Only when there is a clause.  "complete: true" about a
-                ;; :PRE the contract does not have is a claim, and the
-                ;; response has %OPTIONAL-BOOL to carry an absent flag as
-                ;; null -- which is what this PR added it for.
-                :preconditions-complete (if pre (second pre) :not-applicable)
-                :preconditions-omitted-chars (third pre)
-                :postconditions (first post)
-                :postconditions-complete (if post (second post) :not-applicable)
-                :postconditions-omitted-chars (third post)
-                :source-form source
-                :source-form-complete source-complete
-                :source-form-omitted-chars source-omitted
-                :source-location (getf data :source-location)
-                :definition-digest (definition-digest api name registry
-                                                      :property data)))))))
+          ;; The pair, not the value alone.  A digest whose input hit the print
+          ;; limit is not one a caller may compare, and this was the third
+          ;; place offering one for expect_definition_digest without saying so.
+          (multiple-value-bind (digest complete)
+              (definition-digest api name registry :property data)
+            (list :status :ok
+                  :kind "function-spec"
+                  :name (symbol-data name)
+                  :documentation (getf data :documentation)
+                  :arguments (loop for argument in (getf data :arguments)
+                                   collect (list :variable
+                                                 (symbol-data (getf argument :variable))
+                                                 :spec (%spec-tree (getf argument :spec))))
+                  :returns (%spec-tree (getf data :returns))
+                  :preconditions (first pre)
+                  ;; Only when there is a clause.  "complete: true" about a
+                  ;; :PRE the contract does not have is a claim, and the
+                  ;; response has %OPTIONAL-BOOL to carry an absent flag as
+                  ;; null -- which is what this PR added it for.
+                  :preconditions-complete (if pre (second pre) :not-applicable)
+                  :preconditions-omitted-chars (third pre)
+                  :postconditions (first post)
+                  :postconditions-complete (if post (second post) :not-applicable)
+                  :postconditions-omitted-chars (third post)
+                  :source-form source
+                  :source-form-complete source-complete
+                  :source-form-omitted-chars source-omitted
+                  :source-location (getf data :source-location)
+                  :definition-digest digest
+                  :definition-digest-complete complete
+                  :definition-digest-covers :contract)))))))
 
 (defun %describe-property (api name registry max-chars)
   "Return the detail plist for property NAME."
@@ -1004,7 +1018,8 @@ function-spec; got ~S" kind)
           ;; failure -- a bad argument, a printer error, a malformed
           ;; :ARGUMENTS entry -- as the absence of a registration, which is
           ;; exactly the false negative this file exists to prevent.
-          (list :status (%describe-condition-status api condition)
+          (list :status (%describe-condition-status
+                         api condition (string= kind "function-spec"))
                 :kind kind
                 :name (symbol-data symbol)
                 :message (princ-to-string condition)
@@ -1171,7 +1186,13 @@ each call.  Same reason DEFINITION-DIGEST takes a :PROPERTY."
     ;; Answering not-registered here made the two paths disagree about one
     ;; fact, and told the caller to register something they already had.
     (undefined-function (condition)
-      (values nil (princ-to-string condition) nil :undefined-function))
+      (values nil (princ-to-string condition) nil
+              ;; Only a contract's reader raises this on purpose; out of
+              ;; PROPERTY-DATA it is a fault in the revision, not a fact about
+              ;; the caller's code.
+              (if (eq data-key :function-spec-data)
+                  :undefined-function
+                  :not-registered)))
     (error (condition)
       (values nil (princ-to-string condition) nil :not-registered))))
 
@@ -1259,6 +1280,13 @@ while listing the properties about this symbol: ~A" condition)))))))
                         ;; the channels added so the fact need not be read out
                         ;; of prose, and they were sending the caller to an
                         ;; operation CHECK-REPORT answers :unsupported.
+                        ;; The symbol's own property, as data.  The mirror
+                        ;; direction reports it in three channels; here it
+                        ;; lived only in a note several lines under a bare
+                        ;; verdict, which is the reading those channels exist
+                        ;; to stop.
+                        :own-property-not-run (let ((own (getf routing :property)))
+                                                (when own (symbol-data own)))
                         :contract-not-run (let ((contract
                                                   (getf routing :function-spec)))
                                             (when (and contract
@@ -1714,7 +1742,11 @@ cl-spec's structured account of a return value that missed its spec."
                   ;; it.
                   (%print-bounded-form explanation max-value-chars)
                   (values nil :not-applicable nil))
-            (list :rejected rejected
+            (list ;; Only when it is a number.  A reader that answered a
+                ;; keyword or a float published that value beside a status
+                ;; saying the count could not be read -- and handed yason
+                ;; something it may refuse to serialize.
+                :rejected (when (integerp rejected) rejected)
                   :rejection-status rejection-status
                   :rejected-measured (and rejected-read (integerp rejected) t)
                 :rejected-readable (and rejected-read t)

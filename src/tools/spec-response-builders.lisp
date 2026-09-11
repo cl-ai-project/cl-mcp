@@ -531,6 +531,10 @@ preconditions_complete.  Absent has to reach the consumer as null."
               "source_form_omitted_chars" (getf report :source-form-omitted-chars)
               "source_location" (%source-location-ht (getf report :source-location))
               "definition_digest" (getf report :definition-digest)
+              "definition_digest_complete" (%optional-bool
+                                            report :definition-digest-complete)
+              "definition_digest_covers" (%keyword-string
+                                          (getf report :definition-digest-covers))
               "environment" (%environment-ht (getf report :environment))
               "content" (text-content (%format-describe-text report))))))
 

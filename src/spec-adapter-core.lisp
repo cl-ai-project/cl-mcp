@@ -659,10 +659,18 @@ different input domain and the run is not a reproduction of the earlier one.
 A reference to a spec that is not registered is recorded as unresolved rather
 than skipped, so the digest still changes if it is defined later."
   (handler-case
-      (let ((property (if property-p
-                          property
-                          (funcall (api-fn api data-key)
-                                   property-name :registry registry)))
+      (let ((property (or (if property-p
+                              property
+                              (funcall (api-fn api data-key)
+                                       property-name :registry registry))
+                          ;; A reader that answered NIL is not an empty
+                          ;; definition.  Digested as one it gave the same
+                          ;; stable hex for every unreadable name, published
+                          ;; with COMPLETE true -- so a replay against a
+                          ;; definition nothing had read came back "match",
+                          ;; in the field whose whole job is to say the
+                          ;; definition did not move.
+                          (return-from definition-digest (values nil nil))))
             (pending '())
             (seen (make-hash-table :test #'eq))
             (specs '()))
