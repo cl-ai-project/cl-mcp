@@ -328,3 +328,35 @@ are what a test about the message has to look at."
     (ok (eq :cl-spec (disabled-tool-group "spec-list")))
     (with-cl-spec-group
       (ok (null (disabled-tool-group "spec-list"))))))
+
+(deftest spec-check-description-does-not-call-skipped-unreachable
+  (testing "a status the code emits is not documented as one that cannot occur"
+    ;; The description said the current backend does not produce SKIPPED.  It
+    ;; does: cl-spec's CHECK-FUNCTION returns it for a contract whose :pre
+    ;; refused every generated input, and RUN-PROPERTY for a budget that
+    ;; resolved to zero.  A model told the status cannot happen has no reading
+    ;; for it when it does, and the one reading it must not reach is "passed".
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response))))
+           (description (loop for tool across tools
+                              when (string= "spec-check" (gethash "name" tool))
+                                return (gethash "description" tool)))
+           (start (search "  skipped " description))
+           (end (search "  pending " description)))
+      (ok start "the description must document the skipped status")
+      (ok (and end (> end start)) "and pending must follow it")
+      (let ((entry (subseq description start end)))
+        (ok (not (search "does not produce" entry)))
+        (ok (search "never called" entry))
+        (ok (search "NOT a pass" entry)))
+      (testing "and pending, which really is unreachable, still says so alone"
+        ;; Its entry read "same.", which is only true while the entry above
+        ;; it says what SKIPPED no longer says.
+        (let* ((pending-end (search "  timeout " description))
+               (entry (subseq description end pending-end)))
+          (ok (search "does not produce" entry))
+          (ok (not (search "same." entry))))))))

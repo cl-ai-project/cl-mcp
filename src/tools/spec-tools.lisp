@@ -219,8 +219,12 @@ Per property, results[].status:
   failed          a counterexample was found; both the original and the shrunk
                   arguments are reported.
   error           the property body signalled.
-  skipped         defined by cl-spec; the current backend does not produce it.
-  pending         same. Reported as-is if it ever appears.
+  skipped         nothing was checked, and this is NOT a pass: a contract
+                  whose :pre refused every generated input, so the function
+                  was never called, or a run whose trial budget resolved to
+                  zero.
+  pending         defined by cl-spec; the current backend does not produce it.
+                  Reported as-is if it ever appears.
   timeout         the deadline expired. NOTHING was proved or disproved.
   not-run         the whole-call budget was spent before this property started.
   generator-error no value could be generated. Nothing was checked.

@@ -894,3 +894,90 @@
                                           :failure-reason-readable t)))))
       (ok (search "refused by :pre" text))
       (ok (not (search "no :pre" text))))))
+
+(defun %digest-check-report (faithful &key properties-not-run)
+  "Return a passing contract report whose reproduction verdict is FAITHFUL.
+
+PROPERTIES-NOT-RUN adds a coverage gap, so a case can ask whether the two
+qualifiers displace one another."
+  (list :status :completed
+        :verified t
+        :selection (list* :mode "contract" :kind :contract :count 1
+                          :selected (list (%symbol-data "PROBE" "WIDEN"))
+                          :source "explicit function argument"
+                          :coverage "Only the contract named."
+                          :properties-not-run-read t
+                          (when properties-not-run
+                            (list :properties-not-run
+                                  (list (%symbol-data "PROBE" "WIDEN-IS-WIDE")))))
+        :results
+        (list (list :property (%symbol-data "PROBE" "WIDEN")
+                    :kind :contract
+                    :status :passed
+                    :trials (list :executed 30 :budget 30
+                                  :budget-source "requested")
+                    :seed "7"
+                    :counterexample-status :not-applicable
+                    :shrink-status :not-applicable
+                    :definition-match faithful))
+        :counts (list :selected 1 :passed 1 :failed 0
+                      :errored 0 :timed-out 0 :not-run 0
+                      :other 0 :by-status '((:passed . 1)))
+        :reproduction-faithful faithful
+        :environment *environment*))
+
+(defun %headline (report)
+  "Return the first line of the text REPORT renders to."
+  (let ((text (first-text (build-spec-check-response report))))
+    (subseq text 0 (or (position #\Newline text) (length text)))))
+
+(deftest check-response-headline-says-when-the-definitions-moved
+  (testing "a pass that did not reproduce the named run says so up front"
+    ;; EXPECT_DEFINITION_DIGEST is an assertion by the caller: this is still
+    ;; the contract I saved.  When it turns out false the run keeps its own
+    ;; verdict -- but a bare "✓ VERIFIED" on the first line is read as
+    ;; confirmation of the saved one, and the reproduction verdict sits
+    ;; several lines under a reader who has already stopped.  The same
+    ;; argument the coverage qualifiers are here for.
+    (let ((headline (%headline (%digest-check-report :false))))
+      (ok (search "VERIFIED" headline))
+      (ok (search "definitions moved" headline))))
+  (testing "a digest that could not be read is not taken for a match"
+    (let ((headline (%headline (%digest-check-report :unknown))))
+      (ok (search "VERIFIED" headline))
+      (ok (search "could not be read" headline))))
+  (testing "a match, and a run with no digest to check, keep the bare headline"
+    (dolist (value '(:true :not-checked))
+      (let ((headline (%headline (%digest-check-report value))))
+        (ok (search "VERIFIED" headline))
+        (ok (not (search "definitions" headline))))))
+  (testing "and it does not displace the coverage qualifier"
+    ;; Two different gaps.  One says what was covered, the other says which
+    ;; revision covered it, and dropping either to make room for the other
+    ;; leaves the headline making a claim the run did not support.
+    (let ((headline (%headline (%digest-check-report :false
+                                                     :properties-not-run t))))
+      (ok (search "contract only" headline))
+      (ok (search "definitions moved" headline)))))
+
+(deftest check-response-says-when-the-contract-itself-signalled
+  (testing "contract-error is a finding about the contract, not the function"
+    ;; CONDITION, POSTCONDITION and RETURN-SPEC all name a half of what was
+    ;; claimed about the function.  CONTRACT-ERROR names the contract's own
+    ;; code signalling, which is a different accusation -- and printed in the
+    ;; same column as the others, the bare word reads as one more way the
+    ;; function broke.
+    (let ((text (first-text (build-spec-check-response
+                             (%contract-check-report
+                              :failure-reason :contract-error
+                              :failure-reason-readable t)))))
+      (ok (search "broken half: contract-error" text))
+      (ok (search "contract's own code" text))
+      (ok (search "NOT about the function" text))))
+  (testing "and a half that really is about the function gets no such gloss"
+    (let ((text (first-text (build-spec-check-response
+                             (%contract-check-report
+                              :failure-reason :postcondition
+                              :failure-reason-readable t)))))
+      (ok (search "broken half: postcondition" text))
+      (ok (not (search "contract's own code" text))))))
