@@ -375,6 +375,28 @@ thread sees the value the caller captured rather than the global one.")
                   (declare (ignore registry))
                   (when (eq tag :math) (list (%sym "ADD-COMMUTES"))))))))
 
+(defun %contract-listing-api ()
+  "Return a stub API that can enumerate contracts and nothing else.
+
+Stands for a cl-spec whose function-spec half is present while the older
+listing functions are not -- the shape the blanket listing guard refused."
+  (%stub-api :list-function-specs
+             (lambda (&optional registry)
+               (declare (ignore registry))
+               (list (%sym "ADD")))
+             :function-spec-data
+             (lambda (name &key registry)
+               (declare (ignore registry))
+               (list :name name
+                     :documentation "ADD stays inside SMALL-INT."
+                     :arguments (list (list :variable (%sym "A")
+                                            :spec (list :kind :reference
+                                                        :target (%sym "SMALL-INT"))))
+                     :returns (list :kind :reference
+                                    :target (%sym "SMALL-INT"))
+                     :preconditions nil
+                     :postconditions nil))))
+
 (deftest list-report-enumerates-what-is-registered
   (testing "both kinds come back with the property's discovery fields"
     (let ((report (list-report (%listing-api) :ok :kind "both")))
@@ -446,6 +468,35 @@ thread sees the value the caller captured rather than the global one.")
     (let ((report (list-report (%stub-api) :ok :kind "both")))
       (ok (eq :unsupported (getf report :status)))
       (ok (search "list-specs" (getf report :message))))))
+
+(deftest list-report-gates-on-what-the-kind-needs
+  (testing "a contract listing does not wait on the property listing API"
+    ;; kind=function-specs reads neither LIST-SPECS nor LIST-PROPERTIES, and
+    ;; the blanket guard predating it refused a listing it could produce --
+    ;; while reporting function_specs_listable true three keys later.
+    (let ((report (list-report (%contract-listing-api) :ok
+                               :kind "function-specs")))
+      (ok (eq :ok (getf report :status)))
+      (ok (getf report :function-specs-listable))
+      (ok (= 1 (length (getf report :function-specs))))))
+  (testing "and the default kind lists the half it can rather than refusing"
+    ;; "both" is what a caller gets with no arguments.  Failing it outright on
+    ;; a revision that can still enumerate contracts gave back the same
+    ;; "nothing can be enumerated" answer this gate exists to stop giving.
+    (let ((report (list-report (%contract-listing-api) :ok :kind "both")))
+      (ok (eq :ok (getf report :status)))
+      (ok (= 1 (length (getf report :function-specs))))
+      (testing "naming the halves it could not look at"
+        (ok (not (getf report :specs-listable)))
+        (ok (not (getf report :properties-listable)))
+        (testing "whose counts are null, not zero"
+          (ok (null (getf (getf report :counts) :specs)))
+          (ok (null (getf (getf report :counts) :properties)))
+          (ok (eql 1 (getf (getf report :counts) :function-specs)))))))
+  (testing "while a kind with no reachable half is still unsupported"
+    (let ((report (list-report (%contract-listing-api) :ok :kind "properties")))
+      (ok (eq :unsupported (getf report :status)))
+      (ok (search "list-properties" (getf report :message))))))
 
 (deftest list-report-rejects-an-unknown-kind
   (testing "kind is constrained"
@@ -556,6 +607,279 @@ thread sees the value the caller captured rather than the global one.")
                    :seed 42)))
       (ok (eq :invalid-arguments (getf report :status)))
       (ok (search "single" (string-downcase (getf report :message)))))))
+
+(deftest check-report-refuses-a-setting-the-run-cannot-honour
+  (testing "profile with function= is refused, not reported unused"
+    ;; cl-spec's CHECK-FUNCTION takes no profile and a contract has no :TRIALS
+    ;; table for one to select from, so publishing the caller's profile would
+    ;; name a setting the run never used -- the mirror of the trials refusal.
+    (let ((report (check-report (%stub-api) :ok
+                                :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                                :profile "thorough")))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "profile" (string-downcase (getf report :message))))))
+  (testing "trials with symbol= is refused the same way"
+    (let ((report (check-report (%stub-api) :ok
+                                :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                                :trials 100)))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "trials" (string-downcase (getf report :message))))))
+  (testing "and neither waits on cl-spec to be loaded first"
+    ;; An argument that is wrong is wrong whatever cl-spec is doing; answering
+    ;; "cl-spec is not loaded" sends the caller to fix the wrong thing, then
+    ;; hands them the real complaint on the next call.
+    (let ((report (check-report nil :not-loaded :symbol "CL:CAR" :trials 100)))
+      (ok (eq :invalid-arguments (getf report :status)))
+      (ok (search "trials" (string-downcase (getf report :message))))))
+  (testing "while a profile on a property selection is honoured"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub)))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                   :profile "thorough")))
+      (ok (eq :completed (getf report :status)))
+      (ok (eq :thorough (getf report :profile))))))
+
+(deftest check-report-does-not-blame-itself-for-a-missing-function
+  ;; cl-spec's FUNCTION-SPEC-TARGET signals CL:UNDEFINED-FUNCTION on purpose,
+  ;; so that a project can adopt cl-spec one function at a time.  Read as
+  ;; :INTERNAL-ERROR -- documented as "this adapter failed" -- it told the
+  ;; caller cl-mcp was broken when they had simply not written the function.
+  (testing "a contract whose function is not defined says which fact that is"
+    ;; Driven through function=, the path that actually raises it: a property
+    ;; selection reaches the same clause by a different route and would leave
+    ;; the contract path untested.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (error 'undefined-function :name (%sym "ADD")))
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore registry))
+                       (list :name name :arguments nil :preconditions nil)))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (eq :contract (getf result :kind)))
+      (ok (eq :undefined-function (getf result :status)))
+      (ok (not (eq :internal-error (getf result :status))))
+      (testing "and the call did not reach a verdict"
+        (ok (eq :incomplete (getf report :status)))
+        (ok (not (getf report :verified))))))
+  (testing "a property body calling an undefined function reads the same way"
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (error 'undefined-function :name 'no-such-function)))
+                    :ok
+                    :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"))
+           (result (first (getf report :results))))
+      (ok (eq :undefined-function (getf result :status))))))
+
+(deftest check-report-will-not-verify-an-uncountable-contract-run
+  (testing "more refusals than trials is not evidence, in either gate"
+    ;; %CONTRACT-PLIST withholds effective_trials for this case and the text
+    ;; says the call count cannot be derived.  %EVALUATED-P used to fall back
+    ;; to the raw trial count -- the number the rejection count exists to
+    ;; correct -- so verified came back true for a run the same response
+    ;; declared unmeasurable, and the gap list said nothing at all.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed :trials 1))
+                    :check-rejected (lambda (result) (declare (ignore result)) 2)
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil
+                            :preconditions '((> value 0)))))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (let ((contract (getf (first (getf report :results)) :contract)))
+        (ok (getf contract :rejected-overcounted))
+        (ok (null (getf contract :effective-trials))))
+      (ok (not (getf report :verified)))
+      (ok (member :rejection-counts-unmeasured
+                  (getf report :verification-gaps)))
+      (testing "and the gap says the count is unknown, not that it was zero"
+        ;; zero-trials is documented as a budget that resolved to nothing.
+        ;; This run executed trials; only the correction is missing.
+        (ok (member :effective-trials-unknown
+                    (getf report :verification-gaps)))
+        (ok (not (member :zero-trials (getf report :verification-gaps)))))))
+  (testing "and a cl-spec with no refused-input reader verifies nothing either"
+    ;; The raw trial count is not a fallback: a :PRE that admits nothing still
+    ;; generates its full budget, so counting those would let a contract the
+    ;; function never saw report itself evaluated.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed :trials 100))
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil
+                            :preconditions '((> value 1000)))))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (let ((contract (getf (first (getf report :results)) :contract)))
+        (ok (not (getf contract :rejected-measured)))
+        (ok (null (getf contract :effective-trials))))
+      (ok (not (getf report :verified))))))
+
+(deftest check-report-survives-a-result-with-no-trial-count
+  (testing "a NIL trial count is reported, not subtracted"
+    ;; cl-spec writes (- (or (property-result-trials result) 0) rejected) in
+    ;; its own checker, so the count can be NIL.  Reached with no :pre, the
+    ;; adapter subtracted from it and the TYPE-ERROR came back to the caller
+    ;; as internal-error -- "this adapter failed" -- for a run cl-spec had
+    ;; completed.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (%result-stub :status :passed :trials nil))
+                     :check-rejected (lambda (result) (declare (ignore result)) 0)
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore registry))
+                       (list :name name :arguments nil :preconditions nil)))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (not (eq :internal-error (getf result :status))))
+      ;; :TRIALS-UNCOUNTED, not :UNMEASURED: the refusal count was read and
+      ;; the trial count was not, and the two are different sentences.
+      (ok (eq :trials-uncounted
+              (getf (getf result :contract) :rejection-status)))
+      (ok (null (getf (getf result :contract) :effective-trials)))
+      (ok (not (getf report :verified)))))
+  (testing "and a projection that came back NIL is not a readable contract"
+    ;; Read as a real answer it produced four positive claims -- no :pre,
+    ;; every input passed, a usable count, an effective trial count -- and a
+    ;; verified verdict resting on them.
+    (let* ((report (check-report
+                    (%api-with-run
+                     (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                     :check-function
+                     (lambda (&rest ignored)
+                       (declare (ignore ignored))
+                       (%result-stub :status :passed :trials 100))
+                     :check-rejected (lambda (result) (declare (ignore result)) 0)
+                     :function-spec-data
+                     (lambda (name &key registry)
+                       (declare (ignore name registry))
+                       nil))
+                    :ok
+                    :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+           (result (first (getf report :results))))
+      (ok (eq :unknown (getf (getf result :contract) :precondition-p)))
+      (ok (not (getf report :verified))))))
+
+(deftest check-report-lists-an-unrun-contract-as-a-gap
+  (testing "the contract an :about selection left alone reaches the gap list"
+    ;; The headline says it; verification_gaps is the machine-readable half of
+    ;; the same statement, and a consumer branching on verified plus this list
+    ;; read full coverage for a function whose contract never ran.
+    ;; The stub has the contract API: this response tells the caller to run
+    ;; the contract, and it now names one only when this cl-spec could.
+    (let* ((api (%api-with-run (lambda (&rest ignored)
+                                 (declare (ignore ignored))
+                                 (%result-stub))
+                               :check-function
+                               (lambda (&rest ignored)
+                                 (declare (ignore ignored))
+                                 (%result-stub))
+                               :function-spec-data
+                               (lambda (name &key registry)
+                                 (declare (ignore registry))
+                                 (list :name name :arguments nil
+                                       :preconditions nil))
+                               :semantic-data
+                               (lambda (symbol &key registry)
+                                 (declare (ignore registry))
+                                 (list :symbol symbol
+                                       :package (package-name
+                                                 (symbol-package symbol))
+                                       :spec nil :property nil
+                                       :function-spec (%sym "ADD")
+                                       :properties-about
+                                       (list (%sym "ADD-COMMUTES"))))))
+           (report (check-report api :ok
+                                 :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (member :contract-not-run (getf report :verification-gaps)))
+      (testing "and it is named in the selection as data, not only in prose"
+        (ok (string= "ADD" (getf (getf (getf report :selection)
+                                       :contract-not-run)
+                                 :name)))))))
+
+(deftest check-report-lists-the-properties-a-contract-run-left-alone
+  (testing "function= names the properties it did not run, both ways"
+    ;; The mirror of :CONTRACT-NOT-RUN. A contract that holds is not a clean
+    ;; bill for a function whose properties were never run, and the argument
+    ;; for putting one direction in the gap list is the argument for the other.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed))
+                    :check-rejected (lambda (result) (declare (ignore result)) 0)
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil :preconditions nil)))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (member :properties-not-run (getf report :verification-gaps)))
+      (let ((left (getf (getf report :selection) :properties-not-run)))
+        (ok (= 1 (length left)))
+        (ok (string= "ADD-COMMUTES" (getf (first left) :name))))
+      (testing "and says so in a note rather than only in the coverage prose"
+        (ok (find-if (lambda (note) (search "NOT covered" note))
+                     (getf (getf report :selection) :notes))))))
+  (testing "a lookup that failed is not an empty list of related properties"
+    ;; "nothing else is registered" and "this could not be read" are the
+    ;; distinction every other flag in this module carries.
+    (let ((report (check-report
+                   (%api-with-run
+                    (lambda (&rest ignored) (declare (ignore ignored)) nil)
+                    :check-function
+                    (lambda (&rest ignored)
+                      (declare (ignore ignored))
+                      (%result-stub :status :passed))
+                    :check-rejected (lambda (result) (declare (ignore result)) 0)
+                    :semantic-data
+                    (lambda (symbol &key registry)
+                      (declare (ignore symbol registry))
+                      (error 'fixture-unknown-name))
+                    :function-spec-data
+                    (lambda (name &key registry)
+                      (declare (ignore registry))
+                      (list :name name :arguments nil :preconditions nil)))
+                   :ok
+                   :function "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
+      (ok (null (getf (getf report :selection) :properties-not-run)))
+      (ok (not (getf (getf report :selection) :properties-not-run-read)))
+      (ok (member :related-properties-unknown
+                  (getf report :verification-gaps)))
+      (ok (not (member :properties-not-run
+                       (getf report :verification-gaps)))))))
 
 (deftest check-report-digest-mismatch-is-loud
   (testing "an unexpected definition is reported as an unfaithful replay"

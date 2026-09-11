@@ -74,6 +74,31 @@ not registered\"."
       (t (values nil (format nil "~A must be a positive integer, got ~S"
                              name value))))))
 
+(defvar *maximum-trials* 1000000
+  "Largest trial count spec-check will pass to a contract run.
+
+A ceiling, not a bound on the work.  The run happens on a deadline thread that
+cannot always be stopped, so a budget outliving its timeout keeps calling the
+target inside the worker this session's repl-eval and load-system share; this
+caps how many calls that can be, and a million calls of an arbitrary function
+is still unbounded wall-clock time.  What would actually bound it is a
+cooperative deadline the run checks, or retiring a worker on a leaked thread
+-- which WORKER-REUSE already reports and nothing acts on -- and both are at a
+layer below this argument.  Recorded rather than implied, because a number
+that lets the bad case through is worth having only if nobody reads it as a
+guarantee.")
+
+(defun %bounded-integer-arg (params name maximum)
+  "Return (values N NIL) for a positive integer at most MAXIMUM, else an error."
+  (multiple-value-bind (value message) (%positive-integer-arg params name nil)
+    (cond
+      (message (values nil message))
+      ((and value (> value maximum))
+       (values nil (format nil "~A must be at most ~:D; a larger budget can ~
+outlive its timeout and go on calling the function in this worker"
+                           name maximum)))
+      (t (values value nil)))))
+
 (defun %argument-error-response (message builder)
   "Return BUILDER's response for an argument MESSAGE, before cl-spec is asked."
   (funcall builder
@@ -189,7 +214,10 @@ cl-mcp: ~A" value)
   "Return the spec-check response hash-table for PARAMS.
 
 An unusable seed is answered here rather than passed on: a run started with a
-seed the caller did not mean is a run whose result means nothing."
+seed the caller did not mean is a run whose result means nothing.  TRIALS is
+checked in the same place and for the same reason: the tool schema's :INTEGER
+admits 0 and negative numbers, and cl-spec runs (loop for trial from 1 to -5)
+without complaint -- zero trials, reported as \"-5 executed of -5 budget\"."
   ;; The raw value, not %STRING-ARG's: that filter turned a JSON number or an
   ;; empty string into NIL, and NIL means "no seed given" -- so the run went
   ;; ahead with a fresh random seed and reported it as though it were the
@@ -199,18 +227,25 @@ seed the caller did not mean is a run whose result means nothing."
       (parse-seed-string (and params (gethash "seed" params)))
     (multiple-value-bind (max-value-chars chars-error)
         (%positive-integer-arg params "max_value_chars" 2000)
-      (let ((message (or seed-error chars-error)))
-        (if message
-            (%argument-error-response message #'build-spec-check-response)
-            (multiple-value-bind (api status) (resolve-cl-spec-api)
-              (build-spec-check-response
-               (check-report api status
-                             :property (%string-arg params "property")
-                             :symbol (%string-arg params "symbol")
-                             :package (%string-arg params "package")
-                             :profile (%string-arg params "profile")
-                             :seed seed
-                             :expect-definition-digest
-                             (%string-arg params "expect_definition_digest")
-                             :timeout-seconds (gethash "timeout_seconds" params)
-                             :max-value-chars max-value-chars))))))))
+      ;; A default of NIL, so an absent trials stays absent: the budget then
+      ;; comes from the property's own table or the backend, which is what
+      ;; CHECK-REPORT expects to see.
+      (multiple-value-bind (trials trials-error)
+          (%bounded-integer-arg params "trials" *maximum-trials*)
+        (let ((message (or seed-error chars-error trials-error)))
+          (if message
+              (%argument-error-response message #'build-spec-check-response)
+              (multiple-value-bind (api status) (resolve-cl-spec-api)
+                (build-spec-check-response
+                 (check-report api status
+                               :property (%string-arg params "property")
+                               :symbol (%string-arg params "symbol")
+                               :function (%string-arg params "function")
+                               :trials trials
+                               :package (%string-arg params "package")
+                               :profile (%string-arg params "profile")
+                               :seed seed
+                               :expect-definition-digest
+                               (%string-arg params "expect_definition_digest")
+                               :timeout-seconds (gethash "timeout_seconds" params)
+                               :max-value-chars max-value-chars)))))))))

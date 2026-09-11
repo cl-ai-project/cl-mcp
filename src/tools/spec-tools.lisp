@@ -40,15 +40,22 @@
 (define-tool "spec-list"
   :group :cl-spec
   :description
-  "List the cl-spec specs and properties registered in this session's worker.
+  "List the cl-spec specs, function specs and properties registered in this
+session's worker.
 
 Use this when you do not yet know what is here. The other spec tools all take
 a name you already have; this is the one that answers \"what contracts does
 this project define?\".
 
-Returns names, and for each property its kind, tags, the symbols it is
-(:about ...), and its docstring. NOT bodies -- read one with 'spec-describe',
-run one with 'spec-check'.
+Returns names; for each property its kind, tags, the symbols it is
+(:about ...), and its docstring; for each function spec its parameter names and
+whether it carries a :returns. NOT bodies and NOT specs -- read one with
+'spec-describe', run one with 'spec-check'.
+
+A function spec is a contract on one function: which inputs it accepts and
+which output it must return. A property is a relation someone asserted about
+one or more functions. A project can have either without the other, so a
+listing with no function specs is not a listing with no contracts.
 
 An empty listing is NOT evidence that a project has no contracts: it shows
 what is registered in THIS worker, so a definition whose system has not been
@@ -58,14 +65,23 @@ tag names a keyword. A tag no loaded code mentions is reported as
 no-such-keyword rather than as an empty result -- 'nothing carries this tag'
 and 'this tag does not exist here' are different answers.
 
+WHAT THIS CL-SPEC COULD LOOK AT
+specs_listable, properties_listable and function_specs_listable say whether
+the loaded cl-spec can enumerate each half at all, and tag_filterable whether
+it can filter by tag. False is NOT 'this project has none': it is 'this
+revision cannot answer'. The matching counts entry is then null, never 0 --
+0 would say the registry holds none, which is a fact nothing here established.
+A kind whose halves are all unlistable is refused outright instead.
+
 Examples:
   (no arguments) -- everything registered
   kind='properties', package='my-app'
+  kind='function-specs'
   tag='critical'"
   :args
   ((kind :type :string
-    :enum ("specs" "properties" "both")
-    :description "What to list (default: both)")
+    :enum ("specs" "properties" "function-specs" "both")
+    :description "What to list (default: both, which is all three)")
    (package :type :string
     :description "Only names whose home package is this one")
    (tag :type :string
@@ -145,15 +161,20 @@ that this relation is checked over that domain.
 
 kind='property'      the property's arguments, body, source form and digest
 kind='spec'          the spec's normalized IR tree
-kind='function-spec' NOT SUPPORTED by this cl-spec revision; the tool says so
-                     rather than inventing a projection
+kind='function-spec' the contract: the spec of each argument, the spec of the
+                     return value, and the :pre and :post forms. This is what
+                     answers \"which inputs does this accept and which output
+                     must it return\". A cl-spec revision that cannot project
+                     one says so rather than having a projection invented for
+                     it.
 
 Long bodies are cut at max_chars and the cut is reported. Truncated text is a
 preview for reading, NOT a form that can be read back.
 
 Examples:
   kind='property', name='my-app::transfer-preserves-total'
-  kind='spec', name='my-app::account'"
+  kind='spec', name='my-app::account'
+  kind='function-spec', name='my-app::transfer'"
   :args
   ((kind :type :string :required t
     :enum ("property" "spec" "function-spec")
@@ -180,8 +201,15 @@ Examples:
   :description
   "Run cl-spec properties and return structured results and counterexamples.
 
-Give EITHER property (one named property) OR symbol (every property registered
-with (:about <symbol>)).  Not both.
+Give EXACTLY ONE of property (one named property), symbol (every property
+registered with (:about <symbol>)) or function (one registered function spec,
+run with check-function).
+
+A function spec is the contract: which inputs the function accepts (:args,
+:pre) and which output it must return (:returns, :post).  It is NOT selected
+by symbol -- an :about selection covers properties only -- and the response
+says so when one exists.  Read it first with 'spec-describe'
+kind='function-spec'.
 
 WHAT A RESULT MEANS
 
@@ -198,17 +226,50 @@ Per property, results[].status:
   generator-error no value could be generated. Nothing was checked.
   backend-error   cl-spec signalled something else. Nothing was checked.
   not-registered  the name resolved but nothing is registered under it.
+  undefined-function
+                  a function the run needed is not defined in this image --
+                  the one a contract names, or one its property body calls.
+                  Write it, or load its system. NOT an adapter fault.
+  unsupported     the loaded cl-spec cannot run this. Nothing was checked.
   internal-error  this adapter failed. NOT a statement about the property.
 
 For the whole call, status:
   no-properties   ZERO properties were selected. This is NOT a successful
                   verification: nothing ran.
+  unsupported     the loaded cl-spec cannot run a contract. Nothing ran.
   completed       every selected property reached a verdict.
   incomplete      at least one timeout, not-run, or *-error.
+  undefined-function
+                  the name is registered but the function it contracts is not
+                  defined in this image. Nothing ran. NOT an adapter fault.
   cl-spec-not-loaded / cl-spec-incomplete / backend-not-loaded /
   unresolved-symbol / not-registered / invalid-arguments / internal-error
                   the call did not get as far as running anything. None of
                   these is evidence about the symbol or the property.
+
+verification_gaps names what the run could not establish. Values:
+  input-coverage-unmeasured   always present: nothing reports which parts of
+                              the input domain were reached.
+  zero-trials                 a passing run whose budget resolved to nothing.
+  effective-trials-unknown    a contract run whose real call count could not
+                              be derived. NOT the same as a budget of zero.
+  rejection-counts-unmeasured no usable refused-input count. Always on a
+                              property run -- its inputs are refused inside
+                              the generator, which does not report how often
+                              -- and on a contract run whose count could not
+                              be read or never happened at all, a timeout or
+                              a budget-exhausted result included.
+  contract-not-run            a function spec is registered for the symbol and
+                              an :about selection did not run it.
+  properties-not-run          properties are registered about the symbol and a
+                              function= run did not run them.
+  related-properties-unknown  whether any property is registered about the
+                              symbol could not be read at all.
+  no-properties-selected      the selection was empty. Nothing ran.
+A result status that is not a verdict appears here as itself: skipped,
+pending, timeout, not-run, generator-error, backend-error, not-registered,
+undefined-function, unsupported, internal-error. Only passed, failed and error
+are verdicts and none of them is a gap.
 
 counts has a field for the five common statuses plus other, and by_status,
 which covers every status that occurred; selected always equals their sum. A
@@ -218,8 +279,75 @@ verified is true ONLY when at least one property was selected, every one of
 them passed, AND every one evaluated at least one trial. A property whose
 profile resolves to a budget of zero passes without running anything, and that
 is not a verification. verification_gaps names what the run could not
-establish, and always includes the two things cl-spec never measures:
-precondition rejections and input-domain coverage.
+establish, and always includes input-domain coverage, which nothing measures.
+
+CONTRACT RUNS (function=...)
+A contract check generates arguments from :args, drops the ones :pre refuses,
+calls the function, then checks :returns and :post. results[].contract carries:
+  rejected         generated argument lists :pre refused
+  effective_trials trials minus rejected -- what the function was ACTUALLY
+                   called with. NULL means the figure could not be derived,
+                   NOT zero calls: read rejected_measured and
+                   rejected_overcounted to see which. Do NOT read a passed
+                   verdict as proof the function ran: verified is false
+                   whenever this is 0 or null, and verification_gaps carries
+                   zero-trials or effective-trials-unknown, because cl-spec's
+                   own skipped-not-passed rule is computed from the same
+                   count and does not hold when that count is wrong.
+  rejected_measured
+                   false when this cl-spec exports no reader for the refused
+                   count. rejected is then null and the trial count above is
+                   an upper bound on what was checked.
+  rejected_overcounted
+                   true when cl-spec reported more refusals than trials, which
+                   its counter can do when the function signals. The
+                   difference is withheld rather than published as a negative
+                   or clamped to a zero that would read as never called.
+  has_precondition false when the contract has no :pre at all, so nothing
+                   could be refused and rejected 0 is not a shortfall. Null
+                   when the definition could not be read.
+  rejected_contradicted
+                   true when refusals were reported for a contract with no
+                   :pre. Two readers disagreeing, so neither figure is usable.
+  rejected_usable  the one field to branch on: false whenever the refusal
+                   count may not be subtracted with, for any of the reasons
+                   above. effective_trials is null exactly when this is false,
+                   and verified is false with it.
+  explanation_readable
+                   false when this cl-spec exports no reader for cl-spec's
+                   account of the return value, or that reader signalled. A
+                   null explanation then says nothing about the run.
+                   explanation_complete and explanation_omitted_chars report a
+                   cut, like every other bounded field.
+  rejection_status the keyword the booleans above are derived from, and the
+                   one to branch on: usable, no-precondition, unmeasured (the
+                   refusal count could not be read), trials-uncounted (it was,
+                   and the trial count was not), negative (cl-spec reported a
+                   count below zero), overcounted, contradicted,
+                   precondition-unknown.
+  rejected_readable
+                   false when the refused-input reader is absent or signalled,
+                   as against rejected_measured, which is also false when it
+                   returned something that is not a count.
+  failure_reason   which half broke: return-spec, postcondition, precondition,
+                   condition. Absent has two meanings, told apart by
+                   failure_reason_readable: true means cl-spec could not
+                   reproduce the counterexample, so the function is not
+                   deterministic; false means this cl-spec exports no reader
+                   for it, which says nothing about the function.
+  explanation      cl-spec's structured account of a return value that missed
+                   its :returns spec.
+Because rejections are counted here, verification_gaps does not claim they are
+unmeasured for a contract run.
+
+A contract has no :trials table for profile to select from, so its budget is
+the backend default unless you pass trials. Raise it when effective_trials
+comes back small: a :pre that refuses most of what is generated leaves the
+interesting inputs unreached, and cl-spec does not yet reflect a precondition
+into the generator (its specification 19). Raise timeout_seconds alongside it:
+that budget covers the WHOLE call and defaults to 60 seconds, so a run sized
+past it comes back as a timeout with worker_reuse unknown -- not as a result,
+and not as a smaller run.
 
 REPRODUCING A RUN
 Every result carries seed (decimal TEXT, because a cl-spec seed can exceed
@@ -227,6 +355,11 @@ what JSON holds exactly as a number), profile, and definition_digest.  Re-run
 with the same property, seed and profile to regenerate the same trial
 sequence.  Pass expect_definition_digest to be told when the definitions moved
 underneath you.
+
+definition_digest_covers says what the digest is a digest OF: the property, or
+the contract. On a contract run it does NOT cover the function body -- nothing
+here reads one -- so editing the function and replaying from the same seed is
+reported faithful and is not a reproduction. Check the function yourself.
 
 definition_match is four-valued: match, mismatch, unknown (the digest could
 not be computed, or its input hit the print limit -- this is NOT a
@@ -259,19 +392,40 @@ load-system call wrote to.
 
 Examples:
   symbol='my-app::transfer'
+  function='my-app::transfer'
   property='my-app::transfer-preserves-total'
   property='my-app::transfer-preserves-total', seed='3963993791726803706',
     profile='normal', expect_definition_digest='a41f9c2b7d0e5518'"
   :args
   ((property :type :string
-    :description "One registered property to run. Exclusive with symbol.")
+    :description
+    "One registered property to run. Exclusive with symbol and function.")
    (symbol :type :string
     :description
-    "Run every property registered (:about <symbol>). Exclusive with property.")
+    "Run every property registered (:about <symbol>). Does NOT include the
+symbol's function spec; the response names it when one exists.")
+   (function :type :string
+    :description
+    "One registered function spec to run against its function. Exclusive with
+property and symbol.")
+   (trials :type :integer
+    :description
+    "Trial count for a contract run: a positive integer, at most 1,000,000.
+Contract runs only -- a property takes its count from its own :trials table,
+selected by profile -- and given with property= or symbol= it is refused, not
+ignored. The ceiling is there because the run happens on a deadline thread
+that cannot always be stopped: a budget that outlives its timeout goes on
+calling your function inside this session's worker. It caps the number of
+calls, not the time -- size the run with timeout_seconds as well, and check
+worker_reuse afterwards.")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
    (profile :type :string
-    :description "Trial-count profile, e.g. 'normal' or 'smoke' (default: normal)")
+    :description
+    "Trial-count profile, e.g. 'normal' or 'smoke' (default: normal). Property
+runs only -- a contract has no :trials table to select from and cl-spec's
+check-function takes no profile, so it is refused with function=, the mirror
+of how trials is refused with property=. Size a contract run with trials=.")
    (seed :type :string
     :description
     "Decimal digits AS A STRING. A JSON number would already have lost digits.")
@@ -287,6 +441,8 @@ Examples:
   :body
   (let ((params (make-ht "property" property
                          "symbol" symbol
+                         "function" function
+                         "trials" trials
                          "package" package
                          "profile" profile
                          "seed" seed

@@ -14,11 +14,16 @@
 (defpackage #:cl-mcp/tests/fixtures/spec-fixture
   (:use #:cl)
   (:export #:clamp
+           #:function-specs-supported-p
+           #:magnitude
+           #:widen
+           #:never-callable
            #:small-int
            #:clamp-is-within-bounds
            #:clamp-is-idempotent
            #:clamp-is-wrong-on-purpose
-           #:register-corrected-property))
+           #:register-corrected-property
+           #:contracts-registered-p))
 
 (in-package #:cl-mcp/tests/fixtures/spec-fixture)
 
@@ -74,3 +79,89 @@ exactly what loading an edited file produces."
     (:kind :invariant)
     (= (clamp (clamp value 10 90) 10 90)
        (clamp value 10 90))))
+
+(defun widen (value)
+  "Return VALUE moved halfway up SMALL-INT's range, leaving it at the top.
+
+Written to break its :RETURNS over most of that range rather than at one end
+of it.  (1+ value) broke it only at 100, one of the 101 values check-it draws
+uniformly, so the test that reads the failure passed 300 trials and still came
+up empty about once in twenty runs -- measured at 4 misses in 60.  A fixture
+whose failure is rare makes the test that reads it a coin toss."
+  (+ value 50))
+
+(defun never-callable (value)
+  "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
+  value)
+
+(defun magnitude (value)
+  "Return the absolute value of VALUE."
+  (abs value))
+
+(defun function-specs-supported-p ()
+  "Return true when the loaded cl-spec implements function specs.
+
+FUNCTION-SPEC-DATA is the discriminator, not CHECK-FUNCTION: a cl-spec that
+predates function specs still has CHECK-FUNCTION fbound, as a stub that
+signals NOT-IMPLEMENTED, so FBOUNDP alone answers the wrong question."
+  (let ((data (find-symbol "FUNCTION-SPEC-DATA" "CL-SPEC")))
+    (and data (fboundp data) t)))
+
+(defvar *contracts-registered-in*
+  (make-hash-table :test #'eq :weakness :key)
+  "Every registry the contract half of this fixture has loaded into.
+
+A set rather than one value: this file is loaded once per registry and the
+loads interleave with the tests that read the answer, so recording only the
+latest let a private load clobber the shared registry's entry -- and the
+contract tests then skipped against a registry that holds them.
+
+Weak on the key, because one test builds a throwaway registry per run and this
+defvar outlives the suite in a worker image: a strong set would retain every
+registry, with all its entries, for the life of the process.")
+
+(defun contracts-registered-p (&optional (registry (symbol-value
+                                                    (find-symbol "*REGISTRY*"
+                                                                 "CL-SPEC"))))
+  "Return true when this fixture's function specs are in REGISTRY.
+
+What a test should ask before running contract coverage.  FUNCTION-SPECS-
+SUPPORTED-P says the loaded cl-spec has the API; this says the definitions
+actually made it in, which is not the same answer when DEFSPEC-FUNCTION
+signals at run time on a revision that exports it.
+
+Keyed on the registry, not on a boolean.  This file is loaded once per
+registry and one test loads a private copy of it: a flag that only said
+\"yes\" answered for whichever load ran last, so a private load that failed
+could skip the contract tests against a shared registry that holds them, or a
+private load that succeeded could send them at one that does not.  Recording
+one registry rather than all of them has the same fault one step in."
+  (and registry (gethash registry *contracts-registered-in*) t))
+
+;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
+;; and LOAD reads each top-level form before evaluating it -- so a
+;; CL-SPEC:DEFSPEC-FUNCTION form written here is resolved by the reader
+;; whatever a guard around it says, and against a revision that does not
+;; export the symbol the reader error takes the whole fixture down, CLAMP and
+;; the properties with it.  Only a separate file is left unread.
+;;
+;; HANDLER-CASE for the other half of the same promise: a revision that reads
+;; the file and then signals while registering -- a normalization change, a
+;; duplicate registration -- would otherwise take the same three unrelated
+;; tests down that the split was written to protect.  Reported rather than
+;; swallowed, and CONTRACTS-REGISTERED-P tells a test which happened.
+(when (function-specs-supported-p)
+  ;; The registry is recorded, not a boolean.  This file is loaded once per
+  ;; registry and one test loads a private copy: a flag that only said "yes"
+  ;; described whichever load ran last, and the contract tests read it while a
+  ;; different registry was installed.
+  (handler-case
+      (progn
+        (load (merge-pathnames "tests/fixtures/spec-fixture-contracts.lisp"
+                               (asdf:system-source-directory "cl-mcp")))
+        (setf (gethash (symbol-value (find-symbol "*REGISTRY*" "CL-SPEC"))
+                       *contracts-registered-in*)
+              t))
+    (error (condition)
+      (format *error-output*
+              "~&;; spec-fixture: contracts NOT registered: ~A~%" condition))))

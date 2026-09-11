@@ -300,6 +300,40 @@ Same name, different home package: the pair a resolver must not confuse."
           (ok (string= d1 (definition-digest (funcall api-for spec-v1)
                                              'prop nil))))))))
 
+(deftest definition-digest-follows-a-return-spec
+  (testing "widening the spec a contract returns changes its digest"
+    ;; A contract's own data holds a reference node naming the spec, so a
+    ;; :RETURNS whose spec was widened leaves every byte of the contract
+    ;; identical.  Walked from :ARGUMENTS alone, the digest did not move and a
+    ;; replay against the wider output domain came back "faithful".
+    (let* ((contract (list :name 'widen
+                           :arguments (list (list :variable 'value
+                                                  :spec (list :kind :reference
+                                                              :target 'in-int)))
+                           :returns (list :name nil :kind :reference
+                                          :target 'out-int)))
+           (api-for (lambda (out-max)
+                      (make-cl-spec-api
+                       :functions
+                       (list :property-data
+                             (lambda (name &key registry)
+                               (declare (ignore name registry)) contract)
+                             :spec-data
+                             (lambda (name &key registry)
+                               (declare (ignore registry))
+                               (if (eq name 'out-int)
+                                   (list :name name :kind :range :min 0
+                                         :max out-max)
+                                   (list :name name :kind :range :min 0
+                                         :max 100))))))))
+      (let ((narrow (definition-digest (funcall api-for 100) 'widen nil))
+            (wide (definition-digest (funcall api-for 999) 'widen nil)))
+        (ok (stringp narrow))
+        (ok (not (string= narrow wide)))
+        (testing "and the same return spec still digests the same twice"
+          (ok (string= narrow (definition-digest (funcall api-for 100)
+                                                 'widen nil))))))))
+
 (deftest definition-digest-tolerates-unresolved-reference
   (testing "a reference to a spec that is not registered does not signal"
     (let ((api (make-cl-spec-api

@@ -39,6 +39,49 @@
   (list :package package :name name
         :qualified (format nil "~A::~A" package name)))
 
+(defun %contract-check-report (&key failure-reason failure-reason-readable
+                                    rejected-overcounted (rejected 3)
+                                    (effective-trials 27)
+                                    (precondition-p t)
+                                    (rejection-status :usable))
+  "Return a completed contract check report whose single result failed."
+  (list :status :completed
+        :verified nil
+        ;; "contract", the mode %SELECT-NAMED actually emits for a function
+        ;; selection -- %SELECTION-NOUN keys on it, and "function" here sent
+        ;; every test built on this fixture down the property branch.
+        :selection (list :mode "contract" :kind :contract :count 1
+                         :selected (list (%symbol-data "PROBE" "WIDEN"))
+                         :source "explicit function argument"
+                         :coverage "Only the contract named.")
+        :results
+        (list (list :property (%symbol-data "PROBE" "WIDEN")
+                    :kind :contract
+                    :status :failed
+                    :trials (list :executed 30 :budget 30
+                                  :budget-source "requested")
+                    :contract (list :rejected rejected
+                                    :rejection-status rejection-status
+                                    :precondition-p precondition-p
+                                    :rejected-measured t
+                                    :rejected-overcounted rejected-overcounted
+                                    :effective-trials effective-trials
+                                    :failure-reason failure-reason
+                                    :failure-reason-readable
+                                    failure-reason-readable)
+                    ;; No :PROFILE: a contract run has none, and production
+                    ;; now leaves the key out rather than publishing the
+                    ;; :NORMAL that leaks off cl-spec's synthetic property.
+                    :seed "7"
+                    :counterexample nil
+                    :counterexample-status :present
+                    :shrunk-counterexample nil
+                    :shrink-status :present
+                    :definition-match :not-checked))
+        :counts (list :selected 1 :passed 0 :failed 1
+                      :errored 0 :timed-out 0 :not-run 0)
+        :environment *environment*))
+
 (deftest not-loaded-response-says-what-to-load
   (testing "the cl-spec-not-loaded answer is actionable in the text itself"
     (let* ((response (build-spec-symbol-response
@@ -226,6 +269,63 @@
       (testing "and the headline separates it from a falsified property"
         (ok (search "NOT VERIFIED" text))
         (ok (not (search "FAILED" text)))))))
+
+(deftest check-response-headline-says-when-a-contract-was-not-run
+  (testing "a passing :about selection that left a contract unrun says so up front"
+    ;; Without this the first line of a run over a broken function reads
+    ;; "✓ VERIFIED": the properties do hold, and the note saying the contract
+    ;; was never executed sits several lines below a reader who has already
+    ;; stopped.
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified t
+                            :selection (list :mode "about" :count 1
+                                             :selected (list (%symbol-data "PROBE" "GOOD"))
+                                             :contract-not-run (%symbol-data "PROBE" "CLAMP")
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 1 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response))
+           (headline (subseq text 0 (or (position #\Newline text) (length text)))))
+      (ok (search "VERIFIED" headline))
+      (ok (search "properties only" headline))
+      (ok (search "NOT run" headline))
+      (testing "and a consumer reading the payload gets the name, not prose"
+        (ok (string= "PROBE::CLAMP"
+                     (gethash "qualified"
+                              (gethash "contract_not_run"
+                                       (gethash "selection" response))))))))
+  (testing "a selection with no contract behind it keeps the bare headline"
+    (let* ((response (build-spec-check-response
+                      (list :status :completed
+                            :verified t
+                            :selection (list :mode "about" :count 1
+                                             :selected (list (%symbol-data "PROBE" "GOOD"))
+                                             :source "cl-spec:semantic-data -> :properties-about"
+                                             :coverage "Direct (:about ...) registrations only.")
+                            :results
+                            (list (list :property (%symbol-data "PROBE" "GOOD")
+                                        :status :passed
+                                        :trials (list :executed 100 :budget 100
+                                                      :budget-source "backend-default")
+                                        :seed "111" :profile :normal
+                                        :definition-match :not-checked))
+                            :counts (list :selected 1 :passed 1 :failed 0
+                                          :errored 0 :timed-out 0 :not-run 0)
+                            :environment *environment*)))
+           (text (first-text response))
+           (headline (subseq text 0 (or (position #\Newline text) (length text)))))
+      (ok (search "VERIFIED" headline))
+      (ok (not (search "properties only" headline))))))
 
 (deftest check-response-replays-the-failure-not-the-first-run
   (testing "the replay line names the property that did not pass"
@@ -535,6 +635,75 @@
       (ok (search "truncated" text))
       (ok (search "31" text)))))
 
+(deftest describe-response-marks-a-cut-precondition
+  (testing "a truncated :pre or :post says so, like the body does"
+    ;; A silently cut :PRE is worse than a cut body: a reader takes the clause
+    ;; for the whole condition and concludes the contract admits inputs it
+    ;; refuses.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "function-spec"
+                            :name (%symbol-data "PROBE" "TRANSFER")
+                            :documentation nil :arguments nil :returns nil
+                            :preconditions "(AND (PLUSP AMOUNT)"
+                            :preconditions-complete nil
+                            :preconditions-omitted-chars 62
+                            :postconditions "(> RESULT"
+                            :postconditions-complete nil
+                            :postconditions-omitted-chars 17
+                            :source-form "(DEFSPEC-FUNCTION" :source-form-complete t
+                            :definition-digest "a41f9c2b7d0e5518"
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (eq yason:false (gethash "preconditions_complete" response)))
+      (ok (= 62 (gethash "preconditions_omitted_chars" response)))
+      (ok (= 17 (gethash "postconditions_omitted_chars" response)))
+      (ok (search "62 more characters" text))
+      (ok (search "17 more characters" text)))))
+
+(deftest describe-response-renders-an-argument-spec-in-full
+  (testing "an argument's own bounds, values and class reach the text"
+    ;; The arguments block used to print the node's kind and recurse into its
+    ;; children, so everything that says what the input actually admits was
+    ;; dropped -- the half spec-describe kind=function-spec exists for.
+    (let* ((response (build-spec-describe-response
+                      (list :status :ok :kind "function-spec"
+                            :name (%symbol-data "PROBE" "BUCKET")
+                            :documentation nil
+                            :arguments
+                            (list (list :variable (%symbol-data "PROBE" "V")
+                                        :spec (list :kind :range :min "0"
+                                                    :max "100"
+                                                    :base-type "INTEGER"))
+                                  (list :variable (%symbol-data "PROBE" "LO")
+                                        :spec (list :kind :member
+                                                    :values "(1 2 3)"))
+                                  (list :variable (%symbol-data "PROBE" "ACC")
+                                        :spec
+                                        (list :kind :class
+                                              :class-name
+                                              (%symbol-data "PROBE" "ACCOUNT"))))
+                            :returns nil
+                            :source-form "(DEFSPEC-FUNCTION" :source-form-complete t
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (search "V : range [0, 100]  base: INTEGER" text))
+      (ok (search "LO : member  values: (1 2 3)" text))
+      (testing "and a class prints its name, not SYMBOL-DATA's plist"
+        (ok (search "ACC : class PROBE::ACCOUNT" text))
+        (ok (not (search "QUALIFIED" text))))))
+  (testing "a contract with no :pre claims nothing about its completeness"
+    (let ((response (build-spec-describe-response
+                     (list :status :ok :kind "function-spec"
+                           :name (%symbol-data "PROBE" "WIDEN")
+                           :documentation nil :arguments nil :returns nil
+                           :preconditions nil
+                           :preconditions-complete :not-applicable
+                           :source-form "(DEFSPEC-FUNCTION"
+                           :source-form-complete t
+                           :environment *environment*))))
+      (ok (null (gethash "preconditions" response)))
+      (ok (null (gethash "preconditions_complete" response))))))
+
 (deftest list-response-omits-a-kind-that-was-not-requested
   (testing "the header names only what was counted"
     (flet ((text-for (kind specs properties)
@@ -572,3 +741,156 @@
            (counts (gethash "counts" response)))
       (ok (null (gethash "specs" counts)))
       (ok (eql 0 (gethash "properties" counts))))))
+
+(deftest list-response-says-whether-the-tag-narrowed-anything
+  (flet ((header (kind &key (tag-filterable t))
+           (first-text
+            (build-spec-list-response
+             (list :status :ok :kind kind
+                   :specs (list (%symbol-data "PROBE" "SMALL-INT"))
+                   :properties nil :function-specs nil
+                   :specs-listable t :properties-listable t
+                   :function-specs-listable t
+                   :tag-filterable tag-filterable
+                   :counts (list :specs 1)
+                   ;; TAG-APPLIED as LIST-REPORT computes it: the kind lists
+                   ;; properties, this cl-spec can enumerate them, and it can
+                   ;; filter by tag.
+                   :filters (list :tag "critical" :tag-resolved t
+                                  :tag-applied
+                                  (and (member kind '("properties" "both")
+                                               :test #'equal)
+                                       tag-filterable
+                                       t))
+                   :coverage "everything registered here"
+                   :environment *environment*)))))
+    (testing "a kind that lists no properties says the tag was not applied"
+      ;; "1 spec  tagged critical" asserts a filter that narrowed nothing:
+      ;; LIST-REPORT never offers the tag to the spec or contract listings.
+      (let ((text (header "specs")))
+        (ok (search "was NOT applied" text))
+        (ok (not (search "tagged critical" text)))))
+    (testing "a properties listing says it plainly"
+      (let ((text (header "properties")))
+        (ok (search "tagged critical" text))
+        (ok (not (search "was NOT applied" text)))
+        (ok (not (search "(properties only)" text)))))
+    (testing "and a mixed listing says which half it narrowed"
+      (let ((text (header "both")))
+        (ok (search "tagged critical (properties only)" text))))
+    (testing "while a cl-spec that cannot filter by tag says that instead"
+      ;; Keyed on properties_listable, this printed "tagged critical" over a
+      ;; listing the tag never touched -- read as "no property carries it".
+      (let ((text (header "properties" :tag-filterable nil)))
+        (ok (search "was NOT applied" text))
+        (ok (search "properties-with-tag" text))
+        (ok (not (search "tagged critical" text)))))))
+
+(deftest check-response-unsupported-reaches-the-text
+  (testing "a contract cl-spec cannot run says so where a client can see it"
+    ;; The report carries a message and no selection, results or counts.  Read
+    ;; as a report of a run it renders "Selected NIL properties via NIL" and
+    ;; the one thing the caller needs -- why nothing could be executed --
+    ;; never reaches content[].text.
+    (let* ((response (build-spec-check-response
+                      (list :status :unsupported
+                            :verified nil
+                            :message
+                            (concatenate 'string
+                                         "the cl-spec loaded here does not "
+                                         "export check-function, so a "
+                                         "contract cannot be executed.")
+                            :environment *environment*)))
+           (text (first-text response)))
+      (ok (string= "unsupported" (gethash "status" response)))
+      (ok (eq yason:false (gethash "verified" response)))
+      (ok (search "check-function" text))
+      (ok (not (search "Selected" text))))))
+
+(deftest check-response-does-not-invent-non-determinism
+  (testing "an unreadable failure reason is not a finding about the function"
+    ;; NIL reaches the renderer from two opposite places: cl-spec saying the
+    ;; counterexample would not reproduce, and this adapter never having had a
+    ;; reader to ask.  Printing the first for both accuses the caller's code.
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason nil
+                                          :failure-reason-readable nil)))))
+      (ok (search "could not be read" text))
+      (ok (not (search "not deterministic" text)))))
+  (testing "but cl-spec's own silence still is one"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason nil
+                                          :failure-reason-readable t)))))
+      (ok (search "not deterministic" text))))
+  (testing "and a reason that was read is printed as itself"
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :failure-reason :return-spec
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0))))
+      (ok (search "broken half: return-spec" (first-text response)))
+      (ok (string= "return-spec" (gethash "failure_reason" contract)))
+      (ok (eq t (gethash "failure_reason_readable" contract))))))
+
+(deftest check-response-never-reports-a-negative-call-count
+  (testing "more refusals than trials is said, not subtracted"
+    ;; cl-spec stops counting refusals at the first failure it recognizes, but
+    ;; a target that SIGNALS unwinds past that point with the counter running
+    ;; and shrinking keeps feeding it.  Measured at 3 runs in 8 against such a
+    ;; contract -- one of them 1 trial and 2 rejections, which printed as "the
+    ;; function was called -1 times".
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :rejected 2
+                                              :effective-trials nil
+                                              :rejection-status :overcounted
+                                              :rejected-overcounted t
+                                              :failure-reason :condition
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0)))
+           (text (first-text response)))
+      (ok (eq t (gethash "rejected_overcounted" contract)))
+      (ok (search "more refusals than trials" text))
+      (ok (not (search "-1" text)))
+      (ok (not (search "called 0 time" text)))
+      (testing "and the JSON withholds the figure rather than saying zero"
+        ;; 0 is itself the claim the text refuses to make.
+        (ok (null (gethash "effective_trials" contract))))
+      (testing "while the line calls a contract a contract"
+        (ok (search "Selected 1 contract" text))
+        (ok (not (search "Selected 1 property" text))))
+      (testing "and prints no profile, which a contract run does not have"
+        (ok (not (search "profile:" text))))))
+  (testing "and an ordinary count still reads as one"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason :return-spec
+                                          :failure-reason-readable t)))))
+      (ok (search "called 27 times" text))
+      (ok (not (search "more refusals than trials" text))))))
+
+(deftest check-response-does-not-invent-a-precondition
+  (testing "a contract with no :pre is not described as refusing inputs"
+    ;; "0 of them refused by :pre" tells the reader a precondition exists.
+    ;; On a contract written with :args, :returns and :post and no :pre, that
+    ;; is a clause the author never wrote -- and the tool then advises raising
+    ;; trials on the strength of a number that cannot mean anything.
+    (let* ((response (build-spec-check-response
+                      (%contract-check-report :precondition-p nil
+                                              :rejection-status :no-precondition
+                                              :rejected 0
+                                              :effective-trials 30
+                                              :failure-reason :postcondition
+                                              :failure-reason-readable t)))
+           (contract (gethash "contract" (aref (gethash "results" response) 0)))
+           (text (first-text response)))
+      (ok (eq yason:false (gethash "has_precondition" contract)))
+      (ok (search "no :pre" text))
+      (ok (not (search "refused by :pre" text)))))
+  (testing "while one that has a :pre still reports its refusals"
+    (let ((text (first-text
+                 (build-spec-check-response
+                  (%contract-check-report :failure-reason :return-spec
+                                          :failure-reason-readable t)))))
+      (ok (search "refused by :pre" text))
+      (ok (not (search "no :pre" text))))))

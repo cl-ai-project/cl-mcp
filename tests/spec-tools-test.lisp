@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/tools/spec-entry #:parse-seed-string)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+result-statuses+
-                #:+call-statuses+)
+                #:+call-statuses+
+                #:+verification-gap-values+)
   (:import-from #:cl-mcp/src/tools/registry
                 #:*enabled-tool-groups*
                 #:disabled-tool-group)
@@ -140,11 +141,19 @@ are what a test about the message has to look at."
       (ok (search "property" (%text result)))
       (ok (search "spec" (%text result))))))
 
-(deftest spec-check-refuses-both-targets
+(deftest spec-check-refuses-more-than-one-target
   (testing "property and symbol together is refused with a usable message"
     (let ((result (%call "spec-check"
                          "{\"property\":\"cl:car\",\"symbol\":\"cl:cdr\"}")))
-      (ok (search "both" (string-downcase (%text result)))))))
+      (ok (search "exactly one" (string-downcase (%text result))))))
+  (testing "so is a function alongside one of them"
+    (let ((result (%call "spec-check"
+                         "{\"function\":\"cl:car\",\"symbol\":\"cl:cdr\"}")))
+      (ok (search "exactly one" (string-downcase (%text result))))))
+  (testing "and naming none of the three says all three"
+    (let ((result (%call "spec-check" "{}")))
+      (ok (search "property, symbol or function"
+                  (string-downcase (%text result)))))))
 
 (deftest spec-check-refuses-a-non-numeric-seed
   (testing "a seed that is not decimal digits is rejected before any run"
@@ -183,6 +192,44 @@ are what a test about the message has to look at."
                            "{\"kind\":\"property\",\"name\":\"cl:car\",\"max_chars\":-1}")))
       (ok (search "max_chars" (%text response)))
       (ok (search "positive" (string-downcase (%text response)))))))
+
+(deftest spec-check-refuses-a-non-positive-trials
+  (testing "a negative trial count is refused before anything runs"
+    ;; The schema's :INTEGER admits 0 and negatives, and cl-spec runs
+    ;; (loop for trial from 1 to -5) without complaint: zero trials, which the
+    ;; response then asserts as "-5 executed of -5 budget (requested)".
+    (let ((response (%call "spec-check" "{\"function\":\"cl:car\",\"trials\":-5}")))
+      (ok (search "trials" (%text response)))
+      (ok (search "positive" (string-downcase (%text response))))))
+  (testing "and so is zero"
+    (let ((response (%call "spec-check" "{\"function\":\"cl:car\",\"trials\":0}")))
+      (ok (search "positive" (string-downcase (%text response))))))
+  (testing "while an absent trials stays absent rather than becoming a budget"
+    ;; Asserted on the value, not on a status that would be something else
+    ;; anyway.  A numeric default here would send cl-spec a budget the caller
+    ;; never asked for, and "the call was not refused" cannot see that: the
+    ;; status is cl-spec-not-loaded or not-registered either way.
+    (%ensure-tools)
+    (let ((params (make-hash-table :test #'equal))
+          (read-arg (find-symbol "%POSITIVE-INTEGER-ARG"
+                                 "CL-MCP/SRC/TOOLS/SPEC-ENTRY")))
+      (multiple-value-bind (value message) (funcall read-arg params "trials" nil)
+        (ok (null value))
+        (ok (null message)))
+      (testing "and a budget past the ceiling is refused with the reason"
+        ;; The ceiling bounds what a leaked deadline thread is left doing in
+        ;; the worker, so it has to be reachable through the entry point the
+        ;; worker handler calls, not only through the schema.
+        (let ((response (%call "spec-check"
+                               "{\"function\":\"cl:car\",\"trials\":5000000}")))
+          (ok (search "at most" (%text response)))
+          (ok (search "1,000,000" (%text response)))))
+      (testing "and a value that is there still has to be positive"
+        (setf (gethash "trials" params) 0)
+        (multiple-value-bind (value message)
+            (funcall read-arg params "trials" nil)
+          (ok (null value))
+          (ok (search "positive" message)))))))
 
 (deftest read-tools-accept-a-timeout
   (testing "spec-symbol and spec-describe take timeout_seconds"
@@ -231,10 +278,26 @@ are what a test about the message has to look at."
             (format nil "spec-check description must name the ~(~A~) status"
                     status)))
       (testing "and the whole-call statuses too"
-        (dolist (status +call-statuses+)
-          (ok (search (string-downcase (symbol-name status)) description)
-              (format nil "spec-check description must name the ~(~A~) call status"
-                      status)))))))
+        ;; Searched inside the whole-call section, not the whole string: a
+        ;; status documented only under results[].status satisfied a search
+        ;; over the description and the guard reported coverage it did not
+        ;; have -- which is how undefined-function reached +CALL-STATUSES+
+        ;; without ever being defined for a caller reading about a call.
+        (let* ((start (search "For the whole call, status:" description))
+               (section (subseq description (or start 0))))
+          (ok start "the description must have a whole-call status section")
+          (dolist (status +call-statuses+)
+            (ok (search (string-downcase (symbol-name status)) section)
+                (format nil "the whole-call section must name ~(~A~)"
+                        status)))))
+      (testing "and every verification gap it can report"
+        ;; The gap set grew four times in one branch while the description
+        ;; explained two of the values.  Checked from the code's own list for
+        ;; the same reason the statuses are.
+        (dolist (gap +verification-gap-values+)
+          (ok (search (string-downcase (symbol-name gap)) description)
+              (format nil "spec-check description must name the ~(~A~) gap"
+                      gap)))))))
 
 (deftest spec-check-description-states-the-current-rules
   (testing "verified's third condition and the four-valued match are stated"
