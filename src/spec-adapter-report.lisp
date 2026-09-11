@@ -2338,9 +2338,18 @@ anything holds."
                   ;; is to have reproduced the earlier run.
                   :reproduction-faithful
                   (cond ((null expect-definition-digest) :not-checked)
-                        ((find :unknown results
-                               :key (lambda (result)
-                                      (getf result :definition-match)))
+                        ;; :NOT-CHECKED beside a digest that WAS asked for is
+                        ;; a run that never reached the comparison -- a
+                        ;; timeout, an exhausted budget, a run that signalled.
+                        ;; It belongs with the unreadable digest and not with
+                        ;; the fall-through: taken for a disagreement, a
+                        ;; contract whose target is not even defined reported
+                        ;; that the caller's definitions had moved, about a
+                        ;; digest nothing had looked at.
+                        ((find-if (lambda (result)
+                                    (member (getf result :definition-match)
+                                            '(:unknown :not-checked)))
+                                  results)
                          :unknown)
                         ((every (lambda (result)
                                   (eq :true (getf result :definition-match)))

@@ -895,11 +895,14 @@
       (ok (search "refused by :pre" text))
       (ok (not (search "no :pre" text))))))
 
-(defun %digest-check-report (faithful &key properties-not-run)
+(defun %digest-check-report (faithful &key properties-not-run (match faithful))
   "Return a passing contract report whose reproduction verdict is FAITHFUL.
 
 PROPERTIES-NOT-RUN adds a coverage gap, so a case can ask whether the two
-qualifiers displace one another."
+qualifiers displace one another.  MATCH is the result's own verdict, which is
+FAITHFUL except where the two differ: a call answers :UNKNOWN both for a digest
+that could not be read and for a run that never reached a comparison, and only
+the result says which."
   (list :status :completed
         :verified t
         :selection (list* :mode "contract" :kind :contract :count 1
@@ -919,7 +922,7 @@ qualifiers displace one another."
                     :seed "7"
                     :counterexample-status :not-applicable
                     :shrink-status :not-applicable
-                    :definition-match faithful))
+                    :definition-match match))
         :counts (list :selected 1 :passed 1 :failed 0
                       :errored 0 :timed-out 0 :not-run 0
                       :other 0 :by-status '((:passed . 1)))
@@ -946,6 +949,16 @@ qualifiers displace one another."
     (let ((headline (%headline (%digest-check-report :unknown))))
       (ok (search "VERIFIED" headline))
       (ok (search "could not be read" headline))))
+  (testing "and a run that never compared one is not called a disagreement"
+    ;; :UNKNOWN covers two different shortfalls.  A digest that could not be
+    ;; read was looked at; a timeout, an exhausted budget or a signalling run
+    ;; never got that far, and "could not be read" sends the reader to a
+    ;; digest that was never the problem.
+    (let ((headline (%headline (%digest-check-report :unknown
+                                                     :match :not-checked))))
+      (ok (search "VERIFIED" headline))
+      (ok (search "did not get far enough" headline))
+      (ok (not (search "could not be read" headline)))))
   (testing "a match, and a run with no digest to check, keep the bare headline"
     (dolist (value '(:true :not-checked))
       (let ((headline (%headline (%digest-check-report value))))

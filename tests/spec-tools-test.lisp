@@ -360,3 +360,27 @@ are what a test about the message has to look at."
                (entry (subseq description end pending-end)))
           (ok (search "does not produce" entry))
           (ok (not (search "same." entry))))))))
+
+(deftest spec-check-description-says-when-a-digest-was-never-compared
+  (testing "not-checked and unknown are not documented as one cause each"
+    ;; not-checked has two causes -- no digest was asked for, and a run that
+    ;; never reached a comparison -- and the description named only the first.
+    ;; A caller reading it takes not-checked beside an expect_definition_digest
+    ;; it did pass for a contradiction, and takes the call's unknown for a
+    ;; digest that could not be read when nothing had looked at one.
+    (%ensure-tools)
+    (let* ((*use-worker-pool* nil)
+           (*enabled-tool-groups* (list "CL-SPEC"))
+           (response (process-json-line
+                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+           (tools (gethash "tools" (gethash "result" (parse response))))
+           (description (loop for tool across tools
+                              when (string= "spec-check" (gethash "name" tool))
+                                return (gethash "description" tool)))
+           (start (search "definition_match is" description))
+           (end (search "This regenerates the trial sequence" description))
+           (section (subseq description start end)))
+      (ok (search "never reached a comparison" section))
+      (ok (search "reproduction_faithful" section))
+      (testing "and the call-level unknown covers the same shortfall"
+        (ok (search "nothing compared" section))))))

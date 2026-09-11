@@ -569,7 +569,11 @@ Four answers, and NIL is not one of them.  A report that carries no verdict at
 all -- a selection of zero, where nothing ran and no digest was requested --
 was being published as an unfaithful reproduction of a run that never
 happened, because \"unfaithful\" was the fallback for both an absent key and a
-real disagreement.  CHECK-REPORT now says :FALSE for the disagreement."
+real disagreement.  CHECK-REPORT now says :FALSE for the disagreement.
+
+:UNKNOWN carries two shortfalls: a digest that could not be read, and a run
+that never reached a comparison at all.  Neither is a disagreement, which is
+the whole point of keeping them out of :FALSE."
   (case value
     (:true "faithful")
     (:false "unfaithful")
@@ -965,8 +969,18 @@ this symbol could not be read"))
            (case (getf report :reproduction-faithful)
              (:false (format nil "the definitions moved since the digest ~
 given -- this did NOT reproduce that run"))
-             (:unknown (format nil "whether the definitions still match the ~
-digest given could not be read"))
+             ;; Two shortfalls under one word, and the results are what tell
+             ;; them apart.  A digest that could not be read was looked at; a
+             ;; timeout, an exhausted budget or a run that signalled never got
+             ;; that far, and "could not be read" would send the reader to a
+             ;; digest that was never the problem.
+             (:unknown
+              (if (find :unknown (getf report :results)
+                        :key (lambda (result) (getf result :definition-match)))
+                  (format nil "whether the definitions still match the digest ~
+given could not be read")
+                  (format nil "this run did not get far enough to compare the ~
+digest given")))
              (t nil))))
     (format nil "~A~@[ (~A)~]~@[ (~A)~]" verdict coverage reproduction)))
 

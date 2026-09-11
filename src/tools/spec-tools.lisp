@@ -367,8 +367,13 @@ reported faithful and is not a reproduction. Check the function yourself.
 
 definition_match is four-valued: match, mismatch, unknown (the digest could
 not be computed, or its input hit the print limit -- this is NOT a
-disagreement) and not-checked (no expect_definition_digest was given).
-reproduction_faithful says the same four things about the call as a whole.
+disagreement) and not-checked (no expect_definition_digest was given, OR this
+result never reached a comparison: a timeout, an exhausted budget, a run that
+signalled).  reproduction_faithful says the same four things about the call as
+a whole, with one difference forced by that second cause: not-checked there
+means only that no expect_definition_digest was given, and unknown covers both
+a digest that could not be read and a run where nothing compared one.  Neither
+is a disagreement; only mismatch says the definitions moved.
 A matching digest means the property and the specs it references are
 unchanged; it says nothing about the implementation, the backend, or the
 environment.

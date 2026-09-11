@@ -1031,3 +1031,31 @@ listing functions are not -- the shape the blanket listing guard refused."
                                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
                                   :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD")
                     :status))))))
+
+(deftest check-report-does-not-call-an-unexecuted-run-unfaithful
+  (testing "a run that never compared the digest did not find the definitions moved"
+    ;; A timeout, an exhausted budget and a signalling run all carry
+    ;; :DEFINITION-MATCH :NOT-CHECKED whether or not a digest was asked for.
+    ;; The fall-through read every one of them as a disagreement, so a caller
+    ;; who passed expect_definition_digest to a contract whose target is not
+    ;; defined was told its definitions had moved -- about a digest nothing
+    ;; had looked at.
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (error "the target is not defined")))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                   :expect-definition-digest "0000000000000000")))
+      (ok (eq :not-checked (getf (first (getf report :results))
+                                 :definition-match)))
+      (ok (eq :unknown (getf report :reproduction-faithful)))))
+  (testing "and a real disagreement is still reported as one"
+    (let ((report (check-report
+                   (%api-with-run (lambda (&rest ignored)
+                                    (declare (ignore ignored))
+                                    (%result-stub)))
+                   :ok
+                   :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
+                   :expect-definition-digest "0000000000000000")))
+      (ok (eq :false (getf report :reproduction-faithful))))))
