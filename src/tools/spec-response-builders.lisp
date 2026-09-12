@@ -486,6 +486,22 @@ preconditions_complete.  Absent has to reach the consumer as null."
       (unless (eq :not-applicable (getf report key))
         (json-bool (getf report key))))))
 
+(defun %core-schema-ht (data)
+  "Render the supported Lisp core schema independently of MCP's envelope version."
+  (when data
+    (let ((capabilities (getf data :capabilities)))
+      (make-ht "schema_version" (getf data :schema-version)
+               "record_kind" (%keyword-string (getf data :record-kind))
+               "entity_kind" (%keyword-string (getf data :entity-kind))
+               "definition_digest" (getf data :definition-digest)
+               "definition_digest_complete" (json-bool (getf data :definition-digest-complete))
+               "definition_digest_covers" (%keyword-string (getf data :definition-digest-covers))
+               "capabilities"
+               (make-ht "generation" (%keyword-string (getf capabilities :generation))
+                        "shrinking" (%keyword-string (getf capabilities :shrinking))
+                        "instrumentation" (%keyword-string
+                                           (getf capabilities :instrumentation)))))))
+
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
   (case (getf report :status)
@@ -530,6 +546,7 @@ preconditions_complete.  Absent has to reach the consumer as null."
               "source_form_complete" (%optional-bool report :source-form-complete)
               "source_form_omitted_chars" (getf report :source-form-omitted-chars)
               "source_location" (%source-location-ht (getf report :source-location))
+              "core_schema" (%core-schema-ht (getf report :core-schema))
               "definition_digest" (getf report :definition-digest)
               "definition_digest_complete" (%optional-bool
                                             report :definition-digest-complete)
@@ -651,6 +668,7 @@ not be read."
            "elapsed" (getf result :elapsed)
            "timeout_seconds" (getf result :timeout-seconds)
            "thread_leaked" (json-bool (getf result :thread-leaked))
+           "core_schema" (%core-schema-ht (getf result :core-schema))
            "definition_digest" (getf result :definition-digest)
            "definition_digest_covers" (%keyword-string
                                        (getf result :definition-digest-covers))

@@ -25,7 +25,7 @@
                 #:find-keyword
                 #:symbol-data
                 #:externalize-value
-                #:definition-digest
+                #:core-schema-data #:definition-digest
                 #:printed-for-display
                 #:print-form-bounded)
   (:import-from #:cl-mcp/src/object-registry
@@ -900,7 +900,8 @@ answers."
           ;; place offering one for expect_definition_digest without saying so.
           (multiple-value-bind (digest complete)
               (definition-digest api name registry :property data)
-            (list :status :ok
+            (list :core-schema (core-schema-data data)
+                  :status :ok
                   :kind "function-spec"
                   :name (symbol-data name)
                   :documentation (getf data :documentation)
@@ -934,7 +935,8 @@ answers."
         (%print-bounded-form (getf data :body) max-chars)
       (multiple-value-bind (source source-complete source-omitted)
           (%print-bounded-form (getf data :source-form) max-chars)
-        (list :status :ok
+        (list :core-schema (core-schema-data data)
+              :status :ok
               :kind "property"
               :name (symbol-data name)
               :property-kind (getf data :kind)
@@ -967,7 +969,8 @@ answers."
   (let ((data (funcall (api-fn api :spec-data) name :registry registry)))
     (multiple-value-bind (source complete omitted)
         (%print-bounded-form (getf data :source-form) max-chars)
-      (list :status :ok
+      (list :core-schema (core-schema-data data)
+            :status :ok
             :kind "spec"
             :name (symbol-data name)
             :spec (%spec-tree data)
@@ -1801,7 +1804,15 @@ legitimately empty, and cl-spec reports it as NIL -- exactly what a run that
 never reached a verdict also reports.  Reading one as the other is how a
 consumer ends up believing a timeout produced a counterexample with no
 arguments, or that a failure was somehow argument-free."
-  (let* ((status (funcall (api-fn api :result-status) result))
+  (let* ((core-data (when (api-has-p api :result-data)
+                      (funcall (api-fn api :result-data) result)))
+         (core-schema (core-schema-data core-data))
+         (digest (if core-data
+                     (multiple-value-bind (value complete)
+                         (definition-digest api name nil :property core-data)
+                       (list :value value :complete complete :covers (getf digest :covers)))
+                     digest))
+         (status (funcall (api-fn api :result-status) result))
          (counterexample (funcall (api-fn api :result-counterexample) result))
          (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
          (condition (funcall (api-fn api :result-condition) result))
@@ -1810,7 +1821,8 @@ arguments, or that a failure was somehow argument-free."
          (zero-argument-property (eql 0 argument-count))
          (executed (funcall (api-fn api :result-trials) result))
          (verdict (member status '(:failed :error))))
-    (list :property (symbol-data name)
+    (list :core-schema core-schema
+          :property (symbol-data name)
           :kind kind
           :contract (when (eq kind :contract)
                       (%contract-plist api result executed max-value-chars

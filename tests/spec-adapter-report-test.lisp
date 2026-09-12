@@ -24,6 +24,28 @@
 
 (in-package #:cl-mcp/tests/spec-adapter-report-test)
 
+(deftest result-digest-uses-captured-core-metadata
+  (let* ((data '(:schema-version 1 :record-kind :result :entity-kind :property
+                 :definition-digest "captured" :definition-digest-complete t))
+         (api (make-cl-spec-api
+               :functions
+               (list :result-data (constantly data)
+                     :result-status (constantly :passed)
+                     :result-counterexample (constantly nil)
+                     :result-shrunk-counterexample (constantly nil)
+                     :result-condition (constantly nil)
+                     :result-seed (constantly 42)
+                     :result-trials (constantly 1)
+                     :result-profile (constantly :normal)
+                     :result-elapsed (constantly 0))))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil 'sample :property nil
+                  '(:value "before-run" :complete t :covers :property)
+                  "captured" 100 nil)))
+    (ok (equal "captured" (getf report :definition-digest)))
+    (ok (eq :true (getf report :definition-match)))
+    (ok (eq :result (getf (getf report :core-schema) :record-kind)))))
+
 (define-condition fixture-unknown-name (error)
   ()
   (:report (lambda (condition stream)

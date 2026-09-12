@@ -28,6 +28,22 @@
 
 (in-package #:cl-mcp/tests/spec-adapter-core-test)
 
+(deftest core-digests-take-precedence-without-legacy-fallback
+  (let ((api (make-cl-spec-api)))
+    (multiple-value-bind (digest complete)
+        (definition-digest api 'sample nil
+                           :property '(:schema-version 1 :definition-digest "core"
+                                       :definition-digest-complete t))
+      (ok (equal "core" digest))
+      (ok complete))
+    (dolist (data '((:schema-version 1 :definition-digest nil :definition-digest-complete nil)
+                    (:schema-version 99 :definition-digest "future"
+                     :definition-digest-complete t)))
+      (multiple-value-bind (digest complete)
+          (definition-digest api 'sample nil :property data)
+        (ok (null digest))
+        (ok (null complete))))))
+
 (defun %ensure-fixture-packages ()
   "Create two packages that both export a symbol named FOO.
 Same name, different home package: the pair a resolver must not confuse."
