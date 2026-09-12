@@ -569,7 +569,11 @@ Four answers, and NIL is not one of them.  A report that carries no verdict at
 all -- a selection of zero, where nothing ran and no digest was requested --
 was being published as an unfaithful reproduction of a run that never
 happened, because \"unfaithful\" was the fallback for both an absent key and a
-real disagreement.  CHECK-REPORT now says :FALSE for the disagreement."
+real disagreement.  CHECK-REPORT now says :FALSE for the disagreement.
+
+:UNKNOWN carries two shortfalls: a digest that could not be read, and a run
+that never reached a comparison at all.  Neither is a disagreement, which is
+the whole point of keeping them out of :FALSE."
   (case value
     (:true "faithful")
     (:false "unfaithful")
@@ -771,7 +775,17 @@ so the function was called ~A time~:P"
       (let ((reason (getf contract :failure-reason)))
         (cond
           (reason
-           (format stream "~&    broken half: ~A" (%keyword-string reason)))
+           (format stream "~&    broken half: ~A" (%keyword-string reason))
+           ;; CONTRACT-ERROR is not a half of what was claimed about the
+           ;; function, the way CONDITION, POSTCONDITION and RETURN-SPEC are:
+           ;; it is the contract's own code signalling while it checked the
+           ;; answer.  In the same column and the same words as the others it
+           ;; reads as one more way the function broke -- and so does the
+           ;; condition under it, which is a TYPE-ERROR out of a :post form.
+           (when (eq :contract-error reason)
+             (format stream "~&      The contract's own code signalled while ~
+it checked the answer. The condition below is a finding about the :pre, ~
+:returns or :post form, NOT about the function.")))
           ((not (member (getf result :status) '(:failed :error))) nil)
           ((getf contract :failure-reason-readable)
            (format stream "~&    broken half: not determined -- re-running the ~
@@ -912,35 +926,63 @@ that has a function spec ran the properties and not the contract, and the bare
 word would be read as a clean bill for the function -- which is exactly what a
 run over a broken function whose properties happen to hold produces.  The
 qualifier goes on all three verdicts: what was covered does not depend on how
-it came out."
-  (let ((verdict (cond ((getf report :verified) "✓ VERIFIED")
-                       ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
-                       (t "⚠ NOT VERIFIED")))
-        (contract (getf (getf report :selection) :contract-not-run))
-        (properties (append (getf (getf report :selection) :properties-not-run)
-                            (let ((own (getf (getf report :selection)
-                                             :own-property-not-run)))
-                              (when own (list own))))))
-    (cond
-      (contract
-       (format nil "~A (properties only -- the function spec for ~A was NOT run)"
-               verdict (getf contract :qualified)))
-      ;; The mirror, and it needs saying for the same reason: a contract that
-      ;; holds is not a clean bill for a function whose properties were never
-      ;; run, and the headline is where a reader stops.
-      (properties
-       (format nil "~A (contract only -- ~D propert~:@P about this symbol ~
-~:*~[~;was~:;were~] NOT run)"
-               verdict (length properties)))
-      ;; And the case where coverage is least known needs it most: the
-      ;; lookup that would have said what else is registered failed, so the
-      ;; bare verdict would be the only line that did not admit it.
-      ((and (eq :contract (getf (getf report :selection) :kind))
-            (not (getf (getf report :selection) :properties-not-run-read)))
-       (format nil "~A (contract only -- what else is registered about this ~
-symbol could not be read)"
-               verdict))
-      (t verdict))))
+it came out.
+
+And a claim about which revision was covered.  EXPECT_DEFINITION_DIGEST is an
+assertion by the caller -- this is still the contract I saved -- so a run that
+disagrees with it has a verdict about definitions the caller was not asking
+about.  Carried beside the coverage qualifier rather than instead of it: the
+two answer different questions, and either one dropped leaves the headline
+claiming what the run did not establish."
+  (let* ((verdict (cond ((getf report :verified) "✓ VERIFIED")
+                        ((plusp (or (getf (getf report :counts) :failed) 0)) "✗ FAILED")
+                        (t "⚠ NOT VERIFIED")))
+         (selection (getf report :selection))
+         (contract (getf selection :contract-not-run))
+         (properties (append (getf selection :properties-not-run)
+                             (let ((own (getf selection :own-property-not-run)))
+                               (when own (list own)))))
+         (coverage
+           (cond
+             (contract
+              (format nil "properties only -- the function spec for ~A was NOT run"
+                      (getf contract :qualified)))
+             ;; The mirror, and it needs saying for the same reason: a contract
+             ;; that holds is not a clean bill for a function whose properties
+             ;; were never run, and the headline is where a reader stops.
+             (properties
+              (format nil "contract only -- ~D propert~:@P about this symbol ~
+~:*~[~;was~:;were~] NOT run"
+                      (length properties)))
+             ;; And the case where coverage is least known needs it most: the
+             ;; lookup that would have said what else is registered failed, so
+             ;; the bare verdict would be the only line that did not admit it.
+             ((and (eq :contract (getf selection :kind))
+                   (not (getf selection :properties-not-run-read)))
+              (format nil "contract only -- what else is registered about ~
+this symbol could not be read"))
+             (t nil)))
+         ;; :TRUE and :NOT-CHECKED add nothing -- one confirms the assertion,
+         ;; the other means none was made -- and a qualifier on every headline
+         ;; is a qualifier nobody reads.
+         (reproduction
+           (case (getf report :reproduction-faithful)
+             (:false (format nil "the definitions moved since the digest ~
+given -- this did NOT reproduce that run"))
+             ;; Two shortfalls under one word, and the results are what tell
+             ;; them apart.  A digest that could not be read was looked at; a
+             ;; timeout, an exhausted budget or a run that signalled never got
+             ;; that far, and "could not be read" would send the reader to a
+             ;; digest that was never the problem.
+             (:unknown
+              (if (find :unknown (getf report :results)
+                        :key (lambda (result) (getf result :definition-match)))
+                  (format nil "whether the definitions still match the digest ~
+given could not be read")
+                  (format nil "this run did not get far enough to compare the ~
+digest given")))
+             (t nil))))
+    (format nil "~A~@[ (~A)~]~@[ (~A)~]" verdict coverage reproduction)))
 
 (defun %format-check-text (report)
   "Render the spec-check report as the text an MCP client will show."
