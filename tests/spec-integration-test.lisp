@@ -164,6 +164,60 @@ reached the caller."
         (gethash "text" (aref content 0))
         "")))
 
+(deftest real-function-core-schema-survives-check
+  (if (or (not (%contracts-available-p))
+          (not (find-symbol "SCHEMA-INFO" "CL-SPEC")))
+      (skip "This integration check needs the versioned Function Spec schema.")
+      (with-fixture-registry
+        (let* ((name (%fixture-name "WIDEN"))
+               (description (spec-describe-response
+                             (make-ht "kind" "function-spec" "name" name)))
+               (definition (gethash "core_schema" description))
+               (checked (spec-check-response
+                         (make-ht "function" name "seed" "42" "trials" 1)))
+               (result (%first-result checked))
+               (metadata (gethash "core_schema" result)))
+          (ok (hash-table-p definition))
+          (ok (hash-table-p metadata))
+          (when (and definition metadata)
+            (ok (equal "function-spec" (gethash "entity_kind" metadata)))
+            (ok (equal "result" (gethash "record_kind" metadata)))
+            (ok (equal (gethash "definition_digest" definition)
+                       (gethash "definition_digest" metadata))))
+          (ok (equal (gethash "definition_digest" description)
+                     (gethash "definition_digest" result)))))))
+
+(deftest real-core-schema-survives-describe-and-check
+  (if (or (not (%cl-spec-available-p))
+          (not (find-symbol "SCHEMA-INFO" "CL-SPEC")))
+      (skip "This integration check needs cl-spec's versioned core schema.")
+      (progn
+        (%ensure-fixture)
+        (with-fixture-registry
+          (let* ((name (%fixture-name "CLAMP-IS-IDEMPOTENT"))
+                 (description (spec-describe-response
+                               (make-ht "kind" "property" "name" name)))
+                 (definition (gethash "core_schema" description))
+                 (checked (spec-check-response (make-ht "property" name "seed" "42")))
+                 (result (%first-result checked))
+                 (metadata (gethash "core_schema" result)))
+            (ok (hash-table-p definition))
+            (ok (hash-table-p metadata))
+            (when (and definition metadata)
+              (ok (equal "definition" (gethash "record_kind" definition)))
+              (ok (equal "result" (gethash "record_kind" metadata)))
+              (ok (equal "property" (gethash "entity_kind" metadata)))
+              (ok (equal (gethash "definition_digest" definition)
+                         (gethash "definition_digest" metadata))))
+            (ok (equal (gethash "definition_digest" description)
+                       (gethash "definition_digest" result))))
+          (let* ((description (spec-describe-response
+                               (make-ht "kind" "spec" "name" (%fixture-name "SMALL-INT"))))
+                 (metadata (gethash "core_schema" description)))
+            (ok (hash-table-p metadata))
+            (when metadata
+              (ok (equal "spec" (gethash "entity_kind" metadata)))))))))
+
 (deftest cl-spec-adapter-discovers-and-describes
   (if (not (%cl-spec-available-p))
       (skip +skip-reason+)

@@ -681,6 +681,20 @@ structured counterexample. cl-mcp does not depend on cl-spec: these tools
 resolve it at call time and report `cl-spec-not-loaded` when it is absent, and
 `unsupported` when the loaded revision lacks the API an operation needs.
 
+With cl-spec's versioned Lisp API, `spec-describe` and completed per-result
+`spec-check` records include `core_schema`. Its integer `schema_version` is
+independent of the adapter's existing string `schema_version`. It carries
+`record_kind`, `entity_kind`, `definition_digest`, `definition_digest_complete`,
+`definition_digest_covers`, and `capabilities` (generation, shrinking,
+instrumentation). An absent or unsupported core schema is `null`.
+The digest covers declarations and registered spec/generator dependencies,
+including whole-argument generators; it excludes target/helper implementations,
+captured/external state and backend settings. Check results use metadata captured
+by cl-spec before execution. Incomplete or unsupported versioned digests remain
+unknown when compared. Only older cl-spec records without a schema version use
+the legacy adapter digest. Capability `available` means generator/shrinker
+construction is supported; it does not guarantee successful draws or reductions.
+
 - `spec-list` — what is registered at all. The entry point when you do not yet
   know a name: the other three all take one you already have. Returns names,
   and for each property its kind, tags, `(:about ...)` targets and docstring —

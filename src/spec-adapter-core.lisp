@@ -43,7 +43,7 @@
            #:printed-for-digest
            #:printed-for-display
            #:print-form-bounded
-           #:definition-digest))
+           #:core-schema-data #:definition-digest))
 
 (in-package #:cl-mcp/src/spec-adapter-core)
 
@@ -89,7 +89,8 @@ the symbol.  Empty on a stub API, where PROGV then binds nothing."
 and fbound for the adapter to report itself usable.")
 
 (defparameter +optional-functions+
-  '((:list-specs . "LIST-SPECS")
+  '((:result-data . "RESULT-DATA")
+     (:list-specs . "LIST-SPECS")
     (:list-properties . "LIST-PROPERTIES")
     (:list-function-specs . "LIST-FUNCTION-SPECS")
     (:properties-with-tag . "PROPERTIES-WITH-TAG")
@@ -629,6 +630,14 @@ followed *PRINT-CASE*, which a digest must not."
                  "|"
                  (symbol-name symbol))))
 
+(defun core-schema-data (data)
+  "Return recognized core metadata, independent of the adapter's JSON schema.
+Absent or unsupported core versions return NIL; they are never inferred."
+  (when (eql 1 (getf data :schema-version))
+    (loop for key in '(:schema-version :record-kind :entity-kind :definition-digest
+                      :definition-digest-complete :definition-digest-covers :capabilities)
+          append (list key (getf data key)))))
+
 (defun definition-digest (api property-name registry
                           &key (property nil property-p)
                                (data-key :property-data))
@@ -674,6 +683,15 @@ than skipped, so the digest still changes if it is defined later."
             (pending '())
             (seen (make-hash-table :test #'eq))
             (specs '()))
+        ;; A versioned core record owns its digest, including incompleteness.
+        ;; Never turn an unknown schema or missing dependency into a legacy match.
+        (when (get-properties property '(:schema-version))
+          (return-from definition-digest
+            (if (and (eql 1 (getf property :schema-version))
+                     (getf property :definition-digest-complete)
+                     (stringp (getf property :definition-digest)))
+                (values (getf property :definition-digest) t)
+                (values nil nil))))
         (dolist (argument (getf property :arguments))
           (setf pending (%collect-spec-references (getf argument :spec) pending)))
         ;; :RETURNS as well, for a function spec.  The contract's own data

@@ -20,6 +20,23 @@
 
 (in-package #:cl-mcp/tests/spec-response-builders-test)
 
+(deftest core-schema-is-distinct-from-mcp-schema
+  (let* ((metadata '(:schema-version 1 :record-kind :definition :entity-kind :spec
+                     :definition-digest "core" :definition-digest-complete t
+                     :definition-digest-covers :declaration-and-registered-dependencies
+                     :capabilities (:generation :available :shrinking :none
+                                    :instrumentation :unavailable)))
+         (response (build-spec-describe-response
+                    (list :status :ok :kind "spec" :core-schema metadata)))
+         (core (gethash "core_schema" response)))
+    (ok (equal "1" (gethash "schema_version" response)))
+    (ok (hash-table-p core))
+    (when core
+      (ok (eql 1 (gethash "schema_version" core)))
+      (ok (equal "spec" (gethash "entity_kind" core)))
+      (ok (equal "core" (gethash "definition_digest" core)))
+      (ok (equal "none" (gethash "shrinking" (gethash "capabilities" core)))))))
+
 (defun first-text (response)
   "Pull the text of the first content part out of RESPONSE, or NIL."
   (let ((content (gethash "content" response)))
