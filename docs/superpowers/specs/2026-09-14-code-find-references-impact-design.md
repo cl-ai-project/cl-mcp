@@ -71,6 +71,9 @@ quasi の `who-calls` / `who-references`（`src/introspection.lisp`）は位置�
 - **#1 トップレベル使用の検出**: xref に記録されない使用をソース走査で補う
 - **#5 テストとの対応付け**: `(lambda)` を囲む deftest 名に解決する
 - 不具合修正 #2 #3 #4 #7
+- 不具合修正 #8（計画時に発見）: `%offset->line` が SBCL のバイト位置を文字位置として読むため、
+  マルチバイト文字（日本語コメントなど）より後ろの定義で `code-find` / `code-describe` /
+  `code-find-references` の行番号がずれる。実測で 7〜8 行目の定義が 10 行目と報告された
 
 含めない（非ゴール）:
 
@@ -131,6 +134,17 @@ quasi の `who-calls` / `who-references`（`src/introspection.lisp`）は位置�
 
 ロード後の変更は、xref の `definition-source-file-write-date` と現在のファイルの
 `file-write-date` を比べて `stale` とする。
+
+**突き合わせのキーは (truename, トップレベルフォームの番号)**（計画時の実測で確定）:
+
+- `definition-source-form-path` の先頭要素は、リーダーが返したトップレベルフォームの中での番号で、
+  CST の `:expr` ノードを先頭から数えた番号と一致する。`#+sbcl` 付き、`eval-when`、`progn`、
+  `defmethod`、rove の `deftest` の lambda のすべてで確認した（`#-sbcl` で読み飛ばされたフォームと
+  コメントは `:skipped` ノードなので数に入らない）
+- `character-offset` はキーに使わない。値は UTF-8 の**バイト位置**で、しかも「直前のフォームを読み終えた位置」
+  を指すため、文字位置で解析する CST とは合わない
+- `form-path` を持たない xref エントリ（エディタからの compile-string など）は行番号でまとめ、
+  フォーム情報なしで報告する
 
 ### 5.3 ファイル構成
 
@@ -195,7 +209,11 @@ worker の依存グラフに入らない。
 - `form_type` / `form_name`: `lisp-edit-form` / `lisp-read-file` の指定にそのまま使える値。
   名前を持たないトップレベルフォーム（`progn` など）では `form_name` が null
 - `test`: `{"name", "framework"}` または null
-- `call_sites[].shadowed_by`: 6.4 のシャドウ検出時のみ付く
+- `call_sites[].shadowed_by`: 6.4 のシャドウ検出時のみ値が入る（それ以外は null）
+- `refs[].note`: 6.3 の行末注記の文言（無ければ null）。本文テキストはこれをそのまま使う
+- ほかに `lookup_package` / `lookup_name`（解決に使ったパッケージ名と名前。not_found の本文用）、
+  `file_count`（`limit` で切る前のファイル数）、`xref_count`、`files_scanned`、`name_matches`
+  （名前が一致した候補の総数）、`scan_skipped`（走査を省いた理由）、`limit` を持つ
 - 1 エントリ = 1 トップレベルフォーム。同じフォームに複数の xref 種別があれば `types` に並べ、
   `type` には先頭（互換用）を入れる。`origin` が `source` のエントリでは、`types` は
   `call_sites[].kind` の重複を除いたもの
@@ -260,7 +278,9 @@ CL-MCP/SRC/FOO:BAR (function) — no references.
 
 | 位置 | `kind` |
 |---|---|
-| リストの先頭 `(foo ...)` | `call`（対象がマクロなら worker 側で `macroexpand` に置き換える） |
+| リストの先頭 `(foo ...)` | `call`（対象がマクロなら worker 側で `macro` に置き換える。既存の `WHO-MACROEXPANDS` の型名に合わせる） |
+| `defun` / `defmacro` / `lambda` などのラムダリストの中 | `bind` |
+| `defclass` / `define-condition` のスーパークラス一覧 | `reference` |
 | `#'foo` / `(function foo)` | `function` |
 | `'foo` | `quoted` |
 | バッククォートの中の、アンクォートされていない位置 | `template` |
@@ -361,11 +381,18 @@ xref の実行とファイル読み込みはその外側の薄い層に置く。
 - `docs/tools.md` の `code-find-references` 節と `prompts/repl-driven-development.md` の早見表
   （呼び出し元・影響範囲を調べるならこのツール）を更新する
 
-## 10. 実装初期に確認するリスク
+## 10. リスク
+
+計画時に解消したもの:
+
+| リスク | 結果 |
+|---|---|
+| `eval-when` / `progn` / `#+sbcl` で包んだ定義で位置が合わない | `form-path` の先頭要素を使えばすべて一致（5.2） |
+| xref の位置がバイト単位か文字単位か | バイト単位。キーには使わず、`%offset->line` も修正する（#8） |
+
+残るもの:
 
 | リスク | 確認方法 | 外れた場合 |
 |---|---|---|
-| `eval-when` / `progn` で包んだ定義で、xref の `character-offset` が外側のトップレベルフォームを指さない | フィクスチャで実測 | `form-path` を使って内側のフォームに対応付ける |
-| `#+sbcl` 付きフォームで、xref の開始位置が `#+` と本体のどちらを指すか | フィクスチャで実測 | 突き合わせ時に reader conditional の分だけ許容する |
-| 名前が一致する候補が多すぎて params が大きくなる（`make-ht` 級） | 実際に計測 | 候補の送信形式をファイル単位にまとめて圧縮する |
-| `in-readtable` を使うファイルで CST 解析が失敗する | 既存のフィクスチャで確認 | 解析失敗として飛ばし、注記する（7 章どおり） |
+| 名前が一致する候補が多すぎて params が大きくなる（`make-ht` 級） | 最終タスクで実測 | 候補の送信形式を見直す |
+| `in-readtable` 以降を CL リーダーで読むファイルでは CST の子ノードがなく、呼び出し箇所を拾えない | 既知の限界として扱う | 必要になったら別途対応 |
