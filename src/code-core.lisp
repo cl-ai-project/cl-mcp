@@ -72,8 +72,29 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
   (let ((pkg (%ensure-sb-introspect)))
     (and pkg (find-symbol name pkg))))
 
+(defun %byte-offset->char-offset (pathname byte-offset)
+  "Return the character offset in PATHNAME that BYTE-OFFSET corresponds to.
+
+SBCL records source positions (DEFINITION-SOURCE-CHARACTER-OFFSET, a debug
+source's start positions) as FILE-POSITION values, and FILE-POSITION on a
+UTF-8 character stream counts octets.  Where a multibyte character -- a
+Japanese comment, say -- precedes a definition, the recorded value exceeds the
+character offset, and reading it as one lands lines too far down.  The prefix
+is decoded as UTF-8, the external format sources are compiled with by default;
+a malformed prefix decodes with replacement characters, and any failure
+returns BYTE-OFFSET unchanged, which is exact for ASCII text."
+  (handler-case
+      (with-open-file (in pathname :element-type '(unsigned-byte 8))
+        (let* ((count (min (max byte-offset 0) (file-length in)))
+               (octets (make-array count :element-type '(unsigned-byte 8))))
+          (read-sequence octets in)
+          (length (sb-ext:octets-to-string
+                   octets :external-format '(:utf-8 :replacement #\?)))))
+    (error () byte-offset)))
+
 (defun %offset->line (pathname offset)
-  "Convert character OFFSET within PATHNAME to a 1-based line number.
+  "Convert SBCL's source OFFSET within PATHNAME to a 1-based line number.
+OFFSET is an octet position; see %BYTE-OFFSET->CHAR-OFFSET.
 SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET typically points at a
 whitespace character or reader-conditional directive that precedes
 the actual `(def...)' form. Walk forward from OFFSET across:
@@ -90,7 +111,7 @@ the offset is spurious. Returns NIL when the file cannot be read."
         (let* ((physical (translate-logical-pathname pathname))
                (content (uiop:read-file-string physical))
                (len (length content))
-               (start (min (max offset 0) len))
+               (start (min (max (%byte-offset->char-offset physical offset) 0) len))
                (limit (min len (+ start 1024))))
           (labels ((ws-p (ch)
                      (or (char= ch #\Space) (char= ch #\Tab)

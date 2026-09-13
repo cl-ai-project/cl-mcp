@@ -169,6 +169,62 @@
                    "offset just before #-sbcl should report the defun's line")))
         (ignore-errors (delete-file path))))))
 
+(deftest code-offset-to-line-counts-octets
+  (testing "%offset->line reads SBCL's octet offset after a multibyte comment"
+    (let* ((tmp (uiop:merge-pathnames*
+                 (format nil "cl-mcp-offset-octets-~A.lisp" (get-universal-time))
+                 (uiop:temporary-directory)))
+           (path (namestring tmp))
+           (text (format nil "(in-package :cl-user)~%~
+                              ;; 日本語のコメントでバイト数と文字数がずれる~%~
+                              (defun before-mb () :ok)~%~
+                              ~%~
+                              (defun after-mb () :ok)~%~
+                              (defun filler-1 () :ok)~%~
+                              (defun filler-2 () :ok)~%~
+                              (defun filler-3 () :ok)~%")))
+      (unwind-protect
+           (progn
+             (with-open-file (s path :direction :output :if-exists :supersede
+                                     :external-format :utf-8)
+               (write-string text s))
+             (let* ((char-pos (search "(defun after-mb" text))
+                    ;; SBCL records the octet position just past the previous
+                    ;; form, i.e. at the whitespace before this one.
+                    (octet-pos (length (sb-ext:string-to-octets
+                                        text :end (1- char-pos)
+                                        :external-format :utf-8))))
+               (ok (= (1+ (count #\Newline text :end char-pos))
+                      (cl-mcp/src/code-core::%offset->line path octet-pos))
+                   "the defun after the comment is reported on its own line")))
+        (ignore-errors (delete-file path))))))
+
+(deftest code-find-definition-line-after-multibyte-comment
+  (testing "code-find-definition reports the defun's own line in a UTF-8 file"
+    (let* ((dir (uiop:ensure-directory-pathname
+                 (uiop:merge-pathnames* (format nil "cl-mcp-octets-~D/" (random 1000000))
+                                        (uiop:temporary-directory))))
+           (src (merge-pathnames "octets.lisp" dir))
+           (fasl (merge-pathnames "octets.fasl" dir))
+           (text (format nil "(defpackage #:cl-mcp-octets-fixture (:use #:cl))~%~
+                              (in-package #:cl-mcp-octets-fixture)~%~
+                              ;; 日本語のコメントでバイト数と文字数がずれる~%~
+                              (defun one () 1)~%~
+                              (defun two () 2)~%~
+                              (defun three () 3)~%~
+                              (defun four () 4)~%")))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (s src :direction :output :if-exists :supersede
+                                    :external-format :utf-8)
+               (write-string text s))
+             (handler-bind ((warning #'muffle-warning))
+               (load (compile-file src :output-file fasl :verbose nil :print nil)))
+             (ok (eql (1+ (count #\Newline text :end (search "(defun three" text)))
+                      (nth-value 1 (code-find-definition "cl-mcp-octets-fixture::three")))))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
 (deftest code-find-references-returns-project-refs
   (testing "code.find-references returns valid structure"
     ;; Skip this test on macOS due to XREF instability
