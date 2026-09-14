@@ -25,6 +25,8 @@
                 #:%definition-candidates)
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:collect-target-files)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-source-text)
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path
                 #:normalize-path-for-display)
@@ -554,10 +556,11 @@ the policy denies -- one reached through a symlink leaving the allowed tree,
 say -- is not read, not counted in FILES_SCANNED and not listed in
 SCANNED_FILES, only counted in FILES_DENIED.
 
-An allowed file is read as UTF-8 with invalid bytes replaced by #\\?, so one bad
-byte (in a comment, say) does not drop the whole file; a file that still cannot
-be read (missing, unreadable, ...) is reported in parse_failures instead of
-being silently skipped.  Every file's abs_path -- in a form or a parse_failures
+An allowed file is read whole by CL-MCP/SRC/FS:FS-READ-SOURCE-TEXT, as UTF-8
+with invalid bytes replaced by #\\?, so one bad byte (in a comment, say) does
+not drop the whole file; a file that still cannot be read (missing,
+unreadable, ...) is reported in parse_failures instead of being silently
+skipped.  Every file's abs_path -- in a form or a parse_failures
 entry -- is its truename namestring (falling back to its plain namestring when
 TRUENAME fails), so a file reached through a symlinked directory is keyed the
 same way SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  The
@@ -632,15 +635,15 @@ JSON-ready hash-table:
                   (incf scanned)
                   (push abs-path scanned-files)
                   (unless truncated
-                    ;; Not FS-READ-FILE, although the check above is the one it
-                    ;; applies: it caps a read at *FS-READ-MAX-BYTES*, silently
-                    ;; cutting a large file short, and decodes without
-                    ;; replacement, so one invalid byte would drop the file.
+                    ;; FS-READ-SOURCE-TEXT, not FS-READ-FILE: the latter caps a
+                    ;; read at *FS-READ-MAX-BYTES*, silently cutting a large
+                    ;; file short, and decodes without replacement, so one
+                    ;; invalid byte would drop the file.  The wrapper applies
+                    ;; the same read policy as %READABLE-PATH above again
+                    ;; before it opens the file; that check is what feeds
+                    ;; files_denied.  Anything it signals is a parse failure.
                     (multiple-value-bind (text read-condition)
-                        (ignore-errors
-                         (uiop:read-file-string readable
-                                                :external-format
-                                                '(:utf-8 :replacement #\?)))
+                        (ignore-errors (fs-read-source-text readable))
                       (cond
                         ((null text)
                          (fail file abs-path (%first-line (princ-to-string read-condition))))

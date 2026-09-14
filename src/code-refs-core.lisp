@@ -222,7 +222,7 @@ interned."
 (defparameter *note-not-in-xref*
   "not in xref (top-level form, or not compiled since it was written)"
   "Note for a form only the source scan found, holding a site of a kind xref
-records (see *SITE-KINDS-XREF-NEVER-RECORDS*).")
+records (see *SITE-KINDS-XREF-SELDOM-RECORDS*).")
 
 (defparameter *xref-type-site-kinds*
   '(("call" "call" "function")
@@ -239,11 +239,14 @@ A merged form holding no site of a kind listed for one of its xref types gets
 *NOTE-UNMATCHED-XREF* (see %REFERENCE-NOTE); a type missing from this table is
 shown by no site.")
 
-(defparameter *site-kinds-xref-never-records* '("quoted" "template" "method")
-  "Scan site kinds no xref finder records: quoted data, backquote templates and
-DEFMETHOD names.  A form the scan alone found gets *NOTE-NOT-IN-XREF* only when
-it holds a site of some other kind; for these the absence is expected, and the
-note's explanation (a top-level form, or code not compiled) would be wrong.")
+(defparameter *site-kinds-xref-seldom-records* '("quoted" "template" "method")
+  "Scan site kinds xref usually does not record: quoted data, backquote templates
+and DEFMETHOD names.  (WHO-CALLS does record a function passed by name, as in
+(mapcar 'name xs) or :key 'name, but a compiled form like that is then found by
+xref too, and so is not source-only.)  A form the scan alone found gets
+*NOTE-NOT-IN-XREF* only when it holds a site of some other kind; for these the
+absence is expected, and the note's explanation (a top-level form, or code not
+compiled) would be wrong.")
 
 (defparameter *note-unmatched-xref*
   "xref records ~{~A~#[~; and ~:;, ~]~} here that no site below ~
@@ -363,8 +366,8 @@ PRIMARY is the xref entry the reference takes its caller from.
 
 In order: a stale file; an xref entry with no form, explained by how the scan
 covered its file; a form the scan alone found that holds a site of a kind xref
-records (one whose sites are all *SITE-KINDS-XREF-NEVER-RECORDS* is expected to
-be missing from xref); and a form both found where some xref type has no
+records (one whose sites are all *SITE-KINDS-XREF-SELDOM-RECORDS* is expected
+to be missing from xref); and a form both found where some xref type has no
 compatible site (see *XREF-TYPE-SITE-KINDS*), so that no site listed is that
 call, set, ... itself."
   (cond
@@ -378,7 +381,7 @@ call, set, ... itself."
      (let ((sites (getf form :sites)))
        (if (and sites
                 (every (lambda (site)
-                         (member (getf site :kind) *site-kinds-xref-never-records*
+                         (member (getf site :kind) *site-kinds-xref-seldom-records*
                                  :test #'equal))
                        sites))
            nil

@@ -425,10 +425,11 @@ LABEL goes into its name, so a leftover directory says which test made it."
 (deftest scan-project-looks-a-package-up-once-per-scan
   (testing "files of a package the parent lacks share one search for its definition"
     ;; Package discovery reads files through FS-READ-FILE, which logs an
-    ;; fs.read.open event per read; scan-project itself reads with UIOP and
+    ;; fs.read.open event per read; scan-project's own reads go through
+    ;; FS-READ-SOURCE-TEXT, which logs fs.read-source.open instead, and it
     ;; never parses sub/package.lisp, which does not mention FOO.  So each
-    ;; logged read of that file is one walk: three without the cache (one per
-    ;; file using the package), one with it.
+    ;; fs.read.open of that file is one walk: three without the cache (one
+    ;; per file using the package), one with it.
     (let ((dir (uiop:ensure-directory-pathname
                 (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-pkg-~D/" (random 1000000))
                                        (uiop:temporary-directory)))))

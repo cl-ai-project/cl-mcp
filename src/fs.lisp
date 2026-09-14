@@ -43,6 +43,7 @@
   (:export #:*lisp-file-unparseable-hook*
            #:fs-resolve-read-path
            #:fs-read-file
+           #:fs-read-source-text
            #:fs-window-start
            #:fs-write-file
            #:fs-list-directory
@@ -131,6 +132,29 @@ read (so a LIMIT read can be told apart from a whole file)."
                  "path" (namestring pn)
                  "fd" (fd-count))
       (values text truncated file-length remaining))))
+
+(defun fs-read-source-text (path)
+  "Return the whole text of the file PATH, decoded as UTF-8 with every invalid
+byte replaced by #\\?.
+
+Use this instead of FS-READ-FILE for source files that tooling scans whole,
+such as code-find-references' source scan: FS-READ-FILE stops at
+*FS-READ-MAX-BYTES*, silently cutting a large file short, and decodes without
+replacement, so one stray invalid byte (in a comment, say) would make the
+whole file unreadable.  The read policy is FS-READ-FILE's: an error is
+signalled when ALLOWED-READ-PATH does not permit PATH.  A file that cannot be
+opened or read signals as well."
+  (let ((pn (allowed-read-path path)))
+    (unless pn
+      (error "Read not permitted for path ~A" path))
+    (log-event :debug "fs.read-source.open"
+               "path" (namestring pn)
+               "fd" (fd-count))
+    (unwind-protect
+         (uiop:read-file-string pn :external-format '(:utf-8 :replacement #\?))
+      (log-event :debug "fs.read-source.close"
+                 "path" (namestring pn)
+                 "fd" (fd-count)))))
 
 (defun fs-window-start (path offset)
   "Return two values for the window of PATH that FS-READ-FILE opens at OFFSET:
