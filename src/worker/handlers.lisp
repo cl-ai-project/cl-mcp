@@ -13,7 +13,7 @@
   (:import-from #:cl-mcp/src/code-core
                 #:code-find-definition
                 #:code-describe-symbol
-                #:code-find-references)
+                #:code-find-references-report)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:load-system
                 #:*system-load-lock-wrapper*)
@@ -283,15 +283,23 @@ caller is answered at the deadline even while the suite is still blocked."
 
 (defun %handle-code-find-references (params)
   "Find symbol references.  Returns the same structure as define-tool
-\"code-find-references\"."
+\"code-find-references\".
+
+PARAMS carries the parent's source scan under \"scan\"; this handler resolves
+its sites against the symbols loaded in this image and merges them with xref."
   (let ((symbol (gethash "symbol" params))
         (package (gethash "package" params))
-        (project-only (%bool-default params "project_only" t)))
+        (project-only (%bool-default params "project_only" t))
+        (limit (or (gethash "limit" params) 50))
+        (scan (gethash "scan" params)))
     (unless symbol
       (error "symbol is required"))
-    (multiple-value-bind (refs count)
-        (code-find-references symbol :package package :project-only project-only)
-      (build-code-find-references-response symbol refs count project-only))))
+    (build-code-find-references-response
+     (code-find-references-report symbol
+                                  :package package
+                                  :project-only project-only
+                                  :limit limit
+                                  :scan scan))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/inspect-object

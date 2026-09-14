@@ -13,6 +13,8 @@
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:cl-mcp/src/code-refs-core
+                #:build-references-report)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-code-find-response
                 #:build-code-describe-response
@@ -26,6 +28,105 @@
   (let ((content (gethash "content" response)))
     (when (and (vectorp content) (plusp (length content)))
       (gethash "text" (aref content 0)))))
+
+(defun %ref (&key (path "src/a.lisp") (line 10) (type "call") (caller "a") form-type
+                  form-name (origin "xref+source") sites test note)
+  "Return a reference object shaped like MERGE-REFERENCES' output."
+  (make-ht "path" path "line" line "type" type "types" (vector type)
+           "caller" caller "caller_symbol" nil "context" "(defun a"
+           "form_type" form-type "form_name" form-name "origin" origin
+           "call_sites" (coerce sites 'vector) "test" test "stale" nil "note" note))
+
+(defun %site (line &key (kind "call") (context "(foo 1)") shadowed-by)
+  "Return a call-site object shaped like MERGE-REFERENCES' output."
+  (make-ht "line" line "column" 3 "kind" kind "context" context
+           "shadowed_by" shadowed-by))
+
+(defun %report (refs &rest overrides)
+  "Return a found-symbol report for REFS; OVERRIDES win over the defaults."
+  (apply #'build-references-report
+         (append overrides
+                 (list :symbol "p::foo" :resolved-symbol "P::FOO" :status :found
+                       :kind "function" :project-only t :refs refs))))
+
+(deftest build-code-find-references-response-shows-forms-sites-and-tests
+  (testing "header, one line per form, its call sites, and the tests"
+    (let* ((r (build-code-find-references-response
+               (%report (list (%ref :form-type "defun" :form-name "a"
+                                    :sites (list (%site 12)
+                                                 (%site 13 :kind "quoted" :context "'foo")))
+                              (%ref :path "tests/a-test.lisp" :line 5 :form-type "deftest"
+                                    :form-name "a-test" :caller "(lambda)"
+                                    :sites (list (%site 6))
+                                    :test (make-ht "name" "a-test" "framework" "rove"))))))
+           (text (first-text r)))
+      (ok (search "P::FOO (function) — 2 forms in 2 files, 1 test" text))
+      (ok (search "src/a.lisp:10 (defun a) [call]" text))
+      (ok (search "  12: (foo 1)" text))
+      (ok (search "  13 (quoted): 'foo" text))
+      (ok (search "tests/a-test.lisp:5 (deftest a-test) [call] TEST" text))
+      (ok (search "Tests: a-test" text))
+      (ok (= 2 (gethash "count" r))))))
+
+(deftest build-code-find-references-response-notes-and-caps
+  (testing "notes follow the form line; call sites beyond five are counted"
+    (let ((text (first-text
+                 (build-code-find-references-response
+                  (%report (list (%ref :form-type "defun" :form-name "a"
+                                       :sites (loop for i from 1 to 7 collect (%site i)))
+                                 (%ref :path "src/b.lisp" :origin "xref" :caller "hidden"
+                                       :note "call not visible in source (produced by a macro expansion)")
+                                 (%ref :path "src/c.lisp" :form-type "defun" :form-name "c"
+                                       :sites (list (%site 3 :shadowed-by "flet")))))))))
+      (ok (search "  +2 more" text))
+      (ok (search "src/b.lisp:10 (used in hidden) [call] — call not visible in source" text))
+      (ok (search "[shadowed by flet]" text)))))
+
+(deftest build-code-find-references-response-hides-lambda-callers
+  (testing "a lambda caller without a form falls back to path:line"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report (list (%ref :caller "(lambda)" :origin "xref")))))))
+      (ok (search "src/a.lisp:10 [call]" text))
+      (ok (not (search "(lambda)" text))))))
+
+(deftest build-code-find-references-response-truncates
+  (testing "forms beyond the limit are counted, not listed"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report (list (%ref :path "a.lisp") (%ref :path "b.lisp")
+                                            (%ref :path "c.lisp"))
+                                      :limit 2)))))
+      (ok (search "— 3 forms in 3 files" text))
+      (ok (search "… 1 more form (raise limit to see them)" text))
+      (ok (not (search "c.lisp" text))))))
+
+(deftest build-code-find-references-response-empty-and-missing
+  (testing "no references says so and shows what was searched"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report '() :files-scanned 147 :name-matches 0)))))
+      (ok (search "P::FOO (function) — no references." text))
+      (ok (search "xref: 0 entries   source scan: 147 files, 0 matches" text))))
+  (testing "a missing symbol"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report '() :status :not-found :resolved-symbol nil :kind nil
+                                          :lookup-package "P" :lookup-name "NOPE"
+                                          :name-matches 7)))))
+      (ok (search "Symbol \"NOPE\" not found in P (nothing was interned)" text))
+      (ok (search "7 textual matches" text))))
+  (testing "a missing package"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report '() :status :package-not-found
+                                          :lookup-package "NOPE-PKG")))))
+      (ok (search "Package \"NOPE-PKG\" not found" text))))
+  (testing "unresolved matches and notes are listed"
+    (let ((text (first-text (build-code-find-references-response
+                             (%report (list (%ref))
+                                      :unresolved (list (list :path "tests/x-test.lisp"
+                                                              :package "X-TEST" :count 3
+                                                              :tests '("x-test")))
+                                      :notes '("source scan skipped: project root is not set"))))))
+      (ok (search "+ 3 possible matches in files whose package is not loaded:" text))
+      (ok (search "tests/x-test.lisp (X-TEST; tests: x-test)" text))
+      (ok (search "Note: source scan skipped: project root is not set" text)))))
 
 (deftest build-code-find-response-with-line
  (testing "successful find emits path, line and a content text mentioning both"
@@ -108,40 +209,6 @@
     (let ((text (first-text r)))
       (ok (search "BAR" text))
       (ok (search "macro" text))))))
-
-(deftest build-code-find-references-response-uses-caller
- (testing "summary text shows path:line and the caller name when available"
-  (let* ((ref (make-ht "path" "/p/a.lisp" "line" 10 "type" "call"
-                       "caller" "MAIN" "context" "..."))
-         (refs (vector ref))
-         (r (build-code-find-references-response "FOO" refs 1 t))
-         (text (first-text r)))
-    (ok (= 1 (gethash "count" r)))
-    (ok (eq t (gethash "project_only" r)))
-    (ok (search "MAIN" text) "caller appears in summary")
-    ;; The line is not an alternative to the caller name: without it the row
-    ;; is neither clickable nor sortable against the caller-less rows.
-    (ok (search "/p/a.lisp:10" text) "path:line appears alongside the caller")
-    (ok (string= "/p/a.lisp:10 (used in MAIN) [call]"
-                 (string-right-trim '(#\Newline) text)))
-    (ok (search "FOO" (or (gethash "symbol" r) ""))))))
-
-(deftest build-code-find-references-response-empty
- (testing "empty refs vector yields an empty content text without erroring"
-  (let* ((r (build-code-find-references-response "FOO" #() 0 nil))
-         (text (first-text r)))
-    (ok (= 0 (gethash "count" r)))
-    (ok (or (null text) (zerop (length text))) "summary is empty"))))
-
-(deftest build-code-find-references-response-lambda-caller-falls-back
- (testing "(lambda) caller is treated as missing and we fall back to path:line"
-  (let* ((ref (make-ht "path" "/p/a.lisp" "line" 99 "type" "call"
-                       "caller" "(lambda)" "context" "..."))
-         (refs (vector ref))
-         (r (build-code-find-references-response "FOO" refs 1 nil))
-         (text (first-text r)))
-    (ok (search "/p/a.lisp:99" text) "fallback path:line shown")
-    (ok (not (search "(lambda)" text)) "lambda placeholder is suppressed"))))
 
 (deftest build-inspect-response-success-attaches-content
  (testing "successful inspection result gets a content vector attached"

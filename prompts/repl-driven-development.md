@@ -16,6 +16,7 @@ EXPLORE -> EXPERIMENT -> PERSIST -> VERIFY
 |------|------|------------|
 | Find symbol | `clgrep-search` | `pattern`, `form_types` |
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
+| Callers / impact | `code-find-references` | `symbol` (load-system first) |
 | Load system | `load-system` | `system`, `force`, `clear_fasls` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit form | `lisp-edit-form` | `form_type`, `form_name`, `operation`, `content` |
@@ -78,7 +79,7 @@ the worker image has the macro's definition loaded.
 - **SEARCH/EXPLORE**
   - Pattern search (project-wide) -> `clgrep-search`
   - Symbol lookup (system loaded) -> `code-find`, `code-describe`
-  - Find callers/references -> `code-find-references` (loaded) or `clgrep-search`
+  - Find callers/references, call sites and affected tests -> `code-find-references` (loaded) or `clgrep-search`
 - **READ**
   - `.lisp`/`.asd` file -> `lisp-read-file` (`collapsed=true`, then `name_pattern`)
   - Other files -> `fs-read-file`

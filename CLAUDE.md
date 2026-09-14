@@ -50,7 +50,7 @@ mallet src/*.lisp src/*/*.lisp tests/*.lisp
 | Lisp Reading | `src/lisp-read-file.lisp` | Collapsed signatures, pattern-based expansion |
 | Lisp Editing | `src/lisp-edit-form.lisp` | CST-based form replace/insert via Eclector |
 | Lisp Patching | `src/lisp-patch-form.lisp` | Token-efficient sub-form text replacement |
-| Code Intel | `src/code.lisp` | Symbol lookup, describe, xref via sb-introspect |
+| Code Intel | `src/code.lisp`, `src/code-refs-scan.lisp`, `src/code-refs-core.lisp` | Symbol lookup, describe; callers with call sites and tests (xref + source scan) |
 | Validation | `src/validate.lisp`, `src/parinfer.lisp` | Paren checking, auto-repair |
 | Pool Mgmt | `src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp` | Worker diagnostics and lifecycle |
 | cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Spec/Property listing, discovery and execution (`spec-list` / `spec-symbol` / `spec-describe` / `spec-check`). **Optional tool group `cl-spec`, off by default** |

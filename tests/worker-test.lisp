@@ -830,6 +830,54 @@ Cleans up server and socket on exit."
             (ok (gethash "count" result)
                 "result has count field")))))))
 
+(deftest worker-code-find-references-resolves-scan-sites
+  (testing "worker/code-find-references resolves the sites the parent scanned"
+    (with-handler-server (stream)
+      (let ((site (make-hash-table :test 'equal))
+            (form (make-hash-table :test 'equal))
+            (scan (make-hash-table :test 'equal))
+            (params (make-hash-table :test 'equal)))
+        (setf (gethash "line" site) 3
+              (gethash "column" site) 5
+              (gethash "kind" site) "call"
+              (gethash "token" site) "car"
+              (gethash "context" site) "(car x)"
+              (gethash "shadowed_by" site) nil)
+        (setf (gethash "path" form) "virtual.lisp"
+              (gethash "abs_path" form) "/virtual/virtual.lisp"
+              (gethash "index" form) 0
+              (gethash "start_line" form) 1
+              (gethash "end_line" form) 4
+              (gethash "form_type" form) "defun"
+              (gethash "form_name" form) "virtual"
+              (gethash "test_name" form) nil
+              (gethash "test_framework" form) nil
+              (gethash "in_package" form) "COMMON-LISP-USER"
+              (gethash "context" form) "(defun virtual (x)"
+              (gethash "sites" form) (vector site))
+        (setf (gethash "target_name" scan) "CAR"
+              (gethash "root" scan) "/virtual/"
+              (gethash "files_scanned" scan) 1
+              (gethash "files_matched" scan) 1
+              (gethash "forms" scan) (vector form)
+              (gethash "parse_failures" scan) (vector)
+              (gethash "truncated_at" scan) nil
+              (gethash "skipped_reason" scan) nil)
+        (setf (gethash "symbol" params) "cl:car"
+              (gethash "project_only" params) t
+              (gethash "limit" params) 100000
+              (gethash "scan" params) scan)
+        (let* ((response (%send-and-receive stream 303 "worker/code-find-references" params))
+               (result (%result-of response)))
+          (ok result "handler returns a result")
+          (when result
+            (let ((ref (find "virtual" (coerce (gethash "refs" result) 'list)
+                             :key (lambda (r) (gethash "form_name" r)) :test #'equal)))
+              (ok ref "the scanned form survives the JSON round trip and is resolved")
+              (when ref
+                (ok (equal "source" (gethash "origin" ref)))
+                (ok (= 3 (gethash "line" (elt (gethash "call_sites" ref) 0))))))))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Handshake parser noise tolerance tests (Issue #9, Major)
 ;;; ---------------------------------------------------------------------------
