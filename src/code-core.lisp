@@ -101,38 +101,60 @@ returns BYTE-OFFSET unchanged, which is exact for ASCII text."
                    octets :external-format '(:utf-8 :replacement #\?)))))
     (error () byte-offset)))
 
+(defun %source-whitespace-p (ch)
+  "True when CH is whitespace in standard syntax: space, tab, newline, return or page."
+  (member ch '(#\Space #\Tab #\Newline #\Linefeed #\Return #\Page)))
+
 (defun %feature-expression-value (text start end)
   "Evaluate the feature expression written in TEXT between START and END.
 
 Returns T or NIL, what #+ would decide against this image's *FEATURES*, or
 :UNKNOWN when the text is not an expression this parser understands.  It
-understands an atom, with or without a package prefix, and a list headed by
-AND, OR or NOT, all case-insensitive.  An atom is true when a member of
-*FEATURES* has a symbol name STRING= to the atom's upcased name.  The text is
-parsed by hand, so nothing is read and nothing is interned."
+understands atoms and lists headed by AND, OR or NOT, all case-insensitive,
+and follows SBCL's FEATUREP, which reads the expression in the KEYWORD package
+and compares symbols with EQ:
+  - an atom written without a package prefix, or with an empty or KEYWORD one
+    (`sbcl', `:sbcl', `keyword:sbcl'), is true when a keyword in *FEATURES*
+    has its upcased name;
+  - an uninterned atom (`#:nil') is never a feature, so it is false;
+  - an atom with any other package prefix (`cl-user::sbcl') is never EQ to a
+    keyword feature, so it is false too;
+  - an operator may also be written with a CL or COMMON-LISP prefix.
+The text is parsed by hand, so nothing is read and nothing is interned."
   (let ((i start))
-    (labels ((whitespace-p (ch)
-               (member ch '(#\Space #\Tab #\Newline #\Return #\Page)))
-             (skip-whitespace ()
-               (loop while (and (< i end) (whitespace-p (char text i)))
+    (labels ((skip-whitespace ()
+               (loop while (and (< i end) (%source-whitespace-p (char text i)))
                      do (incf i)))
              (unknown ()
                (return-from %feature-expression-value :unknown))
-             (token-name ()
-               ;; An atom's name, upcased and without its package prefix.
+             (read-atom ()
+               ;; Returns (values NAME KIND PREFIX): NAME upcased, without any
+               ;; prefix; KIND :KEYWORD, :UNINTERNED or :OTHER.
                (let ((token-start i))
                  (loop while (and (< i end)
-                                  (not (whitespace-p (char text i)))
+                                  (not (%source-whitespace-p (char text i)))
                                   (not (member (char text i) '(#\( #\)))))
                        do (incf i))
                  (let* ((token (subseq text token-start i))
-                        (colon (position #\: token :from-end t))
-                        (name (string-upcase (if colon (subseq token (1+ colon)) token))))
+                        (uninterned (and (> (length token) 2) (string= "#:" token :end2 2)))
+                        (body (if uninterned (subseq token 2) token))
+                        (first-colon (position #\: body))
+                        (last-colon (position #\: body :from-end t))
+                        (prefix (and first-colon (subseq body 0 first-colon)))
+                        (name (string-upcase (if last-colon (subseq body (1+ last-colon)) body))))
                    (when (or (zerop (length name))
-                             (find-if (lambda (ch) (find ch "|\\\"'`,;#")) token)
-                             (every #'digit-char-p name))
+                             (find-if (lambda (ch) (find ch "|\\\"'`,;#")) body)
+                             (every #'digit-char-p name)
+                             (and uninterned first-colon))
                      (unknown))
-                   name)))
+                   (values name
+                           (cond (uninterned :uninterned)
+                                 ((or (null prefix)
+                                      (string= prefix "")
+                                      (string-equal prefix "KEYWORD"))
+                                  :keyword)
+                                 (t :other))
+                           prefix))))
              (parse ()
                (skip-whitespace)
                (when (or (>= i end) (char= (char text i) #\)))
@@ -143,25 +165,31 @@ parsed by hand, so nothing is read and nothing is interned."
                      (skip-whitespace)
                      (when (or (>= i end) (member (char text i) '(#\( #\))))
                        (unknown))
-                     (let ((operator (token-name))
-                           (arguments '()))
-                       (loop
-                         (skip-whitespace)
-                         (when (>= i end)
-                           (unknown))
-                         (when (char= (char text i) #\))
-                           (incf i)
-                           (return))
-                         (push (parse) arguments))
-                       (cond
-                         ((string= operator "AND") (every #'identity arguments))
-                         ((string= operator "OR") (and (some #'identity arguments) t))
-                         ((and (string= operator "NOT") (= 1 (length arguments)))
-                          (not (first arguments)))
-                         (t (unknown)))))
-                   (let ((name (token-name)))
-                     (and (find-if (lambda (feature)
-                                     (and (symbolp feature)
+                     (multiple-value-bind (operator kind prefix) (read-atom)
+                       (unless (or (eq kind :keyword)
+                                   (and (eq kind :other)
+                                        (member prefix '("CL" "COMMON-LISP")
+                                                :test #'string-equal)))
+                         (unknown))
+                       (let ((arguments '()))
+                         (loop
+                           (skip-whitespace)
+                           (when (>= i end)
+                             (unknown))
+                           (when (char= (char text i) #\))
+                             (incf i)
+                             (return))
+                           (push (parse) arguments))
+                         (cond
+                           ((string= operator "AND") (every #'identity arguments))
+                           ((string= operator "OR") (and (some #'identity arguments) t))
+                           ((and (string= operator "NOT") (= 1 (length arguments)))
+                            (not (first arguments)))
+                           (t (unknown))))))
+                   (multiple-value-bind (name kind) (read-atom)
+                     (and (eq kind :keyword)
+                          (find-if (lambda (feature)
+                                     (and (keywordp feature)
                                           (string= name (symbol-name feature))))
                                    *features*)
                           t)))))
@@ -174,19 +202,32 @@ parsed by hand, so nothing is read and nothing is interned."
 
 The form is READ from a string stream with *READ-SUPPRESS* true and
 *READ-EVAL* false, through a copy of the standard readtable, so its symbols
-are neither interned nor looked up and nothing is evaluated.  In that copy #+
-and #- read both their feature expression and their form suppressed: the
-standard ones read the feature expression unsuppressed, into KEYWORD, even
-inside a suppressed form.  NIL when the form cannot be read, end of file
-included."
+are neither interned nor looked up and nothing is evaluated.  NIL when the form
+cannot be read, end of file included.
+
+The standard #+ and #- read their feature expression unsuppressed, into
+KEYWORD, even inside a suppressed form, so the copy replaces them.  The
+replacement reads the expression suppressed and judges its text with
+%FEATURE-EXPRESSION-VALUE (:UNKNOWN counts as true), reads the form it gates,
+and then does what the standard ones do: return one value when the
+conditional holds, and none when it does not, so that READ goes on to the next
+object.  That matters when the form being skipped is itself a conditional:
+`#+nil #+sbcl (a) (b)' skips only (a), while `#+nil #+ccl (a) (b)' skips (a)
+and (b)."
   (handler-case
       (let ((stream (make-string-input-stream text))
             (readtable (copy-readtable nil)))
         (flet ((suppressed-conditional (stream sub-char numarg)
-                 (declare (ignore sub-char numarg))
-                 (read stream t nil t)
-                 (read stream t nil t)
-                 (values)))
+                 (declare (ignore numarg))
+                 (let* ((expression-start (file-position stream))
+                        (expression-end (progn (read stream t nil t)
+                                               (file-position stream)))
+                        (value (%feature-expression-value
+                                text expression-start expression-end))
+                        (holds (or (eq value :unknown)
+                                   (eq value (char= sub-char #\+)))))
+                   (read stream t nil t)
+                   (if holds nil (values)))))
           (set-dispatch-macro-character #\# #\+ #'suppressed-conditional readtable)
           (set-dispatch-macro-character #\# #\- #'suppressed-conditional readtable))
         (file-position stream start)
@@ -207,7 +248,7 @@ SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET typically points just past the
 previous top-level form, so whitespace, comments and reader conditionals can
 lie between it and the `(def...)' form it belongs to.  Walk forward from
 OFFSET across:
-  - whitespace
+  - whitespace, form feeds included (%SOURCE-WHITESPACE-P)
   - `;' line comments
   - `#|...|#' block comments, nested ones included
   - `#+feature' / `#-feature' reader conditionals.  The feature expression is
@@ -228,8 +269,7 @@ length.  Returns NIL when the file cannot be read."
                (len (length content))
                (start (min (max (%byte-offset->char-offset physical offset) 0) len)))
           (labels ((ws-p (ch)
-                     (or (char= ch #\Space) (char= ch #\Tab)
-                         (char= ch #\Newline) (char= ch #\Return)))
+                     (%source-whitespace-p ch))
                    (next-char-p (i ch)
                      (and (< (1+ i) len) (char= (char content (1+ i)) ch)))
                    (skip-balanced-list (i)

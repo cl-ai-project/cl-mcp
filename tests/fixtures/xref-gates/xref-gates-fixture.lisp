@@ -2,7 +2,8 @@
 ;;;;
 ;;;; Compiled and loaded by tests/code-test.lisp.  Between some callers of
 ;;;; GATE-CALLEE sit things SBCL's source offset does not point past: a form
-;;;; that is false on SBCL, and a comment block longer than 1024 characters.
+;;;; that is false on SBCL (alone, or with a true conditional stacked under its
+;;;; false one), and a comment block longer than 1024 characters.
 ;;;; Each caller must still meet its own xref entry.  The last caller follows
 ;;;; a form gated on a feature the test adds only while scanning, so the scan
 ;;;; reads a form the compiler skipped.
@@ -32,6 +33,13 @@
 
 (defun after-not-sbcl ()
   (gate-callee 2))
+
+#+(or) #+sbcl
+(defun false-over-true-gated ()
+  :never-read)
+
+(defun after-false-over-true ()
+  (gate-callee 6))
 
 ;;; A comment block longer than 1024 characters, so the form after it starts
 ;;; well beyond any fixed look-ahead from the end of the previous form.

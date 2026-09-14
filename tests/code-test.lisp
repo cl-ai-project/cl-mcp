@@ -201,14 +201,30 @@
                (line "#+(and sbcl (not sbcl))")
                (line "(defun gated-and-not () :never)")
                (line "(defun after-and-not () :ok)")
-               (line "#-(OR cl-user::SBCL :ccl) (defun gated-prefixed () :never)")
-               (line "(defun after-prefixed () :ok)")
+               (line "#-(OR :SBCL ccl) (defun gated-keyword () :never)")
+               (line "(defun after-keyword () :ok)")
+               (line "#-cl-user::sbcl")
+               (line "(defun gated-prefixed () :read-on-sbcl)")
+               (line "#+#:nil")
+               (line "(defun gated-uninterned () :never)")
+               (line "(defun after-uninterned () :ok)")
                (line "#+nil (defun gated-nil () :never)")
                (line "(defun after-nil () :ok)")
                (line "#+cl-mcp-offset-absent-top-xyz")
                (line "(defun gated-absent ()")
                (line "  #+cl-mcp-offset-absent-nested-xyz (car '(x)) \")\" #\\) :never)")
                (line "(defun after-absent () :ok)")
+               (line "#+(or) #+sbcl (defun gated-false-over-true () :never)")
+               (line "(defun after-false-over-true () :ok)")
+               (line "#-sbcl #-ccl (defun gated-false-over-true-too () :never)")
+               (line "(defun after-false-over-true-too () :ok)")
+               (line "#+nil #+cl-mcp-offset-absent-nested-xyz (defun gated-first () :never)")
+               (line "(defun gated-second () :never)")
+               (line "(defun after-false-over-false () :ok)")
+               (line "~C" #\Page)
+               (line "(defun after-page () :ok)")
+               (line "#-cl-mcp-offset-absent-top-xyz")
+               (line "(defun gated-true-minus () :ok)")
                (line ";; A line comment block longer than 1024 characters.")
                (dotimes (i 30)
                  (line ";; filler line ~2,'0D of a comment block longer than 1024 characters" i))
@@ -245,13 +261,27 @@
                       "stacked false conditionals are all skipped")
                (lands "(defun after-stacked () :ok)" "(defun after-and-not"
                       "#+(and sbcl (not sbcl)) is false")
-               (lands "(defun after-and-not () :ok)" "(defun after-prefixed"
-                      "atoms match case-insensitively, with or without a package prefix")
-               (lands "(defun after-prefixed () :ok)" "(defun after-nil"
+               (lands "(defun after-and-not () :ok)" "(defun after-keyword"
+                      "unprefixed and keyword atoms match case-insensitively")
+               (lands "(defun after-keyword () :ok)" "(defun gated-prefixed"
+                      "an atom in a package other than KEYWORD never matches, as in SBCL")
+               (lands "(defun gated-prefixed () :read-on-sbcl)" "(defun after-uninterned"
+                      "#+#:nil is false: an uninterned symbol is never a feature")
+               (lands "(defun after-uninterned () :ok)" "(defun after-nil"
                       "#+nil is false")
                (lands "(defun after-nil () :ok)" "(defun after-absent"
                       "a skipped form's strings, characters and conditionals are read past")
-               (lands "(defun after-absent () :ok)" "(defun after-long-line-comment"
+               (lands "(defun after-absent () :ok)" "(defun after-false-over-true ()"
+                      "#+(or) over a true #+sbcl skips one form, not the next one too")
+               (lands "(defun after-false-over-true () :ok)" "(defun after-false-over-true-too ()"
+                      "#-sbcl over a true #-ccl skips one form, not the next one too")
+               (lands "(defun after-false-over-true-too () :ok)" "(defun after-false-over-false"
+                      "a false conditional over a false one skips two forms, as the reader does")
+               (lands "(defun after-false-over-false () :ok)" "(defun after-page"
+                      "a form feed is whitespace")
+               (lands "(defun after-page () :ok)" "(defun gated-true-minus"
+                      "a true #- lands on the gated defun")
+               (lands "(defun gated-true-minus () :ok)" "(defun after-long-line-comment"
                       "a line comment block over 1024 characters is walked past")
                (lands "(defun after-long-line-comment () :ok)" "(defun after-long-block-comment"
                       "a nested block comment over 1024 characters is walked past")
@@ -577,6 +607,8 @@ than SBCL.  The feature is removed again afterwards unless it was already there.
           (testing "a form false on SBCL before a caller is skipped with its conditional"
             (check "after-commented-out" "(gate-callee 1)")
             (check "after-not-sbcl" "(gate-callee 2)"))
+          (testing "a false conditional over a true one skips one form, not the caller after it"
+            (check "after-false-over-true" "(gate-callee 6)"))
           (testing "a comment longer than 1024 characters before a caller is walked past"
             (check "after-long-comment" "(gate-callee 3)"))
           (testing "a form only the scan read does not take the next caller's xref entry"
