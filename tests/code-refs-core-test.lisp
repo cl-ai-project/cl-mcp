@@ -103,6 +103,28 @@
             (nth-value 1 (resolve-target "foo" :package "no-such-package-xyz"))))
     (ok (null (find-package "NO-SUCH-PACKAGE-XYZ")))))
 
+(deftest resolve-target-accepts-every-package-designator
+  (testing "a keyword, a package object and NIL are honoured like a name"
+    (let ((shared (find-symbol "SHARED" "CL-MCP-REFS-CORE-A")))
+      (multiple-value-bind (symbol status package-name)
+          (resolve-target "shared" :package :cl-mcp-refs-core-a)
+        (ok (eq :found status) "a keyword designator names the lookup package")
+        (ok (eq shared symbol))
+        (ok (equal "CL-MCP-REFS-CORE-A" package-name)))
+      (multiple-value-bind (symbol status package-name)
+          (resolve-target "shared" :package (find-package "CL-MCP-REFS-CORE-A"))
+        (ok (eq :found status) "a package object names the lookup package")
+        (ok (eq shared symbol))
+        (ok (equal "CL-MCP-REFS-CORE-A" package-name)))
+      (ok (eq :found (nth-value 1 (resolve-target "aa:shared"
+                                                  :package (find-package "CL-MCP-REFS-CORE-C"))))
+          "a package object's local nicknames apply")
+      (ok (equal "COMMON-LISP-USER" (nth-value 2 (resolve-target "shared" :package nil)))
+          "NIL still means COMMON-LISP-USER")
+      (ok (eq :package-not-found
+              (nth-value 1 (resolve-target "foo" :package :no-such-package-xyz)))
+          "a keyword naming no package is reported, not replaced by COMMON-LISP-USER"))))
+
 (deftest qualified-symbol-name-follows-the-reader
   (testing "external, internal, keyword and uninterned"
     (ok (equal "CL-MCP-REFS-CORE-A:SHARED"

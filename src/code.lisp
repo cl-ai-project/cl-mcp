@@ -81,7 +81,9 @@ the project's source, so it also reports:
 - calls that exist only inside a macro expansion (origin 'xref')
 - the deftest a reference sits in, and a 'Tests:' line listing them
 Each result is one top-level form; its form_type and form_name can be passed
-straight to lisp-read-file or lisp-edit-form.
+straight to lisp-edit-form.  lisp-read-file's name_pattern is a regex, so
+regex-quote form_name there: a defmethod name such as 'area ((s integer))'
+does not match itself.
 
 PREREQUISITE: load the defining system first (load-system).  A symbol or package
 that does not exist is reported as such, and nothing is interned.  'pkg:name'
@@ -98,9 +100,11 @@ For plain text search without loading anything, use 'clgrep-search'."
          (package :type :string
                   :description "Optional package used when SYMBOL is unqualified")
          (project-only :type :boolean :json-name "project_only" :default t
-                       :description "When true (default), only include references under the project root")
+                       :description
+                       "When true (default), only include references under the project root")
          (limit :type :integer
-                :description "Maximum number of forms listed (default 50); the total is always reported"))
+                :description
+                "Maximum number of forms listed (default 50); the total is always reported"))
   :body
   (progn
     ;; Checked here, before the scan and before any worker call, so a bad value

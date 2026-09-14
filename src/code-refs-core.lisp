@@ -121,8 +121,9 @@ FIND-PACKAGE consults the package-local nicknames of *PACKAGE*, so bind
 (defun resolve-target (text &key package)
   "Resolve TEXT to a symbol using FIND-PACKAGE and FIND-SYMBOL only.
 
-PACKAGE (a name) is used for an unqualified TEXT and defaults to
-COMMON-LISP-USER; its package-local nicknames apply to a qualified one.  A
+PACKAGE is used for an unqualified TEXT and defaults to COMMON-LISP-USER; its
+package-local nicknames apply to a qualified one.  It may be a name, a symbol
+(its name is used, so :CL-MCP means \"CL-MCP\"), a package object or NIL.  A
 single colon is accepted for an internal symbol: the question is where a
 symbol is used, not whether it is exported.
 
@@ -130,7 +131,12 @@ Returns (values SYMBOL STATUS PACKAGE-NAME NAME), STATUS being :FOUND,
 :NOT-FOUND or :PACKAGE-NOT-FOUND.  PACKAGE-NAME and NAME say where the lookup
 happened, for the message shown when it fails.  Nothing is interned."
   (multiple-value-bind (name package-part) (parse-target-designator text)
-    (let* ((given (and (stringp package) (plusp (length package)) package))
+    (let* ((package (typecase package
+                      (null nil)
+                      (package (package-name package))
+                      (symbol (symbol-name package))
+                      (t package)))
+           (given (and (stringp package) (plusp (length package)) package))
            (context (or (and given (find-package-named given))
                         (find-package "COMMON-LISP-USER")))
            (home (cond (package-part

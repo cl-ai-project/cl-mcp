@@ -75,7 +75,10 @@
                   (%report (list (%ref :form-type "defun" :form-name "a"
                                        :sites (loop for i from 1 to 7 collect (%site i)))
                                  (%ref :path "src/b.lisp" :origin "xref" :caller "hidden"
-                                       :note "call not visible in source (produced by a macro expansion)")
+                                       :note (concatenate
+                                              'string
+                                              "call not visible in source "
+                                              "(produced by a macro expansion)"))
                                  (%ref :path "src/c.lisp" :form-type "defun" :form-name "c"
                                        :sites (list (%site 3 :shadowed-by "flet")))))))))
       (ok (search "  +2 more" text))

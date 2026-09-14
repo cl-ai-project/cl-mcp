@@ -210,7 +210,8 @@
              (with-open-file (s (merge-pathnames "badbyte.lisp" dir)
                                 :direction :output :if-exists :supersede
                                 :element-type '(unsigned-byte 8))
-               (flet ((w (str) (write-sequence (sb-ext:string-to-octets str :external-format :utf-8) s)))
+               (flet ((w (str)
+                        (write-sequence (sb-ext:string-to-octets str :external-format :utf-8) s)))
                  (w "(defun a () (foo)) ; comment with a bad byte: ")
                  (write-byte #xE9 s)
                  (w (format nil " end~%"))))
@@ -228,7 +229,9 @@
         (progn
           (asdf:load-system "named-readtables")
           (multiple-value-bind (forms count truncated reason)
-              (scan-text (format nil "(defun a () (foo))~%(named-readtables:in-readtable :standard)~%(defun b () (foo))~%")
+              (scan-text (format nil "(defun a () (foo))~%~
+                                      (named-readtables:in-readtable :standard)~%~
+                                      (defun b () (foo))~%")
                          "FOO")
             (declare (ignore count truncated))
             (ok (= 1 (length forms)))
@@ -251,7 +254,9 @@
                                       :direction :output :if-exists :supersede
                                       :external-format :utf-8)
                      (write-string
-                      (format nil "(defun a () (foo))~%(named-readtables:in-readtable :standard)~%(defun b () (foo))~%")
+                      (format nil "(defun a () (foo))~%~
+                                   (named-readtables:in-readtable :standard)~%~
+                                   (defun b () (foo))~%")
                       s))
                    (let ((scan (scan-project "foo" :root dir)))
                      (ok (= 1 (length (gethash "forms" scan)))

@@ -216,7 +216,9 @@ worker の依存グラフに入らない。
 - `symbol_kind`: `function` / `macro` / `generic-function` / `variable` / `constant` / `unbound`
 - `origin`: `xref+source` / `xref` / `source`
 - `caller_symbol`: パッケージ付きの呼び出し元名。`(lambda)` やトップレベル使用では null
-- `form_type` / `form_name`: `lisp-edit-form` / `lisp-read-file` の指定にそのまま使える値。
+- `form_type` / `form_name`: `lisp-edit-form` の `form_type` / `form_name` にそのまま使える値。
+  `lisp-read-file` の `name_pattern` は CL-PPCRE の正規表現なので、名前を正規表現としてクォートしてから渡す
+  （`defmethod` の `area ((s integer))` のような名前はそのままでは自分自身に一致しない）。
   名前を持たないトップレベルフォーム（`progn` など）では `form_name` が null
 - `test`: `{"name", "framework"}` または null
 - `call_sites[].shadowed_by`: 6.4 のシャドウ検出時のみ値が入る（それ以外は null）

@@ -922,18 +922,25 @@
                (search "nothing was interned" (gethash "text" (elt content 0))))))))
 
 (deftest tools-call-code-find-references-rejects-bad-arguments
-  (testing "a non-positive limit and a keyword symbol are argument errors"
-    (dolist (arguments '("{\"symbol\":\"cl:car\",\"limit\":0}"
-                         "{\"symbol\":\":car\"}"))
-      (let* ((req (concatenate 'string
-                    "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\","
-                    "\"params\":{\"name\":\"code-find-references\","
-                    "\"arguments\":" arguments "}}"))
-             (obj (parse (%pjl req)))
-             (result (gethash "result" obj)))
-        (ok (or (gethash "error" obj)
-                (and result (gethash "isError" result)))
-            arguments)))))
+  (testing "a non-positive limit and a keyword symbol are argument validation errors"
+    ;; No protocol version is negotiated here, so TOOL-ERROR answers with a
+    ;; JSON-RPC -32602 error; an internal crash (-32603) must not pass.
+    (dolist (entry '(("{\"symbol\":\"cl:car\",\"limit\":0}" "limit")
+                     ("{\"symbol\":\":car\"}" "keyword")))
+      (destructuring-bind (arguments word) entry
+        (let* ((req (concatenate 'string
+                      "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\","
+                      "\"params\":{\"name\":\"code-find-references\","
+                      "\"arguments\":" arguments "}}"))
+               (obj (parse (%pjl req)))
+               (err (gethash "error" obj)))
+          (ok (null (gethash "result" obj)) (format nil "~A: no result" arguments))
+          (ok (and err (eql -32602 (gethash "code" err)))
+              (format nil "~A: a -32602 invalid-params error" arguments))
+          (ok (and err
+                   (stringp (gethash "message" err))
+                   (search word (gethash "message" err)))
+              (format nil "~A: the message mentions ~A" arguments word)))))))
 
 (deftest tools-call-clgrep-search-recursive-false
   (testing "tools/call clgrep-search with recursive=false searches only top level"

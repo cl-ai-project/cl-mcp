@@ -442,7 +442,7 @@ Output (the content text carries everything that matters for a decision):
 - `refs` (array): one element per top-level form, sorted by path and line
   - `path`, `line` (start of the form), `type` (first of `types`), `types`
   - `caller`, `caller_symbol` (package-qualified; null for lambdas and for forms xref did not see)
-  - `form_type`, `form_name`: pass them to `lisp-read-file` (`name_pattern`) or `lisp-edit-form`
+  - `form_type`, `form_name`: pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
   - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `source` (a top-level use xref never records, or code not compiled since it was written)
   - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`
   - `test`: `{name, framework}` when the form is a `deftest` (rove), `test`/`def-test` (fiveam) or `define-test` (parachute)
