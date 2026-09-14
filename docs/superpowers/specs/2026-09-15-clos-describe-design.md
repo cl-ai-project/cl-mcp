@@ -87,6 +87,8 @@ quasi の `class-info` / `find-methods`（`src/introspection.lisp`）から取�
   `code-find` / `code-describe` もこれで行を返すようになる
 - 不具合修正 #4 #5: `lisp-edit-form` の defmethod の form_name 照合を、パッケージ接頭辞と改行に依存しない形にする
 - `code-describe` の本文に、総称関数・クラスのとき `clos-describe` を案内する 1 行を足す
+- `inspect-object` の本文に、調べたオブジェクトが名前付きのクラスか総称関数のとき
+  `clos-describe` を案内する 1 行を足す（6.6）
 
 含めない（非ゴール）:
 
@@ -138,6 +140,7 @@ worker プールを使わない場合も同じ 3 段（report → 注釈 → 組
 | `src/tools/clos-response-builders.lisp` | 新規 | `annotate-report-forms`、`build-clos-describe-response` |
 | `src/clos.lisp` | 新規 | `define-tool "clos-describe"` |
 | `src/tools/response-builders.lisp` | 修正 | `build-code-describe-response` にヒント行 |
+| `src/inspect.lisp` | 修正 | `inspect-object-by-id` が `hint` を付け、`format-inspect-elements` がそれを出す（6.6） |
 | `src/worker/handlers.lisp` | 修正 | `%handle-clos-describe` を `worker/clos-describe` に登録 |
 | `src/tools/all.lisp`、`main.lisp`、`tests.lisp` | 修正 | 新ファイルの登録（`cl-mcp.asd` は変更不要） |
 
@@ -373,6 +376,25 @@ initfunction の呼び出しを行わない。
   - クラス / condition / struct: `clos-describe shows its slots, superclasses, subclasses and methods.`
 - `lisp-edit-form`: defmethod の form_name 照合（5.5）
 
+### 6.6 inspect-object の案内
+
+`inspect-object` は値を見るツールで、クラスオブジェクトには PCL 内部スロットのダンプを返す
+（`%TYPE`、`WRAPPER`、`CAN-PRECEDE-LIST` など）。総称関数には `[function] #<STANDARD-GENERIC-FUNCTION AREA (4)>` の
+1 行しか返さない（実測）。型の設計を知りたい利用者を `clos-describe` へ案内する。
+
+- `inspect-object-by-id` が、調べた**ルートのオブジェクト**について判定し、結果の hash-table に `hint`（文字列）を足す。
+  ネストした要素と `repl-eval` の `result_preview`（`generate-result-preview`）には付けない
+- 判定:
+  - クラス: `(typep object 'class)` で、`class-name` がシンボルであり、かつ `(find-class name nil)` が
+    そのオブジェクト自身であるもの。名前のない・置き換えられたクラスは対象外
+  - 総称関数: `(typep object 'generic-function)` で、`generic-function-name` がシンボルか `(setf シンボル)` であり、
+    その名前の `fdefinition` がそのオブジェクト自身であるもの
+- 文言（シンボルは `qualified-symbol-name` で完全修飾する。`(setf foo)` の場合は基のシンボル `foo` を案内する）:
+  - クラス: `This is the class CLOS-PROBE::CIRCLE; clos-describe CLOS-PROBE::CIRCLE shows its slots, superclasses, subclasses and methods with source lines.`
+  - 総称関数: `This is the generic function CLOS-PROBE::AREA; clos-describe CLOS-PROBE::AREA lists its methods with their specializers and source lines.`
+- `format-inspect-elements` は `[object-id: N]` 行の直後に `Hint: <hint>` を出す
+- 判定で何かエラーが起きても `hint` を付けないだけにし、検査の結果は変えない
+
 ## 7. エラー処理
 
 | 状況 | 扱い |
@@ -400,6 +422,7 @@ report の組み立ては純粋な関数に分け、MOP オブジェクトから
 | `tests/lisp-edit-form-test.lisp`（更新） | 照合の修正 | CL-USER 以外のパッケージの defmethod を `name ((x class) y)` で引ける、接頭辞付きの form_name でも引ける、`&optional` を含む長いラムダリスト、`(eql :key)`、`(setf name)` メソッド、パッケージ違いの同名メソッドの `[N]` |
 | `tests/code-refs-scan-test.lisp`（更新） | `top-level-forms-at` | 行一致、`in-package` 切り替え後の form_name、`#+sbcl` 付きフォーム、一致なし、読み取り禁止、パース不能 |
 | `tests/clos-response-builders-test.lisp`（新規） | 注釈と本文 | 6.3 の各行、状態の文言、`truncated`、位置なし、list と vector・NIL と `yason:false` の両方の入力、isError 結果の素通し、`abs_path` が応答に残らない |
+| `tests/inspect-test.lisp`（更新） | 案内行 | クラスオブジェクト・総称関数・`(setf foo)` の総称関数で `hint` と `Hint:` 行が出る。インスタンス、名前のないクラス、普通の関数、ネストした要素、`generate-result-preview` には出ない |
 | `tests/tools-test.lisp` / `tests/worker-test.lisp`（更新） | 登録と経路 | `tools/list` に載る、`limit` 検証、worker ハンドラの登録と JSON 往復 |
 | 往復テスト（`tests/clos-core-test.lisp` 内） | form_name の約束 | フィクスチャの全メソッドとクラスについて、`clos-describe` の form_type / form_name で `lisp-edit-form` の dry_run が成功する |
 
@@ -434,7 +457,7 @@ report の組み立ては純粋な関数に分け、MOP オブジェクトから
 - cl-mcp 自身と依存ライブラリに対して実行し、所要時間と出力量を記録する。対象は
   `hunchentoot:acceptor`、`hunchentoot:acceptor-dispatch-request`、`print-object`（`limit` 既定）
 - docs を更新する:
-  - `docs/tools.md` に `clos-describe` の節を足し、`code-describe` の type 一覧（現状 `function|macro|variable|unbound` のまま古い）と行の記述を直す
+  - `docs/tools.md` に `clos-describe` の節を足し、`code-describe` の type 一覧（現状 `function|macro|variable|unbound` のまま古い）と行の記述を直す。`inspect-object` の節に `hint` を足し、値を見る `inspect-object` と型の設計を見る `clos-describe` の使い分けを 1 段落で書く
   - `prompts/repl-driven-development.md` の早見表、worker 側ツール一覧、Tool Selection に「クラス・総称関数の構造を知るなら clos-describe」を足す
   - `CLAUDE.md` のアーキテクチャ表に足す
   - README にツール一覧があれば、そこにも足す
