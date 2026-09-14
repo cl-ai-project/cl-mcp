@@ -6,7 +6,7 @@
 (defpackage #:cl-mcp/tests/code-refs-scan-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:skip)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:arg-validation-error)
   (:import-from #:cl-mcp/src/code-refs-scan
@@ -155,3 +155,89 @@
     (ok (equal "FOO" (target-name-from-designator "pkg::foo")))
     (ok (handler-case (progn (target-name-from-designator ":foo") nil)
           (arg-validation-error () t)))))
+
+(deftest scan-text-walks-non-name-def-prefixed-arguments
+  (testing "a DEF...-prefixed head is only a definer when its first argument looks like a name"
+    (ok (equal '("call") (%kinds "(defun a () (default-value (foo 1)))" "FOO"))
+        "DEFAULT-VALUE is not a definer; its argument is ordinary code")
+    (ok (equal '("call") (%kinds "(defun a () (deflate (foo x) out))" "FOO")))
+    (ok (equal '("call") (%kinds "(defun a () (case k (default (foo 1))))" "FOO"))
+        "a CASE clause key that reads as DEFAULT is not a definer name")
+    (ok (equal '("call") (%kinds "(defun a (&key (x (default-value (foo)))) x)" "FOO"))
+        "a lambda-list init form is walked the same way")
+    (ok (null (%kinds "(defun foo () 1)" "FOO"))
+        "a real definer's name is still excluded")
+    (ok (null (%kinds "(defstruct (foo (:conc-name f-)) x)" "FOO"))
+        "DEFSTRUCT's (name . options) is still skipped whole")))
+
+(deftest scan-text-unwraps-reader-conditionals-around-atoms
+  (testing "a #+feature/#-feature wrapper around a bare token is transparent"
+    (let ((sites (%sites "(defun a () (list #+sbcl foo))" "FOO")))
+      (ok (equal '("reference") (mapcar #'first sites)))
+      (ok (equal '("foo") (mapcar #'fourth sites)) "the token excludes the #+sbcl prefix"))
+    (ok (null (%kinds "(defun a () (list #+sbcl :foo))" "FOO"))
+        "a wrapped keyword is still excluded")
+    (ok (null (%kinds "(defun a () (list '#+sbcl #:foo))" "FOO"))
+        "a wrapped uninterned symbol is still excluded")))
+
+(deftest scan-project-tolerates-invalid-byte
+  (testing "a file with an invalid byte in a comment is still read and scanned"
+    (let ((dir (uiop:ensure-directory-pathname
+                (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-badbyte-~D/" (random 1000000))
+                                       (uiop:temporary-directory)))))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (s (merge-pathnames "badbyte.lisp" dir)
+                                :direction :output :if-exists :supersede
+                                :element-type '(unsigned-byte 8))
+               (flet ((w (str) (write-sequence (sb-ext:string-to-octets str :external-format :utf-8) s)))
+                 (w "(defun a () (foo)) ; comment with a bad byte: ")
+                 (write-byte #xE9 s)
+                 (w (format nil " end~%"))))
+             (let ((scan (scan-project "foo" :root dir)))
+               (ok (= 1 (gethash "files_scanned" scan)))
+               (ok (= 1 (gethash "files_matched" scan)))
+               (ok (= 1 (length (gethash "forms" scan))))
+               (ok (zerop (length (gethash "parse_failures" scan))))))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(deftest scan-text-reports-readtable-switch
+  (testing "sites before an in-file readtable switch are kept, and the switch is reported"
+    (if (not (asdf:find-system "named-readtables" nil))
+        (skip "named-readtables is not available")
+        (progn
+          (asdf:load-system "named-readtables")
+          (multiple-value-bind (forms count truncated reason)
+              (scan-text (format nil "(defun a () (foo))~%(named-readtables:in-readtable :standard)~%(defun b () (foo))~%")
+                         "FOO")
+            (declare (ignore count truncated))
+            (ok (= 1 (length forms)))
+            (ok (stringp reason))
+            (ok (search "readtable" reason)))))))
+
+(deftest scan-project-reports-readtable-switch-as-failure
+  (testing "scan-project keeps forms before the switch and records it as a parse failure"
+    (if (not (asdf:find-system "named-readtables" nil))
+        (skip "named-readtables is not available")
+        (progn
+          (asdf:load-system "named-readtables")
+          (let ((dir (uiop:ensure-directory-pathname
+                      (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-rt-~D/" (random 1000000))
+                                             (uiop:temporary-directory)))))
+            (ensure-directories-exist dir)
+            (unwind-protect
+                 (progn
+                   (with-open-file (s (merge-pathnames "switches.lisp" dir)
+                                      :direction :output :if-exists :supersede
+                                      :external-format :utf-8)
+                     (write-string
+                      (format nil "(defun a () (foo))~%(named-readtables:in-readtable :standard)~%(defun b () (foo))~%")
+                      s))
+                   (let ((scan (scan-project "foo" :root dir)))
+                     (ok (= 1 (length (gethash "forms" scan)))
+                         "only the form before the switch is scanned")
+                     (ok (= 1 (length (gethash "parse_failures" scan))))
+                     (ok (search "readtable"
+                                 (gethash "error" (aref (gethash "parse_failures" scan) 0))))))
+              (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))))

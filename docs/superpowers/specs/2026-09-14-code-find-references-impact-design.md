@@ -292,7 +292,11 @@ CL-MCP/SRC/FOO:BAR (function) — no references.
 除外:
 
 - 対象自身の定義名の位置: `defun` / `defmacro` / `defgeneric` / `defvar` / `defparameter` /
-  `defconstant` / `define-compiler-macro` など、`def` で始まる定義フォームの第 2 要素
+  `defconstant` / `define-compiler-macro` など、`def` で始まる定義フォームの第 2 要素。ただし
+  除外するのはその第 2 要素がシンボル、または `(setf シンボル)` の形をしているときだけ
+  （`defstruct` の `(name . options)` はこの形とみなし丸ごと除外する）。それ以外の形をしている
+  場合（`case` の節がたまたま `default` のような `def` 始まりのシンボルを頭に持つ場合など）は、
+  その定義フォームの発見的な扱いは外れ、通常のコードとして走査する
   （`defmethod` だけは上表のとおり `method` として含める）
 - キーワード（`:foo`）と uninterned シンボル（`#:foo`）
 - `defpackage` / `uiop:define-package` のフォーム全体
@@ -395,4 +399,4 @@ xref の実行とファイル読み込みはその外側の薄い層に置く。
 | リスク | 確認方法 | 外れた場合 |
 |---|---|---|
 | 名前が一致する候補が多すぎて params が大きくなる（`make-ht` 級） | 最終タスクで実測 | 候補の送信形式を見直す |
-| `in-readtable` 以降を CL リーダーで読むファイルでは CST の子ノードがなく、呼び出し箇所を拾えない | 既知の限界として扱う | 必要になったら別途対応 |
+| `in-readtable` 以降を CL リーダーで読むファイルでは CST の子ノードがなく、呼び出し箇所を拾えない | スイッチより前の候補は保持しつつ、そのファイルを `parse_failures` に切り替わった行番号つきで報告する（`scan-text` の第 4 戻り値、`scan-project` がそれを failure に変換する） | - |
