@@ -443,8 +443,8 @@ Output (the content text carries everything that matters for a decision):
   - `path`, `line` (start of the form), `type` (first of `types`), `types`
   - `caller`, `caller_symbol` (package-qualified; null for lambdas and for forms xref did not see)
   - `form_type`, `form_name`: pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
-  - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `source` (a top-level use xref never records, or code not compiled since it was written)
-  - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`
+  - `origin`: `xref+source` (xref's entry met a source site of a compatible kind: a `call` entry a `call` or `function` site, `macro`, `bind`, `set` and `reference` a site of their own kind); `xref` (the call exists only in a macro expansion, or the source was not scanned; when the form it lies in holds no compatible site -- only a quoted name, say -- `form_type`/`form_name`/`test` still name that form, and the form's own sites are listed separately as `source`); `source` (a top-level use xref never records, or code not compiled since it was written; no note when every site is `quoted`, `template` or `method`, which xref never records)
+  - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`; `function` is `#'name` or a quoted `'name` passed as the function to `funcall`, `apply` or `multiple-value-call`
   - `test`: `{name, framework}` when the form is a `deftest` (rove), `test`/`def-test` (fiveam) or `define-test` (parachute)
   - `stale`: the file changed after it was compiled; `note`: why a form lacks call sites or xref
 - `count`, `file_count`, `limit`, `truncated`

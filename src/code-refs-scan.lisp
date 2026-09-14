@@ -64,6 +64,12 @@ the operator's arguments from 0.  For the DEF forms argument 0 is the name.")
 (defparameter *shadowing-operators* '("FLET" "LABELS" "MACROLET")
   "Operators whose bindings shadow a global function or macro of the same name.")
 
+(defparameter *function-designator-operators* '("FUNCALL" "APPLY" "MULTIPLE-VALUE-CALL")
+  "Operators whose first argument designates the function they call.  A quoted
+name there -- (funcall 'name ...) -- names that function the way #'name does,
+and SBCL's WHO-CALLS records it as a call, so its site is \"function\", not
+\"quoted\".")
+
 (defparameter *definers-with-name-and-options* '("DEFSTRUCT")
   "DEF... operators, beyond the specially handled ones, whose argument 0 --
 when it is not a bare name or a (SETF name) list -- is (NAME . OPTIONS) and
@@ -122,6 +128,26 @@ function from being taken for one."
        (let ((package (symbol-package symbol)))
          (and package (string= (package-name package) "ECLECTOR.READER")))))
 
+(defun %quoted-symbol-node (node)
+  "Return the node of the symbol NODE quotes, or NIL.
+NODE, once unwrapped (see %UNWRAP), must read as (QUOTE symbol): written 'name or
+(quote name).  Anything else -- a quoted list, a bare symbol, a call -- is NIL."
+  (let* ((node (%unwrap node))
+         (value (cst-node-value node)))
+    (when (and (eq (cst-node-kind node) :expr)
+               (consp value)
+               (symbolp (car value))
+               (string= (symbol-name (car value)) "QUOTE")
+               (consp (cdr value))
+               (null (cddr value))
+               (symbolp (cadr value)))
+      ;; 'name has the quoted symbol as its only child; (quote name) has the
+      ;; QUOTE token first.  Either way the quoted symbol is the last child.
+      (let ((quoted (car (last (%expr-children node)))))
+        (and quoted
+             (eq (cst-node-value quoted) (cadr value))
+             quoted)))))
+
 (defun %line-context (text start)
   "Return the source line containing START, trimmed and cut to *CONTEXT-WIDTH*."
   (let* ((newline (position #\Newline text :end start :from-end t))
@@ -147,7 +173,9 @@ top-level node TOP, in source order.
 
 Classification is positional, not a code walker.  The head of a list in an
 evaluated position is \"call\" and any other evaluated position \"reference\";
-QUOTE data is \"quoted\"; #'name is \"function\"; lambda lists and LET bindings
+QUOTE data is \"quoted\"; #'name is \"function\", and so is 'name written as the
+function argument of FUNCALL, APPLY or MULTIPLE-VALUE-CALL (see
+*FUNCTION-DESIGNATOR-OPERATORS*); lambda lists and LET bindings
 are \"bind\"; SETF and SETQ places are \"set\"; a DEFMETHOD's name is
 \"method\"; and anything inside a backquote template, outside its unquotes, is
 \"template\".  The name position of a DEF... form is the definition itself and
@@ -280,6 +308,16 @@ a site's position, token or structure."
                     (if (consp (cst-node-value arg))
                         (walk arg nil shadowed-by)
                         (emit arg "function" nil shadowed-by))))
+                 ((member name *function-designator-operators* :test #'string=)
+                  ;; (funcall 'name ...) designates NAME as #'name does; the
+                  ;; remaining arguments are ordinary code.
+                  (emit-head "call")
+                  (when args
+                    (let ((designator (%quoted-symbol-node (first args))))
+                      (if designator
+                          (emit designator "function" nil shadowed-by)
+                          (walk (first args) nil shadowed-by))))
+                  (walk-args (rest args)))
                  ((member name '("DEFPACKAGE" "DEFINE-PACKAGE") :test #'string=)
                   nil)
                  ((string= name "DEFMETHOD")

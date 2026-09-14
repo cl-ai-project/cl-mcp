@@ -129,8 +129,19 @@ quasi の `who-calls` / `who-references`（`src/introspection.lisp`）は位置�
 | xref | 候補 | `origin` | 意味 |
 |---|---|---|---|
 | あり | あり | `xref+source` | 実際の呼び出し行を `call_sites` に入れる |
-| あり | なし | `xref` | マクロ展開の中に隠れた呼び出し。`call_sites` は空で理由を注記 |
-| なし | あり | `source` | トップレベル使用、未コンパイルのコード、ロード後に変更されたファイルのいずれか |
+| あり | なし | `xref` | マクロ展開の中に隠れた呼び出し（入っているフォームに種別の整合する候補が無い場合を含む）。`call_sites` は空で理由を注記 |
+| なし | あり | `source` | トップレベル使用、未コンパイルのコード、ロード後に変更されたファイルのいずれか。候補が xref の記録しない種別（`quoted` / `template` / `method`）だけなら、xref に無いのは当然なので注記しない |
+
+**種別の整合**: xref エントリがフォームに付く（`xref+source` になる）のは、そのフォームにエントリの種別と
+整合する種別の候補があるときだけ。整合表は 1 か所（`src/code-refs-core.lisp` の `*xref-type-site-kinds*`）に置く:
+`call` ↔ `call` / `function`、`macro` ↔ `macro`、`bind` ↔ `bind`、`set` ↔ `set`、`reference` ↔ `reference`。
+例えば `(defun f () 'target (m))` で `m` が `target` の呼び出しに展開されると、`WHO-CALLS` はマクロが作った
+呼び出しを返すが候補は `quoted` だけで、付けてしまうと `'target` の位置を呼び出し箇所として報告してしまう。
+整合する候補が無いエントリは突き合わせなしとして行番号でまとめ（`origin` は `xref`、`call_sites` は空、
+注記は走査状況に応じた文言。走査済みファイルならマクロ展開の注記）、ただし入っているフォームの
+`form_type` / `form_name` / `test` は付けて、そのまま `lisp-edit-form` でフォームを指せるようにする。
+フォーム側は候補だけの `source` として別に報告する。1 つのフォームに複数のエントリがあれば、エントリごとに判定する。
+`(funcall 'target 2)` のような関数引数のクォートは 6.4 で `function` に分類するので、`call` と整合して分かれない
 
 ロード後の変更は、xref の `definition-source-file-write-date` と現在のファイルの
 `file-write-date` を比べて `stale` とする。
@@ -263,7 +274,7 @@ Tests: code-find-references-returns-project-refs, code-find-references-includes-
 行末の注記:
 
 - `— call not visible in source (produced by a macro expansion)`: `origin` が `xref`
-- `— top-level use, not in xref`: `origin` が `source`
+- `— top-level use, not in xref`: `origin` が `source`（候補が `quoted` / `template` / `method` だけのフォームには付けない）
 - `— file changed since load; reload for accurate results`: `stale`
 - `— shadowed by flet`: シャドウ検出
 - 1 フォームの呼び出し箇所は 5 件まで表示し、残りは `+N more`
@@ -300,7 +311,8 @@ CL-MCP/SRC/FOO:BAR (function) — no references.
 | `defun` / `defmacro` / `lambda` などのラムダリストの中 | `bind` |
 | `defclass` / `define-condition` のスーパークラス一覧 | `reference` |
 | `#'foo` / `(function foo)` | `function` |
-| `'foo` | `quoted` |
+| `funcall` / `apply` / `multiple-value-call` の関数引数に書いた `'foo`（`(funcall 'foo ...)`） | `function`（関数を指す指定子で、`WHO-CALLS` も呼び出しとして記録する。残りの引数は通常どおり） |
+| それ以外の `'foo` | `quoted` |
 | バッククォートの中の、アンクォートされていない位置 | `template` |
 | `let` / `let*` のバインディング | `bind` |
 | `setf` / `setq` / `psetf` / `psetq` の place | `set` |

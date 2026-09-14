@@ -39,7 +39,7 @@
     (ok (equal '("call") (%kinds "(defun a () (foo 1))" "FOO")))
     (ok (equal '("function") (%kinds "(defun a () (mapcar #'foo xs))" "FOO")))
     (ok (equal '("function") (%kinds "(defun a () (mapcar (function foo) xs))" "FOO")))
-    (ok (equal '("quoted") (%kinds "(defun a () (funcall 'foo))" "FOO")))
+    (ok (equal '("quoted") (%kinds "(defun a () (list 'foo))" "FOO")))
     (ok (equal '("quoted" "quoted") (%kinds "(defun a () '(foo (foo)))" "FOO")))
     (ok (equal '("reference") (%kinds "(defun a () (list foo))" "FOO")))
     (ok (equal '("bind" "reference") (%kinds "(defun a () (let ((foo 1)) foo))" "FOO")))
@@ -48,6 +48,25 @@
     (ok (equal '("call") (%kinds "(defun a () (setf (foo x) 1))" "FOO")))
     (ok (equal '("call") (%kinds "(defun a () (funcall #'(lambda (x) (foo x)) 1))" "FOO")))
     (ok (equal '("reference") (%kinds "(defclass a (foo) ())" "FOO")))))
+
+(deftest scan-text-classifies-quoted-function-designators
+  (testing "a quoted name as FUNCALL's, APPLY's or MULTIPLE-VALUE-CALL's function is a function"
+    (ok (equal '("function") (%kinds "(defun a () (funcall 'foo 1))" "FOO")))
+    (ok (equal '("function") (%kinds "(defun a (args) (apply 'foo args))" "FOO")))
+    (ok (equal '("function") (%kinds "(defun a () (multiple-value-call 'foo (values)))" "FOO")))
+    (ok (equal '("function") (%kinds "(defun a () (funcall (quote foo) 1))" "FOO"))
+        "(quote foo) written out is the same designator")
+    (ok (equal '("function") (%kinds "(defun a () (funcall #+sbcl 'foo 1))" "FOO"))
+        "a reader conditional around the designator is transparent"))
+  (testing "the other arguments, and quoted data elsewhere, are walked as before"
+    (ok (equal '("quoted") (%kinds "(defun a () (list 'foo))" "FOO")))
+    (ok (equal '("quoted") (%kinds "(defun a (bar) (funcall bar 'foo))" "FOO"))
+        "a quoted name that is not the function argument is data")
+    (ok (equal '("function" "quoted") (%kinds "(defun a () (apply 'foo 'foo nil))" "FOO")))
+    (ok (equal '("quoted") (%kinds "(defun a () (funcall '(foo)))" "FOO"))
+        "a quoted list is data, not a designator")
+    (ok (equal '("template") (%kinds "(defmacro m () `(funcall 'foo))" "FOO"))
+        "inside a backquote template it is still template")))
 
 (deftest scan-text-labels-backquote-templates
   (testing "a template is labelled, an unquoted island is ordinary code"

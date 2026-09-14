@@ -44,6 +44,13 @@
 (defun macro-hidden-caller ()
   (with-target :done))
 
+(defun quoted-and-macro-caller ()
+  'target
+  (with-target :quoted))
+
+(defun funcall-caller ()
+  (funcall 'target 10))
+
 (defun shadowing-caller ()
   (flet ((target (x) (* x 10)))
     (target 6)))

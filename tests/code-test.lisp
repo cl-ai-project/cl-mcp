@@ -522,6 +522,40 @@
             (ok (find "target-is-called-from-a-test" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
 
+(deftest code-find-references-report-meets-xref-only-with-compatible-sites
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((refs (coerce (gethash "refs" (%xref-fixture-report)) 'list)))
+        (flet ((refs-of (form-name)
+                 (remove form-name refs :key (lambda (ref) (gethash "form_name" ref))
+                                        :test-not #'equal))
+               (with-origin (origin refs)
+                 (find origin refs :key (lambda (ref) (gethash "origin" ref)) :test #'equal))
+               (kinds (ref)
+                 (map 'list (lambda (site) (gethash "kind" site)) (gethash "call_sites" ref))))
+          (testing "a macro-made call beside a quoted name is not merged with the quoted site"
+            (let* ((mine (refs-of "quoted-and-macro-caller"))
+                   (xref (with-origin "xref" mine))
+                   (source (with-origin "source" mine)))
+              (ok (= 2 (length mine)) "one reference from xref, one from the scan")
+              (ok (null (with-origin "xref+source" mine)))
+              (ok (and xref (zerop (length (gethash "call_sites" xref)))))
+              (ok (and xref (search "macro expansion" (gethash "note" xref))))
+              (ok (and xref (equal "defun" (gethash "form_type" xref))))
+              (ok (and xref (equal "CL-MCP-XREF-FIXTURE::QUOTED-AND-MACRO-CALLER"
+                                   (gethash "caller_symbol" xref))))
+              (ok (and source (equal '("quoted") (kinds source))))
+              (ok (and source (null (gethash "note" source))))))
+          (testing "a quoted name given to funcall is a function site that meets its xref entry"
+            (let* ((mine (refs-of "funcall-caller"))
+                   (ref (first mine)))
+              (ok (= 1 (length mine)))
+              (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+              (ok (and ref (equal '("function") (kinds ref))))
+              (ok (and ref (equal (list (%fixture-line "(funcall 'target 10)"))
+                                  (%site-lines ref))))
+              (ok (and ref (null (gethash "note" ref))))))))))
+
 (defparameter *xref-feature-fixture*
   (asdf:system-relative-pathname :cl-mcp
                                  "tests/fixtures/xref-feature/xref-feature-fixture.lisp")
