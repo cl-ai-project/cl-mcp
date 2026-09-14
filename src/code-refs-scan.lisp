@@ -19,6 +19,8 @@
                 #:cst-node-end-line
                 #:parse-top-level-forms
                 #:%in-package-form-p)
+  (:import-from #:cl-mcp/src/package-context
+                #:*package-spec-discovery-cache*)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%definition-candidates)
   (:import-from #:cl-mcp/src/utils/clgrep
@@ -483,7 +485,10 @@ unreadable, ...) is reported in parse_failures instead of being silently
 skipped.  Every file's abs_path -- in a form or a parse_failures entry -- is
 its truename namestring (falling back to its plain namestring when TRUENAME
 fails), so a file reached through a symlinked directory is keyed the same way
-SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  Returns a
+SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  The search the
+parser makes for the definition of a package the parent lacks is done once per
+package for the whole scan (see
+CL-MCP/SRC/PACKAGE-CONTEXT:*PACKAGE-SPEC-DISCOVERY-CACHE*).  Returns a
 JSON-ready hash-table:
   target_name     the name matched
   root            ROOT's truename namestring, or null
@@ -528,32 +533,36 @@ JSON-ready hash-table:
       (unless root-truename
         (return-from scan-project
           (report (if root "project root is not readable" "project root is not set"))))
-      (dolist (file (collect-target-files root-truename))
-        (incf scanned)
-        (let ((abs-path (or (ignore-errors (namestring (truename file)))
-                            (namestring file))))
-          (push abs-path scanned-files)
-          (unless truncated
-            (multiple-value-bind (text read-condition)
-                (ignore-errors
-                 (uiop:read-file-string file :external-format '(:utf-8 :replacement #\?)))
-              (cond
-                ((null text)
-                 (fail file abs-path (%first-line (princ-to-string read-condition))))
-                ((search name text :test #'char-equal)
-                 (incf matched)
-                 (handler-case
-                     (multiple-value-bind (file-forms file-count file-truncated file-reason)
-                         (scan-text text name
-                                    :path (normalize-path-for-display file)
-                                    :abs-path abs-path
-                                    :max-sites (- max-sites count))
-                       (setf forms (append forms file-forms))
-                       (incf count file-count)
-                       (when file-truncated
-                         (setf truncated t))
-                       (when file-reason
-                         (fail file abs-path file-reason)))
-                   (error (e)
-                     (fail file abs-path (%first-line (princ-to-string e)))))))))))
+      ;; Each matched file whose package the parent lacks sends the parser
+      ;; looking for that package's definition across the project; one table
+      ;; for the whole loop makes that one walk per package, not per file.
+      (let ((*package-spec-discovery-cache* (make-hash-table :test #'equal)))
+        (dolist (file (collect-target-files root-truename))
+          (incf scanned)
+          (let ((abs-path (or (ignore-errors (namestring (truename file)))
+                              (namestring file))))
+            (push abs-path scanned-files)
+            (unless truncated
+              (multiple-value-bind (text read-condition)
+                  (ignore-errors
+                   (uiop:read-file-string file :external-format '(:utf-8 :replacement #\?)))
+                (cond
+                  ((null text)
+                   (fail file abs-path (%first-line (princ-to-string read-condition))))
+                  ((search name text :test #'char-equal)
+                   (incf matched)
+                   (handler-case
+                       (multiple-value-bind (file-forms file-count file-truncated file-reason)
+                           (scan-text text name
+                                      :path (normalize-path-for-display file)
+                                      :abs-path abs-path
+                                      :max-sites (- max-sites count))
+                         (setf forms (append forms file-forms))
+                         (incf count file-count)
+                         (when file-truncated
+                           (setf truncated t))
+                         (when file-reason
+                           (fail file abs-path file-reason)))
+                     (error (e)
+                       (fail file abs-path (%first-line (princ-to-string e))))))))))))
       (report))))

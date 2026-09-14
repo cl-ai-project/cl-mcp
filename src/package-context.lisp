@@ -20,7 +20,8 @@
                 #:ensure-directory-pathname
                 #:ensure-pathname
                 #:subdirectories)
-  (:export #:extract-in-package-name-from-text
+  (:export #:*package-spec-discovery-cache*
+           #:extract-in-package-name-from-text
            #:discover-package-spec
            #:call-with-package-context
            #:call-with-file-package-context))
@@ -54,6 +55,21 @@ vendored output by strong convention; a more general name such as
 This list is an optimization, not the correctness mechanism. Tolerating a
 file we cannot READ is the catch-all clause in %PACKAGE-SPECS-IN-FILE's
 job -- no name list can enumerate every vendoring convention.")
+
+(defvar *package-spec-discovery-cache* nil
+  "NIL, or an EQUAL hash-table in which DISCOVER-PACKAGE-SPEC memoizes its walk.
+
+Without it, every lookup for a package the parent image lacks reads the header
+forms of the project's source files until one defines the package -- all of
+them when none does -- so a batch of lookups costs files looked up times files
+in the project.  Bind this to a fresh table around such a batch over a tree
+that does not change during it; CL-MCP/SRC/CODE-REFS-SCAN:SCAN-PROJECT does so
+around its file loop.  Entries are keyed on the package name and the walk's
+root directory, so one table never answers for a different root, and the
+looked-up file's own definitions are still read on every call.
+
+The default NIL disables memoizing, so lisp-read-file, lisp-edit-form and the
+other callers see a package definition edited between two calls.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
@@ -243,8 +259,28 @@ instead of failing here first."
     (error ()
       nil)))
 
+(defun %find-package-spec-under (root target source-path)
+  "Return the first PACKAGE-SPEC for TARGET among the source files under ROOT, or NIL.
+SOURCE-PATH, when given, is skipped: DISCOVER-PACKAGE-SPEC reads it first."
+  (dolist (file (%collect-source-files root) nil)
+    (unless (and source-path
+                 (equal (probe-file file)
+                        (probe-file (ensure-pathname source-path :want-pathname t))))
+      (let ((match
+              (find-if (lambda (spec)
+                         (%package-spec-matches-p spec target))
+                       (%package-specs-in-file file))))
+        (when match
+          (return match))))))
+
 (defun discover-package-spec (package-name &key source-path)
-  "Discover a PACKAGE-SPEC for PACKAGE-NAME from project source files."
+  "Discover a PACKAGE-SPEC for PACKAGE-NAME from project source files.
+
+SOURCE-PATH's own package definitions are checked first.  Then the source files
+under *PROJECT-ROOT* (or SOURCE-PATH's directory when it is unset) are walked
+until one defines PACKAGE-NAME.  When *PACKAGE-SPEC-DISCOVERY-CACHE* holds a
+hash-table, the walk's result, NIL included, is memoized there per package name
+and root directory."
   (let ((target (%designator-name package-name)))
     (when target
       (when source-path
@@ -260,19 +296,23 @@ instead of failing here first."
                       (and source-path
                            (make-pathname :name nil :type nil
                                           :defaults (ensure-pathname source-path
-                                                                     :want-pathname t))))))
-        (when root
-          (dolist (file (%collect-source-files root))
-            (unless (and source-path
-                         (equal (probe-file file)
-                                (probe-file (ensure-pathname source-path
-                                                             :want-pathname t))))
-              (let ((match
-                      (find-if (lambda (spec)
-                                 (%package-spec-matches-p spec target))
-                               (%package-specs-in-file file))))
-                (when match
-                  (return-from discover-package-spec match))))))))))
+                                                                     :want-pathname t)))))
+            (cache *package-spec-discovery-cache*))
+        (cond
+          ((null root) nil)
+          ((hash-table-p cache)
+           ;; The walk skips SOURCE-PATH, yet its result does not depend on
+           ;; it: the walk only runs once SOURCE-PATH was found not to define
+           ;; TARGET, so skipping that file cannot change which file matches.
+           ;; Keying on TARGET and ROOT alone lets every file of one package
+           ;; share a single walk.
+           (let ((key (cons target (namestring (ensure-directory-pathname root)))))
+             (multiple-value-bind (spec present-p) (gethash key cache)
+               (if present-p
+                   spec
+                   (setf (gethash key cache)
+                         (%find-package-spec-under root target source-path))))))
+          (t (%find-package-spec-under root target source-path)))))))
 
 (defun %make-package-with-guard (name &key nicknames use)
   "Create package NAME with optional NICKNAMES and USE list."

@@ -9,6 +9,11 @@
                 #:deftest #:testing #:ok #:skip)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:arg-validation-error)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
+  (:import-from #:cl-mcp/src/log
+                #:*log-level*
+                #:*log-stream*)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:target-name-from-designator
                 #:scan-text
@@ -283,3 +288,45 @@
              (error ()
                (skip "could not create a symlink in this environment")))
         (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)))))
+
+(deftest scan-project-looks-a-package-up-once-per-scan
+  (testing "files of a package the parent lacks share one search for its definition"
+    ;; Package discovery reads files through FS-READ-FILE, which logs an
+    ;; fs.read.open event per read; scan-project itself reads with UIOP and
+    ;; never parses sub/package.lisp, which does not mention FOO.  So each
+    ;; logged read of that file is one walk: three without the cache (one per
+    ;; file using the package), one with it.
+    (let ((dir (uiop:ensure-directory-pathname
+                (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-pkg-~D/" (random 1000000))
+                                       (uiop:temporary-directory)))))
+      (ensure-directories-exist (merge-pathnames "sub/" dir))
+      (unwind-protect
+           (let ((root (truename dir)))
+             (flet ((write-source (name text)
+                      (with-open-file (s (merge-pathnames name root)
+                                         :direction :output :if-exists :supersede
+                                         :external-format :utf-8)
+                        (write-string text s))))
+               (dolist (name '("a" "b" "c"))
+                 (write-source (format nil "~A.lisp" name)
+                               (format nil "(in-package #:cl-mcp-refs-scan-absent-pkg)~%~
+                                            (defun ~A () (foo))~%"
+                                       name)))
+               (write-source "sub/package.lisp"
+                             "(defpackage #:cl-mcp-refs-scan-absent-pkg (:use #:cl))"))
+             (let* ((log (make-string-output-stream))
+                    (scan (let ((*project-root* root)
+                                (*log-level* :debug)
+                                (*log-stream* log))
+                            (scan-project "foo" :root root)))
+                    (defining (namestring (merge-pathnames "sub/package.lisp" root)))
+                    (reads (with-input-from-string (in (get-output-stream-string log))
+                             (loop for line = (read-line in nil)
+                                   while line
+                                   count (and (search "\"fs.read.open\"" line)
+                                              (search defining line))))))
+               (ok (= 3 (length (gethash "forms" scan))) "every file is scanned")
+               (ok (null (find-package "CL-MCP-REFS-SCAN-ABSENT-PKG"))
+                   "the package stays absent from the parent")
+               (ok (= 1 reads) "the defining file is read by one walk, not one per file")))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
