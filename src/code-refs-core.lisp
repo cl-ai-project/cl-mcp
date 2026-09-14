@@ -337,6 +337,13 @@ when several xref entries share the form."
              "stale" (json-bool stale)
              "note" (%reference-note form xrefs primary stale))))
 
+(defun %span-contains-p (form line)
+  "True when LINE lies within FORM's :START-LINE and :END-LINE, both included."
+  (let ((start (getf form :start-line))
+        (end (getf form :end-line)))
+    (and (integerp line) (integerp start) (integerp end)
+         (<= start line end))))
+
 (defun merge-references (xref-entries forms)
   "Merge XREF-ENTRIES with resolved scan FORMS into reference objects.
 
@@ -344,16 +351,27 @@ XREF-ENTRIES are plists (:type :caller :caller-symbol :truename :path :line
 :context :form-index :stale :scan-status), :SCAN-STATUS being :SCANNED,
 :PARSE-FAILED or :NOT-SCANNED.  FORMS are RESOLVE-SCAN-FORMS' first value.
 
-Entries and forms meet on (truename, top-level form index).  SBCL's
-DEFINITION-SOURCE-FORM-PATH starts with the index of the top-level form among
-those the reader returned, which is the form's position among the file's :EXPR
-nodes -- reader conditionals, EVAL-WHEN and PROGN included.  The character
-offset is no key: it is an octet position, just past the PREVIOUS form.  An
-entry without a form path groups on its line instead.
+Entries and forms meet on (truename, top-level form index), keyed
+(:FORM truename index).  SBCL's DEFINITION-SOURCE-FORM-PATH starts with the
+index of the top-level form among those the reader returned, which is the
+form's position among the file's :EXPR nodes -- reader conditionals, EVAL-WHEN
+and PROGN included.  The character offset is no key: it is an octet position,
+just past the PREVIOUS form.
+
+The index is only trusted when the entry's :LINE lies within the span
+(:START-LINE to :END-LINE) of the form with that index.  The parent counts
+top-level forms with its own *FEATURES*, which need not be the compiling
+image's: a feature the loaded system pushes, or one only the worker has, makes
+the parent skip a #+feature form SBCL counted, so every later index in that
+file is shifted and would otherwise meet the NEXT form.  When the span check
+fails, the entry meets the form of the same truename whose span holds its
+line; when no form does, it is unmatched.  An unmatched entry, like one without
+a form path, groups on its line, keyed (:LINE truename line).
 
 Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
   (let ((seen (make-hash-table :test #'equal))
         (form-by-key (make-hash-table :test #'equal))
+        (forms-by-truename (make-hash-table :test #'equal))
         (xrefs-by-key (make-hash-table :test #'equal))
         (order '()))
     (flet ((remember (key)
@@ -361,13 +379,23 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
                (setf (gethash key seen) t)
                (push key order))))
       (dolist (form forms)
-        (let ((key (list (getf form :truename) (getf form :index))))
+        (let ((key (list :form (getf form :truename) (getf form :index))))
           (remember key)
-          (setf (gethash key form-by-key) form)))
+          (setf (gethash key form-by-key) form)
+          (push form (gethash (getf form :truename) forms-by-truename))))
       (dolist (entry xref-entries)
-        (let ((key (if (getf entry :form-index)
-                       (list (getf entry :truename) (getf entry :form-index))
-                       (list (getf entry :truename) :line (getf entry :line)))))
+        (let* ((truename (getf entry :truename))
+               (line (getf entry :line))
+               (index (getf entry :form-index))
+               (indexed (and index (gethash (list :form truename index) form-by-key)))
+               (form (and index
+                          (if (and indexed (%span-contains-p indexed line))
+                              indexed
+                              (find-if (lambda (form) (%span-contains-p form line))
+                                       (gethash truename forms-by-truename)))))
+               (key (if form
+                        (list :form truename (getf form :index))
+                        (list :line truename line))))
           (remember key)
           (push entry (gethash key xrefs-by-key)))))
     (mapcar (lambda (key)

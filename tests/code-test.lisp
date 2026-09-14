@@ -298,11 +298,11 @@
   (asdf:system-relative-pathname :cl-mcp "tests/fixtures/xref-fixture.lisp")
   "Fixture compiled so that SBCL records cross references for it.")
 
-(defun %load-xref-fixture ()
-  "Compile and load the xref fixture; xref needs COMPILE-FILE, not LOAD of source."
+(defun %load-xref-fixture (&optional (fixture *xref-fixture*))
+  "Compile and load FIXTURE; xref needs COMPILE-FILE, not LOAD of source."
   (uiop:with-temporary-file (:pathname fasl :type "fasl")
     (handler-bind ((warning #'muffle-warning))
-      (load (compile-file *xref-fixture* :output-file fasl :verbose nil :print nil)))))
+      (load (compile-file fixture :output-file fasl :verbose nil :print nil)))))
 
 (defun %xref-fixture-report ()
   "Return the report for the fixture's TARGET, scanning the fixture directory."
@@ -314,9 +314,9 @@
      :scan (scan-project "cl-mcp-xref-fixture:target"
                          :root (uiop:pathname-directory-pathname *xref-fixture*)))))
 
-(defun %fixture-line (needle)
-  "Return the 1-based line of the fixture on which NEEDLE starts."
-  (let ((text (uiop:read-file-string *xref-fixture*)))
+(defun %fixture-line (needle &optional (fixture *xref-fixture*))
+  "Return the 1-based line of FIXTURE on which NEEDLE starts."
+  (let ((text (uiop:read-file-string fixture)))
     (1+ (count #\Newline text :end (search needle text)))))
 
 (defun %ref-named (report form-name)
@@ -400,6 +400,61 @@
                                 (gethash "name" (gethash "test" ref)))))
             (ok (find "target-is-called-from-a-test" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
+
+(defparameter *xref-feature-fixture*
+  (asdf:system-relative-pathname :cl-mcp
+                                 "tests/fixtures/xref-feature/xref-feature-fixture.lisp")
+  "Fixture that pushes a feature while it is compiled and gates one caller on it.")
+
+(defun %xref-feature-fixture-report ()
+  "Return the report for the feature fixture's FEATURE-CALLEE, scanned without its feature.
+The fixture is compiled with its feature pushed, as the image that loads a
+system sees it; the scan runs with *FEATURES* lacking the feature, as a parent
+that never loaded the system does, so the scan counts one top-level form fewer
+than SBCL.  The feature is removed again afterwards unless it was already there."
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (feature :cl-mcp-xref-feature-fixture-on)
+        (designator "cl-mcp-xref-feature-fixture:feature-callee"))
+    (let ((had-feature (member feature *features*)))
+      (unwind-protect
+           (progn
+             (%load-xref-fixture *xref-feature-fixture*)
+             (let ((scan (let ((*features* (remove feature *features*)))
+                           (scan-project designator
+                                         :root (uiop:pathname-directory-pathname
+                                                *xref-feature-fixture*)))))
+               (code-find-references-report designator :limit 1000 :scan scan)))
+        (unless had-feature
+          (setf *features* (remove feature *features*)))))))
+
+(deftest code-find-references-report-survives-a-feature-the-scan-lacks
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((report (%xref-feature-fixture-report)))
+        (testing "each caller after the gated form meets its own xref entry"
+          (dolist (caller '(("caller-a" "(feature-callee 2)")
+                            ("caller-b" "(feature-callee 3)")))
+            (destructuring-bind (name call) caller
+              (let ((ref (%ref-named report name)))
+                (ok ref (format nil "~A is reported" name))
+                (when ref
+                  (ok (equal "xref+source" (gethash "origin" ref))
+                      (format nil "~A meets its xref entry" name))
+                  (ok (equal (list (%fixture-line call *xref-feature-fixture*))
+                             (%site-lines ref))
+                      (format nil "~A carries its own call site" name))
+                  (ok (equal (format nil "CL-MCP-XREF-FEATURE-FIXTURE::~:@(~A~)"
+                                     (gethash "form_name" ref))
+                             (gethash "caller_symbol" ref))
+                      (format nil "~A's caller_symbol names its own form" name))
+                  (ok (null (gethash "note" ref))
+                      (format nil "~A carries no note" name)))))))
+        (testing "no caller's xref entry is left over as a reference of its own"
+          (ok (notany (lambda (ref)
+                        (and (equal "xref" (gethash "origin" ref))
+                             (member (gethash "caller" ref) '("caller-a" "caller-b")
+                                     :test #'string-equal)))
+                      (gethash "refs" report)))))))
 
 (deftest code-find-references-report-never-interns
   (testing "a missing symbol is reported and left uninterned"

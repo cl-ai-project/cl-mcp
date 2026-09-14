@@ -161,9 +161,11 @@
            "in_package" in-package "context" "(defun ..."
            "sites" (coerce sites 'vector)))
 
-(defun %xref (truename index &key (type "call") (caller "c") caller-symbol (line 5)
+(defun %xref (truename index &key (type "call") (caller "c") caller-symbol (line 12)
                                   stale (scan-status :scanned))
-  "Return an xref entry plist as CL-MCP/SRC/CODE-CORE collects it."
+  "Return an xref entry plist as CL-MCP/SRC/CODE-CORE collects it.
+LINE defaults to one inside %RESOLVED's default span (lines 10 to 15), since
+MERGE-REFERENCES only trusts an index whose form holds the entry's line."
   (list :type type :caller caller :caller-symbol caller-symbol
         :truename truename :path (subseq truename 5) :line line :context "ctx"
         :form-index index :stale stale :scan-status scan-status))
@@ -217,10 +219,10 @@
   (testing "xref and source together, xref alone, source alone"
     (let ((refs (merge-references
                  (list (%xref "/abs/a.lisp" 1 :caller "a" :caller-symbol "P::A")
-                       (%xref "/abs/a.lisp" 2 :caller "hidden")
+                       (%xref "/abs/a.lisp" 2 :caller "hidden" :line 20)
                        (%xref "/abs/z.lisp" nil :line 40 :scan-status :not-scanned))
                  (list (%resolved "/abs/a.lisp" 1 :form-name "a")
-                       (%resolved "/abs/a.lisp" 3 :form-name "*top*")))))
+                       (%resolved "/abs/a.lisp" 3 :start-line 30 :form-name "*top*")))))
       (ok (= 4 (length refs)))
       (let ((both (first (%with-origin refs "xref+source"))))
         (ok (equal "P::A" (gethash "caller_symbol" both)))
@@ -254,6 +256,54 @@
       (ok (eq t (gethash "stale" ref)))
       (ok (search "reload" (gethash "note" ref)))
       (ok (equal "a-test" (gethash "name" (gethash "test" ref)))))))
+
+(deftest merge-references-validates-the-index-against-the-line-span
+  (testing "an index within the form's span still meets that form"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "b" :caller-symbol "P::B" :line 50))
+                  (list (%resolved "/abs/a.lisp" 5 :start-line 50 :form-name "b"))))
+           (ref (first refs)))
+      (ok (= 1 (length refs)))
+      (ok (equal "xref+source" (gethash "origin" ref)))
+      (ok (equal "P::B" (gethash "caller_symbol" ref)))))
+  (testing "a shifted index meets the form whose span holds the entry's line"
+    ;; The parent skipped a #+feature form SBCL counted: SBCL's index for
+    ;; each caller is one more than the parent's.
+    (let ((refs (merge-references
+                 (list (%xref "/abs/a.lisp" 5 :caller "a" :caller-symbol "P::A" :line 40)
+                       (%xref "/abs/a.lisp" 6 :caller "b" :caller-symbol "P::B" :line 50))
+                 (list (%resolved "/abs/a.lisp" 4 :start-line 40 :form-name "a")
+                       (%resolved "/abs/a.lisp" 5 :start-line 50 :form-name "b")))))
+      (ok (= 2 (length refs)))
+      (ok (every (lambda (ref) (equal "xref+source" (gethash "origin" ref))) refs))
+      (ok (equal '(("a" . "P::A") ("b" . "P::B"))
+                 (mapcar (lambda (ref)
+                           (cons (gethash "form_name" ref) (gethash "caller_symbol" ref)))
+                         refs))
+          "each caller keeps its own form")
+      (ok (every (lambda (ref) (null (gethash "note" ref))) refs))))
+  (testing "no form holding the line leaves the entry unmatched, grouped on its line"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "gated" :caller-symbol "P::GATED"
+                                               :line 70)
+                        (%xref "/abs/a.lisp" 5 :type "reference" :caller "gated"
+                                               :caller-symbol "P::GATED" :line 70)
+                        (%xref "/abs/b.lisp" 5 :caller "elsewhere" :line 52))
+                  (list (%resolved "/abs/a.lisp" 5 :start-line 50 :form-name "b"))))
+           (xref-only (%with-origin refs "xref"))
+           (gated (find "gated" xref-only
+                        :key (lambda (ref) (gethash "caller" ref)) :test #'equal))
+           (source-only (first (%with-origin refs "source"))))
+      (ok (= 3 (length refs)))
+      (ok (= 2 (length xref-only)))
+      (ok (and gated (= 70 (gethash "line" gated))) "reported on the entry's own line")
+      (ok (and gated (equal '("call" "reference") (coerce (gethash "types" gated) 'list)))
+          "entries on the same line share one reference")
+      (ok (and gated (null (gethash "form_name" gated))))
+      (ok (find "elsewhere" xref-only :key (lambda (ref) (gethash "caller" ref)) :test #'equal)
+          "a form in another file never holds the line")
+      (ok (and source-only (equal "b" (gethash "form_name" source-only)))
+          "the form the index named is left to the source scan"))))
 
 (deftest build-references-report-sorts-limits-and-lists-tests
   (testing "sorted by path and line, cut to LIMIT, counted in full"
