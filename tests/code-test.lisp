@@ -9,7 +9,13 @@
   (:import-from #:cl-mcp/src/code
                 #:code-find-definition
                 #:code-describe-symbol
-                #:code-find-references))
+                #:code-find-references)
+  (:import-from #:cl-mcp/src/code-core
+                #:code-find-references-report)
+  (:import-from #:cl-mcp/src/code-refs-scan
+                #:scan-project)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*))
 
 (in-package #:cl-mcp/tests/code-test)
 
@@ -283,3 +289,123 @@
           "lambda + file path should collapse to (lambda)")
       (ok (not (search "/abs/path" (funcall fmt '(lambda () :in "/abs/path.lisp"))))
           "absolute file paths must not appear in caller output"))))
+
+;;; code-find-references-report against real xref data
+
+(defparameter *xref-fixture*
+  (asdf:system-relative-pathname :cl-mcp "tests/fixtures/xref-fixture.lisp")
+  "Fixture compiled so that SBCL records cross references for it.")
+
+(defun %load-xref-fixture ()
+  "Compile and load the xref fixture; xref needs COMPILE-FILE, not LOAD of source."
+  (uiop:with-temporary-file (:pathname fasl :type "fasl")
+    (handler-bind ((warning #'muffle-warning))
+      (load (compile-file *xref-fixture* :output-file fasl :verbose nil :print nil)))))
+
+(defun %xref-fixture-report ()
+  "Return the report for the fixture's TARGET, scanning the fixture directory."
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (%load-xref-fixture)
+    (code-find-references-report
+     "cl-mcp-xref-fixture:target"
+     :limit 1000
+     :scan (scan-project "cl-mcp-xref-fixture:target"
+                         :root (uiop:pathname-directory-pathname *xref-fixture*)))))
+
+(defun %fixture-line (needle)
+  "Return the 1-based line of the fixture on which NEEDLE starts."
+  (let ((text (uiop:read-file-string *xref-fixture*)))
+    (1+ (count #\Newline text :end (search needle text)))))
+
+(defun %ref-named (report form-name)
+  "Return the reference in REPORT whose form_name is FORM-NAME."
+  (find form-name (gethash "refs" report)
+        :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))
+
+(defun %site-lines (ref)
+  "Return the call-site lines of REF."
+  (map 'list (lambda (site) (gethash "line" site)) (gethash "call_sites" ref)))
+
+(deftest code-find-references-report-exact-call-sites
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((report (%xref-fixture-report)))
+        (testing "the symbol resolves and is described"
+          (ok (equal "found" (gethash "symbol_status" report)))
+          (ok (equal "CL-MCP-XREF-FIXTURE:TARGET" (gethash "resolved_symbol" report)))
+          (ok (equal "function" (gethash "symbol_kind" report))))
+        (testing "a plain caller carries its exact call line and qualified name"
+          (let ((ref (%ref-named report "plain-caller")))
+            (ok ref)
+            (when ref
+              (ok (equal "xref+source" (gethash "origin" ref)))
+              (ok (equal (list (%fixture-line "(target 1)")) (%site-lines ref)))
+              (ok (equal "CL-MCP-XREF-FIXTURE::PLAIN-CALLER" (gethash "caller_symbol" ref)))
+              (ok (= (%fixture-line "(defun plain-caller") (gethash "line" ref))))))
+        (testing "#+sbcl and eval-when wrappers still meet their xref entries"
+          (let ((feature (%ref-named report "feature-caller"))
+                (eval-when (find (%fixture-line "(target 3)") (gethash "refs" report)
+                                 :key (lambda (ref) (first (%site-lines ref))))))
+            (ok (and feature (equal "xref+source" (gethash "origin" feature))))
+            (ok (and feature (equal (list (%fixture-line "(target 2)")) (%site-lines feature))))
+            (ok (and eval-when (equal "xref+source" (gethash "origin" eval-when))))
+            (ok (and eval-when (equal "eval-when" (gethash "form_type" eval-when))))))
+        (testing "a method is named the way lisp-edit-form addresses it"
+          (let ((ref (%ref-named report "shape-area ((shape integer))")))
+            (ok ref)
+            (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+            (ok (and ref (equal "CL-MCP-XREF-FIXTURE::SHAPE-AREA"
+                                (gethash "caller_symbol" ref))))))
+        (testing "a package-local nickname resolves; a same-named symbol does not"
+          (ok (%ref-named report "nickname-caller"))
+          (ok (null (%ref-named report "other-caller")))))))
+
+(deftest code-find-references-report-finds-what-xref-cannot
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((report (%xref-fixture-report)))
+        (testing "a top-level use comes from the source scan alone"
+          (let ((ref (%ref-named report "*top-level-use*")))
+            (ok ref)
+            (ok (and ref (equal "source" (gethash "origin" ref))))
+            (ok (and ref (equal "defparameter" (gethash "form_type" ref))))
+            (ok (and ref (search "not in xref" (gethash "note" ref))))))
+        (testing "a macro template is labelled; the call it expands into comes from xref"
+          (let ((template (%ref-named report "with-target"))
+                (hidden (find-if (lambda (ref)
+                                   (search "macro-hidden-caller" (gethash "caller" ref)))
+                                 (gethash "refs" report))))
+            (ok (and template
+                     (equal '("template")
+                            (map 'list (lambda (site) (gethash "kind" site))
+                                 (gethash "call_sites" template)))))
+            (ok hidden)
+            (ok (and hidden (equal "xref" (gethash "origin" hidden))))
+            (ok (and hidden (zerop (length (gethash "call_sites" hidden)))))
+            (ok (and hidden (search "macro expansion" (gethash "note" hidden))))))
+        (testing "a flet of the same name is flagged as shadowing"
+          (let ((ref (%ref-named report "shadowing-caller")))
+            (ok ref)
+            (ok (and ref
+                     (plusp (length (gethash "call_sites" ref)))
+                     (every (lambda (site) (equal "flet" (gethash "shadowed_by" site)))
+                            (gethash "call_sites" ref))))))
+        (testing "a call inside a deftest is attributed to the test"
+          (let ((ref (%ref-named report "target-is-called-from-a-test")))
+            (ok ref)
+            (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+            (ok (and ref (equal "target-is-called-from-a-test"
+                                (gethash "name" (gethash "test" ref)))))
+            (ok (find "target-is-called-from-a-test" (gethash "tests" report)
+                      :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
+
+(deftest code-find-references-report-never-interns
+  (testing "a missing symbol is reported and left uninterned"
+    (let ((report (code-find-references-report
+                   "cl-mcp/src/code-core::%no-such-function-xyz")))
+      (ok (equal "not_found" (gethash "symbol_status" report)))
+      (ok (null (nth-value 1 (find-symbol "%NO-SUCH-FUNCTION-XYZ" "CL-MCP/SRC/CODE-CORE"))))))
+  (testing "a single colon reaches an internal symbol"
+    (ok (equal "found"
+               (gethash "symbol_status"
+                        (code-find-references-report "cl-mcp/src/code-core:%parse-symbol"))))))
