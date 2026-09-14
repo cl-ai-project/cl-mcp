@@ -658,3 +658,19 @@ than SBCL.  The feature is removed again afterwards unless it was already there.
   (testing "no scan at all is not-scanned"
     (ok (eq :not-scanned
             (cl-mcp/src/code-core::%scan-status (list :truename "/proj/a.lisp") nil)))))
+
+(deftest scan-notes-count-denied-files
+  (flet ((notes (denied)
+           (cl-mcp/src/code-core::%scan-notes
+            (make-ht "root" "/proj/"
+                     "files_denied" denied
+                     "scanned_files" #()
+                     "parse_failures" #()
+                     "skipped_reason" nil
+                     "truncated_at" nil))))
+    (testing "files the read policy denied are counted, without their paths"
+      (ok (equal '("2 files outside the readable paths were not scanned") (notes 2)))
+      (ok (equal '("1 file outside the readable paths was not scanned") (notes 1))))
+    (testing "no note when nothing was denied, or the scan predates the count"
+      (ok (null (notes 0)))
+      (ok (null (notes nil))))))

@@ -455,6 +455,9 @@ Output (the content text carries everything that matters for a decision):
 Limits: matching is positional, not a code walker. A `flet`/`labels`/`macrolet` binding the same
 name is flagged in `shadowed_by`; other lexical bindings are not. The name position of any
 `def...` form is treated as a definition. Sites after an `in-readtable` switch are not found.
+Only files `fs-read-file` may read are scanned (under the project root or a registered ASDF
+system's source directory, symlinks resolved): a file the root reaches through a symlink leading
+elsewhere is not read, and a note counts such files without naming them.
 
 ## `clhs-lookup`
 Look up a symbol or section in the Common Lisp HyperSpec (ANSI standard documentation).

@@ -705,11 +705,14 @@ FILES_SCANNED counted -- says a file was scanned."
       (t :not-scanned))))
 
 (defun %scan-notes (scan)
-  "Return the sentences saying what SCAN, the parent's source scan, missed."
+  "Return the sentences saying what SCAN, the parent's source scan, missed.
+Files the read policy denied (FILES_DENIED) are counted but never named: their
+paths lie outside what the caller may read."
   (if (null scan)
       (list "source scan not performed; call sites and top-level uses are unavailable")
       (let ((notes '())
             (failures (sequence->list (gethash "parse_failures" scan)))
+            (denied (gethash "files_denied" scan))
             (skipped (gethash "skipped_reason" scan))
             (truncated (gethash "truncated_at" scan)))
         (when skipped
@@ -722,6 +725,10 @@ FILES_SCANNED counted -- says a file was scanned."
                         (mapcar (lambda (failure) (gethash "path" failure))
                                 (subseq failures 0 (min 3 (length failures))))
                         (> (length failures) 3))
+                notes))
+        (when (and (integerp denied) (plusp denied))
+          (push (format nil "~D file~:P outside the readable paths ~:[were~;was~] not scanned"
+                        denied (= 1 denied))
                 notes))
         (when truncated
           (push (format nil "source scan stopped after ~D sites; results may be incomplete"

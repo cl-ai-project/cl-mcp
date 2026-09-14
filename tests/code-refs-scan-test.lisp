@@ -121,6 +121,23 @@
       (ok truncated)
       (ok (= 2 (length (gethash "sites" (first forms))))))))
 
+(defun %make-temp-dir (label)
+  "Create and return a fresh directory pathname under the temporary directory.
+LABEL goes into its name, so a leftover directory says which test made it."
+  (let ((dir (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-~A-~D/"
+                                             label (random 1000000))
+                                     (uiop:temporary-directory)))))
+    (ensure-directories-exist dir)
+    dir))
+
+(defun %put-file (dir name text)
+  "Write TEXT as UTF-8 to the file NAME under the directory DIR."
+  (with-open-file (s (merge-pathnames name dir)
+                     :direction :output :if-exists :supersede
+                     :external-format :utf-8)
+    (write-string text s)))
+
 (deftest scan-project-reports-files-and-failures
   (testing "files scanned, files matched, forms and parse failures"
     (let ((dir (uiop:ensure-directory-pathname
@@ -136,7 +153,8 @@
              (put "uses.lisp" "(defun a () (foo))")
              (put "silent.lisp" "(defun b () (bar))")
              (put "broken.lisp" "(defun c () (foo")
-             (let* ((scan (scan-project "foo" :root dir))
+             (let* ((scan (let ((*project-root* dir))
+                            (scan-project "foo" :root dir)))
                     (uses-truename (namestring (truename (merge-pathnames "uses.lisp" dir))))
                     (silent-truename (namestring (truename (merge-pathnames "silent.lisp" dir))))
                     (broken-truename (namestring (truename (merge-pathnames "broken.lisp" dir))))
@@ -145,6 +163,7 @@
                (ok (stringp (gethash "root" scan)))
                (ok (= 3 (gethash "files_scanned" scan)))
                (ok (= 2 (gethash "files_matched" scan)))
+               (ok (eql 0 (gethash "files_denied" scan)))
                (ok (= 1 (length (gethash "forms" scan))))
                (ok (= 1 (length (gethash "parse_failures" scan))))
                (ok (search "broken.lisp"
@@ -167,7 +186,21 @@
   (testing "no root means no scan, with a reason"
     (let ((scan (scan-project "foo" :root nil)))
       (ok (stringp (gethash "skipped_reason" scan)))
-      (ok (zerop (length (gethash "forms" scan)))))))
+      (ok (zerop (length (gethash "forms" scan))))))
+  (testing "a root given while the project root is unset is not scanned either"
+    ;; The read policy is anchored at *PROJECT-ROOT*; without it nothing can
+    ;; be vouched for, whatever ROOT says.
+    (let ((dir (%make-temp-dir "unset")))
+      (unwind-protect
+           (progn
+             (%put-file dir "a.lisp" "(defun a () (foo))")
+             (let* ((scan (let ((*project-root* nil))
+                            (scan-project "foo" :root dir)))
+                    (reason (gethash "skipped_reason" scan)))
+               (ok (and (stringp reason) (search "project root is not set" reason)))
+               (ok (zerop (length (gethash "forms" scan))))
+               (ok (zerop (gethash "files_scanned" scan)))))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
 
 (deftest target-name-from-designator-validates
   (testing "the name as read, or an argument error"
@@ -215,7 +248,8 @@
                  (w "(defun a () (foo)) ; comment with a bad byte: ")
                  (write-byte #xE9 s)
                  (w (format nil " end~%"))))
-             (let ((scan (scan-project "foo" :root dir)))
+             (let ((scan (let ((*project-root* dir))
+                           (scan-project "foo" :root dir))))
                (ok (= 1 (gethash "files_scanned" scan)))
                (ok (= 1 (gethash "files_matched" scan)))
                (ok (= 1 (length (gethash "forms" scan))))
@@ -258,7 +292,8 @@
                                    (named-readtables:in-readtable :standard)~%~
                                    (defun b () (foo))~%")
                       s))
-                   (let ((scan (scan-project "foo" :root dir)))
+                   (let ((scan (let ((*project-root* dir))
+                                 (scan-project "foo" :root dir))))
                      (ok (= 1 (length (gethash "forms" scan)))
                          "only the form before the switch is scanned")
                      (ok (= 1 (length (gethash "parse_failures" scan))))
@@ -285,13 +320,72 @@
                                     :direction :output :if-exists :supersede
                                     :external-format :utf-8)
                    (write-string "(defun a () (foo))" s))
-                 (let* ((scan (scan-project "foo" :root root))
+                 ;; The link's target lies under BASE, the project root, so the
+                 ;; read policy allows the file it leads to.
+                 (let* ((scan (let ((*project-root* base))
+                                (scan-project "foo" :root root)))
                         (forms (gethash "forms" scan))
                         (expected (namestring (truename (merge-pathnames "a.lisp" real)))))
                    (ok (= 1 (length forms)))
                    (ok (equal expected (gethash "abs_path" (aref forms 0))))))
              (error ()
                (skip "could not create a symlink in this environment")))
+        (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)))))
+
+(deftest scan-project-does-not-read-outside-the-readable-paths
+  (testing "a file reached through a symlink that leaves the project root is denied, not read"
+    (require :sb-posix)
+    (let* ((base (%make-temp-dir "deny"))
+           (root (uiop:ensure-directory-pathname (merge-pathnames "root/" base)))
+           (outside (uiop:ensure-directory-pathname (merge-pathnames "outside/" base)))
+           (link (merge-pathnames "linked" root)))
+      (ensure-directories-exist root)
+      (ensure-directories-exist outside)
+      (unwind-protect
+           (progn
+             (%put-file outside "a.lisp" "(defun a () (foo))")
+             (%put-file root "own.lisp" "(defun b () (foo))")
+             (if (not (ignore-errors
+                       (sb-posix:symlink (uiop:native-namestring outside)
+                                         (uiop:native-namestring link))
+                       t))
+                 (skip "could not create a symlink in this environment")
+                 (let* ((scan (let ((*project-root* root))
+                                (scan-project "foo" :root root)))
+                        (forms (coerce (gethash "forms" scan) 'list))
+                        (scanned-files (coerce (gethash "scanned_files" scan) 'list))
+                        (own (namestring (truename (merge-pathnames "own.lisp" root))))
+                        (denied (namestring (truename (merge-pathnames "a.lisp" outside)))))
+                   (ok (eql 1 (gethash "files_denied" scan)) "the outside file is counted")
+                   (ok (= 1 (gethash "files_scanned" scan)) "only the root's own file counts")
+                   (ok (= 1 (gethash "files_matched" scan)))
+                   (ok (equal (list own) (mapcar (lambda (form) (gethash "abs_path" form))
+                                                 forms))
+                       "the root's own file is scanned; the outside file is not in forms")
+                   (ok (equal (list own) scanned-files)
+                       "the outside file is not claimed as scanned")
+                   (ok (not (member denied scanned-files :test #'equal)))
+                   (ok (zerop (length (gethash "parse_failures" scan)))
+                       "a denied file is not a parse failure either"))))
+        (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)))))
+
+(deftest scan-project-skips-a-root-outside-the-readable-paths
+  (testing "a root the read policy does not allow is skipped with a reason, reading nothing"
+    (let* ((base (%make-temp-dir "outside-root"))
+           (root (uiop:ensure-directory-pathname (merge-pathnames "root/" base)))
+           (outside (uiop:ensure-directory-pathname (merge-pathnames "outside/" base))))
+      (ensure-directories-exist root)
+      (ensure-directories-exist outside)
+      (unwind-protect
+           (progn
+             (%put-file outside "a.lisp" "(defun a () (foo))")
+             (let* ((scan (let ((*project-root* root))
+                            (scan-project "foo" :root outside)))
+                    (reason (gethash "skipped_reason" scan)))
+               (ok (and (stringp reason) (search "outside the readable paths" reason)))
+               (ok (zerop (length (gethash "forms" scan))))
+               (ok (zerop (gethash "files_scanned" scan)))
+               (ok (zerop (length (gethash "scanned_files" scan))))))
         (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)))))
 
 (deftest scan-project-looks-a-package-up-once-per-scan

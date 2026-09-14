@@ -356,6 +356,7 @@ in-package: その候補より前にある最後の `in-package`（`%package-in-
 | パッケージが無い / シンボルが無い | 通常の結果で `symbol_status` を返す。名前だけで一致した件数をヒントに添える |
 | 個別ファイルが解析できない | そのファイルを飛ばし、件数と先頭 3 件のパスを `notes` と本文に出す |
 | project root が未設定 | ソース走査を省き xref のみ。`source scan skipped: project root not set` と注記 |
+| 走査ルートや個別ファイルが読み取りポリシーの外 | `fs-read-file` と同じ `allowed-read-path`（symlink を解決し、project root か登録済み ASDF システムのソースディレクトリだけを許す）で判定する。ルートが外なら走査を省き `skipped_reason` に理由を入れる。ファイルが外（root の外へ出る symlink の先など）なら読まず、`scanned_files` にも入れず `files_denied` に数え、`N files outside the readable paths were not scanned` と注記する（パスは出さない）。読み込み自体は `fs-read-file` を使わない（1 MB の上限で黙って切れ、不正な UTF-8 バイトで読めなくなるため） |
 | 候補が 5000 件を超える | そこで打ち切り、`truncated` と注記 |
 | `project_only=false` の外部ライブラリ参照 | ソース走査しないので `call_sites` なし（注記あり） |
 | worker のクラッシュ・タイムアウト | 既存の proxy の処理に従う |

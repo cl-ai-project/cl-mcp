@@ -26,6 +26,7 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:collect-target-files)
   (:import-from #:cl-mcp/src/utils/paths
+                #:allowed-read-path
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
@@ -473,27 +474,48 @@ later forms were not scanned"
                       (%first-line (princ-to-string read-error)))))
       (values (nreverse forms) count truncated switch-reason))))
 
+(defun %readable-path (path)
+  "Return PATH's resolved pathname when the read policy allows reading it, else NIL.
+
+The policy is FS-READ-FILE's: CL-MCP/SRC/UTILS/PATHS:ALLOWED-READ-PATH, which
+resolves symlinks and accepts only paths inside *PROJECT-ROOT* or the source
+directory of a registered ASDF system.  NIL also when *PROJECT-ROOT* is unset
+or the check itself signals, so a path the policy cannot vouch for is never
+read."
+  (and *project-root*
+       (handler-case (allowed-read-path path)
+         (error () nil))))
+
 (defun scan-project (designator &key (root *project-root*) (max-sites *max-scan-sites*))
   "Scan every Lisp file under ROOT for sites of the symbol DESIGNATOR spells.
 
 Validates DESIGNATOR first (see TARGET-NAME-FROM-DESIGNATOR).  The files are
 those clgrep-search reads (.lisp, .asd and .ros, honouring .gitignore); only
-those whose text contains the name, ignoring case, are parsed.  A file is read
-as UTF-8 with invalid bytes replaced by #\\?, so one bad byte (in a comment,
-say) does not drop the whole file; a file that still cannot be read (missing,
-unreadable, ...) is reported in parse_failures instead of being silently
-skipped.  Every file's abs_path -- in a form or a parse_failures entry -- is
-its truename namestring (falling back to its plain namestring when TRUENAME
-fails), so a file reached through a symlinked directory is keyed the same way
-SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  The search the
-parser makes for the definition of a package the parent lacks is done once per
-package for the whole scan (see
+those whose text contains the name, ignoring case, are parsed.
+
+Nothing is read that FS-READ-FILE would refuse (see %READABLE-PATH): a ROOT
+outside the project root and every registered ASDF system's source directory
+is skipped, as is any scan while *PROJECT-ROOT* is unset, and a file under ROOT
+the policy denies -- one reached through a symlink leaving the allowed tree,
+say -- is not read, not counted in FILES_SCANNED and not listed in
+SCANNED_FILES, only counted in FILES_DENIED.
+
+An allowed file is read as UTF-8 with invalid bytes replaced by #\\?, so one bad
+byte (in a comment, say) does not drop the whole file; a file that still cannot
+be read (missing, unreadable, ...) is reported in parse_failures instead of
+being silently skipped.  Every file's abs_path -- in a form or a parse_failures
+entry -- is its truename namestring (falling back to its plain namestring when
+TRUENAME fails), so a file reached through a symlinked directory is keyed the
+same way SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  The
+search the parser makes for the definition of a package the parent lacks is
+done once per package for the whole scan (see
 CL-MCP/SRC/PACKAGE-CONTEXT:*PACKAGE-SPEC-DISCOVERY-CACHE*).  Returns a
 JSON-ready hash-table:
   target_name     the name matched
   root            ROOT's truename namestring, or null
-  files_scanned   files considered
+  files_scanned   files the read policy allowed, whether read or not
   files_matched   files whose text contains the name
+  files_denied    files under ROOT the read policy denied, which were not read
   forms           SCAN-TEXT's forms for every file, concatenated
   parse_failures  path, abs_path and error of each file that did not parse, or
                   that could not be read, or whose scan stopped partway at an
@@ -502,8 +524,8 @@ JSON-ready hash-table:
   scanned_files   the truename namestring of every file FILES_SCANNED counted,
                   matched or not -- what CL-MCP/SRC/CODE-CORE:%SCAN-STATUS
                   checks an xref entry's file against, so a file under ROOT
-                  this scan never considered (gitignored, or not
-                  .lisp/.asd/.ros) is never claimed as scanned
+                  this scan never considered (gitignored, not .lisp/.asd/.ros,
+                  or denied) is never claimed as scanned
   truncated_at    MAX-SITES when collection stopped there, else null
   skipped_reason  why nothing was scanned, else null"
   (let ((name (target-name-from-designator designator))
@@ -513,6 +535,7 @@ JSON-ready hash-table:
         (scanned-files '())
         (scanned 0)
         (matched 0)
+        (denied 0)
         (count 0)
         (truncated nil))
     (flet ((report (&optional skipped)
@@ -520,6 +543,7 @@ JSON-ready hash-table:
                       "root" root-truename
                       "files_scanned" scanned
                       "files_matched" matched
+                      "files_denied" denied
                       "forms" (coerce forms 'vector)
                       "parse_failures" (coerce (reverse failures) 'vector)
                       "scanned_files" (coerce (nreverse scanned-files) 'vector)
@@ -530,39 +554,58 @@ JSON-ready hash-table:
                             "abs_path" abs-path
                             "error" reason)
                    failures)))
-      (unless root-truename
-        (return-from scan-project
-          (report (if root "project root is not readable" "project root is not set"))))
+      (let ((skipped (cond
+                       ((or (null root) (null *project-root*))
+                        "project root is not set")
+                       ((null root-truename)
+                        "project root is not readable")
+                       ((null (%readable-path root-truename))
+                        (concatenate 'string
+                                     "root is outside the readable paths "
+                                     "(project root and registered ASDF system sources)")))))
+        (when skipped
+          (return-from scan-project (report skipped))))
       ;; Each matched file whose package the parent lacks sends the parser
       ;; looking for that package's definition across the project; one table
       ;; for the whole loop makes that one walk per package, not per file.
       (let ((*package-spec-discovery-cache* (make-hash-table :test #'equal)))
         (dolist (file (collect-target-files root-truename))
-          (incf scanned)
-          (let ((abs-path (or (ignore-errors (namestring (truename file)))
-                              (namestring file))))
-            (push abs-path scanned-files)
-            (unless truncated
-              (multiple-value-bind (text read-condition)
-                  (ignore-errors
-                   (uiop:read-file-string file :external-format '(:utf-8 :replacement #\?)))
-                (cond
-                  ((null text)
-                   (fail file abs-path (%first-line (princ-to-string read-condition))))
-                  ((search name text :test #'char-equal)
-                   (incf matched)
-                   (handler-case
-                       (multiple-value-bind (file-forms file-count file-truncated file-reason)
-                           (scan-text text name
-                                      :path (normalize-path-for-display file)
-                                      :abs-path abs-path
-                                      :max-sites (- max-sites count))
-                         (setf forms (append forms file-forms))
-                         (incf count file-count)
-                         (when file-truncated
-                           (setf truncated t))
-                         (when file-reason
-                           (fail file abs-path file-reason)))
-                     (error (e)
-                       (fail file abs-path (%first-line (princ-to-string e))))))))))))
+          (let ((readable (%readable-path file)))
+            (if (null readable)
+                (incf denied)
+                (let ((abs-path (or (ignore-errors (namestring (truename file)))
+                                    (namestring file))))
+                  (incf scanned)
+                  (push abs-path scanned-files)
+                  (unless truncated
+                    ;; Not FS-READ-FILE, although the check above is the one it
+                    ;; applies: it caps a read at *FS-READ-MAX-BYTES*, silently
+                    ;; cutting a large file short, and decodes without
+                    ;; replacement, so one invalid byte would drop the file.
+                    (multiple-value-bind (text read-condition)
+                        (ignore-errors
+                         (uiop:read-file-string readable
+                                                :external-format
+                                                '(:utf-8 :replacement #\?)))
+                      (cond
+                        ((null text)
+                         (fail file abs-path (%first-line (princ-to-string read-condition))))
+                        ((search name text :test #'char-equal)
+                         (incf matched)
+                         (handler-case
+                             (multiple-value-bind (file-forms file-count file-truncated
+                                                   file-reason)
+                                 (scan-text text name
+                                            :path (normalize-path-for-display file)
+                                            :abs-path abs-path
+                                            :max-sites (- max-sites count))
+                               (setf forms (append forms file-forms))
+                               (incf count file-count)
+                               (when file-truncated
+                                 (setf truncated t))
+                               (when file-reason
+                                 (fail file abs-path file-reason)))
+                           (error (e)
+                             (fail file abs-path
+                                   (%first-line (princ-to-string e))))))))))))))
       (report))))
