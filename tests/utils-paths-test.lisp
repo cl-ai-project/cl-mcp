@@ -20,7 +20,8 @@
                 #:ensure-write-path
                 #:resolve-path-in-project
                 #:resolve-readable-path
-                #:broad-root-p))
+                #:broad-root-p
+                #:normalize-path-for-display))
 
 (in-package #:cl-mcp/tests/utils-paths-test)
 
@@ -158,3 +159,26 @@
   (ok (broad-root-p "/home/")))
  (testing "broad-root-p accepts a normal nested directory"
   (ok (not (broad-root-p "/tmp/cl-mcp-some-project/")))))
+
+(deftest normalize-path-for-display-untranslatable-logical-pathname
+  (testing "a logical pathname with no matching translation rule returns NIL, not an error"
+    ;; Regression test: NORMALIZE-PATH-FOR-DISPLAY used to call
+    ;; TRANSLATE-LOGICAL-PATHNAME unprotected.  Some environments' SBCL xref
+    ;; data references logical pathnames (e.g. SYS:OBJ;...) with no
+    ;; translation rule at all, which signals FILE-ERROR instead of
+    ;; returning gracefully and aborted the whole caller.  This reproduces
+    ;; that shape without depending on this machine's own SYS: translations,
+    ;; via a private logical host whose only rule does not cover the
+    ;; directory used below.  The translations must be defined before the
+    ;; pathname is built, or MAKE-PATHNAME itself signals for an unknown host.
+    (setf (logical-pathname-translations "CLMCPPATHTEST")
+          '(("SRC;**;*.*.*" "/tmp/")))
+    (let* ((pn (make-pathname :host "CLMCPPATHTEST" :directory '(:absolute "OBJ")
+                              :name "X" :type "LISP"))
+           (signaled nil)
+           (result (handler-case (normalize-path-for-display pn)
+                     (condition (c) (setf signaled c) :signaled))))
+      (ok (not signaled)
+          (format nil "must not signal a condition; got ~A"
+                  (and signaled (list (type-of signaled) signaled))))
+      (ok (null result) "must return NIL for an untranslatable logical pathname"))))
