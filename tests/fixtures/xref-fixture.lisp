@@ -51,6 +51,15 @@
 (defun funcall-caller ()
   (funcall 'target 10))
 
+(defun mapcar-caller ()
+  (mapcar 'target '(11)))
+
+(defvar *target-count* 0
+  "A special variable read and written only through INCF.")
+
+(defun incf-caller ()
+  (incf *target-count*))
+
 (defun shadowing-caller ()
   (flet ((target (x) (* x 10)))
     (target 6)))

@@ -269,14 +269,7 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                   (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)")
                         (%xref "/abs/a.lisp" 1 :type "reference" :caller "named"
                                                :caller-symbol "P::NAMED" :stale t))
-                  ;; A site for each entry's type: an entry only meets a form
-                  ;; holding a site of a compatible kind.
-                  (list (%resolved "/abs/a.lisp" 1
-                                   :test-name "a-test"
-                                   :sites (list (list :line 11 :column 3 :kind "call"
-                                                      :context "(shared)" :shadowed-by nil)
-                                                (list :line 12 :column 3 :kind "reference"
-                                                      :context "shared" :shadowed-by nil))))))
+                  (list (%resolved "/abs/a.lisp" 1 :test-name "a-test"))))
            (ref (first refs)))
       (ok (= 1 (length refs)))
       (ok (equal '("call" "reference") (coerce (gethash "types" ref) 'list)))
@@ -334,68 +327,65 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
       (ok (and source-only (equal "b" (gethash "form_name" source-only)))
           "the form the index named is left to the source scan"))))
 
-(deftest merge-references-needs-a-site-of-a-compatible-kind
+(deftest merge-references-flags-xref-types-no-site-shows
   (flet ((site (kind &optional (line 11))
            (list :line line :column 3 :kind kind :context "ctx" :shadowed-by nil))
          (kinds (ref)
            (map 'list (lambda (site) (gethash "kind" site)) (gethash "call_sites" ref))))
-    (testing "a call xref beside only a quoted site stays apart from it"
-      (let* ((refs (merge-references
-                    (list (%xref "/abs/a.lisp" 1 :caller "f" :caller-symbol "P::F"))
-                    (list (%resolved "/abs/a.lisp" 1 :form-name "f" :test-name "f-test"
-                                                    :sites (list (site "quoted"))))))
-             (xref (first (%with-origin refs "xref")))
-             (source (first (%with-origin refs "source"))))
-        (ok (= 2 (length refs)))
-        (ok (null (%with-origin refs "xref+source")) "no reference claims the quoted site")
-        (ok (and xref (zerop (length (gethash "call_sites" xref)))))
-        (ok (and xref (equal "P::F" (gethash "caller_symbol" xref))))
-        (ok (and xref (= 12 (gethash "line" xref))) "grouped on the entry's own line")
-        (ok (and xref (search "macro expansion" (gethash "note" xref))))
-        (ok (and xref (equal "defun" (gethash "form_type" xref)))
-            "the form it lies in is still named, for lisp-edit-form")
-        (ok (and xref (equal "f" (gethash "form_name" xref))))
-        (ok (and xref (equal "f-test" (gethash "name" (gethash "test" xref)))))
-        (ok (and source (equal '("quoted") (kinds source))))
-        (ok (and source (null (gethash "note" source)))
-            "quoted data is not something xref would record: no \"not in xref\" note")))
-    (testing "a call xref meets a function site"
-      (let* ((refs (merge-references
-                    (list (%xref "/abs/a.lisp" 1 :caller "f" :caller-symbol "P::F"))
-                    (list (%resolved "/abs/a.lisp" 1 :form-name "f"
-                                                    :sites (list (site "function"))))))
-             (ref (first refs)))
-        (ok (= 1 (length refs)))
-        (ok (equal "xref+source" (gethash "origin" ref)))
-        (ok (equal '("function") (kinds ref)))
-        (ok (null (gethash "note" ref)))))
-    (testing "a reference xref beside only a call site is split"
-      (let* ((refs (merge-references
-                    (list (%xref "/abs/a.lisp" 1 :type "reference" :caller "f"))
-                    (list (%resolved "/abs/a.lisp" 1 :form-name "f"
-                                                    :sites (list (site "call"))))))
-             (xref (first (%with-origin refs "xref")))
-             (source (first (%with-origin refs "source"))))
-        (ok (= 2 (length refs)))
-        (ok (and xref (equal '("reference") (coerce (gethash "types" xref) 'list))))
-        (ok (and xref (equal "f" (gethash "form_name" xref))))
-        (ok (and source (equal '("call") (kinds source))))
-        (ok (and source (search "not in xref" (gethash "note" source)))
-            "a call site xref would record keeps its note")))
-    (testing "each entry of a form is judged on its own"
-      (let* ((refs (merge-references
-                    (list (%xref "/abs/a.lisp" 1 :type "call" :caller "f")
-                          (%xref "/abs/a.lisp" 1 :type "set" :caller "f"))
-                    (list (%resolved "/abs/a.lisp" 1 :form-name "f"
-                                                    :sites (list (site "call")
-                                                                 (site "reference" 12))))))
-             (both (first (%with-origin refs "xref+source")))
-             (xref (first (%with-origin refs "xref"))))
-        (ok (= 2 (length refs)))
-        (ok (and both (equal '("call") (coerce (gethash "types" both) 'list))))
-        (ok (and both (equal '("call" "reference") (kinds both)))
-            "the matched reference keeps every site of its form")
-        (ok (and xref (equal '("set") (coerce (gethash "types" xref) 'list))))))
+    (flet ((merge-one (xrefs sites)
+             (merge-references xrefs
+                               (list (%resolved "/abs/a.lisp" 1 :form-name "f" :test-name "f-test"
+                                                                :sites sites)))))
+      (testing "a call xref beside only a quoted site merges, and the note names the call"
+        (let* ((refs (merge-one (list (%xref "/abs/a.lisp" 1 :caller "f" :caller-symbol "P::F"))
+                                (list (site "quoted"))))
+               (ref (first refs))
+               (note (gethash "note" ref)))
+          (ok (= 1 (length refs)) "not split")
+          (ok (equal "xref+source" (gethash "origin" ref)))
+          (ok (equal '("quoted") (kinds ref)) "the quoted site is still listed")
+          (ok (equal "f" (gethash "form_name" ref)))
+          (ok (and (stringp note) (search "xref records a call here" note)))
+          (ok (and (stringp note) (search "function passed by name" note)))))
+      (testing "a call xref beside a function site carries no note"
+        (let ((refs (merge-one (list (%xref "/abs/a.lisp" 1 :caller "f"))
+                               (list (site "function")))))
+          (ok (= 1 (length refs)))
+          (ok (equal "xref+source" (gethash "origin" (first refs))))
+          (ok (null (gethash "note" (first refs))))))
+      (testing "a set xref beside only a reference site gets a set note"
+        (let* ((refs (merge-one (list (%xref "/abs/a.lisp" 1 :type "set" :caller "f"))
+                                (list (site "reference"))))
+               (note (gethash "note" (first refs))))
+          (ok (= 1 (length refs)))
+          (ok (equal "xref+source" (gethash "origin" (first refs))))
+          (ok (and (stringp note) (search "xref records a set here" note)))))
+      (testing "call and reference xrefs beside call and reference sites carry no note"
+        (let ((refs (merge-one (list (%xref "/abs/a.lisp" 1 :type "call" :caller "f")
+                                     (%xref "/abs/a.lisp" 1 :type "reference" :caller "f"))
+                               (list (site "call") (site "reference" 12)))))
+          (ok (= 1 (length refs)))
+          (ok (null (gethash "note" (first refs))))))
+      (testing "reference and set xrefs beside the set site of an incf carry no note"
+        ;; SBCL records both a reference and a set for (incf *v*), whose place
+        ;; the scan calls a set.
+        (let ((refs (merge-one (list (%xref "/abs/a.lisp" 1 :type "reference" :caller "f")
+                                     (%xref "/abs/a.lisp" 1 :type "set" :caller "f"))
+                               (list (site "set")))))
+          (ok (= 1 (length refs)))
+          (ok (null (gethash "note" (first refs))))))
+      (testing "every type no site shows is named"
+        (let ((note (gethash "note"
+                             (first (merge-one (list (%xref "/abs/a.lisp" 1 :type "call")
+                                                     (%xref "/abs/a.lisp" 1 :type "set"))
+                                               (list (site "quoted")))))))
+          (ok (and (stringp note) (search "xref records a call and a set here" note)))
+          (ok (and (stringp note) (search "shows as such" note)))))
+      (testing "a stale entry keeps the stale note"
+        (let ((note (gethash "note"
+                             (first (merge-one (list (%xref "/abs/a.lisp" 1 :caller "f" :stale t))
+                                               (list (site "quoted")))))))
+          (ok (and (stringp note) (search "reload" note))))))
     (testing "a source-only form with only template or method sites carries no note"
       (let ((refs (merge-references
                    '()

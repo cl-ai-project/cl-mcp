@@ -211,8 +211,7 @@ interned."
 
 (defparameter *note-macro-expansion*
   "call not visible in source (produced by a macro expansion)"
-  "Note for an xref entry in a scanned file whose form holds no site of a kind
-compatible with the entry's type (see *XREF-TYPE-SITE-KINDS*).")
+  "Note for an xref entry whose form in a scanned file holds no matching site.")
 
 (defparameter *note-parse-failed* "file could not be parsed; call sites unavailable"
   "Note for an xref entry in a file the source scan could not parse.")
@@ -230,20 +229,40 @@ records (see *SITE-KINDS-XREF-NEVER-RECORDS*).")
     ("macro" "macro")
     ("bind" "bind")
     ("set" "set")
-    ("reference" "reference"))
-  "For each xref entry type, the scan site kinds that can be where it is written.
+    ("reference" "reference" "set"))
+  "For each xref entry type, the scan site kinds that show it in the source.
 A call is written (name ...) or through a designator, #'name or (funcall 'name
-...), which the scan calls \"function\"; every other type has its own kind.  An
-entry meets a scanned form only when the form holds a site of a kind listed
-here for the entry's type (see MERGE-REFERENCES), so a form whose only site is,
-say, quoted data beside a macro that expands into the call is never reported as
-that call's location.  A type missing from this table meets no form.")
+...), which the scan calls \"function\".  A reference is also shown by a \"set\"
+site: INCF, DECF, POP, PUSH and PUSHNEW read the place they write, and SBCL
+records both a reference and a set for it.  Every other type has its own kind.
+A merged form holding no site of a kind listed for one of its xref types gets
+*NOTE-UNMATCHED-XREF* (see %REFERENCE-NOTE); a type missing from this table is
+shown by no site.")
 
 (defparameter *site-kinds-xref-never-records* '("quoted" "template" "method")
   "Scan site kinds no xref finder records: quoted data, backquote templates and
 DEFMETHOD names.  A form the scan alone found gets *NOTE-NOT-IN-XREF* only when
 it holds a site of some other kind; for these the absence is expected, and the
 note's explanation (a top-level form, or code not compiled) would be wrong.")
+
+(defparameter *note-unmatched-xref*
+  "xref records ~{~A~#[~; and ~:;, ~]~} here that no site below ~
+   shows as ~:[one~;such~]~@[ (~{~A~^; ~})~]"
+  "FORMAT control for the note on a form both xref and the scan found, when one or
+more of its xref types has no compatible site (see *XREF-TYPE-SITE-KINDS*).  Its
+arguments are the types' phrases, whether there is more than one, and their
+distinct explanations, all from *UNMATCHED-XREF-WORDING*.  The sites are still
+listed, each with its own kind, but none of them is that call, set, ... itself.")
+
+(defparameter *unmatched-xref-wording*
+  '(("call" "a call" "a macro expansion, or a function passed by name")
+    ("macro" "a macro use" "for example inside another macro's expansion")
+    ("bind" "a binding" "for example inside a macro's expansion")
+    ("set" "a set" "for example inside a macro such as rotatef or multiple-value-setq")
+    ("reference" "a reference" "for example inside a macro's expansion"))
+  "For each xref entry type, the phrase *NOTE-UNMATCHED-XREF* names it with and
+the likely reason no site shows it.  A type missing here is named as it is
+spelled, with no reason.")
 
 (defun resolve-scan-forms (forms target &key macro-p)
   "Keep the scan sites in FORMS that name TARGET in this image.
@@ -318,12 +337,36 @@ missing package, counting the sites that could not be judged."
            "context" (getf site :context)
            "shadowed_by" (getf site :shadowed-by)))
 
+(defun %compatible-site-p (type sites)
+  "True when SITES, resolved site plists, hold a site of a kind that
+*XREF-TYPE-SITE-KINDS* lists for the xref entry type TYPE."
+  (let ((kinds (cdr (assoc type *xref-type-site-kinds* :test #'equal))))
+    (and (some (lambda (site) (member (getf site :kind) kinds :test #'equal)) sites)
+         t)))
+
+(defun %unmatched-xref-note (types)
+  "Return *NOTE-UNMATCHED-XREF* naming TYPES, the xref types no site shows, or NIL
+when TYPES is empty."
+  (when types
+    (let ((wordings (mapcar (lambda (type)
+                              (or (cdr (assoc type *unmatched-xref-wording* :test #'equal))
+                                  (list type nil)))
+                            types)))
+      (format nil *note-unmatched-xref*
+              (mapcar #'first wordings)
+              (rest types)
+              (%distinct (remove nil (mapcar #'second wordings)))))))
+
 (defun %reference-note (form xrefs primary stale)
   "Return the note explaining a reference built from FORM and XREFS, or NIL.
-PRIMARY is the xref entry the reference takes its caller from.  A form found
-by the scan alone is noted only when it holds a site of a kind xref records:
-one whose sites are all *SITE-KINDS-XREF-NEVER-RECORDS* is expected to be
-missing from xref."
+PRIMARY is the xref entry the reference takes its caller from.
+
+In order: a stale file; an xref entry with no form, explained by how the scan
+covered its file; a form the scan alone found that holds a site of a kind xref
+records (one whose sites are all *SITE-KINDS-XREF-NEVER-RECORDS* is expected to
+be missing from xref); and a form both found where some xref type has no
+compatible site (see *XREF-TYPE-SITE-KINDS*), so that no site listed is that
+call, set, ... itself."
   (cond
     (stale *note-stale*)
     ((null form)
@@ -340,21 +383,19 @@ missing from xref."
                        sites))
            nil
            *note-not-in-xref*)))
-    (t nil)))
+    (t
+     (let ((sites (getf form :sites)))
+       (%unmatched-xref-note
+        (remove-if (lambda (type) (%compatible-site-p type sites))
+                   (%distinct (mapcar (lambda (entry) (getf entry :type)) xrefs))))))))
 
-(defun %reference (form xrefs &key address)
+(defun %reference (form xrefs)
   "Return the reference object for one top-level form.
 FORM is a resolved scan form or NIL; XREFS are the xref entries in that form,
 in finder order, possibly none.  A named caller is preferred over a lambda
-when several xref entries share the form.
-
-ADDRESS is a resolved scan form XREFS lie in without meeting it (see
-MERGE-REFERENCES), given only when FORM is NIL: its form_type, form_name and
-test are reported so the form can still be addressed, while call_sites stay
-empty and origin, line and note are those of an unmatched entry."
+when several xref entries share the form."
   (let* ((primary (or (find-if (lambda (entry) (getf entry :caller-symbol)) xrefs)
                       (first xrefs)))
-         (named (or form address))
          (sites (and form (getf form :sites)))
          (types (%distinct (if xrefs
                                (mapcar (lambda (entry) (getf entry :type)) xrefs)
@@ -369,16 +410,16 @@ empty and origin, line and note are those of an unmatched entry."
                           (or (getf form :form-name) ""))
              "caller_symbol" (and primary (getf primary :caller-symbol))
              "context" (if form (getf form :context) (getf primary :context))
-             "form_type" (and named (getf named :form-type))
-             "form_name" (and named (getf named :form-name))
+             "form_type" (and form (getf form :form-type))
+             "form_name" (and form (getf form :form-name))
              "origin" (cond ((and form xrefs) "xref+source")
                             (xrefs "xref")
                             (t "source"))
              "call_sites" (map 'vector #'%site->ht sites)
-             "test" (and named
-                         (getf named :test-name)
-                         (make-ht "name" (getf named :test-name)
-                                  "framework" (getf named :test-framework)))
+             "test" (and form
+                         (getf form :test-name)
+                         (make-ht "name" (getf form :test-name)
+                                  "framework" (getf form :test-framework)))
              "stale" (json-bool stale)
              "note" (%reference-note form xrefs primary stale))))
 
@@ -388,13 +429,6 @@ empty and origin, line and note are those of an unmatched entry."
         (end (getf form :end-line)))
     (and (integerp line) (integerp start) (integerp end)
          (<= start line end))))
-
-(defun %compatible-site-p (type sites)
-  "True when SITES, resolved site plists, hold a site of a kind that
-*XREF-TYPE-SITE-KINDS* lists for the xref entry type TYPE."
-  (let ((kinds (cdr (assoc type *xref-type-site-kinds* :test #'equal))))
-    (and (some (lambda (site) (member (getf site :kind) kinds :test #'equal)) sites)
-         t)))
 
 (defun merge-references (xref-entries forms)
   "Merge XREF-ENTRIES with resolved scan FORMS into reference objects.
@@ -416,22 +450,20 @@ top-level forms with its own *FEATURES*, which need not be the compiling
 image's: a feature the loaded system pushes, or one only the worker has, makes
 the parent skip a #+feature form SBCL counted, so every later index in that
 file is shifted and would otherwise meet the NEXT form.  When the span check
-fails, the entry lies in the form of the same truename whose span holds its
-line; when no form does, it is unmatched.
+fails, the entry meets the form of the same truename whose span holds its
+line; when no form does, it is unmatched.  An unmatched entry, like one without
+a form path, groups on its line, keyed (:LINE truename line).
 
-An entry that lies in a form meets it only when the form holds a site of a
-kind compatible with the entry's :TYPE (see *XREF-TYPE-SITE-KINDS*).  A form
-whose only site is a quoted name, beside a macro that expands into a call, must
-not have that site reported as the call's location.  Such an entry is
-unmatched too, but its reference still names the form it lies in (form_type,
-form_name, test; see %REFERENCE's ADDRESS) so the form can be addressed.  An
-unmatched entry, like one without a form path, groups on its line, keyed
-(:LINE truename line).
+An entry meets its form whatever sites the form holds.  When none of them shows
+the entry's type -- a call made by a macro expansion or through a function
+passed by name beside a quoted name, say -- the reference says so in its note
+(see %REFERENCE-NOTE and *XREF-TYPE-SITE-KINDS*) rather than being split, since
+splitting would turn common code such as (mapcar 'name xs) into a false
+macro-expansion reference.
 
 Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
   (let ((seen (make-hash-table :test #'equal))
         (form-by-key (make-hash-table :test #'equal))
-        (address-by-key (make-hash-table :test #'equal))
         (forms-by-truename (make-hash-table :test #'equal))
         (xrefs-by-key (make-hash-table :test #'equal))
         (order '()))
@@ -449,25 +481,19 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
                (line (getf entry :line))
                (index (getf entry :form-index))
                (indexed (and index (gethash (list :form truename index) form-by-key)))
-               (container (and index
-                               (if (and indexed (%span-contains-p indexed line))
-                                   indexed
-                                   (find-if (lambda (form) (%span-contains-p form line))
-                                            (gethash truename forms-by-truename)))))
-               (form (and container
-                          (%compatible-site-p (getf entry :type) (getf container :sites))
-                          container))
+               (form (and index
+                          (if (and indexed (%span-contains-p indexed line))
+                              indexed
+                              (find-if (lambda (form) (%span-contains-p form line))
+                                       (gethash truename forms-by-truename)))))
                (key (if form
                         (list :form truename (getf form :index))
                         (list :line truename line))))
           (remember key)
-          (when (and container (not form) (not (gethash key address-by-key)))
-            (setf (gethash key address-by-key) container))
           (push entry (gethash key xrefs-by-key)))))
     (mapcar (lambda (key)
               (%reference (gethash key form-by-key)
-                          (reverse (gethash key xrefs-by-key))
-                          :address (gethash key address-by-key)))
+                          (reverse (gethash key xrefs-by-key))))
             (reverse order))))
 
 (defun %reference< (a b)

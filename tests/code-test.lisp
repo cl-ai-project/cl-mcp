@@ -425,14 +425,15 @@
     (handler-bind ((warning #'muffle-warning))
       (load (compile-file fixture :output-file fasl :verbose nil :print nil)))))
 
-(defun %xref-fixture-report ()
-  "Return the report for the fixture's TARGET, scanning the fixture directory."
+(defun %xref-fixture-report (&optional (designator "cl-mcp-xref-fixture:target"))
+  "Return the report for DESIGNATOR, the fixture's TARGET unless given, scanning the
+fixture directory."
   (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
     (%load-xref-fixture)
     (code-find-references-report
-     "cl-mcp-xref-fixture:target"
+     designator
      :limit 1000
-     :scan (scan-project "cl-mcp-xref-fixture:target"
+     :scan (scan-project designator
                          :root (uiop:pathname-directory-pathname *xref-fixture*)))))
 
 (defun %fixture-line (needle &optional (fixture *xref-fixture*))
@@ -522,39 +523,58 @@
             (ok (find "target-is-called-from-a-test" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
 
-(deftest code-find-references-report-meets-xref-only-with-compatible-sites
+(deftest code-find-references-report-flags-xref-kinds-no-site-shows
   (if (uiop:os-macosx-p)
       (skip "XREF tests are unstable on macOS")
-      (let ((refs (coerce (gethash "refs" (%xref-fixture-report)) 'list)))
-        (flet ((refs-of (form-name)
-                 (remove form-name refs :key (lambda (ref) (gethash "form_name" ref))
-                                        :test-not #'equal))
-               (with-origin (origin refs)
-                 (find origin refs :key (lambda (ref) (gethash "origin" ref)) :test #'equal))
-               (kinds (ref)
-                 (map 'list (lambda (site) (gethash "kind" site)) (gethash "call_sites" ref))))
-          (testing "a macro-made call beside a quoted name is not merged with the quoted site"
-            (let* ((mine (refs-of "quoted-and-macro-caller"))
-                   (xref (with-origin "xref" mine))
-                   (source (with-origin "source" mine)))
-              (ok (= 2 (length mine)) "one reference from xref, one from the scan")
-              (ok (null (with-origin "xref+source" mine)))
-              (ok (and xref (zerop (length (gethash "call_sites" xref)))))
-              (ok (and xref (search "macro expansion" (gethash "note" xref))))
-              (ok (and xref (equal "defun" (gethash "form_type" xref))))
-              (ok (and xref (equal "CL-MCP-XREF-FIXTURE::QUOTED-AND-MACRO-CALLER"
-                                   (gethash "caller_symbol" xref))))
-              (ok (and source (equal '("quoted") (kinds source))))
-              (ok (and source (null (gethash "note" source))))))
-          (testing "a quoted name given to funcall is a function site that meets its xref entry"
-            (let* ((mine (refs-of "funcall-caller"))
+      (flet ((mentions (refs name)
+               ;; Every reference that is about NAME: by its form, or by its caller.
+               (remove-if-not (lambda (ref)
+                                (or (equal name (gethash "form_name" ref))
+                                    (string-equal name (gethash "caller" ref))))
+                              refs))
+             (kinds (ref)
+               (map 'list (lambda (site) (gethash "kind" site)) (gethash "call_sites" ref))))
+        (let ((refs (coerce (gethash "refs" (%xref-fixture-report)) 'list)))
+          (testing "a macro-made call beside a quoted name merges, and the note names the call"
+            (let* ((mine (mentions refs "quoted-and-macro-caller"))
+                   (ref (first mine))
+                   (note (and ref (gethash "note" ref))))
+              (ok (= 1 (length mine)) "one reference, not split")
+              (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+              (ok (and ref (equal '("quoted") (kinds ref))))
+              (ok (and (stringp note) (search "xref records a call" note)))))
+          (testing "a quoted name given to funcall is a function site with no note"
+            (let* ((mine (mentions refs "funcall-caller"))
                    (ref (first mine)))
               (ok (= 1 (length mine)))
               (ok (and ref (equal "xref+source" (gethash "origin" ref))))
               (ok (and ref (equal '("function") (kinds ref))))
               (ok (and ref (equal (list (%fixture-line "(funcall 'target 10)"))
                                   (%site-lines ref))))
-              (ok (and ref (null (gethash "note" ref))))))))))
+              (ok (and ref (null (gethash "note" ref))))))
+          (testing "a function passed to mapcar by name is not split into an xref-only reference"
+            (let* ((mine (mentions refs "mapcar-caller"))
+                   (ref (first mine))
+                   (note (and ref (gethash "note" ref))))
+              (ok (null (find "xref" mine :key (lambda (ref) (gethash "origin" ref))
+                                          :test #'equal))
+                  "no xref-only reference for mapcar-caller")
+              (ok (= 1 (length mine)))
+              (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+              (ok (and ref (equal '("quoted") (kinds ref))))
+              (ok (and (stringp note) (search "xref records a call" note))))))
+        (testing "a special variable changed by incf needs no note"
+          (let* ((refs (coerce (gethash "refs" (%xref-fixture-report
+                                                 "cl-mcp-xref-fixture::*target-count*"))
+                               'list))
+                 (mine (mentions refs "incf-caller"))
+                 (ref (first mine)))
+            (ok (= 1 (length mine)))
+            (ok (and ref (equal "xref+source" (gethash "origin" ref))))
+            (ok (and ref (equal '("reference" "set") (coerce (gethash "types" ref) 'list)))
+                "SBCL records both a read and a write")
+            (ok (and ref (equal '("set") (kinds ref))))
+            (ok (and ref (null (gethash "note" ref)))))))))
 
 (defparameter *xref-feature-fixture*
   (asdf:system-relative-pathname :cl-mcp

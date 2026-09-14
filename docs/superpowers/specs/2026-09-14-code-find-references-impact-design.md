@@ -128,20 +128,29 @@ quasi の `who-calls` / `who-references`（`src/introspection.lisp`）は位置�
 
 | xref | 候補 | `origin` | 意味 |
 |---|---|---|---|
-| あり | あり | `xref+source` | 実際の呼び出し行を `call_sites` に入れる |
-| あり | なし | `xref` | マクロ展開の中に隠れた呼び出し（入っているフォームに種別の整合する候補が無い場合を含む）。`call_sites` は空で理由を注記 |
+| あり | あり | `xref+source` | 実際の呼び出し行を `call_sites` に入れる。xref の種別を示す候補が無ければ注記する（下記「種別の整合」） |
+| あり | なし | `xref` | マクロ展開の中に隠れた呼び出し。`call_sites` は空で理由を注記 |
 | なし | あり | `source` | トップレベル使用、未コンパイルのコード、ロード後に変更されたファイルのいずれか。候補が xref の記録しない種別（`quoted` / `template` / `method`）だけなら、xref に無いのは当然なので注記しない |
 
-**種別の整合**: xref エントリがフォームに付く（`xref+source` になる）のは、そのフォームにエントリの種別と
-整合する種別の候補があるときだけ。整合表は 1 か所（`src/code-refs-core.lisp` の `*xref-type-site-kinds*`）に置く:
-`call` ↔ `call` / `function`、`macro` ↔ `macro`、`bind` ↔ `bind`、`set` ↔ `set`、`reference` ↔ `reference`。
-例えば `(defun f () 'target (m))` で `m` が `target` の呼び出しに展開されると、`WHO-CALLS` はマクロが作った
-呼び出しを返すが候補は `quoted` だけで、付けてしまうと `'target` の位置を呼び出し箇所として報告してしまう。
-整合する候補が無いエントリは突き合わせなしとして行番号でまとめ（`origin` は `xref`、`call_sites` は空、
-注記は走査状況に応じた文言。走査済みファイルならマクロ展開の注記）、ただし入っているフォームの
-`form_type` / `form_name` / `test` は付けて、そのまま `lisp-edit-form` でフォームを指せるようにする。
-フォーム側は候補だけの `source` として別に報告する。1 つのフォームに複数のエントリがあれば、エントリごとに判定する。
-`(funcall 'target 2)` のような関数引数のクォートは 6.4 で `function` に分類するので、`call` と整合して分かれない
+**種別の整合**: フォームに付いた xref エントリは、候補の種別によらず常にそのフォームにマージする。ただし
+エントリの種別を示す候補がフォームに 1 つも無いときは、その種別を注記で明示する。整合表は 1 か所
+（`src/code-refs-core.lisp` の `*xref-type-site-kinds*`）に置く: `call` ↔ `call` / `function`、`macro` ↔ `macro`、
+`bind` ↔ `bind`、`set` ↔ `set`、`reference` ↔ `reference` / `set`。`reference` が `set` とも整合するのは、
+6.4 で `set` に分類する `incf` / `decf` / `pop` / `push` / `pushnew` の place を SBCL が参照と代入の両方として
+記録するため（`setf` / `setq` は代入だけ）。
+
+- 例: `(defun f () 'target (m))` で `m` が `target` の呼び出しに展開されると、`WHO-CALLS` はマクロが作った
+  呼び出しを返すが候補は `quoted` だけ。`(mapcar 'target xs)` や `:key 'target` も `WHO-CALLS` に記録されるが
+  候補は `quoted` になる。どちらも 1 つの `xref+source` にまとめ、注記
+  `xref records a call here that no site below shows as one (a macro expansion, or a function passed by name)`
+  を付ける。本文では候補の種別が型と違えば `48 (quoted): 'target` と表示されるので、クォートの位置を
+  呼び出しそのものとして示すことはない
+- 分割（整合する候補が無いエントリを `xref` として別に報告する）は採らない。上のような一般的なコードが
+  偽の「マクロ展開」参照と候補だけの参照の 2 つに割れるため
+- 種別ごとの言い回しと理由は `*unmatched-xref-wording*`（`call`: マクロ展開か名前で渡した関数、`set`:
+  `rotatef` や `multiple-value-setq` のようなマクロの中など）。複数の種別が該当すれば全部を並べる
+  （`xref records a call and a set here ...`）。注記の優先度は `stale` より低い
+- `(funcall 'target 2)` のような関数引数のクォートは 6.4 で `function` に分類するので、注記は付かない
 
 ロード後の変更は、xref の `definition-source-file-write-date` と現在のファイルの
 `file-write-date` を比べて `stale` とする。
@@ -275,6 +284,7 @@ Tests: code-find-references-returns-project-refs, code-find-references-includes-
 
 - `— call not visible in source (produced by a macro expansion)`: `origin` が `xref`
 - `— top-level use, not in xref`: `origin` が `source`（候補が `quoted` / `template` / `method` だけのフォームには付けない）
+- `— xref records a call here that no site below shows as one (...)`: `origin` が `xref+source` で、xref の種別を示す候補が無い（5.2「種別の整合」）
 - `— file changed since load; reload for accurate results`: `stale`
 - `— shadowed by flet`: シャドウ検出
 - 1 フォームの呼び出し箇所は 5 件まで表示し、残りは `+N more`
@@ -316,6 +326,7 @@ CL-MCP/SRC/FOO:BAR (function) — no references.
 | バッククォートの中の、アンクォートされていない位置 | `template` |
 | `let` / `let*` のバインディング | `bind` |
 | `setf` / `setq` / `psetf` / `psetq` の place | `set` |
+| `incf` / `decf` / `pop` の第 1 引数、`push` / `pushnew` の第 2 引数に書いたシンボル（place） | `set`（それ以外の引数は通常どおり） |
 | `(defmethod foo ...)` の名前位置 | `method` |
 | それ以外 | `reference` |
 

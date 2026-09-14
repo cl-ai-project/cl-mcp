@@ -70,6 +70,12 @@ name there -- (funcall 'name ...) -- names that function the way #'name does,
 and SBCL's WHO-CALLS records it as a call, so its site is \"function\", not
 \"quoted\".")
 
+(defparameter *place-modifying-operators*
+  '(("INCF" . 0) ("DECF" . 0) ("POP" . 0) ("PUSH" . 1) ("PUSHNEW" . 1))
+  "Macros that read and write the place at the given argument position, counting
+from 0.  A bare symbol there is a \"set\" site, as a SETF place is; SBCL records
+both a set and a reference for it.  The other arguments are ordinary code.")
+
 (defparameter *definers-with-name-and-options* '("DEFSTRUCT")
   "DEF... operators, beyond the specially handled ones, whose argument 0 --
 when it is not a bare name or a (SETF name) list -- is (NAME . OPTIONS) and
@@ -176,7 +182,8 @@ evaluated position is \"call\" and any other evaluated position \"reference\";
 QUOTE data is \"quoted\"; #'name is \"function\", and so is 'name written as the
 function argument of FUNCALL, APPLY or MULTIPLE-VALUE-CALL (see
 *FUNCTION-DESIGNATOR-OPERATORS*); lambda lists and LET bindings
-are \"bind\"; SETF and SETQ places are \"set\"; a DEFMETHOD's name is
+are \"bind\"; SETF and SETQ places, and the bare-symbol place of INCF, DECF, POP,
+PUSH and PUSHNEW (see *PLACE-MODIFYING-OPERATORS*), are \"set\"; a DEFMETHOD's name is
 \"method\"; and anything inside a backquote template, outside its unquotes, is
 \"template\".  The name position of a DEF... form is the definition itself and
 is skipped only when it looks like a name -- a bare symbol, a (SETF sym) list,
@@ -354,6 +361,15 @@ a site's position, token or structure."
                         do (if (and (evenp i) (not (consp (cst-node-value arg))))
                                (emit arg "set" nil shadowed-by)
                                (walk arg nil shadowed-by))))
+                 ((assoc name *place-modifying-operators* :test #'string=)
+                  (emit-head "call")
+                  (let ((position (cdr (assoc name *place-modifying-operators*
+                                              :test #'string=))))
+                    (loop for arg in args
+                          for i from 0
+                          do (if (and (= i position) (not (consp (cst-node-value arg))))
+                                 (emit arg "set" nil shadowed-by)
+                                 (walk arg nil shadowed-by)))))
                  ((member name *shadowing-operators* :test #'string=)
                   (emit-head "call")
                   (let* ((bindings (and args (%unwrap (first args))))

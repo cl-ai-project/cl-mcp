@@ -68,6 +68,21 @@
     (ok (equal '("template") (%kinds "(defmacro m () `(funcall 'foo))" "FOO"))
         "inside a backquote template it is still template")))
 
+(deftest scan-text-classifies-place-modifying-macros
+  (testing "the bare-symbol place of INCF, DECF, POP, PUSH and PUSHNEW is a set"
+    (ok (equal '("set") (%kinds "(defun a () (incf foo))" "FOO")))
+    (ok (equal '("set") (%kinds "(defun a () (decf foo 2))" "FOO")))
+    (ok (equal '("set") (%kinds "(defun a () (pop foo))" "FOO")))
+    (ok (equal '("set") (%kinds "(defun a () (push 1 foo))" "FOO")))
+    (ok (equal '("set") (%kinds "(defun a () (pushnew 1 foo))" "FOO"))))
+  (testing "the other arguments, and a compound place, are walked as before"
+    (ok (equal '("reference") (%kinds "(defun a (list) (push foo list))" "FOO"))
+        "the item PUSH adds is only read")
+    (ok (equal '("set" "reference") (%kinds "(defun a () (incf foo foo))" "FOO"))
+        "the place is a set, the delta a reference")
+    (ok (equal '("call") (%kinds "(defun a (x) (incf (foo x)))" "FOO"))
+        "a compound place is ordinary code")))
+
 (deftest scan-text-labels-backquote-templates
   (testing "a template is labelled, an unquoted island is ordinary code"
     (ok (equal '("template" "call") (%kinds "(defmacro m (x) `(foo ,(foo x)))" "FOO")))))
