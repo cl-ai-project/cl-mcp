@@ -152,7 +152,7 @@
                      #+(or sbcl ccl)~%~
                      (defun after-list-cond () :ok)~%~
                      ~%~
-                     #-sbcl~%~
+                     #+sbcl~%~
                      (defun after-atom-cond () :ok)~%")))
       (unwind-protect
            (progn
@@ -172,9 +172,100 @@
                (ok (= (probe-before "#+(or")
                       (line-of-marker "(defun after-list-cond"))
                    "offset just before #+(or ...) should report the defun's line")
-               (ok (= (probe-before "#-sbcl")
+               (ok (= (probe-before "#+sbcl")
                       (line-of-marker "(defun after-atom-cond"))
-                   "offset just before #-sbcl should report the defun's line")))
+                   "offset just before a true #+sbcl should report the gated defun's line")))
+        (ignore-errors (delete-file path))))))
+
+(deftest code-offset-to-line-skips-forms-false-in-this-image
+  (testing "%offset->line evaluates reader conditionals and walks comments of any length"
+    (let ((path (namestring (uiop:merge-pathnames*
+                             (format nil "cl-mcp-offset-false-~A.lisp" (get-universal-time))
+                             (uiop:temporary-directory))))
+          (text
+           (with-output-to-string (s)
+             (flet ((line (control &rest args)
+                      (apply #'format s control args)
+                      (terpri s)))
+               (line "(in-package :cl-user)")
+               (line "(defun before () :ok)")
+               (line "#+(or)")
+               (line "(defun gated-or () :never)")
+               (line "(defun after-or () :ok)")
+               (line "#-sbcl")
+               (line "(defun gated-not-sbcl () :never)")
+               (line "(defun after-not-sbcl () :ok)")
+               (line "#+(or) (defun gated-stacked-1 () :never)")
+               (line "#-sbcl (defun gated-stacked-2 () :never)")
+               (line "(defun after-stacked () :ok)")
+               (line "#+(and sbcl (not sbcl))")
+               (line "(defun gated-and-not () :never)")
+               (line "(defun after-and-not () :ok)")
+               (line "#-(OR cl-user::SBCL :ccl) (defun gated-prefixed () :never)")
+               (line "(defun after-prefixed () :ok)")
+               (line "#+nil (defun gated-nil () :never)")
+               (line "(defun after-nil () :ok)")
+               (line "#+cl-mcp-offset-absent-top-xyz")
+               (line "(defun gated-absent ()")
+               (line "  #+cl-mcp-offset-absent-nested-xyz (car '(x)) \")\" #\\) :never)")
+               (line "(defun after-absent () :ok)")
+               (line ";; A line comment block longer than 1024 characters.")
+               (dotimes (i 30)
+                 (line ";; filler line ~2,'0D of a comment block longer than 1024 characters" i))
+               (line "(defun after-long-line-comment () :ok)")
+               (line "#| An outer block comment")
+               (line "   #| with a nested one |#")
+               (dotimes (i 30)
+                 (line "   filler line ~2,'0D of a block comment longer than 1024 characters" i))
+               (line "|#")
+               (line "(defun after-long-block-comment () :ok)")
+               (line "#+sbcl")
+               (line "(defun gated-sbcl () :ok)")
+               (line "#+(version>= 9)")
+               (line "(defun gated-unparsed () :ok)")
+               (line "#-sbcl")
+               (line "(defun gated-unreadable ()")))))
+      (unwind-protect
+           (progn
+             (with-open-file (s path :direction :output :if-exists :supersede)
+               (write-string text s))
+             (labels ((line-of (needle)
+                        (1+ (count #\Newline text :end (search needle text))))
+                      (line-after (previous)
+                        ;; SBCL's offset points just past the previous form.
+                        (cl-mcp/src/code-core::%offset->line
+                         path (+ (search previous text) (length previous))))
+                      (lands (previous expected description)
+                        (ok (eql (line-of expected) (line-after previous)) description)))
+               (lands "(defun before () :ok)" "(defun after-or"
+                      "a #+(or) form is skipped with its conditional")
+               (lands "(defun after-or () :ok)" "(defun after-not-sbcl"
+                      "a #-sbcl form is skipped with its conditional")
+               (lands "(defun after-not-sbcl () :ok)" "(defun after-stacked"
+                      "stacked false conditionals are all skipped")
+               (lands "(defun after-stacked () :ok)" "(defun after-and-not"
+                      "#+(and sbcl (not sbcl)) is false")
+               (lands "(defun after-and-not () :ok)" "(defun after-prefixed"
+                      "atoms match case-insensitively, with or without a package prefix")
+               (lands "(defun after-prefixed () :ok)" "(defun after-nil"
+                      "#+nil is false")
+               (lands "(defun after-nil () :ok)" "(defun after-absent"
+                      "a skipped form's strings, characters and conditionals are read past")
+               (lands "(defun after-absent () :ok)" "(defun after-long-line-comment"
+                      "a line comment block over 1024 characters is walked past")
+               (lands "(defun after-long-line-comment () :ok)" "(defun after-long-block-comment"
+                      "a nested block comment over 1024 characters is walked past")
+               (lands "(defun after-long-block-comment () :ok)" "(defun gated-sbcl"
+                      "a true #+sbcl still lands on the gated defun")
+               (lands "(defun gated-sbcl () :ok)" "(defun gated-unparsed"
+                      "an expression the parser does not understand counts as true")
+               (lands "(defun gated-unparsed () :ok)" "(defun gated-unreadable"
+                      "a gated form that cannot be read is where the walk stops"))
+             (ok (null (find-symbol "CL-MCP-OFFSET-ABSENT-TOP-XYZ" "KEYWORD"))
+                 "evaluating a feature expression interns nothing")
+             (ok (null (find-symbol "CL-MCP-OFFSET-ABSENT-NESTED-XYZ" "KEYWORD"))
+                 "skipping a form interns nothing, not even its conditionals' features")
+             (ok (null (find-symbol "GATED-ABSENT" "COMMON-LISP-USER"))))
         (ignore-errors (delete-file path))))))
 
 (deftest code-offset-to-line-counts-octets
@@ -406,24 +497,53 @@
                                  "tests/fixtures/xref-feature/xref-feature-fixture.lisp")
   "Fixture that pushes a feature while it is compiled and gates one caller on it.")
 
+(defun %scanned-fixture-report (fixture designator &key (scan-features #'identity))
+  "Compile and load FIXTURE, scan its directory alone, and return DESIGNATOR's report.
+The scan runs with *FEATURES* bound to SCAN-FEATURES applied to *FEATURES* as it
+is after loading, standing in for a parent whose features differ from the
+compiling image's; the report, which evaluates reader conditionals the way the
+worker does, runs with *FEATURES* as it is."
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (%load-xref-fixture fixture)
+    (let ((scan (let ((*features* (funcall scan-features *features*)))
+                  (scan-project designator
+                                :root (uiop:pathname-directory-pathname fixture)))))
+      (code-find-references-report designator :limit 1000 :scan scan))))
+
+(defun %ok-caller-meets-its-own-form (report fixture package-name name call)
+  "Check that the function NAME in REPORT is one xref+source reference of its own.
+FIXTURE holds its one call site, whose text is CALL; PACKAGE-NAME is the package
+its caller_symbol is qualified with.  A caller whose xref entry missed its form
+shows up twice -- once from xref, once from the scan -- or on another form."
+  (let ((mentions (remove-if-not (lambda (ref)
+                                   (or (equal name (gethash "form_name" ref))
+                                       (string-equal name (gethash "caller" ref))))
+                                 (coerce (gethash "refs" report) 'list)))
+        (ref (%ref-named report name)))
+    (ok (= 1 (length mentions)) (format nil "~A is one reference, not split" name))
+    (ok (and ref (equal "xref+source" (gethash "origin" ref)))
+        (format nil "~A meets its xref entry" name))
+    (ok (and ref (equal (list (%fixture-line call fixture)) (%site-lines ref)))
+        (format nil "~A carries its own call site" name))
+    (ok (and ref (equal (format nil "~A::~:@(~A~)" package-name name)
+                        (gethash "caller_symbol" ref)))
+        (format nil "~A's caller_symbol names its own form" name))
+    (ok (and ref (null (gethash "note" ref)))
+        (format nil "~A carries no note" name))))
+
 (defun %xref-feature-fixture-report ()
   "Return the report for the feature fixture's FEATURE-CALLEE, scanned without its feature.
 The fixture is compiled with its feature pushed, as the image that loads a
 system sees it; the scan runs with *FEATURES* lacking the feature, as a parent
 that never loaded the system does, so the scan counts one top-level form fewer
 than SBCL.  The feature is removed again afterwards unless it was already there."
-  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
-        (feature :cl-mcp-xref-feature-fixture-on)
-        (designator "cl-mcp-xref-feature-fixture:feature-callee"))
+  (let ((feature :cl-mcp-xref-feature-fixture-on))
     (let ((had-feature (member feature *features*)))
       (unwind-protect
-           (progn
-             (%load-xref-fixture *xref-feature-fixture*)
-             (let ((scan (let ((*features* (remove feature *features*)))
-                           (scan-project designator
-                                         :root (uiop:pathname-directory-pathname
-                                                *xref-feature-fixture*)))))
-               (code-find-references-report designator :limit 1000 :scan scan)))
+           (%scanned-fixture-report *xref-feature-fixture*
+                                    "cl-mcp-xref-feature-fixture:feature-callee"
+                                    :scan-features (lambda (features)
+                                                     (remove feature features)))
         (unless had-feature
           (setf *features* (remove feature *features*)))))))
 
@@ -432,29 +552,40 @@ than SBCL.  The feature is removed again afterwards unless it was already there.
       (skip "XREF tests are unstable on macOS")
       (let ((report (%xref-feature-fixture-report)))
         (testing "each caller after the gated form meets its own xref entry"
-          (dolist (caller '(("caller-a" "(feature-callee 2)")
-                            ("caller-b" "(feature-callee 3)")))
-            (destructuring-bind (name call) caller
-              (let ((ref (%ref-named report name)))
-                (ok ref (format nil "~A is reported" name))
-                (when ref
-                  (ok (equal "xref+source" (gethash "origin" ref))
-                      (format nil "~A meets its xref entry" name))
-                  (ok (equal (list (%fixture-line call *xref-feature-fixture*))
-                             (%site-lines ref))
-                      (format nil "~A carries its own call site" name))
-                  (ok (equal (format nil "CL-MCP-XREF-FEATURE-FIXTURE::~:@(~A~)"
-                                     (gethash "form_name" ref))
-                             (gethash "caller_symbol" ref))
-                      (format nil "~A's caller_symbol names its own form" name))
-                  (ok (null (gethash "note" ref))
-                      (format nil "~A carries no note" name)))))))
-        (testing "no caller's xref entry is left over as a reference of its own"
-          (ok (notany (lambda (ref)
-                        (and (equal "xref" (gethash "origin" ref))
-                             (member (gethash "caller" ref) '("caller-a" "caller-b")
-                                     :test #'string-equal)))
-                      (gethash "refs" report)))))))
+          (%ok-caller-meets-its-own-form report *xref-feature-fixture*
+                                         "CL-MCP-XREF-FEATURE-FIXTURE"
+                                         "caller-a" "(feature-callee 2)")
+          (%ok-caller-meets-its-own-form report *xref-feature-fixture*
+                                         "CL-MCP-XREF-FEATURE-FIXTURE"
+                                         "caller-b" "(feature-callee 3)")))))
+
+(defparameter *xref-gates-fixture*
+  (asdf:system-relative-pathname :cl-mcp "tests/fixtures/xref-gates/xref-gates-fixture.lisp")
+  "Fixture whose callers follow forms false on SBCL, a long comment, and a scan-only form.")
+
+(deftest code-find-references-report-sees-past-skipped-forms-and-long-comments
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((feature :cl-mcp-xref-gates-scan-only)
+             (report (%scanned-fixture-report *xref-gates-fixture*
+                                              "cl-mcp-xref-gates-fixture:gate-callee"
+                                              :scan-features (lambda (features)
+                                                               (cons feature features)))))
+        (flet ((check (name call)
+                 (%ok-caller-meets-its-own-form report *xref-gates-fixture*
+                                                "CL-MCP-XREF-GATES-FIXTURE" name call)))
+          (testing "a form false on SBCL before a caller is skipped with its conditional"
+            (check "after-commented-out" "(gate-callee 1)")
+            (check "after-not-sbcl" "(gate-callee 2)"))
+          (testing "a comment longer than 1024 characters before a caller is walked past"
+            (check "after-long-comment" "(gate-callee 3)"))
+          (testing "a form only the scan read does not take the next caller's xref entry"
+            (ok (null (member feature *features*)) "the feature was added for the scan only")
+            (check "after-scan-only" "(gate-callee 5)")
+            (let ((scan-only (%ref-named report "scan-only-caller")))
+              (ok (and scan-only (equal "source" (gethash "origin" scan-only)))
+                  "the form the compiler skipped is reported from the scan alone")
+              (ok (and scan-only (null (gethash "caller_symbol" scan-only))))))))))
 
 (deftest code-find-references-report-never-interns
   (testing "a missing symbol is reported and left uninterned"

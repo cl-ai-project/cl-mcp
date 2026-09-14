@@ -101,33 +101,140 @@ returns BYTE-OFFSET unchanged, which is exact for ASCII text."
                    octets :external-format '(:utf-8 :replacement #\?)))))
     (error () byte-offset)))
 
+(defun %feature-expression-value (text start end)
+  "Evaluate the feature expression written in TEXT between START and END.
+
+Returns T or NIL, what #+ would decide against this image's *FEATURES*, or
+:UNKNOWN when the text is not an expression this parser understands.  It
+understands an atom, with or without a package prefix, and a list headed by
+AND, OR or NOT, all case-insensitive.  An atom is true when a member of
+*FEATURES* has a symbol name STRING= to the atom's upcased name.  The text is
+parsed by hand, so nothing is read and nothing is interned."
+  (let ((i start))
+    (labels ((whitespace-p (ch)
+               (member ch '(#\Space #\Tab #\Newline #\Return #\Page)))
+             (skip-whitespace ()
+               (loop while (and (< i end) (whitespace-p (char text i)))
+                     do (incf i)))
+             (unknown ()
+               (return-from %feature-expression-value :unknown))
+             (token-name ()
+               ;; An atom's name, upcased and without its package prefix.
+               (let ((token-start i))
+                 (loop while (and (< i end)
+                                  (not (whitespace-p (char text i)))
+                                  (not (member (char text i) '(#\( #\)))))
+                       do (incf i))
+                 (let* ((token (subseq text token-start i))
+                        (colon (position #\: token :from-end t))
+                        (name (string-upcase (if colon (subseq token (1+ colon)) token))))
+                   (when (or (zerop (length name))
+                             (find-if (lambda (ch) (find ch "|\\\"'`,;#")) token)
+                             (every #'digit-char-p name))
+                     (unknown))
+                   name)))
+             (parse ()
+               (skip-whitespace)
+               (when (or (>= i end) (char= (char text i) #\)))
+                 (unknown))
+               (if (char= (char text i) #\()
+                   (progn
+                     (incf i)
+                     (skip-whitespace)
+                     (when (or (>= i end) (member (char text i) '(#\( #\))))
+                       (unknown))
+                     (let ((operator (token-name))
+                           (arguments '()))
+                       (loop
+                         (skip-whitespace)
+                         (when (>= i end)
+                           (unknown))
+                         (when (char= (char text i) #\))
+                           (incf i)
+                           (return))
+                         (push (parse) arguments))
+                       (cond
+                         ((string= operator "AND") (every #'identity arguments))
+                         ((string= operator "OR") (and (some #'identity arguments) t))
+                         ((and (string= operator "NOT") (= 1 (length arguments)))
+                          (not (first arguments)))
+                         (t (unknown)))))
+                   (let ((name (token-name)))
+                     (and (find-if (lambda (feature)
+                                     (and (symbolp feature)
+                                          (string= name (symbol-name feature))))
+                                   *features*)
+                          t)))))
+      (let ((value (parse)))
+        (skip-whitespace)
+        (if (< i end) :unknown value)))))
+
+(defun %skip-suppressed-form (text start)
+  "Return the index in TEXT just past the form that begins at or after START, or NIL.
+
+The form is READ from a string stream with *READ-SUPPRESS* true and
+*READ-EVAL* false, through a copy of the standard readtable, so its symbols
+are neither interned nor looked up and nothing is evaluated.  In that copy #+
+and #- read both their feature expression and their form suppressed: the
+standard ones read the feature expression unsuppressed, into KEYWORD, even
+inside a suppressed form.  NIL when the form cannot be read, end of file
+included."
+  (handler-case
+      (let ((stream (make-string-input-stream text))
+            (readtable (copy-readtable nil)))
+        (flet ((suppressed-conditional (stream sub-char numarg)
+                 (declare (ignore sub-char numarg))
+                 (read stream t nil t)
+                 (read stream t nil t)
+                 (values)))
+          (set-dispatch-macro-character #\# #\+ #'suppressed-conditional readtable)
+          (set-dispatch-macro-character #\# #\- #'suppressed-conditional readtable))
+        (file-position stream start)
+        (let ((*read-suppress* t)
+              (*read-eval* nil)
+              (*readtable* readtable))
+          ;; The stream itself is the end-of-file marker: a suppressed READ
+          ;; returns NIL for every form.
+          (if (eq (read stream nil stream) stream)
+              nil
+              (file-position stream))))
+    (error () nil)))
+
 (defun %offset->line (pathname offset)
   "Convert SBCL's source OFFSET within PATHNAME to a 1-based line number.
 OFFSET is an octet position; see %BYTE-OFFSET->CHAR-OFFSET.
-SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET typically points at a
-whitespace character or reader-conditional directive that precedes
-the actual `(def...)' form. Walk forward from OFFSET across:
+SBCL's DEFINITION-SOURCE-CHARACTER-OFFSET typically points just past the
+previous top-level form, so whitespace, comments and reader conditionals can
+lie between it and the `(def...)' form it belongs to.  Walk forward from
+OFFSET across:
   - whitespace
   - `;' line comments
-  - `#|...|#' block comments
-  - `#+feature' / `#-feature' reader conditionals (with atom or
-    list feature expressions)
-and stop at the first `(' that begins the next definition form.
-Scan is capped at 1024 characters of look-ahead to stay safe if
-the offset is spurious. Returns NIL when the file cannot be read."
+  - `#|...|#' block comments, nested ones included
+  - `#+feature' / `#-feature' reader conditionals.  The feature expression is
+    evaluated against this image's *FEATURES* (%FEATURE-EXPRESSION-VALUE,
+    which interns nothing), as the reader that compiled the file did when
+    this image compiled it.  When the conditional is false -- `#+(or)', or
+    `#-sbcl' on SBCL -- the form it gates was skipped by that reader too, so
+    it is skipped here as well (%SKIP-SUPPRESSED-FORM) and the walk goes on.
+    An expression the parser does not understand counts as true, and a gated
+    form that cannot be read is not skipped: the walk stops at it.
+and stop at the first character that begins anything else, normally the `('
+that begins the definition form.  The walk is bounded only by the file's
+length.  Returns NIL when the file cannot be read."
   (when (and pathname offset)
     (handler-case
         (let* ((physical (translate-logical-pathname pathname))
                (content (uiop:read-file-string physical))
                (len (length content))
-               (start (min (max (%byte-offset->char-offset physical offset) 0) len))
-               (limit (min len (+ start 1024))))
+               (start (min (max (%byte-offset->char-offset physical offset) 0) len)))
           (labels ((ws-p (ch)
                      (or (char= ch #\Space) (char= ch #\Tab)
                          (char= ch #\Newline) (char= ch #\Return)))
+                   (next-char-p (i ch)
+                     (and (< (1+ i) len) (char= (char content (1+ i)) ch)))
                    (skip-balanced-list (i)
                      (let ((depth 0))
-                       (loop while (< i limit) do
+                       (loop while (< i len) do
                          (let ((c (char content i)))
                            (incf i)
                            (cond
@@ -137,45 +244,58 @@ the offset is spurious. Returns NIL when the file cannot be read."
                               (when (zerop depth) (return))))))
                        i))
                    (skip-atom (i)
-                     (loop while (< i limit) do
+                     (loop while (< i len) do
                        (let ((c (char content i)))
                          (when (or (ws-p c) (char= c #\() (char= c #\))
                                    (char= c #\;))
                            (return))
                          (incf i)))
                      i)
-                   (skip-conditional (i)
-                     (incf i 2)
-                     (loop while (and (< i limit) (ws-p (char content i)))
+                   (skip-feature-expression (i)
+                     ;; I is just past the `#+' or `#-'.
+                     (loop while (and (< i len) (ws-p (char content i)))
                            do (incf i))
-                     (if (< i limit)
+                     (if (< i len)
                          (if (char= (char content i) #\()
                              (skip-balanced-list i)
                              (skip-atom i))
                          i))
                    (skip-block-comment (i)
-                     (let ((end (search "|#" content :start2 (+ i 2)
-                                        :end2 limit)))
-                       (if end (+ end 2) limit))))
+                     ;; I is at the `#|'; nested `#|...|#' pairs are counted.
+                     (let ((depth 0))
+                       (loop while (< i len) do
+                         (cond
+                           ((and (char= (char content i) #\#) (next-char-p i #\|))
+                            (incf depth)
+                            (incf i 2))
+                           ((and (char= (char content i) #\|) (next-char-p i #\#))
+                            (decf depth)
+                            (incf i 2)
+                            (when (zerop depth) (return)))
+                           (t (incf i))))
+                       (min i len))))
             (let ((i start))
-              (loop while (< i limit) do
+              (loop while (< i len) do
                 (let ((ch (char content i)))
                   (cond
                     ((ws-p ch) (incf i))
                     ((char= ch #\;)
-                     (let ((nl (position #\Newline content :start i
-                                         :end limit)))
-                       (setf i (if nl (1+ nl) limit))))
-                    ((char= ch #\#)
-                     (cond
-                       ((and (< (1+ i) limit)
-                             (char= (char content (1+ i)) #\|))
-                        (setf i (skip-block-comment i)))
-                       ((and (< (1+ i) limit)
-                             (or (char= (char content (1+ i)) #\+)
-                                 (char= (char content (1+ i)) #\-)))
-                        (setf i (skip-conditional i)))
-                       (t (return))))
+                     (let ((nl (position #\Newline content :start i)))
+                       (setf i (if nl (1+ nl) len))))
+                    ((and (char= ch #\#) (next-char-p i #\|))
+                     (setf i (skip-block-comment i)))
+                    ((and (char= ch #\#) (or (next-char-p i #\+) (next-char-p i #\-)))
+                     (let* ((wanted (next-char-p i #\+))
+                            (expression-start (+ i 2))
+                            (expression-end (skip-feature-expression expression-start))
+                            (value (%feature-expression-value
+                                    content expression-start expression-end)))
+                       (setf i expression-end)
+                       (when (and (not (eq value :unknown))
+                                  (not (eq value wanted)))
+                         (let ((after (%skip-suppressed-form content expression-end)))
+                           (when after
+                             (setf i after))))))
                     (t (return)))))
               (1+ (count #\Newline content :end (min i len))))))
       (error (e)
