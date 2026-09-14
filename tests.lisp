@@ -6,6 +6,8 @@
   (:import-from #:cl-mcp/tests/asdf-tools-test)
   (:import-from #:cl-mcp/tests/clhs-test)
   (:import-from #:cl-mcp/tests/code-test)
+  (:import-from #:cl-mcp/tests/code-refs-core-test)
+  (:import-from #:cl-mcp/tests/code-refs-scan-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
   (:import-from #:cl-mcp/tests/frame-inspector-test)

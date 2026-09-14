@@ -207,17 +207,22 @@ against *broad-root-deny-list* to prevent symlink bypass."
 (defun normalize-path-for-display (pathname)
   "Return a namestring for PATHNAME, relative to *project-root* when possible.
 Falls back to CWD, then cl-mcp system source directory, else absolute.
-Logical pathnames are translated to physical before processing."
+Logical pathnames are translated to physical before processing.  Returns NIL,
+without signaling, when PATHNAME is a logical pathname with no registered
+translation for it -- SBCL build-internal pseudo-hosts such as SYS:OBJ;... can
+appear this way in xref source locations."
   (when pathname
-    (let ((pn (translate-logical-pathname
-               (uiop/pathname:ensure-pathname pathname)))
-          (bases (remove nil
-                         (list *project-root*
-                               (uiop/os:getcwd)
-                               (ignore-errors
-                                (asdf/system:system-source-directory :cl-mcp))))))
-      (dolist (base bases (namestring pn))
-        (when (uiop/pathname:subpathp pn base)
-          (return
-           (namestring
-            (uiop/pathname:enough-pathname pn base))))))))
+    (let ((pn (handler-case
+                  (translate-logical-pathname (uiop/pathname:ensure-pathname pathname))
+                (file-error () nil))))
+      (when pn
+        (let ((bases (remove nil
+                             (list *project-root*
+                                   (uiop/os:getcwd)
+                                   (ignore-errors
+                                    (asdf/system:system-source-directory :cl-mcp))))))
+          (dolist (base bases (namestring pn))
+            (when (uiop/pathname:subpathp pn base)
+              (return
+               (namestring
+                (uiop/pathname:enough-pathname pn base))))))))))

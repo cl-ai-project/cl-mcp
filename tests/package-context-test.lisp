@@ -16,12 +16,16 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/package-context
+                #:*package-spec-discovery-cache*
                 #:extract-in-package-name-from-text
                 #:discover-package-spec
                 #:call-with-package-context
                 #:call-with-file-package-context
                 #:package-spec-name
-                #:package-spec-local-nicknames))
+                #:package-spec-nicknames
+                #:package-spec-use
+                #:package-spec-local-nicknames
+                #:package-spec-source-path))
 
 (in-package #:cl-mcp/tests/package-context-test)
 
@@ -91,6 +95,64 @@
    (lambda (root)
      (write-source root "src/empty.lisp" "(defun foo () 1)")
      (ok (null (discover-package-spec "NOT-DEFINED-ANYWHERE-PKG")))))))
+
+(defun %spec-summary (spec)
+  "Return SPEC's name, nicknames, use list, local nicknames and source path, or NIL.
+The source form is left out: it holds uninterned symbols, fresh on every read."
+  (and spec
+       (list (package-spec-name spec)
+             (package-spec-nicknames spec)
+             (package-spec-use spec)
+             (package-spec-local-nicknames spec)
+             (namestring (package-spec-source-path spec)))))
+
+(deftest discover-package-spec-memoizes-its-walk-when-the-cache-is-bound
+  (testing "cached results equal uncached ones, and a repeat lookup reads no file again"
+    (call-with-temp-project
+     (lambda (root)
+       (let* ((defining (write-source root "src/package.lisp"
+                                      "(defpackage #:cl-mcp-test-cached-pkg
+  (:use #:cl)
+  (:nicknames #:cl-mcp-test-cached-nick)
+  (:local-nicknames (#:a #:alexandria)))"))
+              (user-a (write-source root "src/a.lisp"
+                                    "(in-package #:cl-mcp-test-cached-pkg)
+(defun a () 1)"))
+              (user-b (write-source root "src/b.lisp"
+                                    "(in-package #:cl-mcp-test-cached-pkg)
+(defun b () 2)"))
+              (uncached (discover-package-spec "CL-MCP-TEST-CACHED-PKG" :source-path user-a))
+              (cache (make-hash-table :test #'equal)))
+         (ok uncached "the package is found without the cache")
+         (let ((*package-spec-discovery-cache* cache))
+           (let ((cached (discover-package-spec "CL-MCP-TEST-CACHED-PKG" :source-path user-a)))
+             (ok (equal (%spec-summary uncached) (%spec-summary cached))
+                 "the cached lookup finds what the uncached one does")
+             (ok (null (discover-package-spec "CL-MCP-TEST-MISSING-PKG" :source-path user-a))
+                 "a package defined nowhere is still NIL")
+             (ok (= 2 (hash-table-count cache)) "the found spec and the miss are both kept")
+             ;; With the defining file gone, only a lookup that skips the walk
+             ;; can still return the spec; with a definition added, only one
+             ;; that skips the walk can still miss it.
+             (delete-file defining)
+             (write-source root "src/late.lisp" "(defpackage #:cl-mcp-test-missing-pkg)")
+             (ok (eq cached (discover-package-spec "CL-MCP-TEST-CACHED-PKG" :source-path user-b))
+                 "another file of the same package reuses the walk's result")
+             (ok (null (discover-package-spec "CL-MCP-TEST-MISSING-PKG" :source-path user-b))
+                 "a miss is reused too")
+             (call-with-temp-project
+              (lambda (other-root)
+                (write-source other-root "src/package.lisp"
+                              "(defpackage #:cl-mcp-test-cached-pkg (:use #:cl))")
+                (let ((elsewhere (discover-package-spec "CL-MCP-TEST-CACHED-PKG")))
+                  (ok (and elsewhere (not (eq cached elsewhere)))
+                      "a different project root walks its own sources")
+                  (ok (and elsewhere (null (package-spec-local-nicknames elsewhere)))
+                      "and finds its own definition"))))))
+         (ok (null (discover-package-spec "CL-MCP-TEST-CACHED-PKG" :source-path user-b))
+             "without the cache the walk sees the defining file is gone")
+         (ok (discover-package-spec "CL-MCP-TEST-MISSING-PKG" :source-path user-b)
+             "without the cache the walk sees the added definition"))))))
 
 (deftest call-with-package-context-existing-package
  (testing "binds *package* when target package already exists"

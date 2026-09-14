@@ -14,6 +14,7 @@
                 #:%file-unparseable-by-edit-tools-p)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
+                #:fs-read-source-text
                 #:fs-write-file
                 #:fs-window-start
                 #:fs-list-directory
@@ -84,6 +85,45 @@
                (ok (= (length text) cap) "the prefix up to the cap is returned")
                (ok truncated "and it is reported as truncated"))
           (ignore-errors (delete-file abs)))))))
+
+(deftest fs-read-source-text-reads-whole-files-within-the-read-policy
+  (testing "an invalid UTF-8 byte is replaced, not an error"
+    (with-test-project-root
+      (let ((abs (merge-pathnames "tests/tmp/source-text-bad-byte.lisp"
+                                  cl-mcp/src/project-root:*project-root*)))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (write-sequence (sb-ext:string-to-octets "(defun a () 1) ; " :external-format :utf-8)
+                          out)
+          (write-byte #xE9 out)
+          (write-sequence (sb-ext:string-to-octets (format nil " end~%") :external-format :utf-8)
+                          out))
+        (unwind-protect
+             (ok (equal (format nil "(defun a () 1) ; ? end~%") (fs-read-source-text abs)))
+          (ignore-errors (delete-file abs))))))
+  (testing "a file past fs-read-file's cap is read whole"
+    (with-test-project-root
+      (let ((abs (merge-pathnames "tests/tmp/source-text-over-cap.lisp"
+                                  cl-mcp/src/project-root:*project-root*))
+            (size (+ cl-mcp/src/fs::*fs-read-max-bytes* 10)))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (loop repeat size do (write-byte 97 out)))
+        (unwind-protect
+             (ok (= size (length (fs-read-source-text abs))))
+          (ignore-errors (delete-file abs))))))
+  (testing "a path outside the readable paths signals, even when the file exists"
+    (with-test-project-root
+      (let ((outside (merge-pathnames (format nil "cl-mcp-source-text-~D.lisp" (random 1000000))
+                                      (uiop:temporary-directory))))
+        (with-open-file (out outside :direction :output :if-exists :supersede)
+          (write-string "(defun secret () 1)" out))
+        (unwind-protect
+             (ok (handler-case (progn (fs-read-source-text outside) nil)
+                   (error (e) (and (search "not permitted" (princ-to-string e)) t))))
+          (ignore-errors (delete-file outside)))))))
 
 (deftest fs-write-file-project
   (testing "fs-write-file writes under project root"

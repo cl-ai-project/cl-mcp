@@ -366,36 +366,120 @@ missing file into a reported one."
                       (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]"
                               name type arglist doc path line))))
 
-(defun build-code-find-references-response (symbol refs count project-only)
-  "Build the standard code-find-references response hash-table.
-Summary text shows each reference as \"<path>:<line> (used in <caller>) [type]\",
-falling back to \"<path>:<line> [type]\" when the caller is unknown or is an
-anonymous lambda. The line keeps every row clickable and sortable; the caller
-name says which function the reference sits in. As documented on
-CL-MCP/SRC/CODE-CORE:CODE-FIND-REFERENCES, the line points at the start of the
-enclosing function rather than at the exact call site. The raw path, line,
-type, caller, and context fields remain in the structured \"refs\" payload for
-programmatic use."
-  (let* ((summary-lines
-          (map 'list
-               (lambda (h)
-                 (let ((path (gethash "path" h))
-                       (caller (gethash "caller" h))
-                       (type (gethash "type" h))
-                       (line (gethash "line" h)))
-                   (cond
-                    ((and caller (plusp (length caller))
-                          (string/= caller "(lambda)"))
-                     (format nil "~A:~A (used in ~A) [~A]" path line caller
-                             type))
-                    (t (format nil "~A:~A [~A]" path line type)))))
-               refs))
-         (summary
-          (if summary-lines
-              (format nil "~{~A~%~}" summary-lines)
-              "")))
-    (make-ht "refs" refs "count" count "symbol" symbol "project_only"
-             project-only "content" (text-content summary))))
+(defparameter *references-sites-shown* 5
+  "Call sites listed per form in code-find-references' text; the rest are counted.")
+
+(defparameter *references-context-width* 120
+  "Characters of source shown per call site in code-find-references' text.")
+
+(defun %clip-context (text)
+  "Return TEXT trimmed and cut to *REFERENCES-CONTEXT-WIDTH* characters."
+  (let ((text (string-trim '(#\Space #\Tab) (or text ""))))
+    (if (> (length text) *references-context-width*)
+        (concatenate 'string (subseq text 0 (1- *references-context-width*)) "…")
+        text)))
+
+(defun %format-reference (stream ref)
+  "Write REF, one code-find-references reference object, to STREAM."
+  (let ((form-type (gethash "form_type" ref))
+        (form-name (gethash "form_name" ref))
+        (caller (gethash "caller" ref))
+        (type (gethash "type" ref))
+        (sites (coerce (or (gethash "call_sites" ref) #()) 'list)))
+    (format stream "~A:~A" (gethash "path" ref) (gethash "line" ref))
+    (cond
+      ((and form-type form-name)
+       (format stream " (~A ~A)" form-type form-name))
+      ((and caller (plusp (length caller)) (string/= caller "(lambda)"))
+       (format stream " (used in ~A)" caller))
+      (form-type
+       (format stream " (~A)" form-type)))
+    (format stream " [~A]~:[~; TEST~]~@[ — ~A~]~%"
+            type (gethash "test" ref) (gethash "note" ref))
+    (loop for site in sites
+          for shown below *references-sites-shown*
+          do (let ((kind (gethash "kind" site)))
+               (format stream "  ~A~:[ (~A)~;~*~]: ~A~@[  [shadowed by ~A]~]~%"
+                       (gethash "line" site)
+                       (equal kind type)
+                       kind
+                       (%clip-context (gethash "context" site))
+                       (gethash "shadowed_by" site))))
+    (when (> (length sites) *references-sites-shown*)
+      (format stream "  +~D more~%" (- (length sites) *references-sites-shown*)))))
+
+(defun %scan-summary (report)
+  "Return a phrase saying what the source scan behind REPORT covered."
+  (let ((skipped (gethash "scan_skipped" report))
+        (files (or (gethash "files_scanned" report) 0))
+        (matches (or (gethash "name_matches" report) 0)))
+    (if skipped
+        (format nil "skipped (~A)" skipped)
+        (format nil "~D file~:P, ~D match~:[es~;~]" files matches (= matches 1)))))
+
+(defun %format-references-report (report)
+  "Return the content text for REPORT, a code-find-references payload."
+  (let ((status (gethash "symbol_status" report))
+        (refs (coerce (or (gethash "refs" report) #()) 'list))
+        (count (or (gethash "count" report) 0))
+        (tests (coerce (or (gethash "tests" report) #()) 'list))
+        (unresolved (coerce (or (gethash "unresolved" report) #()) 'list))
+        (notes (coerce (or (gethash "notes" report) #()) 'list))
+        (matches (or (gethash "name_matches" report) 0)))
+    (with-output-to-string (s)
+      (cond
+        ((equal status "package_not_found")
+         (format s "Package ~S not found (nothing was interned). ~
+                    Load the system that defines it with load-system.~%"
+                 (gethash "lookup_package" report)))
+        ((equal status "not_found")
+         (format s "Symbol ~S not found in ~A (nothing was interned). ~
+                    Is the system loaded? Run load-system first.~%"
+                 (gethash "lookup_name" report) (gethash "lookup_package" report)))
+        ((zerop count)
+         (format s "~A (~A) — no references.~%  xref: ~D entr~:@P   source scan: ~A~%"
+                 (gethash "resolved_symbol" report) (gethash "symbol_kind" report)
+                 (or (gethash "xref_count" report) 0) (%scan-summary report)))
+        (t
+         (format s "~A (~A) — ~D form~:P in ~D file~:P~[~:;, ~:*~D test~:P~]~%"
+                 (gethash "resolved_symbol" report) (gethash "symbol_kind" report)
+                 count (gethash "file_count" report) (length tests))
+         (dolist (ref refs)
+           (%format-reference s ref))
+         (when (> count (length refs))
+           (format s "… ~D more form~:P (raise limit to see them)~%"
+                   (- count (length refs))))
+         (when tests
+           (format s "Tests: ~{~A~^, ~}~%"
+                   (mapcar (lambda (test) (gethash "name" test)) tests)))))
+      (when (and (member status '("not_found" "package_not_found") :test #'equal)
+                 (plusp matches))
+        (format s "~D textual match~:[es~;~] for that name in project files.~%"
+                matches (= matches 1)))
+      (when unresolved
+        (let ((total (reduce #'+ unresolved :key (lambda (entry) (gethash "count" entry)))))
+          (format s "+ ~D possible match~:[es~;~] in files whose package is not loaded:~%"
+                  total (= total 1))
+          (dolist (entry unresolved)
+            (format s "  ~A (~A~@[; tests: ~{~A~^, ~}~]) — load that system to check them~%"
+                    (gethash "path" entry)
+                    (gethash "package" entry)
+                    (coerce (or (gethash "tests" entry) #()) 'list)))))
+      (dolist (note notes)
+        (format s "Note: ~A~%" note)))))
+
+(defun build-code-find-references-response (report)
+  "Return REPORT, a CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT payload,
+with its content text set.
+
+The text is the only part an MCP client shows, so it carries everything a
+caller needs to judge the impact of a change: one line per top-level form with
+its type and name (ready for lisp-read-file or lisp-edit-form), the exact call
+sites under it, a note when only one of xref and the source scan found a form,
+the tests involved, and why nothing was found when that happens."
+  (setf (gethash "content" report)
+        (text-content (%format-references-report report)))
+  report)
 
 (defun build-inspect-response (inspection-result)
   "Build the standard inspect-object response hash-table.
