@@ -131,7 +131,11 @@
              (put "uses.lisp" "(defun a () (foo))")
              (put "silent.lisp" "(defun b () (bar))")
              (put "broken.lisp" "(defun c () (foo")
-             (let ((scan (scan-project "foo" :root dir)))
+             (let* ((scan (scan-project "foo" :root dir))
+                    (uses-truename (namestring (truename (merge-pathnames "uses.lisp" dir))))
+                    (silent-truename (namestring (truename (merge-pathnames "silent.lisp" dir))))
+                    (broken-truename (namestring (truename (merge-pathnames "broken.lisp" dir))))
+                    (scanned-files (coerce (gethash "scanned_files" scan) 'list)))
                (ok (equal "FOO" (gethash "target_name" scan)))
                (ok (stringp (gethash "root" scan)))
                (ok (= 3 (gethash "files_scanned" scan)))
@@ -141,7 +145,17 @@
                (ok (search "broken.lisp"
                            (gethash "abs_path" (aref (gethash "parse_failures" scan) 0))))
                (ok (null (gethash "truncated_at" scan)))
-               (ok (null (gethash "skipped_reason" scan)))))
+               (ok (null (gethash "skipped_reason" scan)))
+               (testing "scanned_files lists every considered file's truename"
+                 (ok (= 3 (length scanned-files)))
+                 (ok (member uses-truename scanned-files :test #'equal))
+                 (ok (member silent-truename scanned-files :test #'equal))
+                 (ok (member broken-truename scanned-files :test #'equal)))
+               (testing "abs_path is a truename in both forms and parse_failures"
+                 (ok (equal broken-truename
+                            (gethash "abs_path" (aref (gethash "parse_failures" scan) 0))))
+                 (ok (equal uses-truename
+                            (gethash "abs_path" (aref (gethash "forms" scan) 0)))))))
         (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
 
 (deftest scan-project-without-root-is-skipped
@@ -241,3 +255,31 @@
                      (ok (search "readtable"
                                  (gethash "error" (aref (gethash "parse_failures" scan) 0))))))
               (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))))
+
+(deftest scan-project-abs-path-resolves-symlinked-subdirectory
+  (testing "a file reached through a symlinked subdirectory reports its truename as abs_path"
+    (require :sb-posix)
+    (let* ((base (uiop:ensure-directory-pathname
+                  (uiop:merge-pathnames* (format nil "cl-mcp-refs-scan-sym-~D/" (random 1000000))
+                                         (uiop:temporary-directory))))
+           (real (uiop:ensure-directory-pathname (merge-pathnames "real/" base)))
+           (root (uiop:ensure-directory-pathname (merge-pathnames "root/" base)))
+           (link (merge-pathnames "linked" root)))
+      (ensure-directories-exist real)
+      (ensure-directories-exist root)
+      (unwind-protect
+           (handler-case
+               (progn
+                 (sb-posix:symlink (uiop:native-namestring real) (uiop:native-namestring link))
+                 (with-open-file (s (merge-pathnames "a.lisp" real)
+                                    :direction :output :if-exists :supersede
+                                    :external-format :utf-8)
+                   (write-string "(defun a () (foo))" s))
+                 (let* ((scan (scan-project "foo" :root root))
+                        (forms (gethash "forms" scan))
+                        (expected (namestring (truename (merge-pathnames "a.lisp" real)))))
+                   (ok (= 1 (length forms)))
+                   (ok (equal expected (gethash "abs_path" (aref forms 0))))))
+             (error ()
+               (skip "could not create a symlink in this environment")))
+        (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)))))

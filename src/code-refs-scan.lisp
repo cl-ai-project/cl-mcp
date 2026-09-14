@@ -480,7 +480,11 @@ those whose text contains the name, ignoring case, are parsed.  A file is read
 as UTF-8 with invalid bytes replaced by #\\?, so one bad byte (in a comment,
 say) does not drop the whole file; a file that still cannot be read (missing,
 unreadable, ...) is reported in parse_failures instead of being silently
-skipped.  Returns a JSON-ready hash-table:
+skipped.  Every file's abs_path -- in a form or a parse_failures entry -- is
+its truename namestring (falling back to its plain namestring when TRUENAME
+fails), so a file reached through a symlinked directory is keyed the same way
+SCANNED_FILES and CL-MCP/SRC/CODE-CORE's xref matching are.  Returns a
+JSON-ready hash-table:
   target_name     the name matched
   root            ROOT's truename namestring, or null
   files_scanned   files considered
@@ -490,12 +494,18 @@ skipped.  Returns a JSON-ready hash-table:
                   that could not be read, or whose scan stopped partway at an
                   IN-READTABLE switch (see SCAN-TEXT) -- that file's forms up
                   to the switch are still in FORMS
+  scanned_files   the truename namestring of every file FILES_SCANNED counted,
+                  matched or not -- what CL-MCP/SRC/CODE-CORE:%SCAN-STATUS
+                  checks an xref entry's file against, so a file under ROOT
+                  this scan never considered (gitignored, or not
+                  .lisp/.asd/.ros) is never claimed as scanned
   truncated_at    MAX-SITES when collection stopped there, else null
   skipped_reason  why nothing was scanned, else null"
   (let ((name (target-name-from-designator designator))
         (root-truename (and root (ignore-errors (namestring (truename root)))))
         (forms '())
         (failures '())
+        (scanned-files '())
         (scanned 0)
         (matched 0)
         (count 0)
@@ -507,6 +517,7 @@ skipped.  Returns a JSON-ready hash-table:
                       "files_matched" matched
                       "forms" (coerce forms 'vector)
                       "parse_failures" (coerce (reverse failures) 'vector)
+                      "scanned_files" (coerce (nreverse scanned-files) 'vector)
                       "truncated_at" (and truncated max-sites)
                       "skipped_reason" skipped))
            (fail (file abs-path reason)
@@ -519,8 +530,10 @@ skipped.  Returns a JSON-ready hash-table:
           (report (if root "project root is not readable" "project root is not set"))))
       (dolist (file (collect-target-files root-truename))
         (incf scanned)
-        (unless truncated
-          (let ((abs-path (namestring file)))
+        (let ((abs-path (or (ignore-errors (namestring (truename file)))
+                            (namestring file))))
+          (push abs-path scanned-files)
+          (unless truncated
             (multiple-value-bind (text read-condition)
                 (ignore-errors
                  (uiop:read-file-string file :external-format '(:utf-8 :replacement #\?)))

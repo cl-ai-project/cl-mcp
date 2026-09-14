@@ -15,7 +15,9 @@
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:scan-project)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*))
+                #:*project-root*)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht))
 
 (in-package #:cl-mcp/tests/code-test)
 
@@ -409,3 +411,32 @@
     (ok (equal "found"
                (gethash "symbol_status"
                         (code-find-references-report "cl-mcp/src/code-core:%parse-symbol"))))))
+
+(deftest scan-status-classifies-entries
+  (testing "a file under root but outside scanned_files is not-scanned"
+    (let ((scan (make-ht "root" "/proj/"
+                         "scanned_files" (vector "/proj/a.lisp")
+                         "parse_failures" #()
+                         "skipped_reason" nil
+                         "truncated_at" nil)))
+      (ok (eq :not-scanned
+              (cl-mcp/src/code-core::%scan-status (list :truename "/proj/b.lisp") scan)))))
+  (testing "a file in scanned_files is scanned"
+    (let ((scan (make-ht "root" "/proj/"
+                         "scanned_files" (vector "/proj/a.lisp")
+                         "parse_failures" #()
+                         "skipped_reason" nil
+                         "truncated_at" nil)))
+      (ok (eq :scanned
+              (cl-mcp/src/code-core::%scan-status (list :truename "/proj/a.lisp") scan)))))
+  (testing "a file in parse_failures is parse-failed"
+    (let ((scan (make-ht "root" "/proj/"
+                         "scanned_files" #()
+                         "parse_failures" (vector (make-ht "abs_path" "/proj/c.lisp"))
+                         "skipped_reason" nil
+                         "truncated_at" nil)))
+      (ok (eq :parse-failed
+              (cl-mcp/src/code-core::%scan-status (list :truename "/proj/c.lisp") scan)))))
+  (testing "no scan at all is not-scanned"
+    (ok (eq :not-scanned
+            (cl-mcp/src/code-core::%scan-status (list :truename "/proj/a.lisp") nil)))))

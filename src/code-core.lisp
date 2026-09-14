@@ -525,7 +525,11 @@ index of its top-level form in the file."
 (defun %scan-status (entry scan)
   "Say whether SCAN, the parent's source scan, covered ENTRY's file.
 Returns :SCANNED, :PARSE-FAILED or :NOT-SCANNED.  A truncated scan covers no
-file for certain, so nothing is claimed about any."
+file for certain, so nothing is claimed about any.  A file under ROOT that
+SCAN never considered (gitignored, or not .lisp/.asd/.ros) is :NOT-SCANNED,
+not :SCANNED, so its xref entries never get a false \"macro expansion\" note:
+only membership in SCANNED_FILES -- the truename of every file SCAN-PROJECT's
+FILES_SCANNED counted -- says a file was scanned."
   (let ((truename (getf entry :truename))
         (root (and scan (gethash "root" scan))))
     (cond
@@ -536,7 +540,8 @@ file for certain, so nothing is claimed about any."
              :key (lambda (failure) (gethash "abs_path" failure))
              :test #'equal)
        :parse-failed)
-      ((uiop:string-prefix-p root truename) :scanned)
+      ((find truename (sequence->list (gethash "scanned_files" scan)) :test #'equal)
+       :scanned)
       (t :not-scanned))))
 
 (defun %scan-notes (scan)
