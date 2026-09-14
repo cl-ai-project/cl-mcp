@@ -22,7 +22,7 @@ CLOS introspection を補強すべき」というものだった。
 実行時にしか確定しない構造であり、`repl-eval` 任せにせず専用ツールで渡す価値がある。
 
 調査の結論: **cl-mcp には CLOS 構造を返す手段がない。** 新ツール `clos-describe` を 1 本追加する。
-あわせて、新ツールの前提になる既存の不具合 2 件を同じブランチで直す。
+あわせて、新ツールの前提になる既存の不具合（2 章の #3〜#6）を同じブランチで直す。
 
 ## 2. 現状調査（実測）
 
@@ -35,6 +35,7 @@ worker に `cl-mcp` とプローブ用の CLOS 定義をロードして計測し
 | 3 | `code-find` は `server-state`（defclass）、`bounded-output-stream`（defclass）、`arg-validation-error`（define-condition）の**行を返さない**（パスのみ） | SBCL はクラス定義に文字位置を記録せず、`form-path`（トップレベルフォーム番号）だけを持つ。現行コードは文字位置しか見ていない |
 | 4 | `lisp-edit-form` に `form_name: "stream-write-char ((stream bounded-output-stream) character)"` を渡すと **not found**（名前だけなら一致） | `%defmethod-candidates` がラムダリストを親プロセスの `*package*` 基準で `prin1` するため、候補が `((stream cl-mcp/src/utils/bounded-stream:bounded-output-stream) character)` になる。`&optional` を含む長いラムダリストは pretty print で改行も混じる |
 | 5 | `code-find-references` は上の defmethod に `form_name` `stream-write-char ((stream bounded-output-stream) character)` を返す | #4 のため、docs の「そのまま lisp-edit-form に渡せる」が CL-USER 以外のパッケージの defmethod で成り立たない |
+| 6 | 主メソッド `area ((shape circle))` と `area :around ((shape circle))` が並ぶファイルで、前者の完全な form_name を渡すと **Multiple matches** になる（計画時の往復テストで発見） | `%defmethod-candidates` は修飾子付きメソッドにも「名前＋ラムダリスト」の候補を作るため、主メソッドの名前が `:around` にも一致する |
 
 補足の実測:
 
@@ -86,6 +87,7 @@ quasi の `class-info` / `find-methods`（`src/introspection.lisp`）から取�
 - 不具合修正 #3: クラス・condition・struct とメソッドの行を `form-path` から解決する。
   `code-find` / `code-describe` もこれで行を返すようになる
 - 不具合修正 #4 #5: `lisp-edit-form` の defmethod の form_name 照合を、パッケージ接頭辞と改行に依存しない形にする
+- 不具合修正 #6: 完全な署名が form_name と一致するフォームがあれば、それを略記として一致するだけのフォームより優先する
 - `code-describe` の本文に、総称関数・クラスのとき `clos-describe` を案内する 1 行を足す
 - `inspect-object` の本文に、調べたオブジェクトが名前付きのクラスか総称関数のとき
   `clos-describe` を案内する 1 行を足す（6.6）
@@ -93,7 +95,8 @@ quasi の `class-info` / `find-methods`（`src/introspection.lisp`）から取�
 含めない（非ゴール）:
 
 - 実効メソッドの計算（引数の型を与えたときの dispatch 順のシミュレーション）
-- struct のアクセサ（MOP の readers に載らない。制限事項として docs に書く）
+- struct のアクセサ（MOP の readers に載らない。制限事項として docs に書く）。
+  struct のスロットは SBCL がいつも initfunction を持たせるので、`:initform` を書かなくても `NIL` と表示される
 - `compute-slots` などをカスタマイズしたメタクラスでの、未 finalize 時の厳密な実効スロット
 - 推移的な下位クラスの木（直接の下位クラスだけを返す）
 - `symbol` に `(setf foo)` と書ける入力形式（`foo` を問い合わせれば `(setf foo)` の総称関数も返す）
@@ -133,7 +136,7 @@ worker プールを使わない場合も同じ 3 段（report → 注釈 → 組
 
 | ファイル | 変更 | 役割 |
 |---|---|---|
-| `src/code-core.lisp` | 追記 | `definition-source-line`、`with-definition-source-cache`（5.3）。`code-find-definition` と `%definition->path/line` がこれを使う。`code-describe-symbol` がメソッド数を返す |
+| `src/code-core.lisp` | 追記 | `definition-source-line`、`definition-source-location`、`with-definition-source-cache`（5.3）。`code-find-definition` がこれを使う（xref の位置を作る `%definition->path/line` は変えない。`code-find-references` の結果を変えないため）。`generic-function-method-count`（6.5） |
 | `src/clos-core.lisp` | 新規（worker） | `clos-describe-report`。総称関数・メソッド・クラス・スロットを JSON 化できる hash-table にする |
 | `src/code-refs-scan.lisp` | 追記（親） | `top-level-forms-at`（5.4） |
 | `src/lisp-edit-form-core.lisp` | 修正 | `%defmethod-candidates` と `%find-target` の照合（5.5） |
@@ -149,9 +152,18 @@ worker プールを使わない場合も同じ 3 段（report → 注釈 → 組
 `definition-source-line (source)` は sb-introspect の definition-source から 1 始まりの行を返す。
 
 1. 文字位置があれば、既存の `%offset->line` で行にする
-2. 文字位置がなく、`pathname` と `form-path` があれば、その先頭要素をトップレベルフォーム番号 N とする。
-   同じファイルの debug-source の `start-positions` の N 番目を位置として `%offset->line` で行にする
+2. 文字位置がなく、`pathname` と `form-path` があれば、その先頭要素をトップレベルフォーム番号 N とし、
+   ファイルのトップレベルフォーム開始位置の N 番目を `%offset->line` で行にする。開始位置は次の順に求める
+   1. 同じファイルの debug-source の `start-positions`（独自リーダーマクロを使うファイルでも正確）
+   2. 無ければ、ファイルを標準リードテーブル・`*read-suppress*` t・`read-preserving-whitespace` で読み、
+      各フォームを読む直前の `file-position` を集める（`%read-form-starts`）
 3. どちらもできなければ NIL
+
+2-2 が要る理由: debug-source はそのファイルからコンパイルされた関数が生きている間しか残らない。
+defclass だけのファイルはロード後にコードが残らず、`(sb-ext:gc :full t)` の後には開始位置が消えて
+行が取れなくなった（計画時の実測）。2-2 の位置は、`#+(or)`・多段の読み取り条件・`#.`・ブロックコメント・
+マルチバイト文字を含むプローブと、cl-mcp の src 66 ファイルのすべてで、コンパイラが記録した位置と一致した。
+読み取った位置も `with-definition-source-cache` の中ではファイルごとに 1 回だけ求める。
 
 ファイル名 → debug-source の表は、`sb-vm:list-allocated-objects :all :type sb-vm:code-header-widetag`
 でコードオブジェクトを走査して作る。
@@ -189,7 +201,7 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 | その行で始まるフォームがある | 付ける | なし |
 | その行で始まるフォームがない | null | `stale` なら `file changed since load; reload for accurate results`、そうでなければ `no top-level form starts at this line` |
 | 読み取りポリシーの外（SBCL 自身のソースなど） | null | なし（本文は path:line だけを出す） |
-| パース不能 | null | `file could not be parsed` |
+| パース不能（`#.` を含むファイルなど。CST は `*read-eval*` を無効にして読む） | null | `file could not be parsed: <理由の 1 行目>` |
 
 注釈を終えたら `abs_path` を取り除き、応答に絶対パスを残さない。
 
@@ -209,6 +221,10 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 
 これにより、パッケージが違うだけの同名メソッドは衝突しうる。その場合は既存の
 `Multiple matches ... Specify an index` と `[N]` 指定で選ぶ。
+
+`[N]` が付いていないとき、一致したフォームのうち**最も詳しい候補（署名全体）**が form_name と完全に
+等しいものがあれば、それだけに絞る（#6）。`area ((shape circle))` は主メソッドに完全一致し、
+`:around` メソッドには略記として一致するだけなので、主メソッドが選ばれる。
 
 `%form-metadata`（`code-find-references` と `clos-describe` の form_name）も同じ候補生成を使うので、
 両ツールの form_name は修正後の照合と必ず一致する。
@@ -244,8 +260,9 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 メソッドオブジェクト:
 
 - `generic_function`（名前）, `qualifiers`（`[":AROUND"]`、`["+"]`）
-- `specializers`: 完全修飾の文字列。`CLOS-PROBE::CIRCLE`、`T`、`(EQL :UNIT)`。
-  eql の対象は `*package*` を KEYWORD にして `prin1` する
+- `specializers`: 完全修飾の文字列。`CLOS-PROBE::CIRCLE`、`COMMON-LISP:T`、`(EQL :UNIT)`。
+  eql の対象は `*package*` を KEYWORD にして `prin1` する。本文では問い合わせたシンボルの
+  パッケージと `COMMON-LISP` の接頭辞を落として `CIRCLE`、`T` と出す
 - `kind`: `method` / `reader` / `writer`。アクセサメソッド（`standard-reader-method` / `standard-writer-method`）の場合は `slot` も返す
 - `via`: クラスの `methods` にだけ付く。特化しているクラス名
 - `path`, `line`, `stale`, `form_type`, `form_name`, `note`
@@ -370,8 +387,10 @@ initfunction の呼び出しを行わない。
 ### 6.5 既存ツールの変更
 
 - `code-find` / `code-describe`: クラス・condition・struct の `line` を返すようになる（5.3）
-- `code-describe`: `code-describe-symbol` がメソッド数を 7 番目の値として返す。
-  `build-code-describe-response` はキーワード引数でメソッド数とクラスかどうかを受け取り、本文の最後に次を足す:
+- `code-describe`: `code-core` に `generic-function-method-count (symbol-name &key package)` を足す
+  （`resolve-target` で解決し、総称関数ならメソッド数、そうでなければ NIL）。
+  `code-describe-symbol` の戻り値は変えない（ftype 宣言が値の数を固定しているため）。
+  `build-code-describe-response` はキーワード引数 `:method-count` を受け取り、`type` とあわせて本文の最後に次を足す:
   - 総称関数: `4 methods; clos-describe lists them with their specializers and source lines.`
   - クラス / condition / struct: `clos-describe shows its slots, superclasses, subclasses and methods.`
 - `lisp-edit-form`: defmethod の form_name 照合（5.5）
@@ -479,6 +498,8 @@ report の組み立ては純粋な関数に分け、MOP オブジェクトから
 | `sb-c::debug-source-start-positions`、`sb-vm:list-allocated-objects`、`sb-pcl::method-combination-*` は SBCL の内部 API | テストで値を固定し、各呼び出しを `ignore-errors` で包む | その項目を null にして動作は続ける |
 | ヒープ走査のコストがイメージの大きさに比例する | 完了条件の実測。走査は必要なときだけ、1 呼び出しに 1 回 | ファイル名ごとの遅延探索に変える |
 | `debug-source-created` が NIL のことがある（実測で遭遇） | 比較では NIL を 0 とみなす | - |
+| debug-source が GC で消えたファイルでは、記録された時刻が取れず `stale` を判定できない | 制限事項として docs に書く | `stale` は偽のまま。行は 2-2 で求める |
+| 独自リーダーマクロを使い、かつ debug-source も消えたファイル | 2-2 の読み取りが失敗して行は NIL | path だけを出す |
 | `#+feature` で包んだ定義で、`%offset->line` の行と CST の開始行がずれる | `top-level-forms-at` のテスト | `%unwrap` した中身の行でも比べる（5.4 に反映済み） |
 | eql 特化子の対象がシンボルで、ソースが `(eql 'foo)` のとき、本文の特化子表記 `(EQL FOO)` とソースの字面が違う | form_name はソースから引くので、編集には影響しない | - |
 | パッケージ接頭辞を無視する照合で、同名メソッドが衝突する | `lisp-edit-form-test` | 既存の `[N]` 指定で選ぶ |
