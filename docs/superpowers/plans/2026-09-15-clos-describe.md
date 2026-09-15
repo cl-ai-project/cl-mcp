@@ -701,9 +701,12 @@ would leave the tables describing files as they were."
 the start positions of that file's top-level forms.
 
 It walks every code object in the heap (about 60ms for 28,000 objects).  Of
-several debug sources for one file -- the file was loaded more than once -- the
-one with the latest DEBUG-SOURCE-CREATED wins; that date can be NIL, which
-counts as 0."
+several debug sources for one file, the one with the latest
+DEBUG-SOURCE-CREATED wins (NIL counts as 0), and of those created in the same
+second, the one recording the most forms.  Loading a file more than once leaves
+one set per load; compiling a file that starts with DEFPACKAGE also leaves a
+second debug source, created in the same second, that records only the forms
+read before the package existed."
   (let ((table (make-hash-table :test #'equal))
         (list-objects (%sbcl-function "SB-VM" "LIST-ALLOCATED-OBJECTS"))
         (code-widetag (let ((symbol (find-symbol "CODE-HEADER-WIDETAG" "SB-VM")))
@@ -727,8 +730,12 @@ counts as 0."
                 (let* ((name (funcall namestring-fn source))
                        (old (gethash name table)))
                   (when (or (null old)
-                            (> (or (funcall created-fn source) 0)
-                               (or (funcall created-fn old) 0)))
+                            (let ((created (or (funcall created-fn source) 0))
+                                  (old-created (or (funcall created-fn old) 0)))
+                              (or (> created old-created)
+                                  (and (= created old-created)
+                                       (> (length (funcall positions-fn source))
+                                          (length (funcall positions-fn old)))))))
                     (setf (gethash name table) source))))))))
       table)))
 ```
@@ -774,39 +781,42 @@ macro may fail to read, giving NIL."
 ```
 
 ```lisp
-(defun %form-starts (pathname)
-  "Return the start positions of PATHNAME's top-level forms: those its newest
-debug source recorded, else %READ-FORM-STARTS', cached per file inside
-WITH-DEFINITION-SOURCE-CACHE.
-
-The debug source is preferred because it also covers files that use custom
-reader syntax.  It is gone, though, once the garbage collector has freed every
-function compiled from the file -- a file holding only DEFCLASS forms keeps no
-code after it is loaded -- and reading the file covers that case."
-  (let ((source (%debug-source-for pathname)))
-    (or (and source
-             (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-START-POSITIONS") source))
-        (let ((key (namestring pathname)))
-          (if (hash-table-p *read-form-starts*)
-              (let ((cached (gethash key *read-form-starts*)))
-                (cond
-                  ((eq cached :none) nil)
-                  (cached cached)
-                  (t (let ((starts (%read-form-starts pathname)))
-                       (setf (gethash key *read-form-starts*) (or starts :none))
-                       starts))))
-              (%read-form-starts pathname))))))
+(defun %cached-read-form-starts (pathname)
+  "Return %READ-FORM-STARTS for PATHNAME, reading the file at most once inside
+WITH-DEFINITION-SOURCE-CACHE."
+  (let ((key (namestring pathname)))
+    (if (hash-table-p *read-form-starts*)
+        (let ((cached (gethash key *read-form-starts*)))
+          (cond
+            ((eq cached :none) nil)
+            (cached cached)
+            (t (let ((starts (%read-form-starts pathname)))
+                 (setf (gethash key *read-form-starts*) (or starts :none))
+                 starts))))
+        (%read-form-starts pathname))))
 ```
 
 ```lisp
 (defun %form-start-offset (pathname form-number)
   "Return the file position where top-level form FORM-NUMBER of PATHNAME
-starts (%FORM-STARTS), or NIL."
-  (let ((positions (%form-starts pathname)))
-    (and (vectorp positions)
-         (integerp form-number)
-         (< -1 form-number (length positions))
-         (aref positions form-number))))
+starts, or NIL.
+
+The positions PATHNAME's newest debug source recorded are used when they reach
+FORM-NUMBER; they also cover files that use custom reader syntax.  Otherwise
+the file is read (%CACHED-READ-FORM-STARTS): the debug source is gone once the
+garbage collector has freed every function compiled from the file -- a file
+holding only DEFCLASS forms keeps no code after it is loaded -- or the one
+left may record only the forms read before a DEFPACKAGE took effect."
+  (flet ((position-in (positions)
+           (and (vectorp positions)
+                (integerp form-number)
+                (< -1 form-number (length positions))
+                (aref positions form-number))))
+    (let ((source (%debug-source-for pathname)))
+      (or (and source
+               (position-in
+                (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-START-POSITIONS") source)))
+          (position-in (%cached-read-form-starts pathname))))))
 ```
 
 ```lisp

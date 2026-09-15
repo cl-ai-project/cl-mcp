@@ -168,7 +168,10 @@ defclass だけのファイルはロード後にコードが残らず、`(sb-ext
 ファイル名 → debug-source の表は、`sb-vm:list-allocated-objects :all :type sb-vm:code-header-widetag`
 でコードオブジェクトを走査して作る。
 
-- 同じファイル名の debug-source が複数あれば（再ロード）、`debug-source-created` が最新のものを使う
+- 同じファイル名の debug-source が複数あれば（再ロード）、`debug-source-created` が最新のものを使う。
+  同じ秒のものが複数あれば、記録したフォーム数が多いものを使う。`defpackage` で始まるファイルをコンパイルすると、
+  パッケージができる前に読んだフォームだけを記録した短い debug-source が同じ秒に並ぶため（実装時に発見）
+- 選んだ記録がフォーム番号 N に届かなければ、2-2 のファイル読み取りに切り替える
 - 表は `with-definition-source-cache` が束縛する動的変数に置き、最初に必要になったときに 1 回だけ作る
 - 1 回の `clos-describe` や `code-find` でメソッドを 50 件解決しても、走査は 1 回で済む
 - 呼び出しをまたいではキャッシュしない。再ロードで古くなるのを避けるため
