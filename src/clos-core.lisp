@@ -478,10 +478,20 @@ methods, and the notes the report should carry about it."
             (gethash "omitted_classes" ht) (map 'vector #'%class-name-string omitted))
       (cond
         ((null cpl)
-         (push (format nil "precedence list and effective slots unavailable: ~
+         (let ((undefined (coerce (gethash "undefined_superclasses" ht) 'list)))
+           (push (cond
+                   ((null undefined)
+                    (format nil "precedence list and effective slots unavailable: ~
+the precedence list could not be computed"))
+                   ;; %UNDEFINED-ANCESTORS lists CLASS itself exactly when it is
+                   ;; forward-referenced: named as a superclass, never defined.
+                   ((typep class 'sb-mop:forward-referenced-class)
+                    "this class is referenced as a superclass but not defined")
+                   (t
+                    (format nil "precedence list and effective slots unavailable: ~
 undefined superclass ~{~A~^, ~}"
-                       (coerce (gethash "undefined_superclasses" ht) 'list))
-               notes))
+                            undefined)))
+                 notes)))
         ((not finalized)
          (push *note-not-finalized* notes))))
     (values ht (nreverse notes))))

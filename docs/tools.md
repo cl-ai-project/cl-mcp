@@ -314,6 +314,16 @@ Input:
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
 
+Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
+ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
+`(defmethod stream-write-char ((s sink) character) ...)`. A `form_name` equal to one method's whole
+signature picks that method over others it only abbreviates: `"area ((s circle))"` picks the
+primary method, not `area :around ((s circle))`. Same-name methods whose specializers differ only
+in package (`((w a:widget))` and `((w b:widget))`) match the same `form_name`; the
+`Multiple matches` error lists them, and a `[N]` suffix (`"render ((w widget))[1]"`, 0-based)
+picks one. Other form types compare `form_name` as written, so a string name such as
+`"/users/:id"` keeps its colon and spaces.
+
 Operations:
 - **replace**: Replace the entire matched form with `content`
 - **insert_before**: Insert `content` as a new form before the matched form
@@ -384,6 +394,10 @@ Input:
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
 
+`form_name` matches a `defmethod` as in `lisp-edit-form`: package prefixes and line breaks in it
+are ignored, the method whose whole signature equals `form_name` is preferred over one it
+abbreviates, and same-name methods from different packages need a `[N]` suffix.
+
 Output:
 - `path`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
@@ -412,7 +426,8 @@ Input:
 
 Output:
 - `path` (relative when inside project, absolute otherwise)
-- `line` (integer or null if unknown)
+- `line` (integer or null if unknown): classes, conditions, structures and methods get one too,
+  the line of the top-level form defining them
 
 ## `code-describe`
 Return symbol metadata (name, type, arglist, documentation).
@@ -479,7 +494,7 @@ Output (the content text carries everything that matters; names in it drop the s
 - `resolved_symbol`, `symbol_kind`, `lookup_package`, `lookup_name`, `limit`, `notes`
 - `generic_functions` (array, up to 2): the function `symbol` names and its `(setf symbol)` function, when generic
   - `name`, `lambda_list`, `documentation`, `method_combination` (`STANDARD`, `+ :MOST-SPECIFIC-FIRST`, ...)
-  - `path`, `line`, `stale`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when only `defmethod` created the generic function
+  - `path`, `line`, `stale`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
   - `method_count`, `truncated`, `methods`
 - `class` (object or null):
   - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `form_type`, `form_name`, `note`
@@ -493,6 +508,9 @@ Output (the content text carries everything that matters; names in it drop the s
 `lisp-edit-form`: a `defmethod` gets its qualifiers and specializers, a method written inside
 `defgeneric` gets that `defgeneric`, and a slot accessor gets its `defclass`. When no form starts
 on the recorded line, `note` says why (the file changed since it was loaded, or does not parse).
+When the form starting there defines something else — a method renamed in place and reloaded
+leaves the old method in the image pointing at the new one's line — `form_type` and `form_name`
+stay null and `note` says the form is a different definition.
 
 Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
 method combination, project files before other files; a class's methods follow its precedence

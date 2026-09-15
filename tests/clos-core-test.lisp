@@ -252,6 +252,15 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
       (ok (some (lambda (note) (search "undefined superclass" note))
                 (%strings report "notes"))))))
 
+(deftest class-report-on-a-forward-referenced-class
+  (testing "a class only named as a superclass is said not to be defined"
+    (let* ((report (%report "cl-mcp-clos-fixture::not-yet-defined"))
+           (class (gethash "class" report)))
+      (ok (hash-table-p class))
+      (ok (null (gethash "precedence_list" class)))
+      (ok (equal '("this class is referenced as a superclass but not defined")
+                 (%strings report "notes"))))))
+
 (deftest class-report-covers-conditions-and-structures
   (testing "a condition's slot reader and its location"
     (let ((class (%class "cl-mcp-clos-fixture:probe-error")))

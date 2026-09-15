@@ -274,7 +274,7 @@ note in brackets, or (no source)."
       (format stream "~A~%" (gethash "documentation" gf)))
     (if (gethash "path" gf)
         (format stream "Defined at ~A~%" (%location-text gf))
-        (format stream "No defgeneric: created by its first defmethod.~%"))
+        (format stream "No defgeneric: created implicitly by a defmethod or a slot accessor.~%"))
     (%write-methods stream methods home)
     (%write-more stream gf)))
 
