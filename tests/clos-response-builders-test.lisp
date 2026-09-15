@@ -12,7 +12,8 @@
                 #:annotate-report-forms
                 #:clos-report-p
                 #:*note-no-form-at-line*
-                #:*note-unparseable*)
+                #:*note-unparseable*
+                #:*note-different-definition*)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
   (:import-from #:cl-mcp/src/code-refs-core
@@ -250,6 +251,97 @@ so arrays are lists and false is NIL."
             (ignore-errors (delete-file file)))))
       (testing "a file outside the readable paths gets no note"
         (ok (null (gethash "note" (annotated "/nonexistent-cl-mcp-dir/x.lisp" 1))))))))
+
+(deftest annotate-report-forms-rejects-a-different-definition
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/clos-renamed.lisp")))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      ;; Lines 3, 6, 9 and 12 start forms.
+      (format out "(in-package #:cl-user)~%~%~
+(defmethod area ((s ellipse))~%  :ellipse)~%~%~
+(defmethod area :around ((s circle))~%  (call-next-method))~%~%~
+(defclass ellipse ()~%  ((radius :reader radius)))~%~%~
+(defgeneric perimeter (shape))~%"))
+    (unwind-protect
+         (let ((abs-path (namestring (truename file))))
+           (labels ((report-of (entry place)
+                      (setf (gethash "abs_path" entry) abs-path)
+                      (make-ht "symbol_status" "found"
+                               "generic_functions" (if (eq place :generic-function)
+                                                       (vector entry)
+                                                       (vector))
+                               "class" (case place
+                                         (:class entry)
+                                         (:method (make-ht "methods" (vector entry))))))
+                    (annotated (entry place)
+                      (annotate-report-forms (report-of entry place))
+                      entry)
+                    (form-of (entry)
+                      (list (gethash "form_type" entry) (gethash "form_name" entry)
+                            (gethash "note" entry)))
+                    (method-at (line &rest keys)
+                      (apply #'%method :path "x.lisp" :line line keys)))
+             (let ((different (list nil nil *note-different-definition*)))
+               (testing "a method whose specializer differs from the defmethod on its line"
+                 (ok (equal different
+                            (form-of (annotated (method-at 3 :specializers '("PKG::CIRCLE"))
+                                                :method))))
+                 (ok (equal '("defmethod" "area ((s ellipse))" nil)
+                            (form-of (annotated (method-at 3 :specializers '("PKG:ELLIPSE"))
+                                                :method)))
+                     "the method the line does define keeps its form"))
+               (testing "the same with lists for vectors, as from the worker"
+                 (let* ((report (let ((yason:*parse-json-arrays-as-vectors* nil))
+                                  (%round-trip (report-of (method-at 3 :specializers
+                                                                     '("PKG::CIRCLE"))
+                                                          :method))))
+                        (entry (elt (gethash "methods" (gethash "class" report)) 0)))
+                   (ok (listp (gethash "specializers" entry)))
+                   (annotate-report-forms report)
+                   (ok (equal different (form-of entry)))))
+               (testing "a method whose qualifiers or generic function differ"
+                 (ok (equal different
+                            (form-of (annotated (method-at 6 :specializers '("PKG::CIRCLE"))
+                                                :method)))
+                     "a primary method on the :around method's line")
+                 (ok (equal '("defmethod" "area :around ((s circle))" nil)
+                            (form-of (annotated (method-at 6 :qualifiers '(":AROUND")
+                                                             :specializers '("PKG::CIRCLE"))
+                                                :method))))
+                 (ok (equal different
+                            (form-of (annotated (method-at 3 :gf "PKG::PERIMETER"
+                                                             :specializers '("PKG::ELLIPSE"))
+                                                :method)))))
+               (testing "a slot reader of another class on a defclass line"
+                 (ok (equal different
+                            (form-of (annotated (method-at 9 :gf "PKG::RADIUS" :kind "reader"
+                                                             :specializers '("PKG::CIRCLE"))
+                                                :method))))
+                 (ok (equal '("defclass" "ellipse" nil)
+                            (form-of (annotated (method-at 9 :gf "PKG::RADIUS" :kind "writer"
+                                                             :specializers
+                                                             '("COMMON-LISP:T" "PKG::ELLIPSE"))
+                                                :method)))
+                     "a writer's class is its second specializer"))
+               (testing "a class or generic function of another name"
+                 (flet ((located (&rest pairs)
+                          (apply #'make-ht "path" "x.lisp" "stale" yason:false
+                                 "form_type" nil "form_name" nil "note" nil
+                                 "methods" (vector) pairs)))
+                   (ok (equal different
+                              (form-of (annotated (located "name" "PKG:CIRCLE" "line" 9
+                                                           "metaclass" "STANDARD-CLASS")
+                                                  :class))))
+                   (ok (equal different
+                              (form-of (annotated (located "name" "PKG::AREA" "line" 12
+                                                           "lambda_list" "(SHAPE)")
+                                                  :generic-function))))
+                   (ok (equal '("defgeneric" "perimeter" nil)
+                              (form-of (annotated (located "name" "PKG::PERIMETER" "line" 12
+                                                           "lambda_list" "(SHAPE)")
+                                                  :generic-function)))))))))
+      (ignore-errors (delete-file file)))))
 
 (deftest clos-describe-form-names-work-in-lisp-edit-form
   (testing "every form_name the fixture's reports carry finds that very form"

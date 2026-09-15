@@ -21,7 +21,8 @@
            #:annotate-report-forms
            #:build-clos-describe-response
            #:*note-no-form-at-line*
-           #:*note-unparseable*))
+           #:*note-unparseable*
+           #:*note-different-definition*))
 
 (in-package #:cl-mcp/src/tools/clos-response-builders)
 
@@ -30,6 +31,13 @@
 
 (defparameter *note-unparseable* "file could not be parsed"
   "Note on a definition whose source file does not parse.")
+
+(defparameter *note-different-definition*
+  (concatenate 'string "the form on this line is a different definition; the file no longer "
+               "has this one as loaded (reload for accurate results)")
+  "Note on a definition whose recorded line starts a form defining something else:
+the file was edited and reloaded, and this definition, still in the image, is no
+longer in it.")
 
 (defun %true-p (value)
   "True when VALUE, a JSON boolean, is true.  False arrives as YASON:FALSE
@@ -67,14 +75,101 @@ function and its methods, the class and its methods."
               (format nil "~A; ~A" old note)
               note))))
 
+(defun %base-name (text)
+  "Return TEXT, a symbol name or (SETF name) as a report or a signature writes
+it, without its package prefix: the text after the last colon, and
+(SETF PKG::X) as (SETF X)."
+  (let ((end (length text)))
+    (if (and (> end 7)
+             (string-equal "(SETF " text :end2 6)
+             (char= #\) (char text (1- end))))
+        (format nil "(SETF ~A)" (%base-name (subseq text 6 (1- end))))
+        (let ((colon (position #\: text :from-end t)))
+          (if colon (subseq text (1+ colon)) text)))))
+
+(defun %same-name-p (a b)
+  "True when A and B, names as strings, are equal without package prefixes and
+ignoring case."
+  (and (stringp a) (stringp b)
+       (string-equal (%base-name a) (%base-name b))))
+
+(defun %same-specializers-p (entry-specializers form-specializers)
+  "True when ENTRY-SPECIALIZERS, a method entry's, match FORM-SPECIALIZERS, a
+defmethod signature's, pairwise: class names by %SAME-NAME-P, and an entry's
+(EQL object) with the signature's (EQL)."
+  (and (= (length entry-specializers) (length form-specializers))
+       (every (lambda (entry-specializer form-specializer)
+                (and (stringp entry-specializer)
+                     (if (and (>= (length entry-specializer) 5)
+                              (string-equal "(EQL " entry-specializer :end2 5))
+                         (equal form-specializer "(EQL)")
+                         (%same-name-p entry-specializer form-specializer))))
+              entry-specializers form-specializers)))
+
+(defun %form-describes-entry-p (form entry)
+  "True unless FORM, a TOP-LEVEL-FORMS-AT value (FORM-TYPE FORM-NAME SIGNATURE)
+for the line ENTRY was recorded on, is a definition that cannot be ENTRY.
+
+The line comes from the image, the form from the file as it is now, so after a
+method is renamed in place and the file reloaded, the old method still in the
+image points at the new one's form.  Names are compared by %SAME-NAME-P:
+- a method (it has specializers) of kind method: a defmethod needs its generic
+  function's name, its qualifiers and its specializers (%SAME-SPECIALIZERS-P);
+  a defgeneric, holding the method as a :method option, needs the name
+- a slot reader or writer: a defclass or define-condition needs the name of the
+  class specialized on, the first specializer of a reader, the second of a writer
+- a generic function (it has a lambda_list): a defgeneric needs its name
+- a class (it has a metaclass): a defclass, define-condition or defstruct needs
+  its name
+Any other form -- a user macro, a PROGN, a form too malformed for a signature --
+cannot be checked and is accepted, as is a method whose generic function the
+worker could not read."
+  (destructuring-bind (form-type form-name &optional signature) form
+    (declare (ignore form-name))
+    (flet ((type-p (&rest types)
+             (and signature (member form-type types :test #'equal)))
+           (named-p (name)
+             (%same-name-p name (getf signature :name))))
+      (cond
+        ((nth-value 1 (gethash "specializers" entry))
+         (let ((kind (gethash "kind" entry))
+               (generic-function (gethash "generic_function" entry))
+               (specializers (sequence->list (gethash "specializers" entry))))
+           (cond
+             ((not (stringp generic-function)) t)
+             ((equal kind "method")
+              (cond
+                ((type-p "defmethod")
+                 (let ((qualifiers (sequence->list (gethash "qualifiers" entry))))
+                   (and (named-p generic-function)
+                        (= (length qualifiers) (length (getf signature :qualifiers)))
+                        (every #'equalp qualifiers (getf signature :qualifiers))
+                        (%same-specializers-p specializers (getf signature :specializers)))))
+                ((type-p "defgeneric") (named-p generic-function))
+                (t t)))
+             ((and (member kind '("reader" "writer") :test #'equal)
+                   (type-p "defclass" "define-condition"))
+              (named-p (nth (if (equal kind "reader") 0 1) specializers)))
+             (t t))))
+        ((nth-value 1 (gethash "lambda_list" entry))
+         (if (type-p "defgeneric") (named-p (gethash "name" entry)) t))
+        ((nth-value 1 (gethash "metaclass" entry))
+         (if (type-p "defclass" "define-condition" "defstruct")
+             (named-p (gethash "name" entry))
+             t))
+        (t t)))))
+
 (defun annotate-report-forms (report)
   "Fill in the form_type, form_name and note of every located object in
 REPORT from its source file, then remove abs_path from each; return REPORT.
 
 Each file is read once (TOP-LEVEL-FORMS-AT).  An object gets the form that
-starts on its line.  When none does it gets a note instead: the file does not
-parse, or it changed since it was loaded (stale), or neither, in which case the
-recorded line simply starts no form.  A file the read policy refuses gets
+starts on its line, unless that form defines something else
+(%FORM-DESCRIBES-ENTRY-P): the object then gets *NOTE-DIFFERENT-DEFINITION*
+and no form, so its form_name never leads an edit to another definition.  When
+no form starts on the line it gets a note instead: the file does not parse, or
+it changed since it was loaded (stale), or neither, in which case the recorded
+line simply starts no form.  A file the read policy refuses gets
 neither form nor note -- the text still gives path:line."
   (let ((by-file (make-hash-table :test #'equal)))
     (dolist (entry (%located-entries report))
@@ -89,9 +184,10 @@ neither form nor note -- the text still gives path:line."
                  (dolist (entry entries)
                    (let ((form (gethash (gethash "line" entry) table)))
                      (cond
-                       (form
-                        (setf (gethash "form_type" entry) (car form)
-                              (gethash "form_name" entry) (cdr form)))
+                       ((and form (%form-describes-entry-p form entry))
+                        (setf (gethash "form_type" entry) (first form)
+                              (gethash "form_name" entry) (second form)))
+                       (form (%add-note entry *note-different-definition*))
                        ((eq failure :denied))
                        (failure
                         (%add-note entry (format nil "~A: ~A" *note-unparseable* failure)))

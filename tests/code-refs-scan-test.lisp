@@ -493,12 +493,54 @@ LABEL goes into its name, so a leftover directory says which test made it."
       (unwind-protect
            (multiple-value-bind (table failure) (top-level-forms-at path '(3 6 9 10 4))
              (ok (null failure))
-             (ok (equal '("defclass" . "widget") (gethash 3 table)))
-             (ok (equal '("defmethod" . "paint ((w widget) stream)") (gethash 6 table)))
-             (ok (equal '("defun" . "gated") (gethash 9 table)) "the #+sbcl line")
-             (ok (equal '("defun" . "gated") (gethash 10 table)) "the wrapped form's line")
+             (ok (equal '("defclass" "widget" (:name "WIDGET")) (gethash 3 table)))
+             (ok (equal '("defmethod" "paint ((w widget) stream)"
+                          (:name "PAINT" :qualifiers () :specializers ("WIDGET" "T")))
+                        (gethash 6 table)))
+             (ok (equal '("defun" "gated" nil) (gethash 9 table)) "the #+sbcl line")
+             (ok (equal '("defun" "gated" nil) (gethash 10 table)) "the wrapped form's line")
              (ok (null (gethash 4 table)) "a line inside a form"))
         (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-gives-definition-signatures
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (path (%write-tmp "top-level-forms-at-signatures.lisp"
+                          (format nil "(in-package #:cl-user)~%~
+(defmethod fx:render :around ((w fx:widget) stream (mode (eql :fast))~%    ~
+&optional (depth 0) &key k)~%  (list w stream mode depth k))~%~
+(defmethod (setf title) (value (w widget))~%  value)~%~
+(defmethod combine + ((a integer) b)~%  a)~%~
+(defgeneric (setf title) (value w))~%~
+(defclass fx:widget () ())~%~
+(define-condition oops (error) ())~%~
+(defstruct (point (:constructor mk)) x)~%~
+(defstruct plain x)~%~
+(defun helper () 1)~%"))))
+    (unwind-protect
+         (multiple-value-bind (table failure)
+             (top-level-forms-at path '(2 5 7 9 10 11 12 13 14))
+           (flet ((signature (line) (third (gethash line table))))
+             (ok (null failure))
+             (testing "a defmethod's name, qualifiers and one specializer per required parameter"
+               (ok (equal '(:name "RENDER" :qualifiers (":AROUND")
+                            :specializers ("WIDGET" "T" "(EQL)"))
+                          (signature 2))
+                   "a keyword qualifier, T, EQL, and &optional ending the required ones")
+               (ok (equal '(:name "(SETF TITLE)" :qualifiers () :specializers ("T" "WIDGET"))
+                          (signature 5))
+                   "a (setf x) name")
+               (ok (equal '(:name "COMBINE" :qualifiers ("+") :specializers ("INTEGER" "T"))
+                          (signature 7))
+                   "a symbol qualifier"))
+             (testing "the name of other definitions"
+               (ok (equal '(:name "(SETF TITLE)") (signature 9)) "defgeneric")
+               (ok (equal '(:name "WIDGET") (signature 10)) "defclass")
+               (ok (equal '(:name "OOPS") (signature 11)) "define-condition")
+               (ok (equal '(:name "POINT") (signature 12)) "defstruct with options")
+               (ok (equal '(:name "PLAIN") (signature 13)) "defstruct"))
+             (testing "no signature for other forms"
+               (ok (equal '("defun" "helper" nil) (gethash 14 table))))))
+      (ignore-errors (delete-file path)))))
 
 (deftest top-level-forms-at-reports-why-it-found-nothing
   (testing "a file that does not parse gives its reader error"

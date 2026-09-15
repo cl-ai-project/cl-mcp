@@ -668,13 +668,84 @@ JSON-ready hash-table:
                                    (%first-line (princ-to-string e))))))))))))))
       (report))))
 
+(defparameter *method-lambda-list-keywords*
+  '("&OPTIONAL" "&REST" "&KEY" "&AUX" "&ALLOW-OTHER-KEYS")
+  "Names of the lambda-list keywords that end a method's required parameters.")
+
+(defun %definition-signature (value)
+  "Return what tells VALUE, a top-level form as read, from other definitions of
+its kind, so a caller can check that the form starting on a line is the
+definition SBCL recorded there; NIL for any other form or a malformed one.
+
+For DEFMETHOD it is (:NAME N :QUALIFIERS (Q...) :SPECIALIZERS (S...)); for
+DEFGENERIC, DEFCLASS, DEFINE-CONDITION and DEFSTRUCT (whose name may come with
+options) it is (:NAME N).  N is the name's symbol name, or \"(SETF X)\" for
+(SETF X).  Each Q is \":NAME\" for a keyword qualifier, else the symbol's name.
+Each S belongs to one required parameter -- those before the first
+lambda-list keyword -- and is the class symbol's name, \"T\" for an
+unspecialized parameter, or \"(EQL)\" for an EQL specializer.  Every name is
+upper case, as SYMBOL-NAME gives it, without a package prefix."
+  (flet ((name-text (name)
+           (cond
+             ((symbolp name) (symbol-name name))
+             ((and (consp name) (symbolp (first name))
+                   (string= "SETF" (symbol-name (first name)))
+                   (consp (rest name)) (symbolp (second name)) (null (cddr name)))
+              (format nil "(SETF ~A)" (symbol-name (second name))))
+             (t (return-from %definition-signature nil))))
+         (qualifier-text (qualifier)
+           (cond
+             ((keywordp qualifier) (format nil ":~A" (symbol-name qualifier)))
+             ((symbolp qualifier) (symbol-name qualifier))
+             (t (prin1-to-string qualifier))))
+         (specializer-text (parameter)
+           (let ((specializer (if (and (consp parameter) (consp (rest parameter)))
+                                  (second parameter)
+                                  t)))
+             (cond
+               ((symbolp specializer) (symbol-name specializer))
+               ((and (consp specializer) (symbolp (first specializer))
+                     (string= "EQL" (symbol-name (first specializer))))
+                "(EQL)")
+               (t (return-from %definition-signature nil))))))
+    (let ((head (and (consp value) (symbolp (first value)) (consp (rest value))
+                     (symbol-name (first value)))))
+      (cond
+        ((null head) nil)
+        ((string= head "DEFMETHOD")
+         (let ((qualifiers '())
+               (after-name (cddr value))
+               (specializers '()))
+           (loop while (and (consp after-name) (not (listp (first after-name))))
+                 do (push (qualifier-text (pop after-name)) qualifiers))
+           (unless (consp after-name)
+             (return-from %definition-signature nil))
+           (loop for tail = (first after-name) then (rest tail)
+                 while (consp tail)
+                 until (and (symbolp (first tail))
+                            (member (symbol-name (first tail)) *method-lambda-list-keywords*
+                                    :test #'string=))
+                 do (push (specializer-text (first tail)) specializers))
+           (list :name (name-text (second value))
+                 :qualifiers (nreverse qualifiers)
+                 :specializers (nreverse specializers))))
+        ((member head '("DEFGENERIC" "DEFCLASS" "DEFINE-CONDITION") :test #'string=)
+         (list :name (name-text (second value))))
+        ((string= head "DEFSTRUCT")
+         (let ((name (second value)))
+           (list :name (name-text (if (consp name) (first name) name)))))
+        (t nil)))))
+
 (defun top-level-forms-at (abs-path lines)
   "Describe the top-level forms of the file at ABS-PATH that start on LINES.
 
 Returns (values TABLE FAILURE).  TABLE maps each line in LINES on which a
-top-level form starts to (FORM-TYPE . FORM-NAME), as %FORM-METADATA gives them
-to code-find-references, with the package from the file's IN-PACKAGE forms; a
-line no form starts on is absent.  A form wrapped in #+feature or #-feature is
+top-level form starts to the list (FORM-TYPE FORM-NAME SIGNATURE).  FORM-TYPE
+and FORM-NAME are what %FORM-METADATA gives code-find-references, with the
+package from the file's IN-PACKAGE forms; SIGNATURE is %DEFINITION-SIGNATURE's
+name, qualifiers and specializers for a DEFMETHOD, DEFGENERIC, DEFCLASS,
+DEFINE-CONDITION or DEFSTRUCT, and NIL for any other form.  A line no form
+starts on is absent.  A form wrapped in #+feature or #-feature is
 found both on its own line and on the line of the form it wraps (%UNWRAP).
 
 FAILURE is NIL when the file was read and parsed.  It is :DENIED when the read
@@ -702,7 +773,9 @@ empty in both cases."
                            (when (and (member line wanted) (not (gethash line table)))
                              (multiple-value-bind (form-type form-name)
                                  (%form-metadata value in-package)
-                               (setf (gethash line table) (cons form-type form-name)))))
+                               (setf (gethash line table)
+                                     (list form-type form-name
+                                           (%definition-signature value))))))
                          (let ((designator (%in-package-form-p value)))
                            (when designator
                              (setf in-package designator))))))
