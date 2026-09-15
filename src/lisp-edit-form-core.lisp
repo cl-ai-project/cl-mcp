@@ -73,6 +73,38 @@ Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
        (symbol-name thing)
        (princ-to-string thing))))
 
+(defun %names-only (tree)
+  "Return TREE with each symbol outside COMMON-LISP and KEYWORD replaced by an
+uninterned symbol of the same name, so %SIGNATURE-TEXT prints it bare.
+COMMON-LISP symbols are kept so the pretty printer still writes (QUOTE X) as
+'X; they print without a prefix from COMMON-LISP-USER anyway."
+  (let ((cl (find-package "COMMON-LISP"))
+        (keyword (find-package "KEYWORD")))
+    (labels ((walk (node)
+               (cond
+                 ((consp node) (cons (walk (car node)) (walk (cdr node))))
+                 ((and (symbolp node)
+                       (not (member (symbol-package node) (list cl keyword))))
+                  (make-symbol (symbol-name node)))
+                 (t node))))
+      (walk tree))))
+
+(defun %signature-text (object)
+  "Return OBJECT, part of a definition's signature, printed as form names are
+compared: lower case, on one line, and with no package prefix on any symbol.
+
+The package a form was read in decides how PRIN1 qualifies its symbols, so
+printing them as read made a method's lambda list come out as
+\"((stream cl-mcp/src/utils/bounded-stream:bounded-output-stream) character)\"
+in one process and unqualified in another, and a long lambda list gained line
+breaks.  Neither matched what a caller writes."
+  (let ((*package* (find-package "COMMON-LISP-USER"))
+        (*print-gensym* nil)
+        (*print-pretty* t)
+        (*print-right-margin* most-positive-fixnum)
+        (*print-readably* nil))
+    (string-downcase (prin1-to-string (%names-only object)))))
+
 (defun %defmethod-candidates (form)
   "Return candidate signature strings for a DEFMETHOD FORM.
 Candidates are generated in order of specificity:
@@ -81,10 +113,9 @@ Candidates are generated in order of specificity:
 3. name + lambda-list: \"resize ((s shape) factor)\"
 4. name + qualifier + lambda-list: \"resize :after ((s shape) factor)\"
 
-Every candidate is passed through %STRIP-HASH-COLON so that lambda-list
-prints from package-inferred-system sources (which surface uninterned
-symbols as '#:foo') compare equal to user inputs written without the
-'#:' reader-macro prefix."
+Qualifiers and the lambda list are printed by %SIGNATURE-TEXT, so symbols
+carry no package prefix and '#:' never appears, whichever package the form
+was read in."
   (destructuring-bind
       (_ name &rest rest)
       form
@@ -94,16 +125,11 @@ symbols as '#:foo') compare equal to user inputs written without the
         (when (listp part) (setf lambda-list part) (return))
         (push part qualifiers))
       (let ((name-str (%normalize-string name))
-            (lambda-str
-             (and lambda-list
-                  (%strip-hash-colon
-                   (%normalize-string
-                    (with-output-to-string (s) (prin1 lambda-list s))))))
+            (lambda-str (and lambda-list (%signature-text lambda-list)))
             (qual-str
              (and qualifiers
-                  (%strip-hash-colon
-                   (%normalize-string
-                    (format nil "~{~S~^ ~}" (nreverse qualifiers)))))))
+                  (format nil "~{~A~^ ~}"
+                          (mapcar #'%signature-text (nreverse qualifiers))))))
         (remove nil
                 (list name-str
                       (and qual-str (format nil "~A ~A" name-str qual-str))
@@ -280,17 +306,71 @@ remain distinguishable."
              (write-char c out)
              (incf i))))))))
 
+(defun %normalize-form-name-text (s)
+  "Return S, a form_name a caller wrote, as the candidates are written.
+Outside string literals, each run of whitespace becomes one space and a
+package prefix -- 'pkg:' or 'pkg::' at the start of a token -- is dropped, so
+\"sb-gray:stream-write-char ((stream\\n  bounded-output-stream) character)\"
+reads as the candidate does.  A token starting with a colon is a keyword and
+is kept."
+  (with-output-to-string (out)
+    (let ((len (length s))
+          (in-string nil)
+          (pending-space nil)
+          (i 0))
+      (flet ((token-start-p ()
+               ;; I begins a token when nothing, whitespace or an opening
+               ;; delimiter precedes it.
+               (or (zerop i)
+                   (find (char s (1- i)) '(#\( #\' #\` #\, #\Space #\Tab
+                                           #\Newline #\Return #\Page)))))
+        (loop while (< i len) do
+          (let ((c (char s i)))
+            (cond
+              ((and in-string (char= c #\\) (< (1+ i) len))
+               (write-char c out)
+               (write-char (char s (1+ i)) out)
+               (incf i 2))
+              (in-string
+               (when (char= c #\") (setf in-string nil))
+               (write-char c out)
+               (incf i))
+              ((%whitespace-char-p c)
+               (setf pending-space t)
+               (incf i))
+              (t
+               (when pending-space
+                 (write-char #\Space out)
+                 (setf pending-space nil))
+               (if (and (token-start-p) (not (find c "():\"'`,#")))
+                   ;; Copy the token from just past its last colon.
+                   (let* ((end (or (position-if (lambda (ch)
+                                                  (or (%whitespace-char-p ch)
+                                                      (find ch "()\"'`,")))
+                                                s :start i)
+                                   len))
+                          (colon (position #\: s :start i :end end :from-end t)))
+                     (write-string s out :start (if colon (1+ colon) i) :end end)
+                     (setf i end))
+                   (progn
+                     (when (char= c #\") (setf in-string t))
+                     (write-char c out)
+                     (incf i)))))))))))
+
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME.
 If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
-If multiple matches exist without an index, signals an error with candidate info."
+If multiple matches exist without an index, signals an error with candidate info.
+FORM-NAME is compared after %NORMALIZE-FORM-NAME-TEXT, so package prefixes and
+line breaks in it do not matter."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let ((target (%strip-hash-colon
-                   (string-downcase (%strip-name-prefix base-name))))
+    (let ((target (%normalize-form-name-text
+                   (%strip-hash-colon
+                    (string-downcase (%strip-name-prefix base-name)))))
           (matches nil))
       (when (zerop (length target))
         (error "form_name resolved to empty string after prefix stripping; ~
@@ -305,6 +385,18 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                                     (%definition-candidates value form-type)))
                      (push (cons node value) matches))))
       (setf matches (nreverse matches))
+      ;; A method's candidates include its lambda list without its qualifiers,
+      ;; so "area ((s circle))" names both the primary method and the :around
+      ;; one.  When no index was given, a form whose full signature is exactly
+      ;; FORM-NAME wins over forms it only abbreviates.
+      (unless index
+        (let ((exact (remove-if-not
+                      (lambda (match)
+                        (string= target
+                                 (car (last (%definition-candidates (cdr match) form-type)))))
+                      matches)))
+          (when exact
+            (setf matches exact))))
       (cond
         ((null matches)
          nil)

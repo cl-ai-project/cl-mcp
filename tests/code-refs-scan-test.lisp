@@ -138,6 +138,16 @@
         (ok (equal "eval-when" (field 3 "form_type")))
         (ok (null (field 3 "form_name")))))))
 
+(deftest scan-text-form-name-is-one-line
+  (testing "a defmethod's form_name has no line break however long its lambda list"
+    (let* ((text (format nil "(defmethod write-out ((stream sink) string &optional (start 0) end ~
+(fill-pointer-output nil) (element-type 'character))~%  (target stream))"))
+           (form (first (scan-text text "TARGET"))))
+      (ok (equal (concatenate 'string
+                              "write-out ((stream sink) string &optional (start 0) end "
+                              "(fill-pointer-output nil) (element-type 'character))")
+                 (gethash "form_name" form))))))
+
 (deftest scan-text-keeps-token-column-and-context
   (testing "the token as written, its 1-based column and its line"
     (let* ((forms (scan-text (format nil "(defun a ()~%  (fx:foo 1))") "FOO"))

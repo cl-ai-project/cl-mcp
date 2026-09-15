@@ -30,6 +30,12 @@
 (setf cl-mcp/src/project-root:*project-root*
       (uiop:ensure-directory-pathname (system-source-directory :cl-mcp)))
 
+;;; A package the CST reader reads the method fixtures below into.  Printing
+;;; their symbols from any other package qualified them, which is what made
+;;; defmethod form_names fail to match.
+(defpackage #:cl-mcp-edit-form-method-fixture
+  (:use #:cl))
+
 (defun project-path (relative)
   "Return an absolute namestring under the cl-mcp project for RELATIVE."
   (native-namestring
@@ -741,6 +747,68 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search ":hash-keep)" updated)))
           ;; The plain "keep" method must be untouched.
           (ok (search ":plain-keep" updated)))))))
+
+(deftest lisp-edit-form-defmethod-in-another-package
+  (testing "a defmethod read in a package of its own matches name + lambda list"
+    (with-temp-file "tests/tmp/edit-form-method-package.lisp"
+        (format nil "(in-package #:cl-mcp-edit-form-method-fixture)~%~%~
+(defmethod paint ((w widget) stream)~%  (list :widget w stream))~%~%~
+(defmethod paint ((g gadget) stream)~%  (list :gadget g stream))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "paint ((g gadget) stream)"
+                        :operation "replace"
+                        :content (format nil "(defmethod paint ((g gadget) stream)~%  ~
+(list :gadget-replaced g stream))"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":gadget-replaced" updated))
+          (ok (search "(list :widget w stream)" updated)))))))
+
+(deftest lisp-edit-form-defmethod-ignores-prefixes-and-line-breaks
+  (testing "package prefixes and line breaks in form_name do not matter"
+    (with-temp-file "tests/tmp/edit-form-method-prefix.lisp"
+        (format nil "(in-package #:cl-mcp-edit-form-method-fixture)~%~%~
+(defmethod paint ((w widget) stream)~%  (list :widget w stream))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name (format nil "cl-mcp-edit-form-method-fixture::paint ~
+((w cl-mcp-edit-form-method-fixture::widget)~%    stream)")
+                        :operation "replace"
+                        :content (format nil "(defmethod paint ((w widget) stream)~%  ~
+(list :widget-replaced w stream))"))
+        (ok (search ":widget-replaced" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-defmethod-long-lambda-list
+  (testing "a lambda list longer than a printed line still matches on one line"
+    (with-temp-file "tests/tmp/edit-form-method-long.lisp"
+        (format nil "(defmethod write-out ((stream sink) string &optional (start 0) end ~
+(fill-pointer-output nil) (element-type 'character))~%  ~
+(list stream string start end fill-pointer-output element-type))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "write-out ((stream sink) string &optional (start 0) end (fill-pointer-output nil) (element-type 'character))"
+                        :operation "replace"
+                        :content (format nil "(defmethod write-out ((stream sink) string ~
+&optional (start 0) end (fill-pointer-output nil) (element-type 'character))~%  :long-replaced)"))
+        (ok (search ":long-replaced" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-defmethod-prefers-the-exact-signature
+  (testing "a primary method's full signature does not also pick the :around method"
+    (with-temp-file "tests/tmp/edit-form-method-around.lisp"
+        (format nil "(defmethod area ((s circle))~%  :primary)~%~%~
+(defmethod area :around ((s circle))~%  (call-next-method))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "area ((s circle))"
+                        :operation "replace"
+                        :content (format nil "(defmethod area ((s circle))~%  :primary-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":primary-replaced" updated))
+          (ok (search "(call-next-method)" updated)))))))
 
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
