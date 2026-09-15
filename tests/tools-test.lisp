@@ -471,6 +471,43 @@
         (ok (stringp (gethash "arglist" result)))
         (ok (stringp (gethash "documentation" result)))))))
 
+(deftest tools-call-clos-describe
+  (testing "tools/list describes clos-describe"
+    (multiple-value-bind (obj result tools) (%tools-list)
+      (declare (ignore obj result))
+      (let* ((desc (%find-tool-descriptor tools "clos-describe"))
+             (schema (and desc (gethash "inputSchema" desc)))
+             (props (and schema (gethash "properties" schema))))
+        (ok desc)
+        (ok (find "symbol" (gethash "required" schema) :test #'string=))
+        (ok (equal "integer" (gethash "type" (gethash "limit" props)))))))
+  (testing "tools/call clos-describe lists a generic function's methods in its text"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl:print-object\",\"limit\":1}}}"))
+           (result (gethash "result" (parse (%pjl req))))
+           (text (gethash "text" (elt (gethash "content" result) 0))))
+      (ok (equal "found" (gethash "symbol_status" result)))
+      (ok (search "Generic function COMMON-LISP:PRINT-OBJECT" text))
+      (ok (search "more (raise limit to see them)" text))))
+  (testing "a missing symbol is explained, not an error"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl-user::no-such-clos-describe-name\"}}}"))
+           (result (gethash "result" (parse (%pjl req)))))
+      (ok (search "nothing was interned" (gethash "text" (elt (gethash "content" result) 0))))
+      (ok (null (find-symbol "NO-SUCH-CLOS-DESCRIBE-NAME" "COMMON-LISP-USER")))))
+  (testing "a non-positive limit is an argument error"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl:print-object\",\"limit\":0}}}"))
+           (obj (parse (%pjl req)))
+           (result (gethash "result" obj)))
+      (ok (or (gethash "error" obj) (and result (gethash "isError" result)))))))
+
 (deftest tools-call-code-find-references
   (testing "tools/call code-find-references returns references"
     ;; Skip this test on macOS due to XREF instability

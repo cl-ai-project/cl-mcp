@@ -17,6 +17,7 @@ EXPLORE -> EXPERIMENT -> PERSIST -> VERIFY
 | Find symbol | `clgrep-search` | `pattern`, `form_types` |
 | Read definition | `lisp-read-file` | `name_pattern="^func$"` |
 | Callers / impact | `code-find-references` | `symbol` (load-system first) |
+| Classes / generic functions | `clos-describe` | `symbol` (load-system first) |
 | Load system | `load-system` | `system`, `force`, `clear_fasls` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
 | Edit form | `lisp-edit-form` | `form_type`, `form_name`, `operation`, `content` |
@@ -49,12 +50,15 @@ Tools run in two process types when the worker pool is enabled (default):
 
 **Worker process** (isolated, one per session):
 - `repl-eval`, `load-system`, `run-tests`, `lisp-macroexpand`
-- `code-find`, `code-describe`, `code-find-references`
+- `code-find`, `code-describe`, `code-find-references`, `clos-describe`
 - `inspect-object`
 
 `lisp-macroexpand` splits across both: the parent resolves `path`/`form_type`/`form_name`
 against the CST to locate the form's source text, then the worker expands it, because only
 the worker image has the macro's definition loaded.
+
+`clos-describe` splits the other way: the worker reads the classes and methods from its image,
+then the parent reads their source files for each definition's `form_type`/`form_name`.
 
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).
@@ -80,6 +84,7 @@ the worker image has the macro's definition loaded.
   - Pattern search (project-wide) -> `clgrep-search`
   - Symbol lookup (system loaded) -> `code-find`, `code-describe`
   - Find callers/references, call sites and affected tests -> `code-find-references` (loaded) or `clgrep-search`
+  - Class hierarchy and slots, or a generic function's methods -> `clos-describe` (loaded)
 - **READ**
   - `.lisp`/`.asd` file -> `lisp-read-file` (`collapsed=true`, then `name_pattern`)
   - Other files -> `fs-read-file`

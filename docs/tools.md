@@ -459,6 +459,55 @@ Only files `fs-read-file` may read are scanned (under the project root or a regi
 system's source directory, symlinks resolved): a file the root reaches through a symlink leading
 elsewhere is not read, and a note counts such files without naming them.
 
+## `clos-describe`
+Describe a CLOS class or generic function from the running image — the structure a source
+search cannot see: a generic function's methods with their qualifiers, specializers and
+source lines, and a class's superclasses, subclasses, precedence list, direct and effective
+slots, default initargs and specialized methods.
+
+Input:
+- `symbol` (string, required): `pkg:name`, `pkg::name` or `name`; a single colon also finds internal symbols
+- `package` (string, optional): package used when `symbol` is unqualified
+- `limit` (integer, default `50`): most methods listed per generic function and per class; `method_count` always gives the total
+
+Output (the content text carries everything that matters; names in it drop the symbol's own package and `COMMON-LISP:`):
+- `symbol_status`: `found`, `not_found` or `package_not_found`; nothing is interned either way
+- `resolved_symbol`, `symbol_kind`, `lookup_package`, `lookup_name`, `limit`, `notes`
+- `generic_functions` (array, up to 2): the function `symbol` names and its `(setf symbol)` function, when generic
+  - `name`, `lambda_list`, `documentation`, `method_combination` (`STANDARD`, `+ :MOST-SPECIFIC-FIRST`, ...)
+  - `path`, `line`, `stale`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when only `defmethod` created the generic function
+  - `method_count`, `truncated`, `methods`
+- `class` (object or null):
+  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `form_type`, `form_name`, `note`
+  - `direct_superclasses`, `direct_subclasses`, `precedence_list` (null when a superclass is undefined), `undefined_superclasses`
+  - `direct_slots`, `effective_slots` (null without a precedence list): `name`, `from` (effective slots: the most specific class defining it), `initargs`, `initform` (the code, never evaluated; null when there is none), `type`, `allocation` (`instance`, `class`), `readers`, `writers`, `documentation`
+  - `default_initargs`: `initarg`, `form`, `from`
+  - `method_count`, `truncated`, `methods`, `omitted_classes`: the methods specialized on the class and its superclasses, except superclasses in `COMMON-LISP` or an `SB-` package (the standard protocol), which `omitted_classes` names
+- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `form_type`, `form_name`, `note`
+
+`form_type` / `form_name` are read from the source file, so they can be passed straight to
+`lisp-edit-form`: a `defmethod` gets its qualifiers and specializers, a method written inside
+`defgeneric` gets that `defgeneric`, and a slot accessor gets its `defclass`. When no form starts
+on the recorded line, `note` says why (the file changed since it was loaded, or does not parse).
+
+Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
+method combination, project files before other files; a class's methods follow its precedence
+list, then the generic function's name.
+
+Reads only: a class is never finalized — an unfinalized class's precedence list is computed and
+its effective slots merged from the direct slots the standard way, with a note — no initform is
+evaluated, and nothing is interned.
+
+Limits: structure accessors are not MOP readers, so a `defstruct` slot lists none, and every
+structure slot shows an initform (`NIL` when none was written). A metaclass that customizes
+`compute-slots` may finalize with other effective slots than an unfinalized class shows. Lines come
+from SBCL's record of each file's top-level forms, or from reading the file once that record has
+been garbage collected with the file's code; a file using a custom reader macro whose record is
+gone gets no line, and without the record `stale` is not known.
+
+Use `inspect-object` for one instance's slot values, `code-describe` for a plain function, macro or
+variable, and `code-find-references` for who calls a generic function.
+
 ## `clhs-lookup`
 Look up a symbol or section in the Common Lisp HyperSpec (ANSI standard documentation).
 

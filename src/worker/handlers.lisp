@@ -14,6 +14,8 @@
                 #:code-find-definition
                 #:code-describe-symbol
                 #:code-find-references-report)
+  (:import-from #:cl-mcp/src/clos-core
+                #:clos-describe-report)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:load-system
                 #:*system-load-lock-wrapper*)
@@ -301,6 +303,17 @@ its sites against the symbols loaded in this image and merges them with xref."
                                   :limit limit
                                   :scan scan))))
 
+(defun %handle-clos-describe (params)
+  "Describe a class or generic function.  Returns the clos-describe report
+without content text: the parent annotates it from the source files, which
+this image cannot parse, and renders the text."
+  (let ((symbol (gethash "symbol" params))
+        (package (gethash "package" params))
+        (limit (or (gethash "limit" params) 50)))
+    (unless symbol
+      (error "symbol is required"))
+    (clos-describe-report symbol :package package :limit limit)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; worker/inspect-object
 ;;; ---------------------------------------------------------------------------
@@ -438,6 +451,7 @@ hand-maintained count is wrong again the next time a method is added."
                    (cons "worker/code-find" #'%handle-code-find)
                    (cons "worker/code-describe" #'%handle-code-describe)
                    (cons "worker/code-find-references" #'%handle-code-find-references)
+                   (cons "worker/clos-describe" #'%handle-clos-describe)
                    (cons "worker/inspect-object" #'%handle-inspect-object)
                    (cons "worker/macroexpand" #'%handle-macroexpand)
                    (cons "worker/spec-list" #'%handle-spec-list)

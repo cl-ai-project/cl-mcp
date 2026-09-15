@@ -27,6 +27,8 @@
                 #:code-find-definition
                 #:code-describe-symbol
                 #:code-find-references)
+  (:import-from #:cl-mcp/src/clos
+                #:clos-describe-report)
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
   (:import-from #:cl-mcp/src/repl
@@ -114,6 +116,7 @@
            #:code-find-definition
            #:code-describe-symbol
            #:code-find-references
+           #:clos-describe-report
            ;; Semantic grep (clgrep)
            #:clgrep-search
            ;; HyperSpec lookup

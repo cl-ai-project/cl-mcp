@@ -830,6 +830,25 @@ Cleans up server and socket on exit."
             (ok (gethash "count" result)
                 "result has count field")))))))
 
+(deftest worker-clos-describe-returns-the-report
+  (testing "worker/clos-describe returns the report, which the parent renders"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "cl:print-object"
+              (gethash "limit" params) 1)
+        (let* ((response (%send-and-receive stream 420 "worker/clos-describe" params))
+               (result (%result-of response))
+               (gfs (gethash "generic_functions" result)))
+          (ok (equal "found" (gethash "symbol_status" result)))
+          (ok (= 1 (length gfs)))
+          (ok (= 1 (length (gethash "methods" (elt gfs 0)))))
+          (ok (not (nth-value 1 (gethash "content" result))) "no content text yet")))))
+  (testing "worker/clos-describe needs a symbol"
+    (with-handler-server (stream)
+      (let ((response (%send-and-receive stream 421 "worker/clos-describe"
+                                         (make-hash-table :test 'equal))))
+        (ok (gethash "error" response))))))
+
 (deftest worker-code-find-references-resolves-scan-sites
   (testing "worker/code-find-references resolves the sites the parent scanned"
     (with-handler-server (stream)
