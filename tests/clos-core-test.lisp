@@ -273,3 +273,18 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
         (%report "cl-mcp-clos-fixture:probe-error")
         (%report "cl-mcp-clos-fixture:point"))
       (ok (null warned) warned))))
+
+(deftest class-report-prints-anonymous-classes
+  (testing "an anonymous superclass is printed, never named NIL"
+    (let* ((anonymous (make-instance 'standard-class
+                                     :direct-superclasses (list (find-class 'standard-object))))
+           (child (sb-mop:ensure-class 'anonymous-superclass-probe
+                                       :direct-superclasses (list anonymous)))
+           (class (gethash "class" (clos-describe-report
+                                    "cl-mcp/tests/clos-core-test::anonymous-superclass-probe")))
+           (superclass (first (%strings class "direct_superclasses"))))
+      (ok (not (sb-mop:class-finalized-p child)))
+      (ok (eql 0 (search "#<anonymous COMMON-LISP:STANDARD-CLASS {" superclass)) superclass)
+      (ok (equal superclass (second (%strings class "precedence_list"))))
+      (ok (notany (lambda (name) (search "COMMON-LISP:NIL" name))
+                  (%strings class "precedence_list"))))))

@@ -187,7 +187,7 @@ was found through that class's specialized methods."
           (gethash "kind" ht) "method"
           (gethash "slot" ht) nil)
     (when via
-      (setf (gethash "via" ht) (%name-string (%proper-class-name via))))
+      (setf (gethash "via" ht) (%class-name-string via)))
     (handler-case
         (let ((gf (sb-mop:method-generic-function method)))
           (setf (gethash "generic_function" ht)
@@ -241,6 +241,20 @@ sorted before any is located, so only the listed ones read their files."
           (map 'vector #'%method-entry (subseq sorted 0 (min limit (length sorted)))))
     ht))
 
+(defun %class-name-string (class)
+  "Return CLASS's name fully qualified when it is a symbol naming CLASS, else
+an unreadable representation naming its metaclass,
+#<anonymous COMMON-LISP:STANDARD-CLASS {10045A8F33}>, so a class without a
+proper name never reads as NIL.  SBCL's own PRINT-OBJECT for a class is not
+used: it writes an anonymous class's name as COMMON-LISP:NIL whatever
+*PACKAGE* is."
+  (let ((name (%proper-class-name class)))
+    (if name
+        (%name-string name)
+        (with-output-to-string (stream)
+          (print-unreadable-object (class stream :identity t)
+            (format stream "anonymous ~A" (%class-name-string (class-of class))))))))
+
 (defun %language-class-p (class)
   "True when CLASS belongs to the language or the implementation: its name's
 package is COMMON-LISP or an SB- package.  Their methods are the standard
@@ -280,7 +294,7 @@ ancestor is undefined."
         when slot collect (cons class slot)))
 
 (defun %names (names)
-  "Return a vector of NAMES, function or class names, fully qualified."
+  "Return a vector of NAMES, function names, fully qualified."
   (map 'vector #'%name-string names))
 
 (defun %slot-type-text (types package)
@@ -335,7 +349,7 @@ Readers and writers are those of every direct slot NAME."
                                         slots)
                                 :test #'equal :from-end t)))
       (make-ht "name" (qualified-symbol-name name)
-               "from" (and pairs (%name-string (%proper-class-name (car (first pairs)))))
+               "from" (and pairs (%class-name-string (car (first pairs))))
                "initargs" (map 'vector #'%datum-text
                                (if effective
                                    (sb-mop:slot-definition-initargs effective)
@@ -386,7 +400,7 @@ CPL."
             (push (first initarg) seen)
             (push (make-ht "initarg" (%datum-text (first initarg))
                            "form" (%form-text (second initarg) package)
-                           "from" (%name-string (%proper-class-name c)))
+                           "from" (%class-name-string c))
                   entries))))
       (coerce (nreverse entries) 'vector))))
 
@@ -438,19 +452,19 @@ methods, and the notes the report should carry about it."
          (notes '()))
     (multiple-value-bind (pairs omitted) (%class-methods class cpl)
       (setf (gethash "name" ht) (%name-string name)
-            (gethash "metaclass" ht) (%name-string (class-name (class-of class)))
+            (gethash "metaclass" ht) (%class-name-string (class-of class))
             (gethash "documentation" ht) (ignore-errors (documentation class t))
             (gethash "finalized" ht) (json-bool finalized)
             (gethash "direct_superclasses" ht)
-            (%names (mapcar #'class-name (sb-mop:class-direct-superclasses class)))
+            (map 'vector #'%class-name-string (sb-mop:class-direct-superclasses class))
             (gethash "direct_subclasses" ht)
             (%names (remove nil (mapcar #'%proper-class-name
                                         (sb-mop:class-direct-subclasses class))))
-            (gethash "precedence_list" ht) (and cpl (%names (mapcar #'class-name cpl)))
+            (gethash "precedence_list" ht) (and cpl (map 'vector #'%class-name-string cpl))
             (gethash "undefined_superclasses" ht)
             (if cpl
                 (vector)
-                (%names (mapcar #'class-name (%undefined-ancestors class))))
+                (map 'vector #'%class-name-string (%undefined-ancestors class)))
             (gethash "direct_slots" ht)
             (map 'vector (lambda (slot) (%direct-slot-entry slot package))
                  (ignore-errors (sb-mop:class-direct-slots class)))
@@ -461,7 +475,7 @@ methods, and the notes the report should carry about it."
             (gethash "methods" ht)
             (map 'vector (lambda (pair) (%method-entry (car pair) :via (cdr pair)))
                  (subseq pairs 0 (min limit (length pairs))))
-            (gethash "omitted_classes" ht) (%names (mapcar #'class-name omitted)))
+            (gethash "omitted_classes" ht) (map 'vector #'%class-name-string omitted))
       (cond
         ((null cpl)
          (push (format nil "precedence list and effective slots unavailable: ~
