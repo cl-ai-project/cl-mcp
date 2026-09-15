@@ -858,3 +858,14 @@ tests run from there."
     (ok (null (generic-function-method-count "cl:car")))
     (ok (null (generic-function-method-count "cl-mcp-clos-fixture::no-such-counted-name")))
     (ok (null (find-symbol "NO-SUCH-COUNTED-NAME" "CL-MCP-CLOS-FIXTURE")))))
+
+(deftest generic-function-method-count-tolerates-unresolvable-names
+  (testing "a keyword or an unparseable designator counts as no generic function"
+    (ok (null (handler-case (generic-function-method-count ":test")
+                (error (e) e))))
+    (ok (null (handler-case (generic-function-method-count "#:uninterned")
+                (error (e) e))))
+    (multiple-value-bind (name type)
+        (code-describe-symbol ":test")
+      (declare (ignore name))
+      (ok (equal "variable" type)))))
