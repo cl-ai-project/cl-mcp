@@ -1719,6 +1719,17 @@ Expected: 新しい 6 本が `class` が NIL のため失敗し、Task 4 の 5 �
 `lisp-edit-form` `insert_after`、form_type `defun`、form_name `%generic-function-entry` から順に（1 回に 1 フォーム）:
 
 ```lisp
+(defun %class-name-string (class)
+  "Return CLASS's name fully qualified when it is a symbol naming CLASS, else
+CLASS printed as COMMON-LISP-USER prints it (#<STANDARD-CLASS NIL {...}> for an
+anonymous class), so a class without a proper name never reads as NIL."
+  (let ((name (%proper-class-name class)))
+    (if name
+        (%name-string name)
+        (%form-text class (find-package "COMMON-LISP-USER")))))
+```
+
+```lisp
 (defun %language-class-p (class)
   "True when CLASS belongs to the language or the implementation: its name's
 package is COMMON-LISP or an SB- package.  Their methods are the standard
@@ -1766,7 +1777,7 @@ ancestor is undefined."
 
 ```lisp
 (defun %names (names)
-  "Return a vector of NAMES, function or class names, fully qualified."
+  "Return a vector of NAMES, function names, fully qualified."
   (map 'vector #'%name-string names))
 ```
 
@@ -1831,7 +1842,7 @@ Readers and writers are those of every direct slot NAME."
                                         slots)
                                 :test #'equal :from-end t)))
       (make-ht "name" (qualified-symbol-name name)
-               "from" (and pairs (%name-string (%proper-class-name (car (first pairs)))))
+               "from" (and pairs (%class-name-string (car (first pairs))))
                "initargs" (map 'vector #'%datum-text
                                (if effective
                                    (sb-mop:slot-definition-initargs effective)
@@ -1886,7 +1897,7 @@ CPL."
             (push (first initarg) seen)
             (push (make-ht "initarg" (%datum-text (first initarg))
                            "form" (%form-text (second initarg) package)
-                           "from" (%name-string (%proper-class-name c)))
+                           "from" (%class-name-string c))
                   entries))))
       (coerce (nreverse entries) 'vector))))
 ```
@@ -1942,19 +1953,19 @@ methods, and the notes the report should carry about it."
          (notes '()))
     (multiple-value-bind (pairs omitted) (%class-methods class cpl)
       (setf (gethash "name" ht) (%name-string name)
-            (gethash "metaclass" ht) (%name-string (class-name (class-of class)))
+            (gethash "metaclass" ht) (%class-name-string (class-of class))
             (gethash "documentation" ht) (ignore-errors (documentation class t))
             (gethash "finalized" ht) (json-bool finalized)
             (gethash "direct_superclasses" ht)
-            (%names (mapcar #'class-name (sb-mop:class-direct-superclasses class)))
+            (map 'vector #'%class-name-string (sb-mop:class-direct-superclasses class))
             (gethash "direct_subclasses" ht)
             (%names (remove nil (mapcar #'%proper-class-name
                                         (sb-mop:class-direct-subclasses class))))
-            (gethash "precedence_list" ht) (and cpl (%names (mapcar #'class-name cpl)))
+            (gethash "precedence_list" ht) (and cpl (map 'vector #'%class-name-string cpl))
             (gethash "undefined_superclasses" ht)
             (if cpl
                 (vector)
-                (%names (mapcar #'class-name (%undefined-ancestors class))))
+                (map 'vector #'%class-name-string (%undefined-ancestors class)))
             (gethash "direct_slots" ht)
             (map 'vector (lambda (slot) (%direct-slot-entry slot package))
                  (ignore-errors (sb-mop:class-direct-slots class)))
@@ -1965,7 +1976,7 @@ methods, and the notes the report should carry about it."
             (gethash "methods" ht)
             (map 'vector (lambda (pair) (%method-entry (car pair) :via (cdr pair)))
                  (subseq pairs 0 (min limit (length pairs))))
-            (gethash "omitted_classes" ht) (%names (mapcar #'class-name omitted)))
+            (gethash "omitted_classes" ht) (map 'vector #'%class-name-string omitted))
       (cond
         ((null cpl)
          (push (format nil "precedence list and effective slots unavailable: ~
@@ -2020,10 +2031,35 @@ methods are listed per entry.  docs/tools.md describes every field."
       report)))
 ```
 
+- [ ] **Step 4b: 無名クラスの名前を `%class-name-string` に揃える**
+
+`lisp-patch-form`、form_type `defun`、form_name `%method-entry`:
+- old_text: `      (setf (gethash "via" ht) (%name-string (%proper-class-name via))))`
+- new_text: `      (setf (gethash "via" ht) (%class-name-string via)))`
+
+`tests/clos-core-test.lisp` の末尾に追加:
+
+```lisp
+(deftest class-report-prints-anonymous-classes
+  (testing "an anonymous superclass is printed, never named NIL"
+    (let* ((anonymous (make-instance 'standard-class
+                                     :direct-superclasses (list (find-class 'standard-object))))
+           (child (sb-mop:ensure-class 'anonymous-superclass-probe
+                                       :direct-superclasses (list anonymous)))
+           (class (gethash "class" (clos-describe-report
+                                    "cl-mcp/tests/clos-core-test::anonymous-superclass-probe")))
+           (superclass (first (%strings class "direct_superclasses"))))
+      (ok (not (sb-mop:class-finalized-p child)))
+      (ok (eql 0 (search "#<STANDARD-CLASS NIL" superclass)) superclass)
+      (ok (equal superclass (second (%strings class "precedence_list"))))
+      (ok (notany (lambda (name) (search "COMMON-LISP:NIL" name))
+                  (%strings class "precedence_list"))))))
+```
+
 - [ ] **Step 5: テストが通ることを確認する**
 
 `<name>` を `clos-core-test` にして実行。
-Expected: 11 本すべて `✗` なし。
+Expected: 12 本すべて `✗` なし。
 
 - [ ] **Step 6: Lint とコミット**
 
