@@ -354,17 +354,32 @@ missing file into a reported one."
                (text-content
                 (format nil "Definition not found for ~A" symbol)))))
 
-(defun build-code-describe-response (name type arglist doc path line)
-  "Build the standard code-describe response hash-table."
-  (make-ht "name" name
-           "type" type
-           "arglist" arglist
-           "documentation" doc
-           "path" path
-           "line" line
-           "content" (text-content
-                      (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]"
-                              name type arglist doc path line))))
+(defun %clos-describe-hint (type method-count)
+  "Return the line pointing code-describe's reader at clos-describe for a
+symbol of TYPE, or NIL.  METHOD-COUNT is a generic function's method count."
+  (cond
+    ((equal type "generic-function")
+     (format nil "~@[~D method~:P; ~]clos-describe lists ~:[its methods~;them~] ~
+with their specializers and source lines."
+             method-count method-count))
+    ((member type '("class" "condition" "structure") :test #'equal)
+     "clos-describe shows its slots, superclasses, subclasses and methods.")))
+
+(defun build-code-describe-response (name type arglist doc path line &key method-count)
+  "Build the standard code-describe response hash-table.
+The text ends with %CLOS-DESCRIBE-HINT's line for a generic function (with
+METHOD-COUNT, its number of methods) or a class, since code-describe shows
+neither methods nor more than a class's direct slot names."
+  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]"
+                      name type arglist doc path line))
+        (hint (%clos-describe-hint type method-count)))
+    (make-ht "name" name
+             "type" type
+             "arglist" arglist
+             "documentation" doc
+             "path" path
+             "line" line
+             "content" (text-content (format nil "~A~@[~%~A~]" text hint)))))
 
 (defparameter *references-sites-shown* 5
   "Call sites listed per form in code-find-references' text; the rest are counted.")

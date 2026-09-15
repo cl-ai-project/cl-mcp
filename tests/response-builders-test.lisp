@@ -213,6 +213,21 @@
       (ok (search "BAR" text))
       (ok (search "macro" text))))))
 
+(deftest build-code-describe-response-points-at-clos-describe
+  (testing "a generic function's text counts its methods and names clos-describe"
+    (ok (search "4 methods; clos-describe lists them with their specializers and source lines."
+                (first-text (build-code-describe-response "AREA" "generic-function" "(SHAPE)"
+                                                          nil nil nil :method-count 4)))))
+  (testing "a class, condition or structure points at clos-describe for its structure"
+    (dolist (type '("class" "condition" "structure"))
+      (ok (search "clos-describe shows its slots, superclasses, subclasses and methods."
+                  (first-text (build-code-describe-response "SHAPE" type "(name)" nil nil nil)))
+          type)))
+  (testing "a plain function does not mention clos-describe"
+    (ok (not (search "clos-describe"
+                     (first-text (build-code-describe-response "FOO" "function" "(X)"
+                                                               nil nil nil)))))))
+
 (deftest build-inspect-response-success-attaches-content
  (testing "successful inspection result gets a content vector attached"
   (let* ((ir (make-ht "id" 1 "kind" "list" "summary" "(1 2 3)"

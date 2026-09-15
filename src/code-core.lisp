@@ -29,7 +29,8 @@
            #:%read-form-starts
            #:definition-source-line
            #:definition-source-location
-           #:with-definition-source-cache))
+           #:with-definition-source-cache
+           #:generic-function-method-count))
 
 (in-package #:cl-mcp/src/code-core)
 
@@ -681,6 +682,16 @@ TYPE is one of:
       (multiple-value-bind (path line)
           (code-find-definition symbol-name :package package)
         (values name type arglist doc path line)))))
+
+(defun generic-function-method-count (symbol-name &key package)
+  "Return how many methods the generic function SYMBOL-NAME names has, or NIL
+when it names no generic function.  Resolved with RESOLVE-TARGET, so nothing
+is interned; code-describe uses it to point at clos-describe."
+  (let ((symbol (resolve-target symbol-name :package package)))
+    (and symbol
+         (fboundp symbol)
+         (typep (fdefinition symbol) 'generic-function)
+         (length (sb-mop:generic-function-methods (fdefinition symbol))))))
 
 (defun %path-inside-project-p (pathname)
   "Return T when PATHNAME is inside *project-root*.

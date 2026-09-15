@@ -13,7 +13,8 @@
   (:import-from #:cl-mcp/src/code-core
                 #:code-find-definition
                 #:code-describe-symbol
-                #:code-find-references-report)
+                #:code-find-references-report
+                #:generic-function-method-count)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
   (:import-from #:cl-mcp/src/system-loader-core
@@ -277,7 +278,9 @@ caller is answered at the deadline even while the suite is still blocked."
       (error "symbol is required"))
     (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol symbol :package package)
-      (build-code-describe-response name type arglist doc path line))))
+      (build-code-describe-response
+       name type arglist doc path line
+       :method-count (generic-function-method-count symbol :package package)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find-references

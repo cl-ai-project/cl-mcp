@@ -9,7 +9,8 @@
                 #:*object-registry*
                 #:make-object-registry)
   (:import-from #:cl-mcp/src/inspect
-                #:inspect-object-by-id)
+                #:inspect-object-by-id
+                #:generate-result-preview)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-inspect-response))
 
@@ -28,6 +29,12 @@
 ;;; Test structure for structure inspection
 (defstruct test-point
   x y)
+
+;;; A generic function and a SETF generic function for the clos-describe hint
+(defgeneric inspect-test-describe (object)
+  (:method ((object test-person)) (person-name object)))
+
+(defgeneric (setf inspect-test-label) (value object))
 
 ;;; Setup/teardown
 (defun with-fresh-registry (thunk)
@@ -507,3 +514,43 @@
                 "content text should show truncation marker for hash-tables")
                (ok (search "total" text)
                 "content text should show total count for hash-tables"))))))))))
+
+(defun %hint-of (object)
+  "Inspect OBJECT in a fresh registry and return its hint, or NIL."
+  (let ((*object-registry* (make-object-registry)))
+    (ht-get (inspect-object-by-id (register-object object)) "hint")))
+
+(deftest inspect-hints-clos-describe-for-classes-and-generic-functions
+  (testing "a class its symbol names"
+    (let ((hint (%hint-of (find-class 'test-person))))
+      (ok (search "This is the class CL-MCP/TESTS/INSPECT-TEST::TEST-PERSON" hint))
+      (ok (search "clos-describe CL-MCP/TESTS/INSPECT-TEST::TEST-PERSON shows its slots" hint))))
+  (testing "a generic function, and a SETF one named by its symbol"
+    (ok (search "clos-describe CL-MCP/TESTS/INSPECT-TEST::INSPECT-TEST-DESCRIBE lists its methods"
+                (%hint-of #'inspect-test-describe)))
+    (let ((hint (%hint-of (fdefinition '(setf inspect-test-label)))))
+      (ok (search "(SETF CL-MCP/TESTS/INSPECT-TEST::INSPECT-TEST-LABEL)" hint))
+      (ok (search "clos-describe CL-MCP/TESTS/INSPECT-TEST::INSPECT-TEST-LABEL " hint))))
+  (testing "the hint is in the content text"
+    (with-fresh-registry
+     (lambda ()
+       (let ((response (build-inspect-response
+                        (inspect-object-by-id (register-object (find-class 'test-person))))))
+         (ok (search "Hint: This is the class"
+                     (gethash "text" (aref (ht-get response "content") 0)))))))))
+
+(deftest inspect-gives-no-clos-hint-for-other-objects
+  (testing "instances, anonymous classes and plain functions get none"
+    (ok (null (%hint-of (make-instance 'test-person :name "Ann" :age 3))))
+    (ok (null (%hint-of (make-instance 'standard-class))))
+    (ok (null (%hint-of #'car))))
+  (testing "nor does a list holding a class, or its elements"
+    (with-fresh-registry
+     (lambda ()
+       (let ((result (inspect-object-by-id (register-object (list (find-class 'test-person))))))
+         (ok (not (nth-value 1 (gethash "hint" result))))
+         (ok (notany (lambda (element)
+                       (and (hash-table-p element) (nth-value 1 (gethash "hint" element))))
+                     (coerce (ht-get result "elements") 'list)))))))
+  (testing "nor a repl-eval result preview"
+    (ok (not (nth-value 1 (gethash "hint" (generate-result-preview (find-class 'test-person))))))))

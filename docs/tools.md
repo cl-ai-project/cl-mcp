@@ -59,6 +59,7 @@ Output fields:
   - Structures: `class` name, `slots` array
   - Functions: `name`, `lambda_list` (SBCL only)
 - `meta`: Contains `truncated` flag, element counts, etc.
+- `hint` (string, only when the object is the class its symbol names or a named generic function): points at `clos-describe`, which describes the class or generic function itself; `inspect-object` shows its internal representation. The text shows it as `Hint:`
 
 Nested objects are returned as `object-ref` with their own `id` for further inspection.
 Circular references are detected and marked as `circular-ref`.
@@ -421,9 +422,12 @@ Input:
 - `package` (string, optional): must exist when `symbol` is unqualified
 
 Output:
-- `type` ("function" | "macro" | "variable" | "unbound")
-- `arglist` (string)
+- `type` (`function`, `generic-function`, `macro`, `variable`, `class`, `condition`, `structure`)
+- `arglist` (string; for a class, its direct slot names)
 - `documentation` (string|null)
+- `path`, `line`: where it is defined; a class, condition or structure gets its line too
+
+The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
 
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside

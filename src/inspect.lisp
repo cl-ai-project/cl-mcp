@@ -6,6 +6,8 @@
                 #:inspectable-p
                 #:register-object
                 #:lookup-object)
+  (:import-from #:cl-mcp/src/code-refs-core
+                #:qualified-symbol-name)
   (:import-from #:cl-mcp/src/utils/printing
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -395,6 +397,31 @@ you could not drill into."
                    "type" (%type-name object))))
     (remhash object active-table)))
 
+(defun %clos-hint (object)
+  "Return the line pointing at clos-describe for OBJECT, or NIL.
+OBJECT qualifies when it is the class its symbol names, or the generic function
+its name -- a symbol or (SETF symbol) -- names.  inspect-object shows such an
+object's internal representation; clos-describe describes the class or generic
+function itself.  Anything else, an anonymous or replaced class included, gets
+no hint, and so does an object whose check signals."
+  (ignore-errors
+   (cond
+     ((typep object 'class)
+      (let ((name (class-name object)))
+        (when (and name (symbolp name) (eq (find-class name nil) object))
+          (let ((qualified (qualified-symbol-name name)))
+            (format nil "This is the class ~A; clos-describe ~A shows its slots, ~
+superclasses, subclasses and methods with source lines."
+                    qualified qualified)))))
+     ((typep object 'generic-function)
+      (let* ((name (sb-mop:generic-function-name object))
+             (setf-p (and (consp name) (eq (first name) 'setf)))
+             (base (if setf-p (second name) name)))
+        (when (and base (symbolp base) (fboundp name) (eq (fdefinition name) object))
+          (format nil "This is the generic function ~:[~A~;(SETF ~A)~]; clos-describe ~A ~
+lists its methods with their specializers and source lines."
+                  setf-p (qualified-symbol-name base) (qualified-symbol-name base))))))))
+
 (defun inspect-object-by-id (id &key (max-depth 1) (max-elements 50))
   "Inspect object by ID from the registry.
 Returns a hash-table with inspection results or error info."
@@ -408,6 +435,10 @@ Returns a hash-table with inspection results or error info."
               (setf (gethash object seen) id)
               (setf result (%inspect-object-impl object seen active 0 max-depth max-elements))
               (setf (gethash "id" result) id)
+              ;; Only the object asked about gets a hint, never its elements.
+              (let ((hint (%clos-hint object)))
+                (when hint
+                  (setf (gethash "hint" result) hint)))
               result)
           (serious-condition (e)
             (make-ht "error" t
@@ -454,6 +485,8 @@ If REPR is not a hash-table, return its princ-to-string."
               (gethash "summary" inspection-result))
       (when (gethash "id" inspection-result)
         (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+      (when (gethash "hint" inspection-result)
+        (format s "~&Hint: ~A" (gethash "hint" inspection-result)))
       ;; List/array elements
       (let ((elements (gethash "elements" inspection-result)))
         (when (and elements (plusp (length elements)))

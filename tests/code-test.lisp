@@ -15,7 +15,8 @@
                 #:definition-source-line
                 #:definition-source-location
                 #:%read-form-starts
-                #:%offset->line)
+                #:%offset->line
+                #:generic-function-method-count)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:scan-project)
   (:import-from #:cl-mcp/src/project-root
@@ -848,3 +849,12 @@ tests run from there."
                          (first (%find-definition-sources "CL-MCP-CLOS-CLASSES-ONLY"
                                                           "ONLY-PROBE" :class))))))
         (ignore-errors (delete-file file))))))
+
+(deftest generic-function-method-count-counts-methods
+  (testing "a generic function's method count, and NIL for anything else"
+    (%compile-and-load-under-own-name *clos-fixture*)
+    (ok (eql 4 (generic-function-method-count "cl-mcp-clos-fixture:area")))
+    (ok (null (generic-function-method-count "cl-mcp-clos-fixture:circle")))
+    (ok (null (generic-function-method-count "cl:car")))
+    (ok (null (generic-function-method-count "cl-mcp-clos-fixture::no-such-counted-name")))
+    (ok (null (find-symbol "NO-SUCH-COUNTED-NAME" "CL-MCP-CLOS-FIXTURE")))))

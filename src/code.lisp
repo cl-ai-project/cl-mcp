@@ -6,7 +6,8 @@
                 #:code-find-definition
                 #:code-describe-symbol
                 #:code-find-references
-                #:code-find-references-report)
+                #:code-find-references-report
+                #:generic-function-method-count)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:scan-project)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -66,7 +67,9 @@ and is loaded"))
                           (make-ht "symbol" symbol "package" package))
     (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol symbol :package package)
-      (result id (build-code-describe-response name type arglist doc path line)))))
+      (result id (build-code-describe-response
+                  name type arglist doc path line
+                  :method-count (generic-function-method-count symbol :package package))))))
 
 (define-tool "code-find-references"
   :description "Find who calls or references a symbol - its callers, the exact call sites
