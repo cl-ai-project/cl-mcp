@@ -24,7 +24,8 @@
            #:resolve-scan-forms
            #:merge-references
            #:build-references-report
-           #:%status-string))
+           #:%status-string
+           #:*note-stale*))
 
 (in-package #:cl-mcp/src/code-refs-core)
 

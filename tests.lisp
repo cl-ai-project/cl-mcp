@@ -9,6 +9,7 @@
   (:import-from #:cl-mcp/tests/code-refs-core-test)
   (:import-from #:cl-mcp/tests/code-refs-scan-test)
   (:import-from #:cl-mcp/tests/clos-core-test)
+  (:import-from #:cl-mcp/tests/clos-response-builders-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
   (:import-from #:cl-mcp/tests/frame-inspector-test)
