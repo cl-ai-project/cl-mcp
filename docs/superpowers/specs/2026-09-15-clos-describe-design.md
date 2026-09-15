@@ -194,17 +194,24 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 - パースは `scan-text` と同じく `parse-top-level-forms` に `:source-path` を渡し、
   `in-package` を追跡して `%form-metadata` を呼ぶ
 - 行の一致は `cst-node-start-line` と比べる。`#+feature` で包まれたフォームは `%unwrap` した中身の開始行とも比べる
-- 戻り値は行 → `(form-type . form-name)` の表と、失敗理由（読み取り禁止 / パース不能）
+- 戻り値は行 → `(form-type form-name signature)` の表と、失敗理由（読み取り禁止 / パース不能）。
+  `signature` は `defmethod` なら名前・修飾子・必須引数の特化子（未特化は `T`、eql は `(EQL)`）、
+  `defgeneric` / `defclass` / `define-condition` / `defstruct` なら名前だけ、それ以外は NIL
 
 `annotate-report-forms` は report 内のすべての位置付き要素を集め、`abs_path` ごとに
 `top-level-forms-at` を 1 回呼ぶ。対象は総称関数、各メソッド、クラス、クラスのメソッドである。
 
 | 状況 | form_type / form_name | note |
 |---|---|---|
-| その行で始まるフォームがある | 付ける | なし |
+| その行で始まるフォームがあり、要素と矛盾しない | 付ける | なし |
+| その行で始まるフォームが別の定義（`defmethod` の名前・修飾子・特化子、`defgeneric` / `defclass` などの名前が要素と合わない） | null | `the form on this line is a different definition; the file no longer has this one as loaded (reload for accurate results)` |
 | その行で始まるフォームがない | null | `stale` なら `file changed since load; reload for accurate results`、そうでなければ `no top-level form starts at this line` |
 | 読み取りポリシーの外（SBCL 自身のソースなど） | null | なし（本文は path:line だけを出す） |
 | パース不能（`#.` を含むファイルなど。CST は `*read-eval*` を無効にして読む） | null | `file could not be parsed: <理由の 1 行目>` |
+
+矛盾の判定は、パッケージ接頭辞を除いた名前で大文字小文字を区別せずに比べる。署名を持たないフォーム（利用者のマクロ、`progn` など）は照合できないので、そのまま付ける。
+この判定は最終レビューで見つかった問題への対応である: ファイルでメソッドの特化子を書き換えて再ロードすると、
+イメージに残った古いメソッドの行に新しいメソッドが始まり、`stale` も偽なので、以前は別のメソッドの form_name を黙って返していた。
 
 注釈を終えたら `abs_path` を取り除き、応答に絶対パスを残さない。
 
