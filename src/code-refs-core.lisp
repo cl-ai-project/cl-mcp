@@ -23,7 +23,8 @@
            #:resolve-site-token
            #:resolve-scan-forms
            #:merge-references
-           #:build-references-report))
+           #:build-references-report
+           #:%status-string))
 
 (in-package #:cl-mcp/src/code-refs-core)
 
