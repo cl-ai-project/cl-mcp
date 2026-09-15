@@ -1202,7 +1202,8 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
                            (let ((method (first (%methods gf))))
                              (list (gethash "kind" method) (gethash "slot" method))))
                          gfs)))
-      (ok (every (lambda (gf) (eql (%line "(defclass circle") (gethash "line" (first (%methods gf)))))
+      (ok (every (lambda (gf)
+                   (eql (%line "(defclass circle") (gethash "line" (first (%methods gf)))))
                  gfs)))))
 
 (deftest generic-function-report-shows-other-method-combinations
@@ -2184,7 +2185,8 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
                                      :form-name "(setf label) (value (s shape))"))
                     "omitted_classes" (vector "COMMON-LISP:STANDARD-OBJECT" "COMMON-LISP:T"))
            "limit" 50
-           "notes" (vector "not finalized; precedence list and slots were computed without finalizing the class")))
+           "notes" (vector (concatenate 'string "not finalized; precedence list and slots "
+                                        "were computed without finalizing the class"))))
 
 (defun %round-trip (report)
   "Return REPORT as it arrives from the worker: JSON-encoded and parsed back,
@@ -2209,20 +2211,24 @@ so arrays are lists and false is NIL."
 (deftest clos-text-for-a-class
   (testing "hierarchy, aligned slots, initargs and methods with their origin"
     (ok (equal (%lines
-                "Class PKG:CIRCLE (standard-class, not finalized) — src/shapes.lisp:20 (defclass circle)"
+                (concatenate 'string "Class PKG:CIRCLE (standard-class, not finalized) — "
+                             "src/shapes.lisp:20 (defclass circle)")
                 "Superclasses: SHAPE"
                 "Subclasses: (none)"
                 "Precedence: CIRCLE SHAPE STANDARD-OBJECT T"
                 "Slots (3):"
                 "  NAME      from SHAPE :initarg :NAME :initform \"anon\"  reader SHAPE-NAME"
-                "  RADIUS    direct     :initarg :RADIUS :initform (RANDOM 10) :type REAL  accessor RADIUS"
+                (concatenate 'string "  RADIUS    direct     :initarg :RADIUS "
+                             ":initform (RANDOM 10) :type REAL  accessor RADIUS")
                 "  REGISTRY  from SHAPE :allocation :class"
                 "Default initargs:"
                 "  :NAME \"round\" from SHAPE"
                 "Methods (2; standard protocol on STANDARD-OBJECT, T omitted):"
                 "  RADIUS (CIRCLE) [reader]          src/shapes.lisp:20 (defclass circle)"
-                "  (SETF LABEL) (T SHAPE) via SHAPE  src/shapes.lisp:30 (defmethod (setf label) (value (s shape)))"
-                "Note: not finalized; precedence list and slots were computed without finalizing the class")
+                (concatenate 'string "  (SETF LABEL) (T SHAPE) via SHAPE  src/shapes.lisp:30 "
+                             "(defmethod (setf label) (value (s shape)))")
+                (concatenate 'string "Note: not finalized; precedence list and slots were computed "
+                             "without finalizing the class"))
                (%text (build-clos-describe-response (%class-report)))))))
 
 (deftest clos-text-is-the-same-after-the-worker-round-trip
@@ -2243,7 +2249,8 @@ so arrays are lists and false is NIL."
       (ok (search "Package \"NOPE\" not found (nothing was interned)"
                   (text-for "symbol_status" "package_not_found" "lookup_package" "NOPE"))))
     (testing "a symbol naming neither a class nor a generic function"
-      (ok (search "COMMON-LISP:CAR names a function, not a generic function or class; code-describe describes it."
+      (ok (search (concatenate 'string "COMMON-LISP:CAR names a function, not a generic function "
+                               "or class; code-describe describes it.")
                   (text-for "symbol_status" "found" "resolved_symbol" "COMMON-LISP:CAR"
                             "symbol_kind" "function")))
       (ok (search "PKG::X names nothing in this image. Is the system loaded?"
@@ -2265,11 +2272,12 @@ so arrays are lists and false is NIL."
       (ok (equal '("defclass" "circle")
                  (list (gethash "form_type" class) (gethash "form_name" class))))
       (ok (not (nth-value 1 (gethash "abs_path" class))))
-      (ok (equal '(("defmethod" "area :around ((shape circle))")
+      (ok (equal `(("defmethod" "area :around ((shape circle))")
                    ("defmethod" "area ((shape circle))")
                    ("defclass" "circle")
                    ("defclass" "circle")
-                   ("defmethod" "describe-shape ((shape shape) &optional (stream *standard-output*) verbose)")
+                   ("defmethod" ,(concatenate 'string "describe-shape ((shape shape) "
+                                              "&optional (stream *standard-output*) verbose)"))
                    ("defmethod" "(setf label) (value (shape shape))")
                    ("defclass" "shape"))
                  (mapcar (lambda (method)
@@ -2322,7 +2330,8 @@ so arrays are lists and false is NIL."
                             "cl-mcp-clos-fixture:radius"))
         (let* ((report (build-clos-describe-response (clos-describe-report designator)))
                (class (gethash "class" report))
-               (entries (append (loop for gf in (sequence->list (gethash "generic_functions" report))
+               (entries (append (loop for gf
+                                        in (sequence->list (gethash "generic_functions" report))
                                       collect gf
                                       append (sequence->list (gethash "methods" gf)))
                                 (and (hash-table-p class)
@@ -2848,7 +2857,8 @@ function."
                   :description "Optional package used when SYMBOL is unqualified")
          (limit :type :integer
                 :description
-                "Maximum methods listed per generic function and per class (default 50); the total is always reported"))
+                "Maximum methods listed per generic function and per class (default 50);
+the total is always reported"))
   :body
   (progn
     ;; Checked before any worker call, so a bad value gets the same argument
