@@ -361,17 +361,21 @@ is kept."
   "Find a target node matching FORM-TYPE and FORM-NAME.
 If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
 If multiple matches exist without an index, signals an error with candidate info.
-FORM-NAME is compared after %NORMALIZE-FORM-NAME-TEXT, so package prefixes and
-line breaks in it do not matter."
+For a defmethod, FORM-NAME is compared after %NORMALIZE-FORM-NAME-TEXT, so
+package prefixes and line breaks in it do not matter: its candidates are
+printed that way.  Other form types compare FORM-NAME as written (reader
+prefixes and case aside), since their names may be strings such as
+\"/users/:id\" whose colons and spaces are part of the name."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let ((target (%normalize-form-name-text
-                   (%strip-hash-colon
-                    (string-downcase (%strip-name-prefix base-name)))))
-          (matches nil))
+    (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
+           (target (if (string= form-type "defmethod")
+                       (%normalize-form-name-text stripped)
+                       stripped))
+           (matches nil))
       (when (zerop (length target))
         (error "form_name resolved to empty string after prefix stripping; ~
 provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))

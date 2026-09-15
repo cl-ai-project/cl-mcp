@@ -812,6 +812,36 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search ":primary-replaced" updated))
           (ok (search "(call-next-method)" updated)))))))
 
+(deftest lisp-edit-form-string-name-with-colon
+  (testing "a string form name holding a colon matches, with or without its quotes"
+    (dolist (form-name '("my-lib:feature" "\"my-lib:feature\""))
+      (with-temp-file "tests/tmp/edit-form-string-colon.lisp"
+          (format nil "(deftest \"my-lib:feature\"~%  (ok t))~%~%(defun untouched () :ok)~%")
+        (lambda (path)
+          (lisp-edit-form :file-path path
+                          :form-type "deftest"
+                          :form-name form-name
+                          :operation "replace"
+                          :content (format nil "(deftest \"my-lib:feature\"~%  (ok :replaced))"))
+          (let ((updated (fs-read-file path)))
+            (ok (search "(ok :replaced)" updated) form-name)
+            (ok (search "(defun untouched () :ok)" updated))))))))
+
+(deftest lisp-edit-form-string-name-with-two-spaces
+  (testing "a string form name holding two consecutive spaces still matches"
+    (dolist (form-name '("adds  two" "\"adds  two\""))
+      (with-temp-file "tests/tmp/edit-form-string-spaces.lisp"
+          (format nil "(deftest \"adds  two\"~%  (ok t))~%~%(deftest \"adds two\"~%  (ok t))~%")
+        (lambda (path)
+          (lisp-edit-form :file-path path
+                          :form-type "deftest"
+                          :form-name form-name
+                          :operation "replace"
+                          :content (format nil "(deftest \"adds  two\"~%  (ok :replaced))"))
+          (let ((updated (fs-read-file path)))
+            (ok (search "(ok :replaced)" updated) form-name)
+            (ok (search (format nil "(deftest \"adds two\"~%  (ok t))") updated))))))))
+
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
     (handler-case
