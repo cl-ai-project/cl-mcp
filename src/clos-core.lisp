@@ -241,6 +241,237 @@ sorted before any is located, so only the listed ones read their files."
           (map 'vector #'%method-entry (subseq sorted 0 (min limit (length sorted)))))
     ht))
 
+(defun %language-class-p (class)
+  "True when CLASS belongs to the language or the implementation: its name's
+package is COMMON-LISP or an SB- package.  Their methods are the standard
+protocol every class inherits."
+  (let* ((name (%proper-class-name class))
+         (package (and name (symbol-package name)))
+         (package-name (and package (package-name package))))
+    (and package-name
+         (or (string= package-name "COMMON-LISP")
+             (uiop:string-prefix-p "SB-" package-name)))))
+
+(defun %undefined-ancestors (class)
+  "Return the forward-referenced classes among CLASS's ancestors."
+  (let ((seen '())
+        (undefined '()))
+    (labels ((walk (c)
+               (unless (member c seen)
+                 (push c seen)
+                 (if (typep c 'sb-mop:forward-referenced-class)
+                     (pushnew c undefined)
+                     (mapc #'walk (ignore-errors (sb-mop:class-direct-superclasses c)))))))
+      (walk class))
+    (nreverse undefined)))
+
+(defun %precedence-list (class)
+  "Return CLASS's precedence list without finalizing it, or NIL when an
+ancestor is undefined."
+  (if (sb-mop:class-finalized-p class)
+      (sb-mop:class-precedence-list class)
+      (ignore-errors (sb-mop:compute-class-precedence-list class))))
+
+(defun %direct-slots-named (cpl name)
+  "Return (CLASS . DIRECT-SLOT) for each class in CPL defining a slot NAME."
+  (loop for class in cpl
+        for slot = (find name (ignore-errors (sb-mop:class-direct-slots class))
+                         :key #'sb-mop:slot-definition-name)
+        when slot collect (cons class slot)))
+
+(defun %names (names)
+  "Return a vector of NAMES, function or class names, fully qualified."
+  (map 'vector #'%name-string names))
+
+(defun %slot-type-text (types package)
+  "Return the type of a slot declared TYPES along the precedence list: T, the
+one declared type, or the conjunction of several."
+  (let ((declared (remove-duplicates (remove t types) :test #'equal :from-end t)))
+    (%form-text (cond ((null declared) t)
+                      ((null (rest declared)) (first declared))
+                      (t (cons 'and declared)))
+                package)))
+
+(defun %allocation-text (allocation)
+  "Return a slot ALLOCATION as lower-case text: instance or class."
+  (if (symbolp allocation)
+      (string-downcase (symbol-name allocation))
+      "class"))
+
+(defun %slot-documentation (slot)
+  "Return SLOT's documentation, or NIL.  Only standard slot definitions are
+asked: SBCL warns \"unsupported DOCUMENTATION\" for condition and structure
+slots, and that warning would reach the caller's stderr."
+  (and (typep slot 'sb-mop:standard-slot-definition)
+       (ignore-errors (documentation slot t))))
+
+(defun %direct-slot-entry (slot package)
+  "Return the JSON object for SLOT, a direct slot definition."
+  (make-ht "name" (qualified-symbol-name (sb-mop:slot-definition-name slot))
+           "initargs" (map 'vector #'%datum-text (sb-mop:slot-definition-initargs slot))
+           "initform" (and (sb-mop:slot-definition-initfunction slot)
+                           (%form-text (sb-mop:slot-definition-initform slot) package))
+           "type" (%form-text (sb-mop:slot-definition-type slot) package)
+           "allocation" (%allocation-text (sb-mop:slot-definition-allocation slot))
+           "readers" (%names (ignore-errors (sb-mop:slot-definition-readers slot)))
+           "writers" (%names (ignore-errors (sb-mop:slot-definition-writers slot)))
+           "documentation" (%slot-documentation slot)))
+
+(defun %effective-slot-entry (name cpl package &optional effective)
+  "Return the JSON object for the slot NAME as CPL's classes define it.
+
+EFFECTIVE, the finalized class's effective slot definition, supplies initargs,
+initform, type and allocation when given.  Otherwise they are merged from the
+direct slots the standard way (CLHS 7.5.3): allocation and documentation from
+the most specific, the initform from the most specific that has one, the
+initargs from all of them, the type as the conjunction of their types.
+Readers and writers are those of every direct slot NAME."
+  (let* ((pairs (%direct-slots-named cpl name))
+         (slots (mapcar #'cdr pairs))
+         (with-initform (find-if #'sb-mop:slot-definition-initfunction slots)))
+    (flet ((all (reader)
+             (remove-duplicates (mapcan (lambda (slot)
+                                          (copy-list (ignore-errors (funcall reader slot))))
+                                        slots)
+                                :test #'equal :from-end t)))
+      (make-ht "name" (qualified-symbol-name name)
+               "from" (and pairs (%name-string (%proper-class-name (car (first pairs)))))
+               "initargs" (map 'vector #'%datum-text
+                               (if effective
+                                   (sb-mop:slot-definition-initargs effective)
+                                   (all #'sb-mop:slot-definition-initargs)))
+               "initform" (let ((source (or effective with-initform)))
+                            (and source (sb-mop:slot-definition-initfunction source)
+                                 (%form-text (sb-mop:slot-definition-initform source) package)))
+               "type" (if effective
+                          (%form-text (sb-mop:slot-definition-type effective) package)
+                          (%slot-type-text (mapcar #'sb-mop:slot-definition-type slots)
+                                           package))
+               "allocation" (%allocation-text
+                             (sb-mop:slot-definition-allocation (or effective (first slots))))
+               "readers" (%names (all #'sb-mop:slot-definition-readers))
+               "writers" (%names (all #'sb-mop:slot-definition-writers))
+               "documentation" (some #'%slot-documentation slots)))))
+
+(defun %effective-slots (class cpl package)
+  "Return the JSON objects for CLASS's effective slots, or NIL without CPL.
+A finalized class's own effective slots are used, so a metaclass that
+computes them differently is respected; an unfinalized class's are merged
+from the direct slots, the most general class's first."
+  (cond
+    ((null cpl) nil)
+    ((sb-mop:class-finalized-p class)
+     (map 'vector
+          (lambda (effective)
+            (%effective-slot-entry (sb-mop:slot-definition-name effective) cpl package effective))
+          (sb-mop:class-slots class)))
+    (t
+     (let ((names (remove-duplicates
+                   (loop for c in (reverse cpl)
+                         append (mapcar #'sb-mop:slot-definition-name
+                                        (ignore-errors (sb-mop:class-direct-slots c))))
+                   :from-end t)))
+       (map 'vector (lambda (name) (%effective-slot-entry name cpl package)) names)))))
+
+(defun %default-initargs (cpl package)
+  "Return the JSON objects for the default initargs of the class whose
+precedence list is CPL, each with the class that supplies it, or NIL without
+CPL."
+  (when cpl
+    (let ((seen '())
+          (entries '()))
+      (dolist (c cpl)
+        (dolist (initarg (ignore-errors (sb-mop:class-direct-default-initargs c)))
+          (unless (member (first initarg) seen)
+            (push (first initarg) seen)
+            (push (make-ht "initarg" (%datum-text (first initarg))
+                           "form" (%form-text (second initarg) package)
+                           "from" (%name-string (%proper-class-name c)))
+                  entries))))
+      (coerce (nreverse entries) 'vector))))
+
+(defun %class-methods (class cpl)
+  "Return (values PAIRS OMITTED) for the methods specialized on CLASS or its
+superclasses.  PAIRS are (METHOD . CLASS-SPECIALIZED), ordered by that class's
+place in CPL, then by generic function name -- X before (SETF X) -- and role.
+OMITTED lists the language-level superclasses (%LANGUAGE-CLASS-P) whose
+methods were left out; CLASS itself is never left out."
+  (let ((seen (make-hash-table :test #'eq))
+        (entries '())
+        (omitted '()))
+    (loop for c in (or cpl (list class))
+          for rank from 0
+          for methods = (ignore-errors (sb-mop:specializer-direct-methods c))
+          do (if (and (not (eq c class)) (%language-class-p c))
+                 (when methods (push c omitted))
+                 (dolist (method methods)
+                   (unless (gethash method seen)
+                     (setf (gethash method seen) t)
+                     (push (list method c rank) entries)))))
+    (flet ((key (entry)
+             (destructuring-bind (method c rank) entry
+               (declare (ignore c))
+               (let* ((gf (ignore-errors (sb-mop:method-generic-function method)))
+                      (name (and gf (sb-mop:generic-function-name gf)))
+                      (setf-p (consp name))
+                      (base (if setf-p (second name) name)))
+                 (list rank
+                       (if (symbolp base) (symbol-name base) "")
+                       (if setf-p 1 0)
+                       (%role-rank method))))))
+      (values (mapcar (lambda (entry) (cons (first entry) (second entry)))
+                      (stable-sort (nreverse entries) #'%key< :key #'key))
+              (nreverse omitted)))))
+
+(defun %class-entry (class limit)
+  "Return (values ENTRY NOTES): the JSON object for CLASS, with at most LIMIT
+methods, and the notes the report should carry about it."
+  (let* ((name (%proper-class-name class))
+         (package (%home-package name))
+         (finalized (sb-mop:class-finalized-p class))
+         (cpl (%precedence-list class))
+         (by-name (%introspect "FIND-DEFINITION-SOURCES-BY-NAME"))
+         (source (and by-name name
+                      (loop for kind in '(:class :condition :structure)
+                            thereis (first (ignore-errors (funcall by-name name kind))))))
+         (ht (%set-location (make-ht) source))
+         (notes '()))
+    (multiple-value-bind (pairs omitted) (%class-methods class cpl)
+      (setf (gethash "name" ht) (%name-string name)
+            (gethash "metaclass" ht) (%name-string (class-name (class-of class)))
+            (gethash "documentation" ht) (ignore-errors (documentation class t))
+            (gethash "finalized" ht) (json-bool finalized)
+            (gethash "direct_superclasses" ht)
+            (%names (mapcar #'class-name (sb-mop:class-direct-superclasses class)))
+            (gethash "direct_subclasses" ht)
+            (%names (remove nil (mapcar #'%proper-class-name
+                                        (sb-mop:class-direct-subclasses class))))
+            (gethash "precedence_list" ht) (and cpl (%names (mapcar #'class-name cpl)))
+            (gethash "undefined_superclasses" ht)
+            (if cpl
+                (vector)
+                (%names (mapcar #'class-name (%undefined-ancestors class))))
+            (gethash "direct_slots" ht)
+            (map 'vector (lambda (slot) (%direct-slot-entry slot package))
+                 (ignore-errors (sb-mop:class-direct-slots class)))
+            (gethash "effective_slots" ht) (%effective-slots class cpl package)
+            (gethash "default_initargs" ht) (%default-initargs cpl package)
+            (gethash "method_count" ht) (length pairs)
+            (gethash "truncated" ht) (json-bool (> (length pairs) limit))
+            (gethash "methods" ht)
+            (map 'vector (lambda (pair) (%method-entry (car pair) :via (cdr pair)))
+                 (subseq pairs 0 (min limit (length pairs))))
+            (gethash "omitted_classes" ht) (%names (mapcar #'class-name omitted)))
+      (cond
+        ((null cpl)
+         (push (format nil "precedence list and effective slots unavailable: ~
+undefined superclass ~{~A~^, ~}"
+                       (coerce (gethash "undefined_superclasses" ht) 'list))
+               notes))
+        ((not finalized)
+         (push *note-not-finalized* notes))))
+    (values ht (nreverse notes))))
+
 (defun clos-describe-report (symbol-name &key package (limit 50))
   "Return the clos-describe payload for SYMBOL-NAME, everything but its content
 text and the form_type, form_name and note fields the parent fills in.
@@ -248,8 +479,8 @@ text and the form_type, form_name and note fields the parent fills in.
 SYMBOL-NAME is resolved like code-find-references' symbol (RESOLVE-TARGET):
 nothing is interned.  The report holds a generic_functions entry for the
 function SYMBOL-NAME names and one for its SETF function, when either is a
-generic function.  At most LIMIT methods are listed per entry.  docs/tools.md
-describes every field."
+generic function, and a class entry when it names a class.  At most LIMIT
+methods are listed per entry.  docs/tools.md describes every field."
   (multiple-value-bind (symbol status lookup-package lookup-name)
       (resolve-target symbol-name :package package)
     (let ((report (make-ht "symbol" symbol-name
@@ -270,5 +501,10 @@ describes every field."
                                               (and (fboundp name) (fdefinition name)))
                               when (typep function 'generic-function)
                                 collect (%generic-function-entry function limit))
-                        'vector))))
+                        'vector))
+          (let ((class (find-class symbol nil)))
+            (when class
+              (multiple-value-bind (entry notes) (%class-entry class limit)
+                (setf (gethash "class" report) entry
+                      (gethash "notes" report) (coerce notes 'vector)))))))
       report)))
