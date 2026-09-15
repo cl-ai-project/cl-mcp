@@ -504,7 +504,8 @@ LABEL goes into its name, so a leftover directory says which test made it."
   (testing "a file that does not parse gives its reader error"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp))
           (path (%write-tmp "top-level-forms-at-bad.lisp"
-                            (format nil "(in-package #:cl-user)~%~%(defparameter *x* #.(+ 1 2))~%"))))
+                            (format nil "(in-package #:cl-user)~%~%~
+(defparameter *x* #.(+ 1 2))~%"))))
       (unwind-protect
            (multiple-value-bind (table failure) (top-level-forms-at path '(3))
              (ok (zerop (hash-table-count table)))
