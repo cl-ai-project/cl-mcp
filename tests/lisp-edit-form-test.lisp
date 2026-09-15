@@ -789,7 +789,9 @@ Used to prove that a dry-run summary does not grow with the size of the file."
       (lambda (path)
         (lisp-edit-form :file-path path
                         :form-type "defmethod"
-                        :form-name "write-out ((stream sink) string &optional (start 0) end (fill-pointer-output nil) (element-type 'character))"
+                        :form-name (concatenate 'string
+                            "write-out ((stream sink) string &optional (start 0) end "
+                            "(fill-pointer-output nil) (element-type 'character))")
                         :operation "replace"
                         :content (format nil "(defmethod write-out ((stream sink) string ~
 &optional (start 0) end (fill-pointer-output nil) (element-type 'character))~%  :long-replaced)"))
