@@ -40,7 +40,8 @@
   (:export #:*max-scan-sites*
            #:target-name-from-designator
            #:scan-text
-           #:scan-project))
+           #:scan-project
+           #:top-level-forms-at))
 
 (in-package #:cl-mcp/src/code-refs-scan)
 
@@ -666,3 +667,45 @@ JSON-ready hash-table:
                              (fail file abs-path
                                    (%first-line (princ-to-string e))))))))))))))
       (report))))
+
+(defun top-level-forms-at (abs-path lines)
+  "Describe the top-level forms of the file at ABS-PATH that start on LINES.
+
+Returns (values TABLE FAILURE).  TABLE maps each line in LINES on which a
+top-level form starts to (FORM-TYPE . FORM-NAME), as %FORM-METADATA gives them
+to code-find-references, with the package from the file's IN-PACKAGE forms; a
+line no form starts on is absent.  A form wrapped in #+feature or #-feature is
+found both on its own line and on the line of the form it wraps (%UNWRAP).
+
+FAILURE is NIL when the file was read and parsed.  It is :DENIED when the read
+policy refuses ABS-PATH (%READABLE-PATH) -- the file is then not opened -- and
+a one-line string when the file cannot be read or does not parse; TABLE is
+empty in both cases."
+  (let ((table (make-hash-table))
+        (wanted (remove-duplicates (remove-if-not #'integerp lines)))
+        (readable (and abs-path (%readable-path abs-path))))
+    (cond
+      ((null readable) (values table :denied))
+      ((null wanted) (values table nil))
+      (t
+       (multiple-value-bind (text read-condition)
+           (ignore-errors (fs-read-source-text readable))
+         (if (null text)
+             (values table (%first-line (princ-to-string read-condition)))
+             (handler-case
+                 (let ((in-package nil))
+                   (dolist (node (parse-top-level-forms text :source-path (pathname abs-path)))
+                     (when (eq (cst-node-kind node) :expr)
+                       (let ((value (cst-node-value node)))
+                         (dolist (line (list (cst-node-start-line node)
+                                             (cst-node-start-line (%unwrap node))))
+                           (when (and (member line wanted) (not (gethash line table)))
+                             (multiple-value-bind (form-type form-name)
+                                 (%form-metadata value in-package)
+                               (setf (gethash line table) (cons form-type form-name)))))
+                         (let ((designator (%in-package-form-p value)))
+                           (when designator
+                             (setf in-package designator))))))
+                   (values table nil))
+               (error (e)
+                 (values table (%first-line (princ-to-string e)))))))))))

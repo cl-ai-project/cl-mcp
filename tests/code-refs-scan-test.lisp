@@ -17,7 +17,8 @@
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:target-name-from-designator
                 #:scan-text
-                #:scan-project))
+                #:scan-project
+                #:top-level-forms-at))
 
 (in-package #:cl-mcp/tests/code-refs-scan-test)
 
@@ -474,3 +475,57 @@ LABEL goes into its name, so a leftover directory says which test made it."
                    "the package stays absent from the parent")
                (ok (= 1 reads) "the defining file is read by one walk, not one per file")))
         (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(defun %write-tmp (name text)
+  "Write TEXT to tests/tmp/NAME in the cl-mcp source tree; return its truename namestring."
+  (let ((file (asdf/system:system-relative-pathname :cl-mcp (format nil "tests/tmp/~A" name))))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede :external-format :utf-8)
+      (write-string text out))
+    (namestring (truename file))))
+
+(deftest top-level-forms-at-describes-forms-starting-on-lines
+  (testing "form_type and form_name of the forms starting on the given lines"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at.lisp"
+                            (format nil "(in-package #:cl-user)~%~%(defclass widget ()~%  ())~%~%~
+(defmethod paint ((w widget) stream)~%  (list w stream))~%~%#+sbcl~%(defun gated () 1)~%"))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(3 6 9 10 4))
+             (ok (null failure))
+             (ok (equal '("defclass" . "widget") (gethash 3 table)))
+             (ok (equal '("defmethod" . "paint ((w widget) stream)") (gethash 6 table)))
+             (ok (equal '("defun" . "gated") (gethash 9 table)) "the #+sbcl line")
+             (ok (equal '("defun" . "gated") (gethash 10 table)) "the wrapped form's line")
+             (ok (null (gethash 4 table)) "a line inside a form"))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-reports-why-it-found-nothing
+  (testing "a file that does not parse gives its reader error"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-bad.lisp"
+                            (format nil "(in-package #:cl-user)~%~%(defparameter *x* #.(+ 1 2))~%"))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(3))
+             (ok (zerop (hash-table-count table)))
+             (ok (and (stringp failure) (search "*READ-EVAL*" failure)) failure))
+        (ignore-errors (delete-file path)))))
+  (testing "a file outside the readable paths is not opened"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (outside (merge-pathnames "cl-mcp-top-level-forms-at-outside.lisp"
+                                    (uiop:temporary-directory))))
+      (with-open-file (out outside :direction :output :if-exists :supersede)
+        (write-string "(defun outside () 1)" out))
+      (unwind-protect
+           (ok (eq :denied (nth-value 1 (top-level-forms-at (namestring outside) '(1)))))
+        (ignore-errors (delete-file outside))))))
+
+(deftest top-level-forms-at-without-lines-reads-nothing
+  (testing "no lines asked for is no failure and an empty table"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-empty.lisp" "(defun one () 1)")))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '())
+             (ok (zerop (hash-table-count table)))
+             (ok (null failure)))
+        (ignore-errors (delete-file path))))))
