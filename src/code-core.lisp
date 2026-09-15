@@ -24,7 +24,12 @@
            #:code-find-references
            #:code-find-references-report
            #:%offset->line
-           #:%ensure-sb-introspect))
+           #:%ensure-sb-introspect
+           #:%sbcl-function
+           #:%read-form-starts
+           #:definition-source-line
+           #:definition-source-location
+           #:with-definition-source-cache))
 
 (in-package #:cl-mcp/src/code-core)
 
@@ -344,6 +349,195 @@ length.  Returns NIL when the file cannot be read."
                    "error" (princ-to-string e))
         nil))))
 
+(defvar *debug-sources* nil
+  "Source namestring -> newest debug source, or :UNBUILT, inside
+WITH-DEFINITION-SOURCE-CACHE.  NIL outside it, where every lookup walks the
+heap afresh.")
+
+(defvar *read-form-starts* nil
+  "Source namestring -> %READ-FORM-STARTS' vector (or :NONE) inside
+WITH-DEFINITION-SOURCE-CACHE, so each file is read at most once.  NIL outside
+it.")
+
+(defmacro with-definition-source-cache (&body body)
+  "Run BODY so that DEFINITION-SOURCE-LINE walks the heap for debug sources,
+and reads each source file for its form positions, at most once however many
+definitions BODY resolves.  Nothing is kept past BODY: a reload in between
+would leave the tables describing files as they were."
+  `(let ((*debug-sources* (or *debug-sources* :unbuilt))
+         (*read-form-starts* (or *read-form-starts* (make-hash-table :test #'equal))))
+     ,@body))
+
+(defun %sbcl-function (package name)
+  "Return the function NAME in SBCL's PACKAGE, or NIL when this SBCL lacks it."
+  (let ((symbol (and (find-package package) (find-symbol name package))))
+    (and symbol (fboundp symbol) (fdefinition symbol))))
+
+(defun %debug-sources-by-namestring ()
+  "Return a table from source namestring to the newest debug source recording
+the start positions of that file's top-level forms.
+
+It walks every code object in the heap (about 60ms for 28,000 objects).  Of
+several debug sources for one file, the one with the latest
+DEBUG-SOURCE-CREATED wins (NIL counts as 0), and of those created in the same
+second, the one recording the most forms.  Loading a file more than once leaves
+one set per load; compiling a file that starts with DEFPACKAGE also leaves a
+second debug source, created in the same second, that records only the forms
+read before the package existed."
+  (let ((table (make-hash-table :test #'equal))
+        (list-objects (%sbcl-function "SB-VM" "LIST-ALLOCATED-OBJECTS"))
+        (code-widetag (let ((symbol (find-symbol "CODE-HEADER-WIDETAG" "SB-VM")))
+                        (and symbol (boundp symbol) (symbol-value symbol))))
+        (debug-info-fn (%sbcl-function "SB-KERNEL" "%CODE-DEBUG-INFO"))
+        (info-type (find-symbol "COMPILED-DEBUG-INFO" "SB-C"))
+        (info-source-fn (%sbcl-function "SB-C" "COMPILED-DEBUG-INFO-SOURCE"))
+        (source-type (find-symbol "DEBUG-SOURCE" "SB-C"))
+        (namestring-fn (%sbcl-function "SB-C" "DEBUG-SOURCE-NAMESTRING"))
+        (positions-fn (%sbcl-function "SB-C" "DEBUG-SOURCE-START-POSITIONS"))
+        (created-fn (%sbcl-function "SB-C" "DEBUG-SOURCE-CREATED")))
+    (when (and list-objects code-widetag debug-info-fn info-type info-source-fn
+               source-type namestring-fn positions-fn created-fn)
+      (dolist (code (funcall list-objects :all :type code-widetag))
+        (let ((info (funcall debug-info-fn code)))
+          (when (typep info info-type)
+            (let ((source (funcall info-source-fn info)))
+              (when (and (typep source source-type)
+                         (stringp (funcall namestring-fn source))
+                         (funcall positions-fn source))
+                (let* ((name (funcall namestring-fn source))
+                       (old (gethash name table)))
+                  (when (or (null old)
+                            (let ((created (or (funcall created-fn source) 0))
+                                  (old-created (or (funcall created-fn old) 0)))
+                              (or (> created old-created)
+                                  (and (= created old-created)
+                                       (> (length (funcall positions-fn source))
+                                          (length (funcall positions-fn old)))))))
+                    (setf (gethash name table) source))))))))
+      table)))
+
+(defun %debug-source-for (pathname)
+  "Return the newest debug source compiled from PATHNAME, or NIL."
+  (let ((table (cond
+                 ((hash-table-p *debug-sources*) *debug-sources*)
+                 ((eq *debug-sources* :unbuilt)
+                  (setf *debug-sources* (%debug-sources-by-namestring)))
+                 (t (%debug-sources-by-namestring)))))
+    (and table pathname (gethash (namestring pathname) table))))
+
+(defun %read-form-starts (pathname)
+  "Return a vector of the file positions at which PATHNAME's top-level forms
+start, numbered as COMPILE-FILE numbers them, or NIL when the file cannot be
+read that way.
+
+The file is read with the standard readtable, *READ-SUPPRESS* true and
+READ-PRESERVING-WHITESPACE, so nothing is evaluated or interned (a feature
+expression's keywords aside) and a form a reader conditional excludes counts
+for nothing -- which is how the compiler counts.  On cl-mcp's own sources the
+positions equal the ones the compiler records.  A file using a custom reader
+macro may fail to read, giving NIL."
+  (handler-case
+      (with-open-file (in (translate-logical-pathname pathname)
+                          :external-format '(:utf-8 :replacement #\?))
+        (let ((*read-suppress* t)
+              (*read-eval* nil)
+              (*package* (find-package "COMMON-LISP-USER"))
+              (*readtable* (copy-readtable nil))
+              (eof (list :eof))
+              (starts '()))
+          (loop
+            (let ((position (file-position in)))
+              (when (eq (read-preserving-whitespace in nil eof) eof)
+                (return (coerce (nreverse starts) 'vector)))
+              (push position starts)))))
+    (error () nil)))
+
+(defun %cached-read-form-starts (pathname)
+  "Return %READ-FORM-STARTS for PATHNAME, reading the file at most once inside
+WITH-DEFINITION-SOURCE-CACHE."
+  (let ((key (namestring pathname)))
+    (if (hash-table-p *read-form-starts*)
+        (let ((cached (gethash key *read-form-starts*)))
+          (cond
+            ((eq cached :none) nil)
+            (cached cached)
+            (t (let ((starts (%read-form-starts pathname)))
+                 (setf (gethash key *read-form-starts*) (or starts :none))
+                 starts))))
+        (%read-form-starts pathname))))
+
+(defun %form-start-offset (pathname form-number)
+  "Return the file position where top-level form FORM-NUMBER of PATHNAME
+starts, or NIL.
+
+The positions PATHNAME's newest debug source recorded are used when they reach
+FORM-NUMBER; they also cover files that use custom reader syntax.  Otherwise
+the file is read (%CACHED-READ-FORM-STARTS): the debug source is gone once the
+garbage collector has freed every function compiled from the file -- a file
+holding only DEFCLASS forms keeps no code after it is loaded -- or the one
+left may record only the forms read before a DEFPACKAGE took effect."
+  (flet ((position-in (positions)
+           (and (vectorp positions)
+                (integerp form-number)
+                (< -1 form-number (length positions))
+                (aref positions form-number))))
+    (let ((source (%debug-source-for pathname)))
+      (or (and source
+               (position-in
+                (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-START-POSITIONS") source)))
+          (position-in (%cached-read-form-starts pathname))))))
+
+(defun definition-source-line (source)
+  "Return the 1-based line an SB-INTROSPECT definition SOURCE starts on, or NIL.
+
+A character offset, recorded for functions, is used when present.  Classes,
+conditions, structures and methods carry only a form path, whose first element
+numbers the top-level form; that form's start comes from %FORM-START-OFFSET.
+Both are octet positions that %OFFSET->LINE converts."
+  (let* ((pkg (%ensure-sb-introspect))
+         (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
+         (offset-fn (and pkg (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
+         (form-path-fn (and pkg (find-symbol "DEFINITION-SOURCE-FORM-PATH" pkg)))
+         (pathname (and source path-fn (ignore-errors (funcall path-fn source))))
+         (offset (and source offset-fn (ignore-errors (funcall offset-fn source))))
+         (form-path (and source form-path-fn (ignore-errors (funcall form-path-fn source)))))
+    (when pathname
+      (let ((position (or offset
+                          (and (consp form-path)
+                               (ignore-errors
+                                (%form-start-offset pathname (first form-path)))))))
+        (and position (%offset->line pathname position))))))
+
+(defun %debug-source-created (pathname)
+  "Return the source write date recorded in PATHNAME's newest debug source, or NIL."
+  (let ((source (%debug-source-for pathname)))
+    (and source
+         (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-CREATED") source))))
+
+(defun definition-source-location (source)
+  "Return (values ABS-PATH PATH LINE STALE) for an SB-INTROSPECT definition SOURCE.
+
+ABS-PATH is the source file's truename namestring, or NIL when SOURCE has no
+file or names none that is absolute (a definition typed into repl-eval records
+the path \"repl-eval\").  PATH is the display path (NORMALIZE-PATH-FOR-DISPLAY)
+and LINE comes from DEFINITION-SOURCE-LINE; either may be NIL.  STALE is true
+when the file was written after the date recorded for SOURCE -- its own
+FILE-WRITE-DATE, or, for definitions that keep none, the date in the file's
+debug source.  Without either date STALE is false."
+  (let* ((pkg (%ensure-sb-introspect))
+         (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
+         (write-date-fn (and pkg (find-symbol "DEFINITION-SOURCE-FILE-WRITE-DATE" pkg)))
+         (pathname (and source path-fn (ignore-errors (funcall path-fn source)))))
+    (if (null pathname)
+        (values nil nil nil nil)
+        (let ((truename (%truename-string pathname))
+              (recorded (or (and write-date-fn (ignore-errors (funcall write-date-fn source)))
+                            (ignore-errors (%debug-source-created pathname)))))
+          (values (and truename (uiop:absolute-pathname-p truename) truename)
+                  (normalize-path-for-display pathname)
+                  (definition-source-line source)
+                  (and (%source-stale-p pathname recorded) t))))))
+
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) t &optional))
                 code-find-definition))
@@ -368,7 +562,6 @@ downstream therefore failed for every file that does exist."
            (find-by-name (and pkg (find-symbol "FIND-DEFINITION-SOURCES-BY-NAME" pkg)))
            (find (and pkg (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
            (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
-           (offset (and pkg (find-symbol "DEFINITION-SOURCE-CHARACTER-OFFSET" pkg)))
            (kinds '(:function :generic-function :method :macro
                     :class :condition :structure :type
                     :variable :constant :method-combination :package))
@@ -391,8 +584,7 @@ downstream therefore failed for every file that does exist."
                 (and find (ignore-errors (funcall find sym))))))
       (when (and source path-fn)
         (let* ((pathname (funcall path-fn source))
-               (char-offset (and offset (funcall offset source)))
-               (line (%offset->line pathname char-offset))
+               (line (definition-source-line source))
                (on-disk (and pathname
                              (ignore-errors (probe-file pathname))
                              t))
