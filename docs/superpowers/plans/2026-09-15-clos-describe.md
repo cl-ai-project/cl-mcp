@@ -1721,12 +1721,17 @@ Expected: 新しい 6 本が `class` が NIL のため失敗し、Task 4 の 5 �
 ```lisp
 (defun %class-name-string (class)
   "Return CLASS's name fully qualified when it is a symbol naming CLASS, else
-CLASS printed as COMMON-LISP-USER prints it (#<STANDARD-CLASS NIL {...}> for an
-anonymous class), so a class without a proper name never reads as NIL."
+an unreadable representation naming its metaclass,
+#<anonymous COMMON-LISP:STANDARD-CLASS {10045A8F33}>, so a class without a
+proper name never reads as NIL.  SBCL's own PRINT-OBJECT for a class is not
+used: it writes an anonymous class's name as COMMON-LISP:NIL whatever
+*PACKAGE* is."
   (let ((name (%proper-class-name class)))
     (if name
         (%name-string name)
-        (%form-text class (find-package "COMMON-LISP-USER")))))
+        (with-output-to-string (stream)
+          (print-unreadable-object (class stream :identity t)
+            (format stream "anonymous ~A" (%class-name-string (class-of class))))))))
 ```
 
 ```lisp
@@ -2050,7 +2055,7 @@ methods are listed per entry.  docs/tools.md describes every field."
                                     "cl-mcp/tests/clos-core-test::anonymous-superclass-probe")))
            (superclass (first (%strings class "direct_superclasses"))))
       (ok (not (sb-mop:class-finalized-p child)))
-      (ok (eql 0 (search "#<STANDARD-CLASS NIL" superclass)) superclass)
+      (ok (eql 0 (search "#<anonymous COMMON-LISP:STANDARD-CLASS {" superclass)) superclass)
       (ok (equal superclass (second (%strings class "precedence_list"))))
       (ok (notany (lambda (name) (search "COMMON-LISP:NIL" name))
                   (%strings class "precedence_list"))))))

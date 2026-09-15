@@ -295,7 +295,8 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 - 式は、`*package*` をクラス名のホームパッケージにし、
   `*print-length*` 10 / `*print-level*` 4 / `*print-right-margin*` 大 で `prin1` する
 - JSON の名前は `qualified-symbol-name` で完全修飾する。名前のない（または別のクラスに名前を奪われた）クラスは、
-  上位クラス・CPL・`from`・`via`・`omitted_classes` では COMMON-LISP-USER で印字した `#<STANDARD-CLASS NIL {...}>` で出し、
+  上位クラス・CPL・`from`・`via`・`omitted_classes` では `#<anonymous COMMON-LISP:STANDARD-CLASS {...}>` と出し
+  （SBCL の print-object は無名クラスの名前をパッケージに関係なく `COMMON-LISP:NIL` と書くので使わない）、
   `direct_subclasses` からは省く（実装時のレビューで発見。以前は `COMMON-LISP:NIL` と出ていた）
 
 ### 6.3 本文テキスト
