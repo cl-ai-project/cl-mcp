@@ -30,8 +30,12 @@
                 #:*lisp-file-unparseable-hook*
                 #:fs-read-file
                 #:fs-resolve-read-path)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-condition-text)
+                #:sanitize-condition-text
+                #:sanitize-for-json)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -62,7 +66,10 @@
            #:file-unparseable-editable-prefix-p
            #:file-unparseable-message
            #:make-file-unparseable-condition
-           #:signal-file-unparseable))
+           #:signal-file-unparseable
+           #:check-edit-guard
+           #:edit-guard-conflict-error
+           #:edit-guard-conflict))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
 
@@ -619,7 +626,113 @@ ABS, TEXT and CAUSE. Never returns."
                                          :readtable readtable
                                          :editable-prefix editable-prefix)))
 
-(defun %locate-target-form (file-path form-type form-name readtable)
+(defconstant +edit-guard-version+ 1
+  "The only value GUARD's version field may carry for CHECK-EDIT-GUARD to
+accept it (design doc 2026-09-16-clos-describe-fail-closed, section 4.1).")
+
+(defun %guard-conflict (reason expected actual)
+  "Build one of CHECK-EDIT-GUARD's CONFLICT values: a plist (:REASON REASON
+:EXPECTED EXPECTED :ACTUAL ACTUAL). EXPECTED and ACTUAL are run through
+SANITIZE-FOR-JSON, since ACTUAL -- and sometimes EXPECTED -- echoes a value
+read from GUARD, a caller-supplied argument; SANITIZE-FOR-JSON also coerces
+a non-string value to one."
+  (list :reason reason
+        :expected (sanitize-for-json expected)
+        :actual (sanitize-for-json actual)))
+
+(define-condition edit-guard-conflict-error (error)
+  ((conflict :initarg :conflict :reader edit-guard-conflict))
+  (:report
+   (lambda (condition stream)
+     (let ((conflict (edit-guard-conflict condition)))
+       (format stream
+               "Edit guard conflict: ~A (expected: ~A; actual: ~A). Call ~
+                clos-describe again for a fresh edit_guard and retry with ~
+                it; do not retry without a guard or through another tool."
+               (getf conflict :reason) (getf conflict :expected)
+               (getf conflict :actual)))))
+  (:documentation
+   "Signaled by %LOCATE-TARGET-FORM, via CHECK-EDIT-GUARD, when a caller's
+GUARD argument no longer matches the file or form it was observed on (design
+doc section 4.2). CONFLICT (reader EDIT-GUARD-CONFLICT) is a plist (:REASON
+string :EXPECTED string :ACTUAL string) naming the first of the six checks
+that failed. Always signaled before %LOCATE-TARGET-FORM returns a value, so
+its caller -- LISP-EDIT-FORM in src/lisp-edit-form.lisp -- never sees, and so
+never writes, content that disagrees with GUARD: no name-only fallback, no
+adopting the new digest and continuing."))
+
+(defun check-edit-guard (guard abs-path snapshot node)
+  "Verify GUARD, an edit_guard JSON object (design doc section 4.1), against
+ABS-PATH (a namestring for the file about to be edited), SNAPSHOT (a plist
+from CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT read for this same
+edit), and NODE (the CST node LOCATE-FORM-IN-NODES matched by form_type and
+form_name in that same SNAPSHOT). Returns (VALUES OK-P CONFLICT): OK-P is T
+when every check below passes, with CONFLICT then NIL; otherwise OK-P is NIL
+and CONFLICT is a plist (:REASON string :EXPECTED string :ACTUAL string)
+naming the first check, in order, that failed.
+
+Never reads or parses anything itself: SNAPSHOT and NODE are taken as given,
+so this always judges the exact bytes %LOCATE-TARGET-FORM is about to splice
+an edit into, never a second, possibly different, read.
+
+The checks, in order (design doc section 4.2):
+ 1. GUARD's version is the one this function supports (+EDIT-GUARD-VERSION+).
+ 2. GUARD's abs_path names the same file as ABS-PATH.
+ 3. GUARD's file_digest matches SNAPSHOT's own digest of the whole file.
+ 4. GUARD's form_start/form_end lie within SNAPSHOT's text, with form_end
+    greater than form_start.
+ 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
+    form_type/form_name search resolves to today is the same span GUARD
+    observed, not a different definition that merely shares the name.
+ 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
+    that range. Absent entirely, this check is skipped; a non-NIL value
+    that is not a matching digest string still fails it."
+  (let ((version (and (hash-table-p guard) (gethash "version" guard)))
+        (guard-abs-path (and (hash-table-p guard) (gethash "abs_path" guard)))
+        (guard-file-digest (and (hash-table-p guard) (gethash "file_digest" guard)))
+        (form-start (and (hash-table-p guard) (gethash "form_start" guard)))
+        (form-end (and (hash-table-p guard) (gethash "form_end" guard)))
+        (guard-form-digest (and (hash-table-p guard) (gethash "form_digest" guard)))
+        (text (getf snapshot :text))
+        (file-digest (getf snapshot :digest)))
+    (cond
+      ((not (eql version +edit-guard-version+))
+       (values nil (%guard-conflict "unsupported guard version"
+                                     +edit-guard-version+ version)))
+      ((not (and (stringp guard-abs-path) (string= guard-abs-path abs-path)))
+       (values nil (%guard-conflict "abs_path does not match the file being edited"
+                                     abs-path guard-abs-path)))
+      ((not (and (stringp guard-file-digest) (stringp file-digest)
+                 (string= guard-file-digest file-digest)))
+       (values nil (%guard-conflict
+                    "file changed since the guard observed it (file_digest mismatch)"
+                    guard-file-digest (or file-digest "unavailable"))))
+      ((not (and (integerp form-start) (integerp form-end)
+                 (<= 0 form-start) (<= form-end (length text))
+                 (> form-end form-start)))
+       (values nil (%guard-conflict
+                    "form_start/form_end are not a valid range in the file"
+                    (format nil "0 <= form_start < form_end <= ~D" (length text))
+                    (format nil "form_start=~A form_end=~A" form-start form-end))))
+      ((not (and (= (cst-node-start node) form-start)
+                 (= (cst-node-end node) form-end)))
+       (values nil (%guard-conflict
+                    "the form moved, was replaced, or was deleted since the guard observed it"
+                    (format nil "start=~D end=~D" form-start form-end)
+                    (format nil "start=~D end=~D"
+                            (cst-node-start node) (cst-node-end node)))))
+      ((and guard-form-digest
+            (not (and (stringp guard-form-digest)
+                      (equal guard-form-digest
+                             (snapshot-range-digest snapshot form-start form-end)))))
+       (values nil (%guard-conflict
+                    "form content changed since the guard observed it (form_digest mismatch)"
+                    guard-form-digest
+                    (or (snapshot-range-digest snapshot form-start form-end)
+                        "unavailable"))))
+      (t (values t nil)))))
+
+(defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR (through SIGNAL-FILE-UNPARSEABLE, which owns the
 classification), carrying a delimiter diagnosis, when the file cannot be parsed
@@ -630,6 +743,19 @@ editable, whereas the Eclector pass yields no forms at all from a file that
 does not parse. A file larger than the fs read cap is reported as such
 instead, because its truncated prefix would only yield a misleading delimiter
 diagnosis.
+
+GUARD, when non-NIL, is an edit_guard JSON object (design doc section 4.1).
+It changes how the file is read: instead of FS-READ-FILE, the file is read
+once via CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT, so ORIGINAL (below)
+and the digests CHECK-EDIT-GUARD verifies GUARD against come from the exact
+same bytes -- this function never reads the file twice for one call. Once
+TARGET is located, CHECK-EDIT-GUARD (design doc section 4.2) is run and
+EDIT-GUARD-CONFLICT-ERROR is signaled on the first failing check, before any
+value is returned, so a stale or mismatched GUARD never reaches a write.
+FS-READ-FILE's read cap does not apply on this path; READ-SOURCE-SNAPSHOT
+reads the whole file regardless of size. Without GUARD, behavior is
+unchanged.
+
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -642,15 +768,25 @@ Returns eight values:
   (let ((form-type-str (string-downcase form-type)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
-      (multiple-value-bind (original truncated file-length)
-          (fs-read-file abs)
-        (when truncated
-          (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
-                  lisp-edit-form and lisp-patch-form cannot edit files this large, ~
-                  and fs-write-file will not overwrite it either (a truncated read ~
-                  cannot prove the file is broken). Split the file or edit it ~
-                  outside cl-mcp."
-                 (namestring abs) file-length (length original)))
+      (let (original snapshot)
+        (if guard
+            (multiple-value-bind (snap failure) (read-source-snapshot abs)
+              (when (null snap)
+                (error "Cannot read ~A to verify guard: ~A" (namestring abs)
+                       (if (eq failure :denied)
+                           "read not permitted for this path"
+                           failure)))
+              (setf snapshot snap
+                    original (getf snap :text)))
+            (multiple-value-bind (text truncated file-length) (fs-read-file abs)
+              (when truncated
+                (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
+                        lisp-edit-form and lisp-patch-form cannot edit files this large, ~
+                        and fs-write-file will not overwrite it either (a truncated read ~
+                        cannot prove the file is broken). Split the file or edit it ~
+                        outside cl-mcp."
+                       (namestring abs) file-length (length text)))
+              (setf original text)))
         (multiple-value-bind (nodes swallowed)
             (handler-case
                 (parse-top-level-forms original
@@ -668,6 +804,11 @@ Returns eight values:
                                         :editable-prefix (and nodes t)))
               (error "Form ~A ~A not found in ~A" form-type form-name
                      (namestring abs)))
+            (when guard
+              (multiple-value-bind (ok-p conflict)
+                  (check-edit-guard guard (namestring abs) snapshot target)
+                (unless ok-p
+                  (error 'edit-guard-conflict-error :conflict conflict))))
             (let ((target-snippet (subseq original
                                           (cst-node-start target)
                                           (cst-node-end target))))

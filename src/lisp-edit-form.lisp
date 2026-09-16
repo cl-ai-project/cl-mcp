@@ -51,7 +51,9 @@
                 #:%locate-target-form
                 #:%reader-level-failure-p
                 #:%detect-readtable-before-node
-                #:file-unparseable-error)
+                #:file-unparseable-error
+                #:edit-guard-conflict-error
+                #:edit-guard-conflict)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
 
@@ -501,7 +503,7 @@ same words. The bracket-opener reminder is part of WARNING, built by
 
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
-        (normalize-blank-lines t) readtable)
+        (normalize-blank-lines t) readtable guard)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, and OPERATION are always required. CONTENT is required for
@@ -511,9 +513,18 @@ OPERATION must be one of: \"replace\", \"insert_before\", \"insert_after\", \"de
 Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
+The same GUARD validation runs whether DRY-RUN is true or not.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing both the file and the new content.
+
+GUARD, if provided, is an edit_guard JSON object (clos-describe's edit_guard,
+design doc 2026-09-16-clos-describe-fail-closed section 4.1) that must still
+describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
+%LOCATE-TARGET-FORM signals EDIT-GUARD-CONFLICT-ERROR, before any value is
+returned and before anything is written, when it does not. Without GUARD,
+this call behaves as before -- there is no guarantee the located form still
+matches what an earlier read observed.
 
 For non-delete operations without DRY-RUN, returns six values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
@@ -538,7 +549,7 @@ or NIL."
       (error "content is required for ~A operation" operation))
     (multiple-value-bind
         (abs rel original nodes target target-snippet _ file-package-name)
-        (%locate-target-form file-path form-type form-name readtable)
+        (%locate-target-form file-path form-type form-name readtable guard)
       (declare (ignore _))
       (if (eq op-key :delete)
           ;; Delete path: no content validation needed
@@ -645,7 +656,14 @@ Applies to replace, insert_before, insert_after, and delete operations.")
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
-is used instead of Eclector, which means comments are NOT preserved."))
+is used instead of Eclector, which means comments are NOT preserved.")
+         (guard :type :object
+                :description "Edit guard from clos-describe's edit_guard (design doc
+2026-09-16-clos-describe-fail-closed section 4.1): {version, path, abs_path,
+file_digest, form_start, form_end, form_digest}. When given, the edit (including
+dry_run) is refused with a conflict object, and nothing is written, unless the
+file and the matched form still look exactly as observed. Without it, this call
+behaves as before: the located form may not be the one an earlier read saw."))
   :body
   (progn
     (when (and (not content) (string/= (string-downcase operation) "delete"))
@@ -661,7 +679,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
                             :content content
                             :dry-run dry_run
                             :normalize-blank-lines normalize_blank_lines
-                            :readtable (%parse-readtable-designator readtable))
+                            :readtable (%parse-readtable-designator readtable)
+                            :guard guard)
           (if dry_run
               ;; The summary inlines only the edited FORM (preview_form), never
               ;; the whole updated file: "preview" holds the full file and is
@@ -733,6 +752,18 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))
+      (edit-guard-conflict-error (e)
+        (let* ((conflict (edit-guard-conflict e))
+               (message (sanitize-for-json (princ-to-string e)))
+               (conflict-ht (make-ht "reason" (getf conflict :reason)
+                                     "expected" (getf conflict :expected)
+                                     "actual" (getf conflict :actual))))
+          (if (and (protocol-version state)
+                   (string>= (protocol-version state) "2025-11-25"))
+              (result id (make-ht "content" (text-content message)
+                                  "isError" t
+                                  "conflict" conflict-ht))
+              (rpc-error id -32602 message conflict-ht))))
       (file-unparseable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))

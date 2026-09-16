@@ -8,9 +8,19 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-start
+                #:cst-node-end)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:locate-form-in-nodes)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
   (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
   (:import-from #:asdf #:system-source-directory)
-  (:import-from #:yason #:parse))
+  (:import-from #:yason #:parse #:encode))
 
 (in-package #:cl-mcp/tests/tools-test)
 
@@ -1722,6 +1732,46 @@
                    "form_name '#:' should produce an error")
                (ok (and (stringp msg) (search "empty" (string-downcase msg)))
                    "error message should mention 'empty'"))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-edit-form-guard-conflict
+  (testing "tools/call lisp-edit-form with a stale guard is refused with a conflict object"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-guard-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string "(defun target () :old)" out))
+        (unwind-protect
+             (let* ((snapshot (read-source-snapshot abs-path))
+                    (nodes (parse-top-level-forms (getf snapshot :text)))
+                    (node (locate-form-in-nodes nodes "defun" "target"))
+                    (guard (make-ht "version" 1
+                                    "abs_path" (getf snapshot :abs-path)
+                                    "file_digest" "md5:00000000000000000000000000000000"
+                                    "form_start" (cst-node-start node)
+                                    "form_end" (cst-node-end node)))
+                    (guard-json (with-output-to-string (s) (encode guard s)))
+                    (req (format nil
+                                 (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":9101,\"method\":\"tools/call\","
+                                  "\"params\":{\"name\":\"lisp-edit-form\","
+                                  "\"arguments\":{\"file_path\":\"~A\","
+                                  "\"form_type\":\"defun\",\"form_name\":\"target\","
+                                  "\"operation\":\"replace\","
+                                  "\"content\":\"(defun target () :new)\","
+                                  "\"guard\":~A}}}")
+                                 tmp-path guard-json))
+                    (before (uiop:read-file-string abs-path))
+                    (resp (%pjl req))
+                    (obj (parse resp))
+                    (err (gethash "error" obj))
+                    (data (and err (gethash "data" err))))
+               (ok err)
+               (ok (hash-table-p data))
+               (ok (stringp (gethash "reason" data)))
+               (ok (search "file_digest" (gethash "reason" data)))
+               (ok (string= (uiop:read-file-string abs-path) before)))
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-lisp-check-parens-reader-error

@@ -313,6 +313,9 @@ Input:
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
+- `guard` (object, optional): an edit_guard object (design doc
+  `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
+  form an earlier read observed. See "Edit guard" below.
 
 Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
 ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
@@ -363,6 +366,42 @@ Dry-run output (when `dry_run` is true):
 - `preview_form` (string): just the edited form after changes, or `"(form removed)"` for `delete`. This is what the human-readable summary shows; `preview` holds the whole file and is not inlined into the summary, so a dry-run against a large file no longer returns the file twice.
 - `parinfer_warning` (string, optional): auto-repair warning when closing delimiters are added
 - `content`: human-readable summary
+
+**Edit guard.** Without `guard`, `lisp-edit-form` matches `form_type`/`form_name` against
+whatever is on disk right now — there is no guarantee that form is the same one an earlier
+read (a `clos-describe` call, say) observed; something else may have replaced, moved or
+deleted it since. Passing `guard` closes that gap: `replace`, `insert_before`, `insert_after`,
+`delete` and `dry_run` all run the same six checks, in order, **before writing anything**:
+
+1. `guard.version` is `1` (the only version this tool understands).
+2. `guard.abs_path` names the same file `file_path` resolves to.
+3. `guard.file_digest` matches an MD5 digest of the file's current bytes.
+4. `guard.form_start`/`guard.form_end` (0-based characters, end exclusive) are a valid range
+   in that same reading of the file.
+5. The form `form_type`/`form_name` matches today has exactly that range — not a different
+   definition that happens to share the name.
+6. When present, `guard.form_digest` matches an MD5 digest of that range's text.
+
+The file is read once for these checks, and the very same bytes are what gets edited — never a
+second, possibly different, read. The first check that fails stops everything: **nothing is
+written**, not even under `dry_run`, and the file is byte-for-byte unchanged. The failure is a
+tool error whose JSON also carries `conflict`: `{"reason": "<one sentence>", "expected": ...,
+"actual": ...}`. There is no fallback to a plain name match and no adopting the new digest to
+continue — re-run whatever produced `guard` (a fresh `clos-describe`, for instance) and retry
+with the new value. Calling without `guard` is unaffected and keeps working as before; it is
+just not protected against this class of surprise.
+
+What this does *not* protect against: `guard` is a precondition, not an access token or a
+lock — the existing path validation and write limits still apply unchanged (a guarded call
+reaches no file, and writes no file, that an unguarded call could not). Reading for a guarded
+call is not capped the way an ordinary `lisp-edit-form` read is: it reads the whole file in one
+pass so the digest it checks and the text it edits always agree, rather than risk a second,
+possibly different, read of a large file. This is not compare-and-swap. Between the check above
+and the write, a concurrent, uncoordinated writer
+(an external editor, another process) can still slip in; that narrow window is not closed. What
+*is* caught: any change after `guard` was built, reusing the same `guard` for a second edit
+after the first one already succeeded, and a change anywhere else in the file (an edited
+`in-package`, say) even when the target form's own text is untouched.
 
 ## `lisp-patch-form`
 Scoped text replacement within a matched top-level Lisp form. Finds `old_text` (exact,
