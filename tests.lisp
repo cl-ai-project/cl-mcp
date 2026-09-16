@@ -11,6 +11,7 @@
   (:import-from #:cl-mcp/tests/clos-core-test)
   (:import-from #:cl-mcp/tests/clos-verify-core-test)
   (:import-from #:cl-mcp/tests/clos-response-builders-test)
+  (:import-from #:cl-mcp/tests/clos-describe-integration-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
   (:import-from #:cl-mcp/tests/frame-inspector-test)
