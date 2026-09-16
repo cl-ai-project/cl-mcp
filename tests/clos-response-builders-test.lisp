@@ -15,7 +15,8 @@
                 #:*note-unparseable*
                 #:*reason-verification-unavailable*
                 #:*reason-not-locatable*
-                #:*reason-not-readable*)
+                #:*reason-not-readable*
+                #:*reason-no-source-line*)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
   (:import-from #:cl-mcp/src/clos-verify-core
@@ -266,6 +267,50 @@ so arrays are lists and false is NIL."
                                        (error "boom")))
       (ok (equal "unverified" (gethash "source_match" class)))
       (ok (equal *reason-verification-unavailable* (gethash "source_match_reason" class)))
+      (ok (null (gethash "form_type" class))))))
+
+(deftest annotate-report-forms-reports-no-source-line
+  (testing "an entry with a source file but no recorded line is unverified, not skipped"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (method (%method :path "src/shapes.lisp" :line nil)))
+      (setf (gethash "abs_path" method) (namestring (truename *fixture*)))
+      (let* ((report (make-ht "symbol" "pkg::area" "symbol_status" "found"
+                              "resolved_symbol" "PKG::AREA" "symbol_kind" "generic-function"
+                              "lookup_package" "PKG" "lookup_name" "AREA"
+                              "generic_functions"
+                              (vector (make-ht "name" "PKG::AREA" "lambda_list" "(SHAPE)"
+                                               "documentation" nil "method_combination" "STANDARD"
+                                               "path" "src/shapes.lisp" "line" 3
+                                               "stale" yason:false
+                                               "form_type" "defgeneric" "form_name" "area"
+                                               "note" nil "source_match" "matched"
+                                               "source_match_reason" nil
+                                               "method_count" 1 "truncated" nil
+                                               "methods" (vector method)))
+                              "class" nil "limit" 50 "notes" (vector)))
+             (text (%text (build-clos-describe-response report #'%verify-inline))))
+        (ok (equal "unverified" (gethash "source_match" method)))
+        (ok (equal *reason-no-source-line* (gethash "source_match_reason" method)))
+        (ok (null (gethash "form_type" method)))
+        (ok (null (gethash "form_name" method)))
+        (ok (search "src/shapes.lisp [unverified: no source line recorded]" text))))))
+
+(deftest annotate-report-forms-clamps-an-unexpected-verifier-status
+  (testing "a status the three-word contract doesn't define is clamped to unverified"
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (clos-describe-report "cl-mcp-clos-fixture:circle"))
+           (class (gethash "class" report)))
+      (annotate-report-forms
+       report
+       (lambda (entries)
+         (make-ht "results"
+                  (map 'vector
+                       (lambda (e) (make-ht "id" (gethash "id" e) "status" "weird-status"
+                                            "reason" nil "candidate_index" nil))
+                       (sequence->list entries)))))
+      (ok (equal "unverified" (gethash "source_match" class)))
+      (ok (search "unexpected verifier status" (gethash "source_match_reason" class)))
       (ok (null (gethash "form_type" class))))))
 
 (deftest annotate-report-forms-reports-a-real-mismatch

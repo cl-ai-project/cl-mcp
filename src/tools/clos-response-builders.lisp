@@ -33,7 +33,8 @@
            #:*note-unparseable*
            #:*reason-verification-unavailable*
            #:*reason-not-locatable*
-           #:*reason-not-readable*))
+           #:*reason-not-readable*
+           #:*reason-no-source-line*))
 
 (in-package #:cl-mcp/src/tools/clos-response-builders)
 
@@ -179,6 +180,12 @@ form, so returning them would invite an edit the JSON does not support.")
 file: every located entry still gets a SOURCE_MATCH (spec 3.1), even one
 whose file cannot be opened at all.")
 
+(defparameter *reason-no-source-line* "no source line recorded"
+  "SOURCE_MATCH_REASON when ENTRY has a source file (PATH/ABS_PATH) but no
+LINE: DEFINITION-SOURCE-LOCATION computes them independently and either may
+be NIL (src/code-core.lisp).  There is no line to scan TOP-LEVEL-FORMS-AT
+for, so this is decided locally, without a VERIFY-FN round trip.")
+
 (defun %verification-results (raw)
   "Return RAW's \"results\" array as a list, or NIL when RAW is not a valid
 {\"results\": [...]} object -- a worker error or crash notice
@@ -251,25 +258,34 @@ CANDIDATE's -- after a MATCHED verdict's round trip is confirmed."
   "Set ENTRY's SOURCE_MATCH (and, once confirmed, FORM_TYPE/FORM_NAME/
 EDIT_UNIT) from RESULT, worker/clos-verify-source's verdict for ENTRY's
 candidates FORMS (spec 3.1, 3.5), or *REASON-VERIFICATION-UNAVAILABLE* when
-RESULT is NIL.  A stale ENTRY (spec 3.1) never keeps a MATCHED verdict."
+RESULT is NIL.  A STATUS other than \"matched\"/\"mismatched\"/\"unverified\"
+-- a future verifier version skew -- is clamped to \"unverified\" naming the
+unexpected value, never passed through as-is: the three-word contract holds
+regardless of what the worker sends.  A stale ENTRY (spec 3.1) never keeps a
+MATCHED verdict."
   (if (null result)
       (%set-source-match entry "unverified" *reason-verification-unavailable*)
       (let ((status (gethash "status" result))
             (reason (gethash "reason" result)))
-        (if (not (equal status "matched"))
-            (%set-source-match entry status reason)
-            (let* ((index (gethash "candidate_index" result))
-                   (candidate (and (integerp index) (nth index forms)))
-                   (nodes (and candidate
-                               (%file-nodes (gethash "abs_path" entry) node-cache))))
-              (if (and candidate
-                       (%round-trip-ok-p nodes (getf candidate :form-type)
-                                         (getf candidate :form-name)
-                                         (getf candidate :start) (getf candidate :end)))
-                  (progn
-                    (%set-source-match entry "matched" nil)
-                    (%set-matched-form entry candidate (gethash "identity" entry)))
-                  (%set-source-match entry "unverified" *reason-not-locatable*))))))
+        (cond
+          ((equal status "matched")
+           (let* ((index (gethash "candidate_index" result))
+                  (candidate (and (integerp index) (nth index forms)))
+                  (nodes (and candidate
+                              (%file-nodes (gethash "abs_path" entry) node-cache))))
+             (if (and candidate
+                      (%round-trip-ok-p nodes (getf candidate :form-type)
+                                        (getf candidate :form-name)
+                                        (getf candidate :start) (getf candidate :end)))
+                 (progn
+                   (%set-source-match entry "matched" nil)
+                   (%set-matched-form entry candidate (gethash "identity" entry)))
+                 (%set-source-match entry "unverified" *reason-not-locatable*))))
+          ((member status '("mismatched" "unverified") :test #'equal)
+           (%set-source-match entry status reason))
+          (t
+           (%set-source-match entry "unverified"
+                               (format nil "unexpected verifier status ~S" status))))))
   (when (and (%true-p (gethash "stale" entry))
              (equal (gethash "source_match" entry) "matched"))
     (setf (gethash "form_type" entry) nil (gethash "form_name" entry) nil)
@@ -295,7 +311,12 @@ or UNVERIFIED, never a silent fallback to MATCHED.
 A line with no candidates at all -- the file could not be read
 (*REASON-NOT-READABLE*) or parsed (*NOTE-UNPARSEABLE*), or simply starts no
 top-level form (*NOTE-NO-FORM-AT-LINE*) -- is decided locally, without a
-VERIFY-FN round trip: there is nothing to send."
+VERIFY-FN round trip: there is nothing to send.  An entry with a source file
+but no LINE at all (*REASON-NO-SOURCE-LINE*: DEFINITION-SOURCE-LOCATION
+computes them independently, spec src/code-core.lisp) is decided the same
+way, since there is no line to scan for.  An entry with no source file at
+all is left untouched: %LOCATION-TEXT already renders it (no source)
+unconditionally, so it carries no SOURCE_MATCH."
   (let ((by-file (make-hash-table :test #'equal))
         (contexts (make-hash-table :test #'equal))
         (node-cache (make-hash-table :test #'equal))
@@ -303,8 +324,10 @@ VERIFY-FN round trip: there is nothing to send."
         (counter 0))
     (dolist (entry (%located-entries report))
       (let ((abs-path (gethash "abs_path" entry)))
-        (when (and (stringp abs-path) (integerp (gethash "line" entry)))
-          (push entry (gethash abs-path by-file)))))
+        (cond
+          ((not (stringp abs-path)))
+          ((integerp (gethash "line" entry)) (push entry (gethash abs-path by-file)))
+          (t (%set-source-match entry "unverified" *reason-no-source-line*)))))
     (maphash
      (lambda (abs-path file-entries)
        (multiple-value-bind (table failure)
