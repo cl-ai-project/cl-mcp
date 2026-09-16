@@ -315,7 +315,8 @@ Input:
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
 - `guard` (object, optional): an edit_guard object (design doc
   `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
-  form an earlier read observed. See "Edit guard" below.
+  form an earlier read observed — `clos-describe`'s own `edit_guard` field, on a `matched`
+  entry, is one. See "Edit guard" below.
 
 Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
 ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
@@ -394,10 +395,11 @@ just not protected against this class of surprise.
 What this does *not* protect against: `guard` is a precondition, not an access token or a
 lock — the existing path validation and write limits still apply unchanged (a guarded call
 reaches no file, and writes no file, that an unguarded call could not). Reading for a guarded
-call is not capped the way an ordinary `lisp-edit-form` read is: it reads the whole file in one
-pass so the digest it checks and the text it edits always agree, rather than risk a second,
-possibly different, read of a large file. This is not compare-and-swap. Between the check above
-and the write, a concurrent, uncoordinated writer
+call is capped the same way an ordinary `lisp-edit-form` read is: it reads the whole file in one
+pass, so the digest it checks and the text it edits always agree, and refuses — never
+truncates — a file at or over the same read limit an unguarded call would refuse too; a guard
+never lets this tool read more than an unguarded call could. This is not compare-and-swap.
+Between the check above and the write, a concurrent, uncoordinated writer
 (an external editor, another process) can still slip in; that narrow window is not closed. What
 *is* caught: any change after `guard` was built, reusing the same `guard` for a second edit
 after the first one already succeeded, and a change anywhere else in the file (an edited
@@ -533,15 +535,15 @@ Output (the content text carries everything that matters; names in it drop the s
 - `resolved_symbol`, `symbol_kind`, `lookup_package`, `lookup_name`, `limit`, `notes`
 - `generic_functions` (array, up to 2): the function `symbol` names and its `(setf symbol)` function, when generic
   - `name`, `lambda_list`, `documentation`, `method_combination` (`STANDARD`, `+ :MOST-SPECIFIC-FIRST`, ...)
-  - `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
+  - `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_guard`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
   - `method_count`, `truncated`, `methods`
 - `class` (object or null):
-  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `note`
+  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_guard`, `note`
   - `direct_superclasses`, `direct_subclasses`, `precedence_list` (null when a superclass is undefined), `undefined_superclasses`
   - `direct_slots`, `effective_slots` (null without a precedence list): `name`, `from` (effective slots: the most specific class defining it), `initargs`, `initform` (the code, never evaluated; null when there is none), `type`, `allocation` (`instance`, `class`), `readers`, `writers`, `documentation`
   - `default_initargs`: `initarg`, `form`, `from`
   - `method_count`, `truncated`, `methods`, `omitted_classes`: the methods specialized on the class and its superclasses, except superclasses in `COMMON-LISP` or an `SB-` package (the standard protocol), which `omitted_classes` names
-- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_unit`, `note`
+- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_unit`, `edit_guard`, `note`
 
 **Observation vs. edit information.** Every definition's `path`/`line`/`stale`/`identity` come
 straight from the running image — SBCL's own record of where each generic function, class or
@@ -561,8 +563,9 @@ are not "matched" (null when it is):
 
 - `matched`: the source form at the recorded location describes the same definition, and
   `lisp-edit-form` resolves `form_type`/`form_name` to that same form — the only state that
-  carries `form_type`/`form_name` (and, for a container, `edit_unit`; see below). Everything
-  else omits both fields entirely rather than sending a stale or unverifiable pair.
+  carries `form_type`/`form_name` (and, for a container, `edit_unit`; see below) and an
+  `edit_guard` (see "Edit guard" below). Everything else omits all three fields entirely rather
+  than sending a stale or unverifiable pair.
 - `mismatched`: the source form there is a different definition (same generic function name but
   different specializers, a class of the same name but different superclass, and so on) — for
   example, a method whose `(eql :old)` specializer was edited to `(eql :new)` and reloaded:
@@ -599,6 +602,21 @@ When that applies, a `matched` method carries `edit_unit` (`"defgeneric"`, `"def
 `"define-condition"`) alongside a `form_type`/`form_name` that names the *container*, not the
 method by itself; `lisp-edit-form` on that form_type/form_name replaces the whole container, so
 edit it with that in mind rather than expecting a single method's text back.
+
+**Edit guard.** A `matched` entry's `edit_guard` is the same object `lisp-edit-form`'s `guard`
+argument accepts (see that tool's "Edit guard" section for the six checks it runs): `version`,
+`path` (display only; verification runs on `abs_path`), `abs_path`, `file_digest`, `form_start`,
+`form_end` and `form_digest` — all computed from the exact same read and CST span that produced
+this entry's `form_type`/`form_name`, never a second, possibly different, read. Pass it straight
+through as `guard` on the `lisp-edit-form` call `form_type`/`form_name` heads toward; recommended
+for every edit built from a `clos-describe` result, not just when a race seems likely. Doing so
+catches a change to the target form, or anywhere else in the file, made after this
+`clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
+the first one already consumed it — it does not catch an uncoordinated writer racing between
+`lisp-edit-form`'s own check and its write; no guard can close that window. On a conflict, call
+`clos-describe` again for a fresh `edit_guard` rather than retrying without one or falling back
+to a plain `form_type`/`form_name` call against possibly-changed source. `edit_guard` is present
+exactly when `form_type`/`form_name` are: an entry with no edit information never carries one.
 
 Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
 method combination, project files before other files; a class's methods follow its precedence
