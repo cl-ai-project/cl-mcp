@@ -239,6 +239,29 @@ worker メソッド `worker/clos-verify-source`（params: `{"entries": [...]}`�
   `test(clos-describe): verify source matching against a reloaded image`
   `docs(clos-describe): document matched / mismatched / unverified`
 
+### Task 10: (A6) condition のアクセサを識別と検証に加える
+
+**Files:** Modify `src/clos-core.lisp`, `src/clos-verify-core.lisp`, `tests/clos-core-test.lisp`,
+`tests/clos-verify-core-test.lisp`
+
+Task 3 で判明: SBCL は `define-condition` のスロット読み取りを `standard-accessor-method` にしないため、
+Task 1 の identity に `class` / `slot` / `access` が入らず、condition のアクセサは常に `unverified` になる。
+spec §3.4 はこれを照合対象としているので塞ぐ。
+
+**Interfaces:** identity の `class` / `slot` / `access` を、次の場合にも埋める:
+メソッドの特化子が 1 つで、それが condition クラス（またはクラス一般）であり、そのクラスの
+`sb-mop:class-direct-slots` のいずれかの `slot-definition-readers` / `slot-definition-writers` に
+そのメソッドの総称関数名が含まれるとき。`readers` に含まれれば `access` は `"reader"`、
+`writers` に含まれれば `"writer"`。両方・複数スロットに該当する場合は埋めない（fail-closed）。
+`clos-verify-core` は `:define-condition` コンテナでもアクセサ判定を行えるようにする。
+
+- [ ] **Step 1: 失敗するテストを書く** — `clos-core-test`: `cl-mcp-clos-fixture:probe-error-code` の
+  identity に `class` / `slot` / `access` が入る。`clos-verify-core-test`: その identity と
+  `define-condition` の候補署名で `matched` になり、スロット名やアクセサ名を変えた候補では `mismatched`。RED を確認
+- [ ] **Step 2: 実装**（MOP 読み取りは既存と同じく `ignore-errors` で包み、判定できなければ埋めない）
+- [ ] **Step 3: GREEN**（`clos-core-test`, `clos-verify-core-test`）、mallet、コミット
+  `feat(clos-core): identify a condition slot accessor by its class and slot`
+
 ---
 
 ## B. 編集ガード
