@@ -28,6 +28,15 @@
                 #:*note-stale*)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:locate-form-in-nodes)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-start
+                #:cst-node-end)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:text-content)
@@ -247,6 +256,29 @@ so arrays are lists and false is NIL."
                            (list (gethash "form_type" method) (gethash "form_name" method)))
                          (sequence->list (gethash "methods" class))))))))
 
+(deftest annotate-report-forms-adds-an-edit-guard-to-a-matched-entry
+  (testing "a matched, round-trip-confirmed entry's edit_guard matches its own snapshot and span"
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (annotate-report-forms (clos-describe-report "cl-mcp-clos-fixture:circle")
+                                           #'%verify-inline))
+           (class (gethash "class" report))
+           (guard (gethash "edit_guard" class))
+           (abs (namestring (truename *fixture*)))
+           (snapshot (read-source-snapshot abs))
+           (nodes (parse-top-level-forms (getf snapshot :text)))
+           (node (locate-form-in-nodes nodes "defclass" "circle")))
+      (ok (equal "matched" (gethash "source_match" class)))
+      (ok (hash-table-p guard))
+      (ok (eql 1 (gethash "version" guard)))
+      (ok (search "tests/fixtures/clos-fixture.lisp" (gethash "path" guard)))
+      (ok (equal abs (gethash "abs_path" guard)))
+      (ok (equal (getf snapshot :digest) (gethash "file_digest" guard)))
+      (ok (= (cst-node-start node) (gethash "form_start" guard)))
+      (ok (= (cst-node-end node) (gethash "form_end" guard)))
+      (ok (equal (snapshot-range-digest snapshot (cst-node-start node) (cst-node-end node))
+                 (gethash "form_digest" guard))))))
+
 (deftest annotate-report-forms-never-matches-a-stale-entry
   (testing "a stale entry never becomes matched even when its form does verify"
     (%load-fixture)
@@ -389,6 +421,8 @@ so arrays are lists and false is NIL."
                (ok (equal "mismatched" (gethash "source_match" method)))
                (ok (stringp (gethash "source_match_reason" method)))
                (ok (null (gethash "form_type" method)))
+               (ok (not (nth-value 1 (gethash "edit_guard" method)))
+                   "a mismatched entry carries no edit_guard")
                (ok (search "[mismatched:" text))
                (ok (not (search "(defmethod" text)))))
         (ignore-errors (delete-file file))))))
@@ -416,6 +450,8 @@ so arrays are lists and false is NIL."
                (ok (equal "unverified" (gethash "source_match" method)))
                (ok (equal *reason-not-locatable* (gethash "source_match_reason" method)))
                (ok (null (gethash "form_type" method)))
+               (ok (not (nth-value 1 (gethash "edit_guard" method)))
+                   "an unverified entry carries no edit_guard")
                (ok (not (search "(defmethod" text)))))
         (ignore-errors (delete-file file))))))
 

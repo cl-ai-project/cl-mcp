@@ -40,6 +40,9 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:edit-guard-conflict-error
+                #:edit-guard-conflict)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-start
@@ -560,3 +563,106 @@ definitions.")
                                                                (gethash "identity" pool-writer))))
                            "...worker-proxied too")))))))
       (%delete-fixture *agreement-fixture-path*))))
+
+;;; ---------------------------------------------------------------------------
+;;; Deftest 3: edit_guard round trip -- accepted once, then rejected reused
+;;; ---------------------------------------------------------------------------
+
+(defparameter *guard-fixture-path*
+  (asdf/system:system-relative-pathname
+   :cl-mcp "tests/tmp/clos-describe-edit-guard-fixture.lisp")
+  "A third, independent scratch file: clos-describe's own edit_guard (design
+doc section 4.1) is handed to lisp-edit-form for a real edit, then reused
+after that edit already changed the file, to prove both halves of the
+guarantee end to end -- a fresh guard round-trips, and a stale one (already
+spent on a prior edit) is refused, leaving the file untouched.")
+
+(defparameter *guard-fixture-text*
+  "
+;;;; Written by cl-mcp/tests/clos-describe-integration-test; deleted after.
+
+(defpackage #:cl-mcp-clos-describe-edit-guard-fixture
+  (:use #:cl)
+  (:export #:widget #:tag))
+
+(in-package #:cl-mcp-clos-describe-edit-guard-fixture)
+
+(defclass widget () ())
+
+(defgeneric tag (x))
+
+(defmethod tag ((x widget))
+  :old)
+")
+
+(deftest clos-describe-hands-out-an-edit-guard-lisp-edit-form-accepts-and-later-refuses
+  (unwind-protect
+       (progn
+         (%write-text *guard-fixture-path* *guard-fixture-text*)
+         (%compile-and-load-path *guard-fixture-path*)
+         (let* ((*project-root* (system-source-directory :cl-mcp))
+                (truename (namestring (truename *guard-fixture-path*)))
+                (report (%annotated-report "cl-mcp-clos-describe-edit-guard-fixture:tag"))
+                (method (first (%methods (first (%gfs report)))))
+                (guard (gethash "edit_guard" method))
+                (before-text (uiop:read-file-string *guard-fixture-path*)))
+           (testing "a matched method carries an edit_guard usable by lisp-edit-form"
+             (ok (equal "matched" (gethash "source_match" method)))
+             (ok (hash-table-p guard))
+             (ok (equal truename (gethash "abs_path" guard))))
+           (testing "observe -> edit with the guard -> only the intended form changes"
+             (multiple-value-bind (updated-text warning would-change)
+                 (lisp-edit-form
+                  :file-path truename
+                  :form-type (gethash "form_type" method)
+                  :form-name (gethash "form_name" method)
+                  :operation "replace"
+                  :content (format nil "~
+(defmethod tag ((x widget))
+  :new)")
+                  :guard guard
+                  :dry-run nil)
+               (declare (ignore updated-text warning))
+               (ok would-change "lisp-edit-form reports a real change"))
+             (let* ((after-text (uiop:read-file-string *guard-fixture-path*))
+                    (before-forms (%top-level-texts before-text))
+                    (after-forms (%top-level-texts after-text))
+                    (diff-indices
+                     (loop for i from 0
+                           for b in before-forms
+                           for a in after-forms
+                           unless (string= b a) collect i)))
+               (ok (= (length before-forms) (length after-forms))
+                   "no top-level form was added or removed")
+               (ok (= 1 (length diff-indices))
+                   "exactly one top-level form's text changed")
+               (when diff-indices
+                 (ok (search ":new)" (nth (first diff-indices) after-forms))
+                     "the changed form is the intended tag method")
+                 (ok (search ":old)" (nth (first diff-indices) before-forms))
+                     "...which used to read :old"))
+               (testing "reusing the same, now-stale guard is refused and the file is untouched"
+                 (let ((text-after-first-edit (uiop:read-file-string *guard-fixture-path*)))
+                   (let ((condition
+                          (handler-case
+                              (progn
+                                (lisp-edit-form
+                                 :file-path truename
+                                 :form-type (gethash "form_type" method)
+                                 :form-name (gethash "form_name" method)
+                                 :operation "replace"
+                                 :content (format nil "~
+(defmethod tag ((x widget))
+  :second-edit)")
+                                 :guard guard
+                                 :dry-run nil)
+                                nil)
+                            (edit-guard-conflict-error (c) c))))
+                     (ok (typep condition 'edit-guard-conflict-error)
+                         "the stale guard is refused, not silently accepted")
+                     (when (typep condition 'edit-guard-conflict-error)
+                       (ok (stringp (getf (edit-guard-conflict condition) :reason)))))
+                   (ok (string= text-after-first-edit
+                                (uiop:read-file-string *guard-fixture-path*))
+                       "the refused edit left the file byte-identical")))))))
+    (%delete-fixture *guard-fixture-path*)))

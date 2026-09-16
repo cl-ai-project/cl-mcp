@@ -18,8 +18,9 @@
                 #:parse-top-level-forms
                 #:cst-node-start
                 #:cst-node-end)
-  (:import-from #:cl-mcp/src/fs
-                #:fs-read-source-text)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:text-content)
@@ -231,27 +232,42 @@ more than this one IDENTITY."
       (t nil))))
 
 (defun %file-nodes (abs-path cache)
-  "Return ABS-PATH's parsed top-level CST nodes, memoized in CACHE (an
-EQUAL hash table), or NIL when the file cannot be read or parsed -- a
-MATCHED verdict there then cannot be round-trip-confirmed (spec 3.5) and
-falls back to UNVERIFIED."
+  "Return (VALUES NODES SNAPSHOT) for ABS-PATH: NODES is its parsed top-level
+CST nodes and SNAPSHOT is the CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT
+plist NODES was parsed from -- the exact same read, so a digest computed
+from SNAPSHOT always describes the bytes NODES was built from, never a
+second, possibly different, read. Both are memoized together in CACHE (an
+EQUAL hash table), so a file with several located entries is read and
+parsed once.
+
+Both are NIL when the file cannot be read (READ-SOURCE-SNAPSHOT's FAILURE)
+or parsed -- a MATCHED verdict there then cannot be round-trip-confirmed
+(spec 3.5) and falls back to UNVERIFIED, with no edit_guard (design doc
+2026-09-16-clos-describe-fail-closed section 4.1) offered either."
   (multiple-value-bind (value found) (gethash abs-path cache)
     (if found
-        value
-        (setf (gethash abs-path cache)
-              (ignore-errors
-                (parse-top-level-forms (fs-read-source-text abs-path)
-                                       :source-path (pathname abs-path)))))))
+        (values-list value)
+        (let* ((snapshot (nth-value 0 (read-source-snapshot abs-path)))
+               (nodes (and snapshot
+                           (ignore-errors
+                             (parse-top-level-forms (getf snapshot :text)
+                                                     :source-path (pathname abs-path))))))
+          (setf (gethash abs-path cache) (list nodes snapshot))
+          (values nodes snapshot)))))
 
 (defun %round-trip-ok-p (nodes form-type form-name start end)
-  "True when NODES resolve FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES,
-the same matching lisp-edit-form uses) to the single CST node spanning
-exactly START/END (spec 3.5) -- comparing spans, not line numbers, and
-never accepting an ambiguous or absent match."
+  "Return (VALUES OK-P NODE): OK-P is true when NODES resolve FORM-TYPE and
+FORM-NAME (LOCATE-FORM-IN-NODES, the same matching lisp-edit-form uses) to
+the single CST node spanning exactly START/END (spec 3.5) -- comparing
+spans, not line numbers, and never accepting an ambiguous or absent match.
+NODE, present exactly when OK-P is, is that matched CST node: the same span
+an edit_guard's form_start/form_end (design doc 4.1) describe, so a caller
+building one from it needs no second LOCATE-FORM-IN-NODES call."
   (and nodes
        (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
          (and node (null reason)
-              (= (cst-node-start node) start) (= (cst-node-end node) end)))))
+              (= (cst-node-start node) start) (= (cst-node-end node) end)
+              (values t node)))))
 
 (defun %set-source-match (entry status reason)
   "Set ENTRY's SOURCE_MATCH and SOURCE_MATCH_REASON (spec 3.1); REASON is
@@ -269,15 +285,41 @@ CANDIDATE's -- after a MATCHED verdict's round trip is confirmed."
     (when edit-unit
       (setf (gethash "edit_unit" entry) edit-unit))))
 
+(defun %maybe-set-edit-guard (entry snapshot node)
+  "Set ENTRY's EDIT_GUARD (design doc 2026-09-16-clos-describe-fail-closed
+section 4.1) from SNAPSHOT (the CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-
+SNAPSHOT plist %FILE-NODES parsed NODE from) and NODE (the CST node
+%ROUND-TRIP-OK-P just confirmed for ENTRY's matched form): the same read
+and the same span %SET-MATCHED-FORM used, never a second one.
+
+Sets nothing when either digest is unavailable (SB-MD5 not loadable) --
+SNAPSHOT's own :DIGEST or SNAPSHOT-RANGE-DIGEST of NODE's span -- so a
+partial guard, missing a digest CHECK-EDIT-GUARD would need, is never
+handed out (fail-closed, design doc 4.1)."
+  (let* ((file-digest (getf snapshot :digest))
+         (start (cst-node-start node))
+         (end (cst-node-end node))
+         (form-digest (and file-digest (snapshot-range-digest snapshot start end))))
+    (when (and file-digest form-digest)
+      (setf (gethash "edit_guard" entry)
+            (make-ht "version" 1
+                      "path" (gethash "path" entry)
+                      "abs_path" (gethash "abs_path" entry)
+                      "file_digest" file-digest
+                      "form_start" start
+                      "form_end" end
+                      "form_digest" form-digest)))))
+
 (defun %apply-verification (entry forms result node-cache)
   "Set ENTRY's SOURCE_MATCH (and, once confirmed, FORM_TYPE/FORM_NAME/
-EDIT_UNIT) from RESULT, worker/clos-verify-source's verdict for ENTRY's
-candidates FORMS (spec 3.1, 3.5), or *REASON-VERIFICATION-UNAVAILABLE* when
-RESULT is NIL.  A STATUS other than \"matched\"/\"mismatched\"/\"unverified\"
+EDIT_UNIT/EDIT_GUARD) from RESULT, worker/clos-verify-source's verdict for
+ENTRY's candidates FORMS (spec 3.1, 3.5), or *REASON-VERIFICATION-UNAVAILABLE*
+when RESULT is NIL.  A STATUS other than \"matched\"/\"mismatched\"/\"unverified\"
 -- a future verifier version skew -- is clamped to \"unverified\" naming the
 unexpected value, never passed through as-is: the three-word contract holds
 regardless of what the worker sends.  A stale ENTRY (spec 3.1) never keeps a
-MATCHED verdict."
+MATCHED verdict, and loses EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT
+when it does."
   (if (null result)
       (%set-source-match entry "unverified" *reason-verification-unavailable*)
       (let ((status (gethash "status" result))
@@ -285,17 +327,20 @@ MATCHED verdict."
         (cond
           ((equal status "matched")
            (let* ((index (gethash "candidate_index" result))
-                  (candidate (and (integerp index) (nth index forms)))
-                  (nodes (and candidate
-                              (%file-nodes (gethash "abs_path" entry) node-cache))))
-             (if (and candidate
-                      (%round-trip-ok-p nodes (getf candidate :form-type)
-                                        (getf candidate :form-name)
-                                        (getf candidate :start) (getf candidate :end)))
-                 (progn
-                   (%set-source-match entry "matched" nil)
-                   (%set-matched-form entry candidate (gethash "identity" entry)))
-                 (%set-source-match entry "unverified" *reason-not-locatable*))))
+                  (candidate (and (integerp index) (nth index forms))))
+             (multiple-value-bind (nodes snapshot)
+                 (and candidate (%file-nodes (gethash "abs_path" entry) node-cache))
+               (multiple-value-bind (ok-p node)
+                   (and candidate
+                        (%round-trip-ok-p nodes (getf candidate :form-type)
+                                          (getf candidate :form-name)
+                                          (getf candidate :start) (getf candidate :end)))
+                 (if ok-p
+                     (progn
+                       (%set-source-match entry "matched" nil)
+                       (%set-matched-form entry candidate (gethash "identity" entry))
+                       (%maybe-set-edit-guard entry snapshot node))
+                     (%set-source-match entry "unverified" *reason-not-locatable*))))))
           ((member status '("mismatched" "unverified") :test #'equal)
            (%set-source-match entry status reason))
           (t
@@ -305,11 +350,13 @@ MATCHED verdict."
              (equal (gethash "source_match" entry) "matched"))
     (setf (gethash "form_type" entry) nil (gethash "form_name" entry) nil)
     (remhash "edit_unit" entry)
+    (remhash "edit_guard" entry)
     (%set-source-match entry "unverified" *note-stale*)))
 
 (defun annotate-report-forms (report verify-fn)
-  "Fill in the form_type, form_name, source_match, source_match_reason and
-(spec 3.4) edit_unit of every located object in REPORT, then remove
+  "Fill in the form_type, form_name, source_match, source_match_reason,
+(spec 3.4) edit_unit and (design doc 2026-09-16-clos-describe-fail-closed
+section 4.1) edit_guard of every located object in REPORT, then remove
 abs_path from each; return REPORT.
 
 Each file's top-level forms starting on a located line are scanned once
