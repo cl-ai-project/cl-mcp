@@ -18,7 +18,11 @@
                 #:target-name-from-designator
                 #:scan-text
                 #:scan-project
-                #:top-level-forms-at))
+                #:top-level-forms-at)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest
+                #:digest-string-octets))
 
 (in-package #:cl-mcp/tests/code-refs-scan-test)
 
@@ -783,4 +787,26 @@ LABEL goes into its name, so a leftover directory says which test made it."
            (multiple-value-bind (table failure) (top-level-forms-at path '())
              (ok (zerop (hash-table-count table)))
              (ok (null failure)))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-accepts-a-source-snapshots-text
+  (testing "READ-SOURCE-SNAPSHOT's :TEXT drives the CST and the digest from one read"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-snapshot.lisp"
+                            (format nil "(in-package #:cl-user)~%(defun widget () 1)~%"))))
+      (unwind-protect
+           (multiple-value-bind (snapshot snapshot-failure) (read-source-snapshot path)
+             (ok (null snapshot-failure))
+             (multiple-value-bind (table failure)
+                 (top-level-forms-at "/does/not/exist.lisp" '(2) :text (getf snapshot :text))
+               (ok (null failure) "the read policy is not consulted when TEXT is given")
+               (let ((entry (first (gethash 2 table))))
+                 (ok (equal '("defun" "widget")
+                            (list (getf entry :form-type) (getf entry :form-name))))
+                 (ok (equal "(defun widget () 1)"
+                            (subseq (getf snapshot :text) (getf entry :start) (getf entry :end)))
+                     "the form's [start, end) matches the snapshot's own text")
+                 (ok (equal (snapshot-range-digest snapshot (getf entry :start) (getf entry :end))
+                            (digest-string-octets "(defun widget () 1)"))
+                     "the range digest covers exactly the CST span the snapshot's text produced"))))
         (ignore-errors (delete-file path))))))

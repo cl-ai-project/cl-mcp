@@ -941,9 +941,11 @@ starts on is absent from TABLE.  A form wrapped in #+feature or #-feature is
 found both on its own line and on the line of the form it wraps (%UNWRAP),
 the same entry under both keys.
 
-TEXT, when given, is used instead of reading ABS-PATH from disk (for a
-caller that already holds the file's snapshot text); the read policy is not
-consulted in that case, since no file is opened.
+TEXT, when given, is used instead of reading ABS-PATH from disk: pass the
+:TEXT of a CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT result so the CST
+built here and a caller's digest (CL-MCP/SRC/SOURCE-SNAPSHOT:SNAPSHOT-RANGE-DIGEST
+over this call's :START/:END) come from the exact same read of the file. The
+read policy is not consulted in that case, since no file is opened.
 
 FAILURE is NIL when the file was read and parsed.  It is :DENIED when the
 read policy refuses ABS-PATH (%READABLE-PATH) and TEXT was not given -- the

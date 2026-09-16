@@ -69,7 +69,8 @@
   (:import-from #:cl-mcp/tests/spec-tools-test)
   (:import-from #:cl-mcp/tests/spec-integration-test)
   (:import-from #:cl-mcp/tests/spec-worker-test)
-  (:import-from #:cl-mcp/tests/lisp-macroexpand-test))
+  (:import-from #:cl-mcp/tests/lisp-macroexpand-test)
+  (:import-from #:cl-mcp/tests/source-snapshot-test))
 
 (in-package #:cl-mcp/tests)
 
