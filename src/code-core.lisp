@@ -7,7 +7,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
-                #:normalize-path-for-display #:path-inside-p)
+                #:allowed-read-path #:normalize-path-for-display #:path-inside-p)
   (:import-from #:uiop
                 #:read-file-string #:ensure-pathname
                 #:ensure-directory-pathname #:absolute-pathname-p)
@@ -431,6 +431,15 @@ read before the package existed."
 start, numbered as COMPILE-FILE numbers them, or NIL when the file cannot be
 read that way.
 
+The file is opened only when the read policy allows it: PATHNAME, after
+TRANSLATE-LOGICAL-PATHNAME, must resolve via ALLOWED-READ-PATH -- under
+*PROJECT-ROOT* or a registered ASDF system's source directory, symlinks
+resolved -- so a definition whose file lies outside gets no line from this
+fallback. FS-READ-SOURCE-TEXT is not used to get that text: FILE-POSITION on
+the character stream this function opens gives the octet positions
+%OFFSET->LINE expects, which a string read cannot provide for a file with
+multibyte characters.
+
 The file is read with the standard readtable, *READ-SUPPRESS* true and
 READ-PRESERVING-WHITESPACE, so nothing is evaluated or interned (a feature
 expression's keywords aside) and a form a reader conditional excludes counts
@@ -438,19 +447,22 @@ for nothing -- which is how the compiler counts.  On cl-mcp's own sources the
 positions equal the ones the compiler records.  A file using a custom reader
 macro may fail to read, giving NIL."
   (handler-case
-      (with-open-file (in (translate-logical-pathname pathname)
-                          :external-format '(:utf-8 :replacement #\?))
-        (let ((*read-suppress* t)
-              (*read-eval* nil)
-              (*package* (find-package "COMMON-LISP-USER"))
-              (*readtable* (copy-readtable nil))
-              (eof (list :eof))
-              (starts '()))
-          (loop
-            (let ((position (file-position in)))
-              (when (eq (read-preserving-whitespace in nil eof) eof)
-                (return (coerce (nreverse starts) 'vector)))
-              (push position starts)))))
+      (let ((resolved (and *project-root*
+                           (ignore-errors
+                            (allowed-read-path (translate-logical-pathname pathname))))))
+        (and resolved
+             (with-open-file (in resolved :external-format '(:utf-8 :replacement #\?))
+               (let ((*read-suppress* t)
+                     (*read-eval* nil)
+                     (*package* (find-package "COMMON-LISP-USER"))
+                     (*readtable* (copy-readtable nil))
+                     (eof (list :eof))
+                     (starts '()))
+                 (loop
+                   (let ((position (file-position in)))
+                     (when (eq (read-preserving-whitespace in nil eof) eof)
+                       (return (coerce (nreverse starts) 'vector)))
+                     (push position starts)))))))
     (error () nil)))
 
 (defun %cached-read-form-starts (pathname)

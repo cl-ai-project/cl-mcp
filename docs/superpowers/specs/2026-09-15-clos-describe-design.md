@@ -155,8 +155,10 @@ worker プールを使わない場合も同じ 3 段（report → 注釈 → 組
 2. 文字位置がなく、`pathname` と `form-path` があれば、その先頭要素をトップレベルフォーム番号 N とし、
    ファイルのトップレベルフォーム開始位置の N 番目を `%offset->line` で行にする。開始位置は次の順に求める
    1. 同じファイルの debug-source の `start-positions`（独自リーダーマクロを使うファイルでも正確）
-   2. 無ければ、ファイルを標準リードテーブル・`*read-suppress*` t・`read-preserving-whitespace` で読み、
-      各フォームを読む直前の `file-position` を集める（`%read-form-starts`）
+   2. 無ければ、`fs-read-file` と同じ読み取りポリシー（`*project-root*` 配下、または登録済み ASDF
+      システムのソースディレクトリ、シンボリックリンク解決後）が許すときに限り、ファイルを標準
+      リードテーブル・`*read-suppress*` t・`read-preserving-whitespace` で読み、各フォームを読む
+      直前の `file-position` を集める（`%read-form-starts`）。許可されなければ NIL
 3. どちらもできなければ NIL
 
 2-2 が要る理由: debug-source はそのファイルからコンパイルされた関数が生きている間しか残らない。

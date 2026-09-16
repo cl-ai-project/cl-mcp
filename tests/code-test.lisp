@@ -816,39 +816,54 @@ tests run from there."
         (ignore-errors (delete-file file))))))
 
 (deftest read-form-starts-counts-forms-as-the-compiler-does
-  (testing "a form a reader conditional excludes leaves no position"
-    (let ((file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/read-form-starts.lisp")))
-      (ensure-directories-exist file)
-      (with-open-file (out file :direction :output :if-exists :supersede :external-format :utf-8)
-        (format out ";;; 日本語のコメント~%(defun one () 1)~%#+(or) (defun never () 0)~%~
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a form a reader conditional excludes leaves no position"
+      (let ((file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/read-form-starts.lisp")))
+        (ensure-directories-exist file)
+        (with-open-file (out file :direction :output :if-exists :supersede :external-format :utf-8)
+          (format out ";;; 日本語のコメント~%(defun one () 1)~%#+(or) (defun never () 0)~%~
 #-sbcl (defun not-sbcl () 0)~%#+sbcl~%(defun two () 2)~%#| block~%comment |#~%~
 (defparameter *three* #.(+ 1 2))~%#+(or) #+sbcl (defun stacked () 0)~%~
 (defun four () (list #\\) \"str)ing\" '|a b|))~%"))
+        (unwind-protect
+             (let ((starts (%read-form-starts file)))
+               (ok starts "a file under the project root still yields positions")
+               (ok (= 4 (length starts)))
+               (ok (equal '(2 6 9 11)
+                          (map 'list (lambda (start) (%offset->line file start)) starts))))
+          (ignore-errors (delete-file file)))))))
+
+(deftest read-form-starts-denies-a-file-outside-the-project-root
+  (testing "the read policy refuses a file outside *project-root* and any registered system"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (file (merge-pathnames "cl-mcp-read-form-starts-outside.lisp"
+                                 (uiop:temporary-directory))))
+      (with-open-file (out file :direction :output :if-exists :supersede)
+        (write-string "(defun outside () 1)" out))
       (unwind-protect
-           (let ((starts (%read-form-starts file)))
-             (ok (= 4 (length starts)))
-             (ok (equal '(2 6 9 11)
-                        (map 'list (lambda (start) (%offset->line file start)) starts))))
+           (ok (null (%read-form-starts file)))
         (ignore-errors (delete-file file))))))
 
 (deftest definition-source-line-survives-collected-code
-  (testing "a file holding only a class still yields a line after a full GC"
-    (let ((file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/clos-classes-only.lisp")))
-      (ensure-directories-exist file)
-      (with-open-file (out file :direction :output :if-exists :supersede)
-        (format out "(defpackage #:cl-mcp-clos-classes-only (:use #:cl))~%~
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a file holding only a class still yields a line after a full GC"
+      (let ((file (asdf/system:system-relative-pathname
+                    :cl-mcp "tests/tmp/clos-classes-only.lisp")))
+        (ensure-directories-exist file)
+        (with-open-file (out file :direction :output :if-exists :supersede)
+          (format out "(defpackage #:cl-mcp-clos-classes-only (:use #:cl))~%~
 (in-package #:cl-mcp-clos-classes-only)~%~%~
 (defclass only-probe ()~%  ((a :initarg :a :accessor only-a)))~%"))
-      (unwind-protect
-           (progn
-             (%compile-and-load-under-own-name file)
-             ;; Once collected, the file's debug source and its recorded form
-             ;; positions are gone, and the line has to come from reading it.
-             (uiop:symbol-call :sb-ext :gc :full t)
-             (ok (eql 4 (definition-source-line
-                         (first (%find-definition-sources "CL-MCP-CLOS-CLASSES-ONLY"
-                                                          "ONLY-PROBE" :class))))))
-        (ignore-errors (delete-file file))))))
+        (unwind-protect
+             (progn
+               (%compile-and-load-under-own-name file)
+               ;; Once collected, the file's debug source and its recorded form
+               ;; positions are gone, and the line has to come from reading it.
+               (uiop:symbol-call :sb-ext :gc :full t)
+               (ok (eql 4 (definition-source-line
+                           (first (%find-definition-sources "CL-MCP-CLOS-CLASSES-ONLY"
+                                                            "ONLY-PROBE" :class))))))
+          (ignore-errors (delete-file file)))))))
 
 (deftest generic-function-method-count-counts-methods
   (testing "a generic function's method count, and NIL for anything else"
