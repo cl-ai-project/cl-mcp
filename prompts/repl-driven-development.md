@@ -58,7 +58,11 @@ against the CST to locate the form's source text, then the worker expands it, be
 the worker image has the macro's definition loaded.
 
 `clos-describe` splits the other way: the worker reads the classes and methods from its image,
-then the parent reads their source files for each definition's `form_type`/`form_name`.
+then the parent reads their source files and the worker re-resolves each token to confirm the
+definition is still the same one — only then does the entry carry a `form_type`/`form_name`.
+An entry whose source no longer matches (or could not be confirmed) carries a `source_match` of
+`"mismatched"` or `"unverified"` and a `source_match_reason` instead of the two edit fields —
+see `docs/tools.md`'s `clos-describe` section for the full three-state contract.
 
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).

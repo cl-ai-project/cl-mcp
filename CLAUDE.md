@@ -51,7 +51,7 @@ mallet src/*.lisp src/*/*.lisp tests/*.lisp
 | Lisp Editing | `src/lisp-edit-form.lisp` | CST-based form replace/insert via Eclector |
 | Lisp Patching | `src/lisp-patch-form.lisp` | Token-efficient sub-form text replacement |
 | Code Intel | `src/code.lisp`, `src/code-refs-scan.lisp`, `src/code-refs-core.lisp` | Symbol lookup, describe; callers with call sites and tests (xref + source scan) |
-| CLOS | `src/clos.lisp`, `src/clos-core.lisp`, `src/tools/clos-response-builders.lisp` | Generic function methods, class hierarchy, slots and specialized methods (clos-describe; worker reads the image, parent reads the source) |
+| CLOS | `src/clos.lisp`, `src/clos-core.lisp`, `src/clos-verify-core.lisp`, `src/tools/clos-response-builders.lisp` | Generic function methods, class hierarchy, slots and specialized methods (clos-describe; worker reads the image, parent reads the source, worker re-verifies each token so a `form_type`/`form_name` is only handed out once source and image agree — see `clos-describe` in docs/tools.md) |
 | Validation | `src/validate.lisp`, `src/parinfer.lisp` | Paren checking, auto-repair |
 | Pool Mgmt | `src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp` | Worker diagnostics and lifecycle |
 | cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Spec/Property listing, discovery and execution (`spec-list` / `spec-symbol` / `spec-describe` / `spec-check`). **Optional tool group `cl-spec`, off by default** |

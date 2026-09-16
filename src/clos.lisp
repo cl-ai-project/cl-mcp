@@ -35,8 +35,13 @@ A symbol naming a class and a generic function, or a SETF generic function,
 gets every section.  Each definition's source_match reports whether its form
 was independently verified against the running image: only \"matched\"
 carries a form_type and form_name that can be passed straight to
-lisp-edit-form; \"mismatched\" or \"unverified\" carries a
-source_match_reason instead.
+lisp-edit-form; \"mismatched\" (a different definition is there now) or
+\"unverified\" (not enough could be confirmed, including an unsupported
+(eql ...) value such as a string, list or variable reference) carries a
+source_match_reason instead.  A matched method inside a defgeneric's
+(:method ...) option or a defclass/define-condition accessor names that
+container as form_type/form_name, with edit_unit saying so, since the
+method itself is not a top-level form.
 
 Reads only: a class is never finalized, no initform is evaluated, and nothing
 is interned.

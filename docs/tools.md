@@ -494,23 +494,72 @@ Output (the content text carries everything that matters; names in it drop the s
 - `resolved_symbol`, `symbol_kind`, `lookup_package`, `lookup_name`, `limit`, `notes`
 - `generic_functions` (array, up to 2): the function `symbol` names and its `(setf symbol)` function, when generic
   - `name`, `lambda_list`, `documentation`, `method_combination` (`STANDARD`, `+ :MOST-SPECIFIC-FIRST`, ...)
-  - `path`, `line`, `stale`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
+  - `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
   - `method_count`, `truncated`, `methods`
 - `class` (object or null):
-  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `form_type`, `form_name`, `note`
+  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `note`
   - `direct_superclasses`, `direct_subclasses`, `precedence_list` (null when a superclass is undefined), `undefined_superclasses`
   - `direct_slots`, `effective_slots` (null without a precedence list): `name`, `from` (effective slots: the most specific class defining it), `initargs`, `initform` (the code, never evaluated; null when there is none), `type`, `allocation` (`instance`, `class`), `readers`, `writers`, `documentation`
   - `default_initargs`: `initarg`, `form`, `from`
   - `method_count`, `truncated`, `methods`, `omitted_classes`: the methods specialized on the class and its superclasses, except superclasses in `COMMON-LISP` or an `SB-` package (the standard protocol), which `omitted_classes` names
-- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `form_type`, `form_name`, `note`
+- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_unit`, `note`
 
-`form_type` / `form_name` are read from the source file, so they can be passed straight to
-`lisp-edit-form`: a `defmethod` gets its qualifiers and specializers, a method written inside
-`defgeneric` gets that `defgeneric`, and a slot accessor gets its `defclass`. When no form starts
-on the recorded line, `note` says why (the file changed since it was loaded, or does not parse).
-When the form starting there defines something else — a method renamed in place and reloaded
-leaves the old method in the image pointing at the new one's line — `form_type` and `form_name`
-stay null and `note` says the form is a different definition.
+**Observation vs. edit information.** Every definition's `path`/`line`/`stale`/`identity` come
+straight from the running image — SBCL's own record of where each generic function, class or
+method was compiled from, plus a structured `identity` (its name, qualifiers, specializers,
+and — for accessors — class/slot/access, all as package+name pairs, never a display string).
+That is *observation*: what the image believes about itself, always present when the image
+records a source location at all, regardless of whether the source file still agrees.
+
+`form_type` / `form_name` are *edit information*: they are handed out only once the source file
+has been independently re-read and its form at that location confirmed to describe the very
+same definition the image reported — and, further, only once `lisp-edit-form`'s own locator
+resolves that `form_type`/`form_name` back to that exact form. Confirming the same definition's
+*identity* is not the same as confirming the loaded code matches the source text byte for byte;
+this tool does not attempt the latter. `source_match` names which of three states this
+confirmation reached, and `source_match_reason` is an English sentence for the two states that
+are not "matched" (null when it is):
+
+- `matched`: the source form at the recorded location describes the same definition, and
+  `lisp-edit-form` resolves `form_type`/`form_name` to that same form — the only state that
+  carries `form_type`/`form_name` (and, for a container, `edit_unit`; see below). Everything
+  else omits both fields entirely rather than sending a stale or unverifiable pair.
+- `mismatched`: the source form there is a different definition (same generic function name but
+  different specializers, a class of the same name but different superclass, and so on) — for
+  example, a method whose `(eql :old)` specializer was edited to `(eql :new)` and reloaded:
+  the old method survives in the image (redefinition never removes a differently-specialized
+  method), so `clos-describe` reports it too, but that entry gets no edit information.
+- `unverified`: not enough could be confirmed either way — an unsupported or unparseable form,
+  a name or package that does not resolve in this image, an ambiguous match (more than one
+  candidate at the line, or more than one of a `defgeneric`'s inline methods matching), a file
+  that could not be read, or a file whose modification time is newer than what the image
+  recorded (`stale`: true) — staleness never lets a would-be `matched` verdict stand, since the
+  form the image last saw and the form on disk now may no longer be the same one.
+
+When no form starts on the recorded line at all, `note` says why (the file changed since it was
+loaded, or does not parse); that case is `unverified` too, with its own `source_match_reason`.
+The content text mirrors this exactly: a `matched` entry's line ends with
+`(form_type form_name)`, everything else ends with `[state: reason]` — the text never suggests
+an edit the JSON does not back up.
+
+**Specializer matching**, including `(eql ...)`, compares the *identity* the image reports
+against the *unevaluated source text* at that location — never against a printed
+representation, and never by evaluating the source form again. Supported `(eql ...)` values:
+a keyword, an integer (including a bignum, carried as decimal text so it never becomes a
+JSON float), a ratio, a character (case-sensitive), `t` and `nil` (tagged as a two-letter
+string, `"T"` or `"NIL"`, so `nil`-the-value is never confused with a missing field), and a
+symbol quoted with `'` or a confirmed `(quote ...)`. A variable reference, a function call, a
+string, a list or array, an uninterned symbol, `#.`, a float or a complex number, or anything
+whose printed form was truncated, is `unverified` — there is no way to confirm it without
+evaluating source, which this tool never does.
+
+**Container edit units.** A method identified as a `defgeneric`'s inline `(:method ...)` option,
+or a class's slot accessor (`:reader`/`:writer`/`:accessor`), is not itself a top-level form —
+editing it means editing the `defgeneric` or the `defclass`/`define-condition` that contains it.
+When that applies, a `matched` method carries `edit_unit` (`"defgeneric"`, `"defclass"` or
+`"define-condition"`) alongside a `form_type`/`form_name` that names the *container*, not the
+method by itself; `lisp-edit-form` on that form_type/form_name replaces the whole container, so
+edit it with that in mind rather than expecting a single method's text back.
 
 Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
 method combination, project files before other files; a class's methods follow its precedence
