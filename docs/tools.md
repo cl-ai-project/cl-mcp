@@ -398,7 +398,10 @@ reaches no file, and writes no file, that an unguarded call could not). Reading 
 call is capped the same way an ordinary `lisp-edit-form` read is: it reads the whole file in one
 pass, so the digest it checks and the text it edits always agree, and refuses — never
 truncates — a file at or over the same read limit an unguarded call would refuse too; a guard
-never lets this tool read more than an unguarded call could. This is not compare-and-swap.
+never lets this tool read more than an unguarded call could. A file that is not valid UTF-8 is
+refused the same way, with a plain error rather than a `conflict`: its undecodable bytes would
+be replaced by `?` on the way back to disk, and an unguarded call refuses it too (its decoder
+signals). This is not compare-and-swap.
 Between the check above and the write, a concurrent, uncoordinated writer
 (an external editor, another process) can still slip in; that narrow window is not closed. What
 *is* caught: any change after `guard` was built, reusing the same `guard` for a second edit
@@ -438,6 +441,12 @@ Input:
 `form_name` matches a `defmethod` as in `lisp-edit-form`: package prefixes and line breaks in it
 are ignored, the method whose whole signature equals `form_name` is preferred over one it
 abbreviates, and same-name methods from different packages need a `[N]` suffix.
+
+No `guard`: `lisp-patch-form` takes no guard argument, so it always patches whatever
+`form_type`/`form_name` match on disk right now, with no check that it is the form an earlier
+read observed. An edit built from a `clos-describe` result should therefore go through
+`lisp-edit-form` with that entry's `edit_guard` passed as `guard` — that is the only path where
+a file or form changed since the observation stops the write.
 
 Output:
 - `path`, `form_type`, `form_name`
@@ -564,8 +573,9 @@ are not "matched" (null when it is):
 - `matched`: the source form at the recorded location describes the same definition, and
   `lisp-edit-form` resolves `form_type`/`form_name` to that same form — the only state that
   carries `form_type`/`form_name` (and, for a container, `edit_unit`; see below) and an
-  `edit_guard` (see "Edit guard" below). Everything else omits all three fields entirely rather
-  than sending a stale or unverifiable pair.
+  `edit_guard` (see "Edit guard" below). Every other state sends `form_type` and `form_name` as
+  `null`, and omits `edit_unit` and `edit_guard` entirely, rather than a stale or unverifiable
+  pair.
 - `mismatched`: the source form there is a different definition (same generic function name but
   different specializers, a class of the same name but different superclass, and so on) — for
   example, a method whose `(eql :old)` specializer was edited to `(eql :new)` and reloaded:
@@ -616,7 +626,8 @@ the first one already consumed it — it does not catch an uncoordinated writer 
 `lisp-edit-form`'s own check and its write; no guard can close that window. On a conflict, call
 `clos-describe` again for a fresh `edit_guard` rather than retrying without one or falling back
 to a plain `form_type`/`form_name` call against possibly-changed source. `edit_guard` is present
-exactly when `form_type`/`form_name` are: an entry with no edit information never carries one.
+exactly when `form_type`/`form_name` carry values: an entry with no edit information (both of
+them `null`) never carries one.
 
 Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
 method combination, project files before other files; a class's methods follow its precedence
@@ -625,6 +636,13 @@ list, then the generic function's name.
 Reads only: a class is never finalized — an unfinalized class's precedence list is computed and
 its effective slots merged from the direct slots the standard way, with a note — no initform is
 evaluated, and nothing is interned.
+
+Cost: confirming a definition means reading and parsing the file it was compiled from, so one
+call reads every distinct file its answer names — once each, whole — and its cost scales with
+that number of files, not with the number of definitions. A file the CST reader cannot read
+(`#.` with `*read-eval*` off, a custom reader macro) yields no candidates at all, so every entry
+in it comes back `unverified` with no edit information, even when the definitions themselves are
+untouched.
 
 Limits: structure accessors are not MOP readers, so a `defstruct` slot lists none, and every
 structure slot shows an initform (`NIL` when none was written). A metaclass that customizes
