@@ -117,7 +117,7 @@ source_signature:
 | `character` | `{value: "A"}`（1 文字の文字列） | `(and (characterp o) (char= o c))` 大小文字を区別 |
 | `keyword` | `{name: "UNIT"}` | `(and (keywordp o) (string= (symbol-name o) name))` |
 | `boolean` | `{value: "T"}` / `{value: "NIL"}` | `(eq o t)` / `(null o)` |
-| `symbol` | `{token: "foo", in_package: "PKG-A", quoted: true}` | トークンを解決して `eq` |
+| `symbol` | `{token: "foo", in_package: "PKG-A", quoted: "reader"}`、`(quote x)` は `quoted: "operator"` と `quote_token: {token: "quote", in_package: "PKG-A"}` | トークンを解決して `eq`。`quoted: "operator"` のときは `quote_token` も解決して `CL:QUOTE` と `eq` か確かめ、違えば `unverified` |
 
 `symbol` は **`'` リーダーマクロ、または `CL:QUOTE` だと確認できた `(quote x)`** で引用された
 interned symbol に限る。`'` はソース文字列の先頭が `'` であることで確認し、`(quote x)` は
