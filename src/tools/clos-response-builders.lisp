@@ -190,18 +190,84 @@ worker could not read."
              t))
         (t t)))))
 
+(defun %legacy-eql-datum-text (datum)
+  "Return DATUM, a CODE-REFS-SCAN %SOURCE-EQL-DATUM tagged plist (spec 3.3),
+rendered the way this file's predecessor (value-based %DEFINITION-SIGNATURE)
+used to render an EQL specializer's datum -- close enough for
+%SAME-SPECIALIZERS-P's text-based, case-insensitive, prefix-stripping
+comparison -- or NIL when DATUM cannot be rendered that way (UNVERIFIABLE),
+matching the old \"cannot print\" case and its safe (EQL) fallback."
+  (case (getf datum :kind)
+    (:keyword (format nil ":~A" (getf datum :name)))
+    (:integer (getf datum :value))
+    (:ratio (format nil "~A/~A" (getf datum :numerator) (getf datum :denominator)))
+    (:character (format nil "#\\~A" (getf datum :value)))
+    (:boolean (getf datum :value))
+    (:symbol (getf datum :token))
+    (t nil)))
+
+(defun %legacy-specializer-text (specializer)
+  "Return SPECIALIZER, a CODE-REFS-SCAN %SOURCE-SPECIALIZER tagged plist,
+rendered the way this file's predecessor rendered a DEFMETHOD specializer,
+or NIL when SPECIALIZER is UNVERIFIABLE -- the caller then treats the whole
+form as un-checkable, as the old code did for anything it could not render."
+  (case (getf specializer :kind)
+    (:class (getf specializer :token))
+    (:eql (let ((text (%legacy-eql-datum-text (getf specializer :datum))))
+            (if text (format nil "(EQL ~A)" text) "(EQL)")))
+    (t nil)))
+
+(defun %legacy-name-text (name)
+  "Return NAME, a CODE-REFS-SCAN %SOURCE-NAME tagged plist, rendered the way
+this file's predecessor rendered a definition's name, or NIL when NAME is
+absent (a malformed definer %DEFINITION-SOURCE-SIGNATURE could not name)."
+  (and name
+       (if (getf name :setf)
+           (format nil "(SETF ~A)" (getf name :token))
+           (getf name :token))))
+
+(defun %legacy-signature (signature)
+  "Return SIGNATURE, a CODE-REFS-SCAN %DEFINITION-SOURCE-SIGNATURE plist
+(spec 3.2), as the (:NAME :QUALIFIERS :SPECIALIZERS) plist
+%FORM-DESCRIBES-ENTRY-P still expects -- a provisional bridge kept only
+until A4 replaces that predicate with worker-verified identity matching.
+NIL when SIGNATURE's kind is :OTHER, its name is missing, or (for a
+DEFMETHOD) any specializer is UNVERIFIABLE: %FORM-DESCRIBES-ENTRY-P then
+accepts the form unchecked, as the old code did for anything it could not
+confidently render as text."
+  (let ((name (%legacy-name-text (getf signature :name))))
+    (case (getf signature :kind)
+      (:defmethod
+        (and name
+             (let ((specializers (mapcar #'%legacy-specializer-text
+                                         (getf signature :specializers))))
+               (and (notany #'null specializers)
+                    (list :name name
+                          :qualifiers (mapcar (lambda (q) (getf q :token))
+                                              (getf signature :qualifiers))
+                          :specializers specializers)))))
+      ((:defgeneric :defclass :define-condition :defstruct)
+       (and name (list :name name)))
+      (t nil))))
+
 (defun annotate-report-forms (report)
   "Fill in the form_type, form_name and note of every located object in
 REPORT from its source file, then remove abs_path from each; return REPORT.
 
-Each file is read once (TOP-LEVEL-FORMS-AT).  An object gets the form that
-starts on its line, unless that form defines something else
-(%FORM-DESCRIBES-ENTRY-P): the object then gets *NOTE-DIFFERENT-DEFINITION*
-and no form, so its form_name never leads an edit to another definition.  When
-no form starts on the line it gets a note instead: the file does not parse, or
-it changed since it was loaded (stale), or neither, in which case the recorded
-line simply starts no form.  A file the read policy refuses gets
-neither form nor note -- the text still gives path:line."
+Each file is read once (TOP-LEVEL-FORMS-AT), which now returns every
+top-level form starting on a line, not just one.  An object gets the form
+that starts on its line only when exactly one form starts there and that
+form describes something else (%FORM-DESCRIBES-ENTRY-P, fed a
+%LEGACY-SIGNATURE bridge from the new token-based source_signature): the
+object then gets *NOTE-DIFFERENT-DEFINITION* and no form, so its form_name
+never leads an edit to another definition.  Zero forms on the line, more
+than one (ambiguous), or no note-worthy match falls through the same way:
+the file does not parse, or it changed since it was loaded (stale), or
+neither, in which case the recorded line simply starts no (uniquely
+identifiable) form.  A file the read policy refuses gets neither form nor
+note -- the text still gives path:line.  A4 replaces this provisional
+one-form-per-line rule with worker-verified identity matching across every
+candidate on the line (spec 3.4)."
   (let ((by-file (make-hash-table :test #'equal)))
     (dolist (entry (%located-entries report))
       (let ((abs-path (gethash "abs_path" entry)))
@@ -213,7 +279,11 @@ neither form nor note -- the text still gives path:line."
                                        (mapcar (lambda (entry) (gethash "line" entry))
                                                entries))
                  (dolist (entry entries)
-                   (let ((form (gethash (gethash "line" entry) table)))
+                   (let* ((forms (gethash (gethash "line" entry) table))
+                          (form (and forms (null (rest forms))
+                                    (list (getf (first forms) :form-type)
+                                          (getf (first forms) :form-name)
+                                          (%legacy-signature (getf (first forms) :signature))))))
                      (cond
                        ((and form (%form-describes-entry-p form entry))
                         (setf (gethash "form_type" entry) (first form)
