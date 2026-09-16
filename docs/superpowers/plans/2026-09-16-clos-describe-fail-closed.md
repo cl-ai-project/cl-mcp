@@ -262,6 +262,28 @@ spec §3.4 はこれを照合対象としているので塞ぐ。
 - [ ] **Step 3: GREEN**（`clos-core-test`, `clos-verify-core-test`）、mallet、コミット
   `feat(clos-core): identify a condition slot accessor by its class and slot`
 
+### Task 11: (A7) 同じ秒に 2 回ロードしたファイルの行を取り違えない
+
+**Files:** Modify `src/code-core.lisp`, `tests/code-test.lisp`
+
+Task 5 のレビューで確認された既存不具合。`%debug-sources-by-namestring` は、`DEBUG-SOURCE-CREATED`
+（秒単位）が同じ記録が複数あるとき「記録したフォーム数が多い方」を採る。これは `defpackage` が残す
+短い記録を避けるための規則だが、**1 秒以内に 2 回保存してフォーム数が減った**場合、古い記録が勝ち、
+分岐点より後ろの定義の行がすべてずれる。Task 5 の統合テストは `(sleep 1.1)` で回避している。
+
+**Interfaces:** `%debug-sources-by-namestring` の同秒タイブレークを次にする。
+同じ秒の記録のうち、位置ベクタが互いに**先頭一致（一方が他方の prefix）**ならこれまでどおり長い方を採る
+（同じロードの部分記録なので安全）。prefix 関係にない記録が 2 つ以上あるときは、どちらが新しいか判断できないので
+その**ファイルの記録を使わない**（`%form-start-offset` はファイルを読む経路にフォールバックする）。
+
+- [ ] **Step 1: 失敗するテストを書く** — `tests/code-test.lisp`: 1 つのファイルを書いてコンパイル・ロードし、
+  **同じ秒のうちに**フォーム数が減るよう書き換えて再コンパイル・ロードし、残っているクラス／メソッドの行が
+  現在のファイルの行と一致すること（ずれた古い記録が採られないこと）。`sleep` を使わないこと。RED を確認
+- [ ] **Step 2: 実装**（`%form-start-offset` の読み取りフォールバックは既存のものを使う）
+- [ ] **Step 3: Task 5 の統合テストから `(sleep 1.1)` を外せるか確認し、外せるなら外す**
+- [ ] **Step 4: GREEN**（`code-test`, `clos-describe-integration-test`）、mallet、コミット
+  `fix(code-core): ignore ambiguous same-second debug sources instead of guessing`
+
 ---
 
 ## B. 編集ガード
