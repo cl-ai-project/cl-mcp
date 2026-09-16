@@ -30,6 +30,8 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:locate-form-in-nodes)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-source-text)
   (:import-from #:cl-mcp/src/source-snapshot
                 #:read-source-snapshot
                 #:snapshot-range-digest)
@@ -279,6 +281,39 @@ so arrays are lists and false is NIL."
       (ok (equal (snapshot-range-digest snapshot (cst-node-start node) (cst-node-end node))
                  (gethash "form_digest" guard))))))
 
+(deftest annotate-report-forms-reads-each-file-once
+  (testing "one snapshot per file feeds the scan, the round trip and the guard"
+    (%load-fixture)
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((report (clos-describe-report "cl-mcp-clos-fixture:circle"))
+            (snapshot-calls (make-hash-table :test #'equal))
+            (source-text-calls 0)
+            (real-snapshot (fdefinition 'read-source-snapshot))
+            (real-source-text (fdefinition 'fs-read-source-text)))
+        (unwind-protect
+             (progn
+               (setf (fdefinition 'read-source-snapshot)
+                     (lambda (path)
+                       (incf (gethash (princ-to-string path) snapshot-calls 0))
+                       (funcall real-snapshot path))
+                     (fdefinition 'fs-read-source-text)
+                     (lambda (path)
+                       (incf source-text-calls)
+                       (funcall real-source-text path)))
+               (annotate-report-forms report #'%verify-inline))
+          (setf (fdefinition 'read-source-snapshot) real-snapshot
+                (fdefinition 'fs-read-source-text) real-source-text))
+        (let ((class (gethash "class" report))
+              (read-twice (loop for path being the hash-keys of snapshot-calls
+                                  using (hash-value count)
+                                unless (= count 1) collect (list path count))))
+          (ok (equal "matched" (gethash "source_match" class))
+              "the annotation still verified the fixture")
+          (ok (plusp (hash-table-count snapshot-calls)) "a file was read at all")
+          (ok (zerop source-text-calls)
+              "top-level-forms-at parses the snapshot's text instead of reading again")
+          (ok (null read-twice) (format nil "files read more than once: ~S" read-twice)))))))
+
 (deftest annotate-report-forms-never-matches-a-stale-entry
   (testing "a stale entry never becomes matched even when its form does verify"
     (%load-fixture)
@@ -289,7 +324,9 @@ so arrays are lists and false is NIL."
       (annotate-report-forms report #'%verify-inline)
       (ok (equal "unverified" (gethash "source_match" class)))
       (ok (equal *note-stale* (gethash "source_match_reason" class)))
-      (ok (null (gethash "form_type" class))))))
+      (ok (null (gethash "form_type" class)))
+      (ok (not (nth-value 1 (gethash "edit_guard" class)))
+          "the edit_guard its matched verdict had is removed, not left behind"))))
 
 (deftest annotate-report-forms-falls-back-when-verify-fn-is-unavailable
   (testing "a verify-fn that signals never blocks the report"

@@ -13,6 +13,7 @@
                 #:sequence->list
                 #:*note-stale*)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:+edit-guard-version+
                 #:locate-form-in-nodes)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
@@ -231,29 +232,31 @@ more than this one IDENTITY."
       (:define-condition "define-condition")
       (t nil))))
 
-(defun %file-nodes (abs-path cache)
-  "Return (VALUES NODES SNAPSHOT) for ABS-PATH: NODES is its parsed top-level
-CST nodes and SNAPSHOT is the CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT
-plist NODES was parsed from -- the exact same read, so a digest computed
-from SNAPSHOT always describes the bytes NODES was built from, never a
-second, possibly different, read. Both are memoized together in CACHE (an
-EQUAL hash table), so a file with several located entries is read and
+(defun %file-nodes (snapshot cache)
+  "Return the parsed top-level CST nodes of SNAPSHOT's text, or NIL when it
+does not parse.
+
+SNAPSHOT is the CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT plist
+ANNOTATE-REPORT-FORMS already read for this file and passed to
+TOP-LEVEL-FORMS-AT as :TEXT, so these nodes, that scan's candidates and every
+digest taken from SNAPSHOT describe one single read of the file (design doc
+2026-09-16-clos-describe-fail-closed sections 3.6 and 4.1): nothing here opens
+the file a second time.  The nodes are memoized in CACHE (an EQUAL hash table
+keyed by SNAPSHOT's :ABS-PATH), so a file with several located entries is
 parsed once.
 
-Both are NIL when the file cannot be read (READ-SOURCE-SNAPSHOT's FAILURE)
-or parsed -- a MATCHED verdict there then cannot be round-trip-confirmed
-(spec 3.5) and falls back to UNVERIFIED, with no edit_guard (design doc
-2026-09-16-clos-describe-fail-closed section 4.1) offered either."
-  (multiple-value-bind (value found) (gethash abs-path cache)
-    (if found
-        (values-list value)
-        (let* ((snapshot (nth-value 0 (read-source-snapshot abs-path)))
-               (nodes (and snapshot
-                           (ignore-errors
-                             (parse-top-level-forms (getf snapshot :text)
-                                                     :source-path (pathname abs-path))))))
-          (setf (gethash abs-path cache) (list nodes snapshot))
-          (values nodes snapshot)))))
+NIL when the text cannot be parsed -- a MATCHED verdict there then cannot be
+round-trip-confirmed (spec 3.5) and falls back to UNVERIFIED, with no
+edit_guard offered either."
+  (let ((key (getf snapshot :abs-path)))
+    (when key
+      (multiple-value-bind (value found) (gethash key cache)
+        (if found
+            value
+            (setf (gethash key cache)
+                  (ignore-errors
+                    (parse-top-level-forms (getf snapshot :text)
+                                           :source-path (pathname key)))))))))
 
 (defun %round-trip-ok-p (nodes form-type form-name start end)
   "Return (VALUES OK-P NODE): OK-P is true when NODES resolve FORM-TYPE and
@@ -288,9 +291,14 @@ CANDIDATE's -- after a MATCHED verdict's round trip is confirmed."
 (defun %maybe-set-edit-guard (entry snapshot node)
   "Set ENTRY's EDIT_GUARD (design doc 2026-09-16-clos-describe-fail-closed
 section 4.1) from SNAPSHOT (the CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-
-SNAPSHOT plist %FILE-NODES parsed NODE from) and NODE (the CST node
-%ROUND-TRIP-OK-P just confirmed for ENTRY's matched form): the same read
-and the same span %SET-MATCHED-FORM used, never a second one.
+SNAPSHOT plist this file's candidates and NODE were parsed from) and NODE (the
+CST node %ROUND-TRIP-OK-P just confirmed for ENTRY's matched form): the same
+read and the same span %SET-MATCHED-FORM used, never a second one.
+
+ABS_PATH is SNAPSHOT's own :ABS-PATH, the namestring of the file that was
+actually read, not ENTRY's abs_path: CHECK-EDIT-GUARD's check 2 compares it
+with the truename of the file lisp-edit-form is about to write, so a guard
+this function emits can never fail that check on a spelling difference.
 
 Sets nothing when either digest is unavailable (SB-MD5 not loadable) --
 SNAPSHOT's own :DIGEST or SNAPSHOT-RANGE-DIGEST of NODE's span -- so a
@@ -302,24 +310,26 @@ handed out (fail-closed, design doc 4.1)."
          (form-digest (and file-digest (snapshot-range-digest snapshot start end))))
     (when (and file-digest form-digest)
       (setf (gethash "edit_guard" entry)
-            (make-ht "version" 1
+            (make-ht "version" +edit-guard-version+
                       "path" (gethash "path" entry)
-                      "abs_path" (gethash "abs_path" entry)
+                      "abs_path" (getf snapshot :abs-path)
                       "file_digest" file-digest
                       "form_start" start
                       "form_end" end
                       "form_digest" form-digest)))))
 
-(defun %apply-verification (entry forms result node-cache)
+(defun %apply-verification (entry forms snapshot result node-cache)
   "Set ENTRY's SOURCE_MATCH (and, once confirmed, FORM_TYPE/FORM_NAME/
 EDIT_UNIT/EDIT_GUARD) from RESULT, worker/clos-verify-source's verdict for
 ENTRY's candidates FORMS (spec 3.1, 3.5), or *REASON-VERIFICATION-UNAVAILABLE*
-when RESULT is NIL.  A STATUS other than \"matched\"/\"mismatched\"/\"unverified\"
--- a future verifier version skew -- is clamped to \"unverified\" naming the
-unexpected value, never passed through as-is: the three-word contract holds
-regardless of what the worker sends.  A stale ENTRY (spec 3.1) never keeps a
-MATCHED verdict, and loses EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT
-when it does."
+when RESULT is NIL.  SNAPSHOT is the one read FORMS were scanned from, so the
+round trip, the span and both digests come from the very text that produced
+the verdict's candidates (design doc sections 3.6 and 4.1).  A STATUS other
+than \"matched\"/\"mismatched\"/\"unverified\" -- a future verifier version skew
+-- is clamped to \"unverified\" naming the unexpected value, never passed
+through as-is: the three-word contract holds regardless of what the worker
+sends.  A stale ENTRY (spec 3.1) never keeps a MATCHED verdict, and loses
+EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does."
   (if (null result)
       (%set-source-match entry "unverified" *reason-verification-unavailable*)
       (let ((status (gethash "status" result))
@@ -328,19 +338,18 @@ when it does."
           ((equal status "matched")
            (let* ((index (gethash "candidate_index" result))
                   (candidate (and (integerp index) (nth index forms))))
-             (multiple-value-bind (nodes snapshot)
-                 (and candidate (%file-nodes (gethash "abs_path" entry) node-cache))
-               (multiple-value-bind (ok-p node)
-                   (and candidate
-                        (%round-trip-ok-p nodes (getf candidate :form-type)
-                                          (getf candidate :form-name)
-                                          (getf candidate :start) (getf candidate :end)))
-                 (if ok-p
-                     (progn
-                       (%set-source-match entry "matched" nil)
-                       (%set-matched-form entry candidate (gethash "identity" entry))
-                       (%maybe-set-edit-guard entry snapshot node))
-                     (%set-source-match entry "unverified" *reason-not-locatable*))))))
+             (multiple-value-bind (ok-p node)
+                 (and candidate
+                      (%round-trip-ok-p (%file-nodes snapshot node-cache)
+                                        (getf candidate :form-type)
+                                        (getf candidate :form-name)
+                                        (getf candidate :start) (getf candidate :end)))
+               (if ok-p
+                   (progn
+                     (%set-source-match entry "matched" nil)
+                     (%set-matched-form entry candidate (gethash "identity" entry))
+                     (%maybe-set-edit-guard entry snapshot node))
+                   (%set-source-match entry "unverified" *reason-not-locatable*)))))
           ((member status '("mismatched" "unverified") :test #'equal)
            (%set-source-match entry status reason))
           (t
@@ -359,8 +368,12 @@ when it does."
 section 4.1) edit_guard of every located object in REPORT, then remove
 abs_path from each; return REPORT.
 
-Each file's top-level forms starting on a located line are scanned once
-(TOP-LEVEL-FORMS-AT) and converted to the candidate JSON spec 3.2 defines
+Each file holding a located definition is read exactly once
+(READ-SOURCE-SNAPSHOT) and parsed from that one text: the candidate scan
+(TOP-LEVEL-FORMS-AT's :TEXT), the round trip below and an edit_guard's
+digests all describe the same bytes, never separate reads mixed together
+(design doc sections 3.6 and 4.1).  The top-level forms starting on a located
+line are converted to the candidate JSON spec 3.2 defines
 (%JSON-SIGNATURE); every located entry, across every file, is sent to
 VERIFY-FN in one batch (spec 3.6) -- a callback CLOS.LISP supplies, calling
 worker/clos-verify-source over the pool or CLOS-VERIFY-CORE:VERIFY-ENTRIES
@@ -400,27 +413,37 @@ assert a state (or its absence) the JSON disagrees with."
           (t (%set-source-match entry "unverified" *reason-no-source-line*)))))
     (maphash
      (lambda (abs-path file-entries)
-       (multiple-value-bind (table failure)
-           (top-level-forms-at abs-path
-                               (mapcar (lambda (e) (gethash "line" e)) file-entries))
-         (dolist (entry file-entries)
-           (let ((forms (gethash (gethash "line" entry) table)))
-             (cond
-               (forms
-                (let ((id (format nil "~D" (incf counter))))
-                  (setf (gethash id contexts) (list entry forms))
-                  (push (make-ht "id" id "identity" (gethash "identity" entry)
-                                 "candidates"
-                                 (map 'vector
-                                      (lambda (f) (%json-signature (getf f :signature)))
-                                      forms))
-                        entries-json)))
-               ((eq failure :denied)
-                (%set-source-match entry "unverified" *reason-not-readable*))
-               (failure
-                (%set-source-match entry "unverified"
-                                   (format nil "~A: ~A" *note-unparseable* failure)))
-               (t (%set-source-match entry "unverified" *note-no-form-at-line*)))))))
+       ;; One read per file (design doc section 3.6): this snapshot's text is
+       ;; what the scan parses, what the round trip re-matches and what both
+       ;; of an edit_guard's digests describe.  A read failure keeps the
+       ;; vocabulary TOP-LEVEL-FORMS-AT used when it did the reading:
+       ;; :DENIED for a path the read policy refuses, a one-line string for
+       ;; anything else.
+       (multiple-value-bind (snapshot read-failure) (read-source-snapshot abs-path)
+         (multiple-value-bind (table failure)
+             (if snapshot
+                 (top-level-forms-at abs-path
+                                     (mapcar (lambda (e) (gethash "line" e)) file-entries)
+                                     :text (getf snapshot :text))
+                 (values nil read-failure))
+           (dolist (entry file-entries)
+             (let ((forms (and table (gethash (gethash "line" entry) table))))
+               (cond
+                 (forms
+                  (let ((id (format nil "~D" (incf counter))))
+                    (setf (gethash id contexts) (list entry forms snapshot))
+                    (push (make-ht "id" id "identity" (gethash "identity" entry)
+                                   "candidates"
+                                   (map 'vector
+                                        (lambda (f) (%json-signature (getf f :signature)))
+                                        forms))
+                          entries-json)))
+                 ((eq failure :denied)
+                  (%set-source-match entry "unverified" *reason-not-readable*))
+                 (failure
+                  (%set-source-match entry "unverified"
+                                     (format nil "~A: ~A" *note-unparseable* failure)))
+                 (t (%set-source-match entry "unverified" *note-no-form-at-line*))))))))
      by-file)
     (let* ((batch (coerce (nreverse entries-json) 'vector))
            (results (and (plusp (length batch)) (%call-verify-fn verify-fn batch)))
@@ -428,8 +451,9 @@ assert a state (or its absence) the JSON disagrees with."
       (dolist (result results)
         (setf (gethash (gethash "id" result) results-by-id) result))
       (maphash (lambda (id context)
-                 (destructuring-bind (entry forms) context
-                   (%apply-verification entry forms (gethash id results-by-id) node-cache)))
+                 (destructuring-bind (entry forms snapshot) context
+                   (%apply-verification entry forms snapshot
+                                        (gethash id results-by-id) node-cache)))
                contexts))
     (dolist (entry (%located-entries report))
       (when (null (gethash "source_match" entry))
