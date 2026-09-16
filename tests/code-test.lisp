@@ -865,6 +865,110 @@ tests run from there."
                                                             "ONLY-PROBE" :class))))))
           (ignore-errors (delete-file file)))))))
 
+(deftest debug-sources-by-namestring-ignores-ambiguous-same-second-reload
+  ;; Run in isolation (rove:run-test), no earlier test has required
+  ;; SB-INTROSPECT yet, and METHOD-LINE below calls into it directly.
+  (require :sb-introspect)
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a same-second recompile with fewer forms resolves the file as it is now"
+      (let ((file (asdf/system:system-relative-pathname
+                   :cl-mcp "tests/tmp/same-second-fixture.lisp"))
+            (full-text (format nil "~
+(defpackage #:cl-mcp-same-second-fixture (:use #:cl))
+(in-package #:cl-mcp-same-second-fixture)
+(defgeneric probe (x))
+
+(defmethod probe ((x integer))
+  (declare (ignore x))
+  :before-probe)
+
+(defmethod probe ((x symbol))
+  (declare (ignore x))
+  ;; Padding so DOOMED's own form is far longer than its neighbors: deleting
+  ;; it below shifts every later top-level form's byte offset by much more
+  ;; than a line, so a wrong (stale) offset lands nowhere near the truth.
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  :doomed-probe)
+
+(defmethod probe ((x string))
+  (declare (ignore x))
+  :mid-probe)
+
+(defmethod probe ((x float))
+  (declare (ignore x))
+  :after-probe)
+
+(defmethod probe ((x cons))
+  (declare (ignore x))
+  :tail-probe)
+"))
+            (shrunk-text (format nil "~
+(defpackage #:cl-mcp-same-second-fixture (:use #:cl))
+(in-package #:cl-mcp-same-second-fixture)
+(defgeneric probe (x))
+
+(defmethod probe ((x integer))
+  (declare (ignore x))
+  :before-probe)
+
+(defmethod probe ((x string))
+  (declare (ignore x))
+  :mid-probe)
+
+(defmethod probe ((x float))
+  (declare (ignore x))
+  :after-probe)
+
+(defmethod probe ((x cons))
+  (declare (ignore x))
+  :tail-probe)
+")))
+        (ensure-directories-exist file)
+        (unwind-protect
+             (flet ((write-and-compile (text)
+                      (with-open-file (out file :direction :output :if-exists :supersede)
+                        (write-string text out))
+                      (%compile-and-load-under-own-name file))
+                    (method-line (specializer-class-name)
+                      (definition-source-line
+                       (uiop:symbol-call
+                        :sb-introspect :find-definition-source
+                        (find-method
+                         (fdefinition (find-symbol "PROBE" "CL-MCP-SAME-SECOND-FIXTURE"))
+                         nil (list (find-class specializer-class-name)))))))
+               (let ((landed nil))
+                 ;; Retry, not sleep: two compiles of a few lines each are far
+                 ;; faster than a second, so they almost always land in the
+                 ;; same wall-clock second on the first try; verifying it
+                 ;; (rather than hoping) keeps this deterministic instead of
+                 ;; flaky in either direction.
+                 (dotimes (attempt 200)
+                   (let ((before (get-universal-time)))
+                     (write-and-compile full-text)
+                     (let ((mid (get-universal-time)))
+                       (write-and-compile shrunk-text)
+                       (let ((after (get-universal-time)))
+                         (when (= before mid after)
+                           (setf landed t)
+                           (return))))))
+                 (ok landed
+                     "both compiles landed in the same wall-clock second within 200 tries"))
+               (ok (eql (%fixture-line "(defmethod probe ((x integer)" file)
+                        (method-line 'integer))
+                   "INTEGER, before the deletion, still resolves to its own line")
+               (ok (eql (%fixture-line "(defmethod probe ((x float)" file)
+                        (method-line 'float))
+                   "FLOAT, two forms after the deletion, resolves to its line in the file as it is now")
+               (ok (eql (%fixture-line "(defmethod probe ((x cons)" file)
+                        (method-line 'cons))
+                   "CONS, three forms after the deletion, resolves to its line in the file as it is now"))
+          (ignore-errors (delete-file file)))))))
+
 (deftest generic-function-method-count-counts-methods
   (testing "a generic function's method count, and NIL for anything else"
     (%compile-and-load-under-own-name *clos-fixture*)

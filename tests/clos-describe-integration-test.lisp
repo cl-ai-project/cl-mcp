@@ -244,20 +244,17 @@ matching guards both cases, not just a stale live method)."
        (progn
          (%write-text *fixture-path* (%fixture-text))
          (%compile-and-load-path *fixture-path*)
-         ;; SB-INTROSPECT keeps one DEBUG-SOURCE per (file, second): when two
-         ;; compiles of the same truename land in the same wall-clock second
-         ;; *and* the second version has fewer top-level forms than the
-         ;; first (as "doomed"'s deletion below does), CL-MCP/SRC/CODE-
-         ;; CORE:%DEBUG-SOURCES-BY-NAMESTRING's documented tie-break --
-         ;; "of those created in the same second, the one recording the most
-         ;; forms wins" -- keeps version 1's form-position table for every
-         ;; later lookup, misattributing every definition's line after that
-         ;; point (a pre-existing code-core.lisp heuristic, unrelated to the
-         ;; fail-closed matching this test exercises).  A real edit session
-         ;; is never sub-second, so this sleep -- not a workaround for this
-         ;; test's own logic -- just keeps the two compiles' timestamps the
-         ;; way two real saves would be.
-         (sleep 1.1)
+         ;; SB-INTROSPECT keeps one DEBUG-SOURCE per (file, second): two
+         ;; compiles of the same truename landing in the same wall-clock
+         ;; second used to be resolved by picking whichever recorded the
+         ;; most forms, which is wrong when the *later* one -- as "doomed"'s
+         ;; deletion below does -- has fewer.  CL-MCP/SRC/CODE-CORE:
+         ;; %DEBUG-SOURCES-BY-NAMESTRING now refuses to guess when two
+         ;; same-second sources aren't one a prefix of the other, so the
+         ;; version-1/version-2 race this comment used to sidestep with a
+         ;; sleep no longer needs sidestepping: %FORM-START-OFFSET falls
+         ;; back to reading the file, which is always the version 2 that is
+         ;; on disk by the time %WRITE-TEXT below returns.
          (%write-text *fixture-path*
                       (%fixture-text
                        :shape-specializer "dog"

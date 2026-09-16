@@ -374,18 +374,53 @@ would leave the tables describing files as they were."
   (let ((symbol (and (find-package package) (find-symbol name package))))
     (and symbol (fboundp symbol) (fdefinition symbol))))
 
+(defun %vector-prefix-p (shorter longer)
+  "True when every element of SHORTER equals LONGER's element at the same
+index, i.e. SHORTER is a prefix of LONGER (LONGER must be at least as long;
+equal length and content counts as a prefix too)."
+  (and (<= (length shorter) (length longer))
+       (dotimes (i (length shorter) t)
+         (unless (eql (aref shorter i) (aref longer i))
+           (return nil)))))
+
+(defun %unambiguous-longest (sources positions-fn)
+  "Return the element of SOURCES, all tied on DEBUG-SOURCE-CREATED, whose
+positions vector (POSITIONS-FN) is longest -- provided every shorter vector in
+SOURCES is a prefix (%VECTOR-PREFIX-P) of every vector at least as long, the
+pattern one load's partial and full debug sources leave.  Returns NIL when two
+of SOURCES disagree instead: their positions cannot both describe the same
+load, so which one is truly newest cannot be told apart."
+  (let ((sorted (sort (copy-list sources) #'<
+                       :key (lambda (source) (length (funcall positions-fn source))))))
+    (loop for (shorter longer) on sorted
+          while longer
+          unless (%vector-prefix-p (funcall positions-fn shorter) (funcall positions-fn longer))
+            do (return-from %unambiguous-longest nil))
+    (first (last sorted))))
+
+(defun %newest-tied-sources (sources created-fn)
+  "Return the subset of SOURCES whose DEBUG-SOURCE-CREATED (CREATED-FN; NIL
+counts as 0) equals the latest value among them."
+  (let ((newest (reduce #'max sources :key (lambda (s) (or (funcall created-fn s) 0)))))
+    (remove-if-not (lambda (s) (= (or (funcall created-fn s) 0) newest)) sources)))
+
 (defun %debug-sources-by-namestring ()
   "Return a table from source namestring to the newest debug source recording
 the start positions of that file's top-level forms.
 
 It walks every code object in the heap (about 60ms for 28,000 objects).  Of
 several debug sources for one file, the one with the latest
-DEBUG-SOURCE-CREATED wins (NIL counts as 0), and of those created in the same
-second, the one recording the most forms.  Loading a file more than once leaves
-one set per load; compiling a file that starts with DEFPACKAGE also leaves a
-second debug source, created in the same second, that records only the forms
-read before the package existed."
-  (let ((table (make-hash-table :test #'equal))
+DEBUG-SOURCE-CREATED wins (NIL counts as 0).  Compiling a file that starts
+with DEFPACKAGE also leaves a second debug source, created in the same
+second, that records only the forms read before the package existed; its
+positions are always a prefix of the full record's, so of sources tied on
+DEBUG-SOURCE-CREATED, the one with the longer, prefix-compatible positions
+wins (%UNAMBIGUOUS-LONGEST).  When two tied sources are NOT prefix-compatible
+-- two distinct compiles of the same file landing in the same wall-clock
+second, the later one with fewer top-level forms than the earlier -- which
+load is truly newest cannot be told apart, so the file gets no entry here at
+all: %FORM-START-OFFSET falls back to reading the file directly."
+  (let ((raw (make-hash-table :test #'equal))
         (list-objects (%sbcl-function "SB-VM" "LIST-ALLOCATED-OBJECTS"))
         (code-widetag (let ((symbol (find-symbol "CODE-HEADER-WIDETAG" "SB-VM")))
                         (and symbol (boundp symbol) (symbol-value symbol))))
@@ -405,17 +440,16 @@ read before the package existed."
               (when (and (typep source source-type)
                          (stringp (funcall namestring-fn source))
                          (funcall positions-fn source))
-                (let* ((name (funcall namestring-fn source))
-                       (old (gethash name table)))
-                  (when (or (null old)
-                            (let ((created (or (funcall created-fn source) 0))
-                                  (old-created (or (funcall created-fn old) 0)))
-                              (or (> created old-created)
-                                  (and (= created old-created)
-                                       (> (length (funcall positions-fn source))
-                                          (length (funcall positions-fn old)))))))
-                    (setf (gethash name table) source))))))))
-      table)))
+                (pushnew source (gethash (funcall namestring-fn source) raw) :test #'eq))))))
+      (let ((table (make-hash-table :test #'equal)))
+        (maphash (lambda (name sources)
+                   (let* ((tied (%newest-tied-sources sources created-fn))
+                          (winner (if (rest tied)
+                                      (%unambiguous-longest tied positions-fn)
+                                      (first tied))))
+                     (when winner (setf (gethash name table) winner))))
+                 raw)
+        table))))
 
 (defun %debug-source-for (pathname)
   "Return the newest debug source compiled from PATHNAME, or NIL."
