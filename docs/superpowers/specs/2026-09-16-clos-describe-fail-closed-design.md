@@ -69,10 +69,13 @@ identity:
   generic_function: {package: "PKG-A", name: "AREA", setf: true|false}   ; method / generic-function
   qualifiers: [{package: "KEYWORD", name: "AROUND"}, ...]                ; method
   specializers: [ {kind: "class",  package: "PKG-A", name: "CIRCLE"}
-                | {kind: "eql",    datum: <tagged datum, 3.3>} ]         ; method
+                | {kind: "eql",    datum: <tagged datum, 3.3>}
+                | {kind: "unverifiable", reason: "<1 文>"} ]             ; method
+                ; 無名クラス・forward-referenced クラス・その他の特化子は unverifiable
   class: {package: "PKG-A", name: "CIRCLE"}                              ; class / accessor
   slot:  {package: "PKG-A", name: "RADIUS"}                              ; accessor
   access: "reader" | "writer"                                            ; accessor
+  ; class / slot / access はメソッドの identity に常に存在し、アクセサ以外では null
 ```
 
 パッケージ名は `package-name`（プライマリ名）、`name` は `symbol-name` をそのまま（大小文字を保つ）。
