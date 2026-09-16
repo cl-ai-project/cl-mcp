@@ -93,17 +93,48 @@ ignoring case."
   (and (stringp a) (stringp b)
        (string-equal (%base-name a) (%base-name b))))
 
+(defun %eql-inner-text (text)
+  "Return the datum text inside TEXT, an (EQL ...) specializer string --
+\"(EQL)\" or \"(EQL <datum>)\" -- between \"(EQL \" and the final \")\"; NIL
+when TEXT does not have that shape.  \"(EQL)\" gives the empty string: an
+older signature, or one whose datum could not be printed."
+  (when (and (stringp text) (>= (length text) 5)
+             (string-equal "(EQL" text :end2 4)
+             (char= #\) (char text (1- (length text)))))
+    (string-trim " " (subseq text 4 (1- (length text))))))
+
+(defun %eql-datum-comparable-p (text)
+  "True when TEXT, an (EQL ...) specializer's inner datum text, holds only
+characters that can appear in symbol, keyword or number syntax, so it can be
+compared against another such text reliably.  A string, a list or a character
+literal holds a double quote, a parenthesis, `#', a backslash, or a space
+(from more than one token), and returns NIL for those."
+  (every (lambda (ch) (and (not (find ch "\"()#\\ ")) (not (char= ch #\Tab)))) text))
+
 (defun %same-specializers-p (entry-specializers form-specializers)
   "True when ENTRY-SPECIALIZERS, a method entry's, match FORM-SPECIALIZERS, a
-defmethod signature's, pairwise: class names by %SAME-NAME-P, and an entry's
-(EQL object) with the signature's (EQL)."
+defmethod signature's, pairwise: class names by %SAME-NAME-P, and an EQL
+specializer -- both texts start \"(EQL \" -- by its datum: the inner texts
+(%EQL-INNER-TEXT), compared like a name (package prefixes dropped token-wise,
+case-insensitively) when both hold only symbol/keyword/number syntax
+(%EQL-DATUM-COMPARABLE-P).  Either inner text empty, or either not comparable
+that way -- a string, a list, or a character literal -- counts as a match:
+those cases cannot be told apart reliably and must not report a false
+mismatch.  A specializer that is EQL on only one side never matches."
   (and (= (length entry-specializers) (length form-specializers))
        (every (lambda (entry-specializer form-specializer)
                 (and (stringp entry-specializer)
-                     (if (and (>= (length entry-specializer) 5)
-                              (string-equal "(EQL " entry-specializer :end2 5))
-                         (equal form-specializer "(EQL)")
-                         (%same-name-p entry-specializer form-specializer))))
+                     (let ((entry-inner (%eql-inner-text entry-specializer)))
+                       (if entry-inner
+                           (let ((form-inner (and (stringp form-specializer)
+                                                  (%eql-inner-text form-specializer))))
+                             (and form-inner
+                                  (or (zerop (length entry-inner))
+                                      (zerop (length form-inner))
+                                      (not (%eql-datum-comparable-p entry-inner))
+                                      (not (%eql-datum-comparable-p form-inner))
+                                      (%same-name-p entry-inner form-inner))))
+                           (%same-name-p entry-specializer form-specializer)))))
               entry-specializers form-specializers)))
 
 (defun %form-describes-entry-p (form entry)

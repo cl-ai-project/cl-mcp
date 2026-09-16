@@ -523,7 +523,7 @@ LABEL goes into its name, so a leftover directory says which test made it."
              (ok (null failure))
              (testing "a defmethod's name, qualifiers and one specializer per required parameter"
                (ok (equal '(:name "RENDER" :qualifiers (":AROUND")
-                            :specializers ("WIDGET" "T" "(EQL)"))
+                            :specializers ("WIDGET" "T" "(EQL :FAST)"))
                           (signature 2))
                    "a keyword qualifier, T, EQL, and &optional ending the required ones")
                (ok (equal '(:name "(SETF TITLE)" :qualifiers () :specializers ("T" "WIDGET"))
@@ -541,6 +541,21 @@ LABEL goes into its name, so a leftover directory says which test made it."
              (testing "no signature for other forms"
                (ok (equal '("defun" "helper" nil) (gethash 14 table))))))
       (ignore-errors (delete-file path)))))
+
+(deftest top-level-forms-at-keeps-the-eql-datum
+  (testing "an EQL specializer's signature keeps its datum, not just \"(EQL)\""
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-eql.lisp"
+                            (format nil "(in-package #:cl-user)~%~
+(defmethod area ((s (eql :unit))) 1)~%~
+(defmethod area ((s (eql 'other))) 2)~%"))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2 3))
+             (flet ((specializers (line) (getf (third (gethash line table)) :specializers)))
+               (ok (null failure))
+               (ok (equal '("(EQL :UNIT)") (specializers 2)) "a keyword datum")
+               (ok (equal '("(EQL OTHER)") (specializers 3)) "a quoted symbol datum")))
+        (ignore-errors (delete-file path))))))
 
 (deftest top-level-forms-at-reports-why-it-found-nothing
   (testing "a file that does not parse gives its reader error"

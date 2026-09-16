@@ -197,8 +197,9 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
   `in-package` を追跡して `%form-metadata` を呼ぶ
 - 行の一致は `cst-node-start-line` と比べる。`#+feature` で包まれたフォームは `%unwrap` した中身の開始行とも比べる
 - 戻り値は行 → `(form-type form-name signature)` の表と、失敗理由（読み取り禁止 / パース不能）。
-  `signature` は `defmethod` なら名前・修飾子・必須引数の特化子（未特化は `T`、eql は `(EQL)`）、
-  `defgeneric` / `defclass` / `define-condition` / `defstruct` なら名前だけ、それ以外は NIL
+  `signature` は `defmethod` なら名前・修飾子・必須引数の特化子（未特化は `T`、eql は
+  `(EQL <datum>)`。DATUM は clos-core の `%datum-text` と同じ流儀で印字し、印字できなければ
+  `(EQL)`）、`defgeneric` / `defclass` / `define-condition` / `defstruct` なら名前だけ、それ以外は NIL
 
 `annotate-report-forms` は report 内のすべての位置付き要素を集め、`abs_path` ごとに
 `top-level-forms-at` を 1 回呼ぶ。対象は総称関数、各メソッド、クラス、クラスのメソッドである。
@@ -212,8 +213,14 @@ fast-function の文字位置は、アクセサメソッドで誤るので使わ
 | パース不能（`#.` を含むファイルなど。CST は `*read-eval*` を無効にして読む） | null | `file could not be parsed: <理由の 1 行目>` |
 
 矛盾の判定は、パッケージ接頭辞を除いた名前で大文字小文字を区別せずに比べる。署名を持たないフォーム（利用者のマクロ、`progn` など）は照合できないので、そのまま付ける。
+eql 特化子どうしは「両方とも `(EQL ` で始まる」だけでなく DATUM も比べる: `(EQL ` と末尾の `)` の
+間の内側テキストを、パッケージ接頭辞を落として大文字小文字を区別せずに比べる。どちらかの内側テキストが
+空（古い署名、または印字できなかった）か、シンボル・キーワード・数値の構文にない文字（文字列・リスト・
+文字リテラルが持つ引用符・括弧・`#`・バックスラッシュ・空白）を含む場合は、確実に比べられないので
+一致したものとして扱う。
 この判定は最終レビューで見つかった問題への対応である: ファイルでメソッドの特化子を書き換えて再ロードすると、
 イメージに残った古いメソッドの行に新しいメソッドが始まり、`stale` も偽なので、以前は別のメソッドの form_name を黙って返していた。
+eql 特化子の DATUM 比較は、`(eql :old)` を `(eql :new)` に書き換えた場合に同じ問題が起きるのを防ぐための追加対応である。
 
 注釈を終えたら `abs_path` を取り除き、応答に絶対パスを残さない。
 

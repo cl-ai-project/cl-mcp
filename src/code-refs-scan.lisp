@@ -672,6 +672,37 @@ JSON-ready hash-table:
   '("&OPTIONAL" "&REST" "&KEY" "&AUX" "&ALLOW-OTHER-KEYS")
   "Names of the lambda-list keywords that end a method's required parameters.")
 
+(defun %eql-datum-text (datum)
+  "Return DATUM, an EQL specializer's unevaluated source form, as
+%DEFINITION-SIGNATURE renders it: \":NAME\" for a keyword and DATUM's bare
+SYMBOL-NAME for any other symbol -- both without a package prefix, matching
+every other name %DEFINITION-SIGNATURE renders -- otherwise DATUM printed the
+way CLOS-CORE's %DATUM-TEXT prints the entry side: *PACKAGE* bound to the
+KEYWORD package, *PRINT-PRETTY* T with a very large *PRINT-RIGHT-MARGIN*,
+*PRINT-LENGTH* 10, *PRINT-LEVEL* 4, *PRINT-READABLY* NIL, upper case as read.
+A quoted datum read by eclector -- (eql 'foo) reads as (EQL (QUOTE FOO)) --
+loses the quote first: when DATUM is a two-element list headed by a symbol
+named \"QUOTE\", in any package (%ECLECTOR-MARKER-P checks the reader's own
+markers the same way, but this head can be plain CL:QUOTE), its second
+element is printed instead.  NIL when DATUM cannot be printed."
+  (let ((datum (if (and (consp datum) (symbolp (first datum))
+                        (string= "QUOTE" (symbol-name (first datum)))
+                        (consp (rest datum)) (null (cddr datum)))
+                   (second datum)
+                   datum)))
+    (handler-case
+        (cond
+          ((keywordp datum) (format nil ":~A" (symbol-name datum)))
+          ((symbolp datum) (symbol-name datum))
+          (t (let ((*package* (find-package "KEYWORD"))
+                   (*print-pretty* t)
+                   (*print-right-margin* most-positive-fixnum)
+                   (*print-length* 10)
+                   (*print-level* 4)
+                   (*print-readably* nil))
+               (prin1-to-string datum))))
+      (error () nil))))
+
 (defun %definition-signature (value)
   "Return what tells VALUE, a top-level form as read, from other definitions of
 its kind, so a caller can check that the form starting on a line is the
@@ -683,8 +714,10 @@ options) it is (:NAME N).  N is the name's symbol name, or \"(SETF X)\" for
 (SETF X).  Each Q is \":NAME\" for a keyword qualifier, else the symbol's name.
 Each S belongs to one required parameter -- those before the first
 lambda-list keyword -- and is the class symbol's name, \"T\" for an
-unspecialized parameter, or \"(EQL)\" for an EQL specializer.  Every name is
-upper case, as SYMBOL-NAME gives it, without a package prefix."
+unspecialized parameter, or \"(EQL <datum>)\" for an EQL specializer, DATUM
+rendered by %EQL-DATUM-TEXT (\"(EQL)\" when it cannot be printed).  Every
+class or parameter name is upper case, as SYMBOL-NAME gives it, without a
+package prefix."
   (flet ((name-text (name)
            (cond
              ((symbolp name) (symbol-name name))
@@ -706,7 +739,10 @@ upper case, as SYMBOL-NAME gives it, without a package prefix."
                ((symbolp specializer) (symbol-name specializer))
                ((and (consp specializer) (symbolp (first specializer))
                      (string= "EQL" (symbol-name (first specializer))))
-                "(EQL)")
+                (let ((text (and (consp (rest specializer))
+                                 (null (cddr specializer))
+                                 (%eql-datum-text (second specializer)))))
+                  (if text (format nil "(EQL ~A)" text) "(EQL)")))
                (t (return-from %definition-signature nil))))))
     (let ((head (and (consp value) (symbolp (first value)) (consp (rest value))
                      (symbol-name (first value)))))

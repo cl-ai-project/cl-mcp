@@ -343,6 +343,36 @@ so arrays are lists and false is NIL."
                                                   :generic-function)))))))))
       (ignore-errors (delete-file file)))))
 
+(deftest annotate-report-forms-compares-the-eql-datum
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/clos-eql-renamed.lisp")))
+    (ensure-directories-exist file)
+    (labels ((report-of (entry)
+               (setf (gethash "abs_path" entry) (namestring (truename file)))
+               (make-ht "symbol_status" "found" "generic_functions" (vector)
+                        "class" (make-ht "methods" (vector entry))))
+             (annotated (entry)
+               (annotate-report-forms (report-of entry))
+               entry)
+             (form-of (entry)
+               (list (gethash "form_type" entry) (gethash "form_name" entry)
+                     (gethash "note" entry))))
+      (unwind-protect
+           (progn
+             (testing "a method re-specialized in place is not handed to the old EQL entry"
+               (with-open-file (out file :direction :output :if-exists :supersede)
+                 (format out "(in-package #:cl-user)~%~%(defmethod area ((s (eql :new))) 1)~%"))
+               (ok (equal (list nil nil *note-different-definition*)
+                          (form-of (annotated (%method :specializers '("(EQL :OLD)")
+                                                       :path "x.lisp" :line 3))))))
+             (testing "the same entry against its own datum keeps its form_name"
+               (with-open-file (out file :direction :output :if-exists :supersede)
+                 (format out "(in-package #:cl-user)~%~%(defmethod area ((s (eql :old))) 1)~%"))
+               (ok (equal (list "defmethod" "area ((s (eql :old)))" nil)
+                          (form-of (annotated (%method :specializers '("(EQL :OLD)")
+                                                       :path "x.lisp" :line 3)))))))
+        (ignore-errors (delete-file file))))))
+
 (deftest clos-describe-form-names-work-in-lisp-edit-form
   (testing "every form_name the fixture's reports carry finds that very form"
     (%load-fixture)
