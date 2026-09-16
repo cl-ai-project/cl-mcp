@@ -526,6 +526,22 @@ form matches"
            (ok (equal "mismatched" (%verify1 "d3" identity candidates)))
         (ignore-errors (delete-file path))))))
 
+(deftest verify-entries-does-not-treat-a-qualified-accessor-shaped-identity-as-an-accessor
+  (testing "an identity that carries class/slot/access AND a qualifier -- as
+CLOS-CORE should never produce, but this file must not rely on that -- is judged as
+a plain method, never verified against the class's own DEFCLASS form"
+    (%load-clos-fixture)
+    (let* ((gfs (%gfs (%report "cl-mcp-clos-fixture:radius")))
+           (reader-identity (%identity (first (%methods (first gfs)))))
+           (qualified-identity (%through-json reader-identity))
+           (path (namestring (truename *clos-fixture*)))
+           (candidates (%candidates-for path "(defclass circle (shape)")))
+      (setf (gethash "qualifiers" qualified-identity)
+            (vector (make-ht "package" "KEYWORD" "name" "BEFORE")))
+      (ok (equal "reader" (gethash "access" qualified-identity))
+          "confirms this identity still looks like an accessor apart from the qualifier")
+      (ok (equal "unverified" (%verify1 "qa1" qualified-identity candidates))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; defstruct
 ;;; ---------------------------------------------------------------------------

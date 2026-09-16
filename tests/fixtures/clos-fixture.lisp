@@ -13,7 +13,7 @@
   (:use #:cl)
   (:export #:shape #:circle #:square #:area #:label #:radius #:side
            #:shape-name #:combine #:describe-shape #:probe-error
-           #:probe-error-code #:point #:pending))
+           #:probe-error-code #:point #:pending #:widget #:widget-size))
 
 (in-package #:cl-mcp-clos-fixture)
 
@@ -75,3 +75,13 @@
 (defstruct point x (y 0))
 
 (defclass pending (not-yet-defined) ())
+
+(defclass widget ()
+  ((size :initarg :size :accessor widget-size)))
+
+;; A :before method sharing WIDGET-SIZE's generic function and sole
+;; specializer with the real accessor above, but qualified -- it must never
+;; be mistaken for that accessor (review fix, Task 10).
+(defmethod widget-size :before ((w widget))
+  (declare (ignore w))
+  nil)

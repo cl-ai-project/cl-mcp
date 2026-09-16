@@ -497,3 +497,28 @@ neither can be picked without a guess -- class/slot/access stay nil, fail-closed
       (ok (null (gethash "access" identity)))
       (ok (null (gethash "slot" identity)))
       (ok (null (gethash "class" identity))))))
+
+(deftest identity-does-not-treat-a-qualified-method-as-an-accessor
+  (testing "a :before method sharing WIDGET-SIZE's generic function and sole specializer
+with the real accessor is not mistaken for it: kind stays \"method\", class/slot/access
+stay nil; the plain accessor still gets them"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:widget-size"))))
+           (methods (%methods gf))
+           (before-method
+             (find-if (lambda (m) (equal '(":BEFORE") (%strings m "qualifiers"))) methods))
+           (reader-method
+             (find-if (lambda (m) (null (%strings m "qualifiers"))) methods))
+           (before-identity (%identity before-method))
+           (reader-identity (%identity reader-method)))
+      (ok before-method)
+      (ok reader-method)
+      (ok (equal "method" (gethash "kind" before-method)))
+      (ok (null (gethash "access" before-identity)))
+      (ok (null (gethash "slot" before-identity)))
+      (ok (null (gethash "class" before-identity)))
+      (ok (equal "reader" (gethash "kind" reader-method)))
+      (ok (equal "reader" (gethash "access" reader-identity)))
+      (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "slot" reader-identity))))
+      (ok (equal "SIZE" (gethash "name" (gethash "slot" reader-identity))))
+      (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "class" reader-identity))))
+      (ok (equal "WIDGET" (gethash "name" (gethash "class" reader-identity)))))))

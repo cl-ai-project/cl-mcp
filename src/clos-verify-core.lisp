@@ -391,8 +391,17 @@ generic function."
 
 (defun %accessor-identity-p (identity)
   "True when IDENTITY, a method identity, describes a standard accessor:
-its class, slot and access fields are all present (spec 3.2)."
-  (and (%get identity "class") (%get identity "slot") (%get identity "access") t))
+its class, slot and access fields are all present (spec 3.2) and it carries
+no qualifiers -- an accessor is never :BEFORE/:AFTER/:AROUND-qualified.
+Belt-and-braces against CLOS-CORE:%METHOD-ENTRY ever handing this a
+qualified method's identity with class/slot/access filled in by mistake (it
+should not, since it now checks this itself): such an identity is judged
+here as a plain method instead, so a qualified method is never verified
+against a DEFCLASS or DEFINE-CONDITION form it merely shares a generic
+function and specializer with."
+  (and (%get identity "class") (%get identity "slot") (%get identity "access")
+       (null (%as-list (%get identity "qualifiers")))
+       t))
 
 (defun %verify-candidate (identity candidate)
   "Judge one CANDIDATE, a source_signature (spec 3.2) as JSON, against

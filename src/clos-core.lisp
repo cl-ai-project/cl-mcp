@@ -177,33 +177,40 @@ generated for: its last specializer -- the sole one for a reader, the second
 of two for a writer -- or NIL when that class has no proper name."
   (%proper-class-name (car (last (sb-mop:method-specializers method)))))
 
-(defun %condition-accessor-slot (method)
-  "Return (values SLOT-NAME ACCESS OWNER) when METHOD, a plain
-(non-accessor) method -- SBCL never makes a DEFINE-CONDITION slot reader or
-writer a STANDARD-ACCESSOR-METHOD -- is unambiguously identifiable as one
-anyway: its sole specializer is a proper class OWNER, and exactly one of
-OWNER's direct slots' READERS or WRITERS names METHOD's generic function.
-Returns NIL fail-closed otherwise: more than one specializer, an anonymous
-specializer, no matching slot, or a slot matching in more than one role or
-more than one slot matching at all -- never a guess between them.  Any MOP
-read that signals (a metaclass whose accessors misbehave) is caught the same
-way, degrading to NIL instead of failing the report."
+(defun %condition-accessor-slot (method qualifiers)
+  "Return (values SLOT-NAME ACCESS OWNER) when METHOD, a plain, unqualified
+method -- SBCL never makes a DEFINE-CONDITION slot reader or writer a
+STANDARD-ACCESSOR-METHOD -- is unambiguously identifiable as one anyway:
+QUALIFIERS (METHOD's own, passed in so this need not recompute what
+%METHOD-ENTRY already has) is empty -- an accessor is never
+:BEFORE/:AFTER/:AROUND-qualified, a guarantee the STANDARD-ACCESSOR-METHOD
+branch gets for free from its type but this fallback must check directly,
+since a hand-written qualified method can otherwise share an accessor's
+generic function and sole specializer without being one -- its sole
+specializer is a proper class OWNER, and exactly one of OWNER's direct
+slots' READERS or WRITERS names METHOD's generic function.  Returns NIL
+fail-closed otherwise: any qualifier at all, more than one specializer, an
+anonymous specializer, no matching slot, or a slot matching in more than one
+role or more than one slot matching at all -- never a guess between them.
+Any MOP read that signals (a metaclass whose accessors misbehave) is caught
+the same way, degrading to NIL instead of failing the report."
   (ignore-errors
-    (let ((specializers (sb-mop:method-specializers method)))
-      (when (= (length specializers) 1)
-        (let* ((class (first specializers))
-               (owner (%proper-class-name class))
-               (gf (sb-mop:method-generic-function method))
-               (name (and gf (sb-mop:generic-function-name gf)))
-               (matches '()))
-          (when (and owner name)
-            (dolist (slot (sb-mop:class-direct-slots class))
-              (when (member name (sb-mop:slot-definition-readers slot) :test #'equal)
-                (push (cons (sb-mop:slot-definition-name slot) "reader") matches))
-              (when (member name (sb-mop:slot-definition-writers slot) :test #'equal)
-                (push (cons (sb-mop:slot-definition-name slot) "writer") matches)))
-            (when (= (length matches) 1)
-              (values (caar matches) (cdar matches) owner))))))))
+    (when (null qualifiers)
+      (let ((specializers (sb-mop:method-specializers method)))
+        (when (= (length specializers) 1)
+          (let* ((class (first specializers))
+                 (owner (%proper-class-name class))
+                 (gf (sb-mop:method-generic-function method))
+                 (name (and gf (sb-mop:generic-function-name gf)))
+                 (matches '()))
+            (when (and owner name)
+              (dolist (slot (sb-mop:class-direct-slots class))
+                (when (member name (sb-mop:slot-definition-readers slot) :test #'equal)
+                  (push (cons (sb-mop:slot-definition-name slot) "reader") matches))
+                (when (member name (sb-mop:slot-definition-writers slot) :test #'equal)
+                  (push (cons (sb-mop:slot-definition-name slot) "writer") matches)))
+              (when (= (length matches) 1)
+                (values (caar matches) (cdar matches) owner)))))))))
 
 (defun %standard-combination-p (gf)
   "True when GF uses the STANDARD method combination."
@@ -330,7 +337,8 @@ was found through that class's specialized methods."
                      (gethash "slot" identity) (%identity-symbol slot-name)
                      (gethash "class" identity) (and owner (%identity-symbol owner)))))
             (t
-             (multiple-value-bind (slot-name access owner) (%condition-accessor-slot method)
+             (multiple-value-bind (slot-name access owner)
+                 (%condition-accessor-slot method qualifiers)
                (when slot-name
                  (setf (gethash "kind" ht) access
                        (gethash "slot" ht) (qualified-symbol-name slot-name)
