@@ -579,23 +579,58 @@ LABEL goes into its name, so a leftover directory says which test made it."
                                          "(defmethod area ((s (eql (f)))) 3)"
                                          "(defmethod area ((s (eql #\\A))) 4)"
                                          "(defmethod area ((s (eql 'foo))) 5)"
-                                         "(defmethod area ((s (eql :k))) 6)"
-                                         "(defmethod area ((s (eql t))) 7)")))))
+                                         "(defmethod area ((s (eql (quote foo)))) 6)"
+                                         "(defmethod area ((s (eql :k))) 7)"
+                                         "(defmethod area ((s (eql t))) 8)"
+                                         "(defmethod area ((s (eql nil))) 9)"
+                                         "(defmethod area ((s (eql 3))) 10)")))))
       (unwind-protect
-           (multiple-value-bind (table failure) (top-level-forms-at path '(2 3 4 5 6 7 8))
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2 3 4 5 6 7 8 9 10 11))
              (ok (null failure))
              (flet ((eql-datum (line)
                       (getf (first (getf (getf (first (gethash line table)) :signature)
                                          :specializers))
                             :datum)))
-               (ok (equal :unverifiable (getf (eql-datum 2) :kind)) "a string")
-               (ok (equal :unverifiable (getf (eql-datum 3) :kind)) "a variable reference")
-               (ok (equal :unverifiable (getf (eql-datum 4) :kind)) "an arbitrary call")
+               (testing "unverifiable data keep a specific reason"
+                 (ok (equal :unverifiable (getf (eql-datum 2) :kind)) "a string")
+                 (ok (search "string" (getf (eql-datum 2) :reason)) "the reason names the type")
+                 (ok (equal :unverifiable (getf (eql-datum 3) :kind)) "a variable reference")
+                 (ok (equal :unverifiable (getf (eql-datum 4) :kind)) "an arbitrary call"))
                (ok (equal '(:kind :character :value "A") (eql-datum 5)))
-               (ok (equal '(:kind :symbol :token "foo" :in-package "CL-USER" :quoted t)
-                          (eql-datum 6)))
-               (ok (equal '(:kind :keyword :name "K") (eql-datum 7)))
-               (ok (equal '(:kind :boolean :value "T") (eql-datum 8)))))
+               (testing "'foo is confirmed by the reader macro character alone"
+                 (ok (equal '(:kind :symbol :token "foo" :in-package "CL-USER" :quoted :reader)
+                            (eql-datum 6))))
+               (testing "(quote foo) carries the operator's own token for the worker to resolve"
+                 (let ((datum (eql-datum 7)))
+                   (ok (equal :symbol (getf datum :kind)))
+                   (ok (equal "foo" (getf datum :token)))
+                   (ok (equal "CL-USER" (getf datum :in-package)))
+                   (ok (equal :operator (getf datum :quoted)))
+                   (ok (equal '(:token "quote" :in-package "CL-USER") (getf datum :quote-token)))))
+               (ok (equal '(:kind :keyword :name "K") (eql-datum 8)))
+               (ok (equal '(:kind :boolean :value "T") (eql-datum 9)))
+               (ok (equal '(:kind :boolean :value "NIL") (eql-datum 10)))
+               (ok (equal '(:kind :integer :value "3") (eql-datum 11)))))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-tags-an-explicit-quote-as-operator-even-if-shadowable
+  (testing "(quote x) stays :operator, with a token, when the package might shadow quote"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-quote-shadow.lisp"
+                            (format nil "~{~A~%~}"
+                                   (list "(in-package #:cl-mcp-refs-scan-quote-shadow)"
+                                         "(defmethod area ((s (eql (quote foo)))) 1)")))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+             (ok (null failure))
+             (let ((datum (getf (first (getf (getf (first (gethash 2 table)) :signature)
+                                             :specializers))
+                                :datum)))
+               (ok (equal :symbol (getf datum :kind)))
+               (ok (equal :operator (getf datum :quoted))
+                   "the parent never decides quote is shadowed; it just hands over the token")
+               (ok (equal '(:token "quote" :in-package "CL-MCP-REFS-SCAN-QUOTE-SHADOW")
+                          (getf datum :quote-token)))))
         (ignore-errors (delete-file path))))))
 
 (deftest top-level-forms-at-returns-every-form-starting-on-a-line

@@ -699,9 +699,18 @@ symbol)."
   "Return NODE, an (EQL datum)'s unevaluated source form, tagged per spec
 3.3.  KEYWORD, INTEGER, RATIO, CHARACTER and BOOLEAN come straight from the
 read value: always safe, since none of those types depend on a package the
-parent might lack.  SYMBOL instead carries (:TOKEN :IN-PACKAGE :QUOTED) for
-the worker to resolve, since an arbitrary quoted symbol's home package may
-not exist in the parent's image.  Anything else is UNVERIFIABLE."
+parent might lack.  SYMBOL instead carries :TOKEN/:IN-PACKAGE for the
+worker to resolve, since an arbitrary quoted symbol's home package may not
+exist in the parent's image, plus :QUOTED naming how the quote was
+confirmed: :READER when the source starts with the ' reader macro character
+-- that alone confirms it, since the macro character cannot be shadowed --
+or :OPERATOR when it is a (quote x) call, whose head could be a same-named
+operator from another package; that datum also carries :QUOTE-TOKEN, the
+head's own :TOKEN/:IN-PACKAGE, for the worker to resolve and require EQ to
+CL:QUOTE.  As JSON, :QUOTED would serialize as the string \"reader\" or
+\"operator\" and :QUOTE-TOKEN as a {token, in_package} object, matching how
+the rest of this plist's token fields are meant to serialize; that
+conversion happens in a later task.  Anything else is UNVERIFIABLE."
   (let* ((node (%unwrap node))
          (value (cst-node-value node)))
     (cond
@@ -715,11 +724,18 @@ not exist in the parent's image.  Anything else is UNVERIFIABLE."
       ((null value) (list :kind :boolean :value "NIL"))
       (t
        (let ((quoted (%quoted-symbol-node node)))
-         (if quoted
-             (list :kind :symbol
-                   :token (subseq text (cst-node-start quoted) (cst-node-end quoted))
-                   :in-package in-package :quoted t)
-             (list :kind :unverifiable :reason (%source-eql-unverifiable-reason value))))))))
+         (cond
+           ((null quoted)
+            (list :kind :unverifiable :reason (%source-eql-unverifiable-reason value)))
+           ((char= (char text (cst-node-start node)) #\')
+            (list :kind :symbol
+                  :token (subseq text (cst-node-start quoted) (cst-node-end quoted))
+                  :in-package in-package :quoted :reader))
+           (t
+            (list :kind :symbol
+                  :token (subseq text (cst-node-start quoted) (cst-node-end quoted))
+                  :in-package in-package :quoted :operator
+                  :quote-token (%source-token (first (%expr-children node)) text in-package)))))))))
 
 (defun %source-specializer (param text in-package)
   "Return PARAM, one required parameter of a method's lambda list, as its
