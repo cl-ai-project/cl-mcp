@@ -11,6 +11,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path)
   (:export #:read-source-snapshot
+           #:snapshot-decode-lossy-p
            #:snapshot-range-digest
            #:digest-string-octets))
 
@@ -115,6 +116,25 @@ non-NIL: a refused or unreadable file never yields a partial snapshot."
                             :digest (%md5-digest-of-octets octets))
                       nil))
           (error (e) (values nil (%first-line (princ-to-string e))))))))
+
+(defun snapshot-decode-lossy-p (snapshot)
+  "True when SNAPSHOT's :TEXT is not a faithful decode of the bytes
+READ-SOURCE-SNAPSHOT read: the file is not valid UTF-8, so %DECODE-UTF-8-
+REPLACING turned at least one byte into #\\? and writing :TEXT back to disk
+would destroy that byte.  A caller that edits through :TEXT -- lisp-edit-form's
+guarded path -- must refuse such a file rather than rewrite it.
+
+Decided from what the snapshot already carries, by re-encoding :TEXT as UTF-8:
+the octet count first, then the MD5 digest of the original bytes, which is what
+catches a single invalid byte (#xE9 becomes #\\?, one octet either way).  With
+SB-MD5 unavailable :DIGEST is NIL and only the count can be compared; a
+same-length replacement then goes unnoticed here, but a guard cannot be
+verified without a digest anyway (CHECK-EDIT-GUARD's check 3 fails first)."
+  (let* ((text (getf snapshot :text))
+         (octets (sb-ext:string-to-octets text :external-format :utf-8))
+         (digest (getf snapshot :digest)))
+    (or (not (eql (length octets) (getf snapshot :octet-count)))
+        (and digest (not (equal digest (%md5-digest-of-octets octets)))))))
 
 (defun snapshot-range-digest (snapshot start end)
   "Return \"md5:<hex>\" for the UTF-8 octets of (SUBSEQ text START END),

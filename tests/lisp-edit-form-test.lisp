@@ -84,6 +84,39 @@ standing in for an earlier clos-describe observation."
            (unless omit-form-digest
              (list "form_digest" (snapshot-range-digest snapshot start end))))))
 
+(defun octets (&rest parts)
+  "Return PARTS concatenated into one (UNSIGNED-BYTE 8) vector: a string part
+is encoded as UTF-8, a vector part is taken byte for byte.  Lets a fixture
+hold a byte no encoder would produce, such as a lone #xE9."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                           :adjustable t :fill-pointer 0)))
+    (dolist (part parts (coerce out '(vector (unsigned-byte 8))))
+      (let ((bytes (if (stringp part)
+                       (sb-ext:string-to-octets part :external-format :utf-8)
+                       part)))
+        (loop for byte across bytes do (vector-push-extend byte out))))))
+
+(defun file-octets (abs)
+  "Return the bytes of the file at ABS as a (UNSIGNED-BYTE 8) vector, so a
+test can compare a file with itself without decoding it."
+  (with-open-file (in abs :element-type '(unsigned-byte 8))
+    (let ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (read-sequence buffer in)
+      buffer)))
+
+(defun with-octet-file (relative bytes thunk)
+  "Create RELATIVE holding exactly BYTES, call THUNK with its absolute path,
+then clean up.  FS-WRITE-FILE encodes a string, so a file carrying an invalid
+byte can only be written this way."
+  (let ((abs (project-path relative)))
+    (ensure-directories-exist abs)
+    (with-open-file (out abs :direction :output :element-type '(unsigned-byte 8)
+                             :if-exists :supersede)
+      (write-sequence bytes out))
+    (unwind-protect
+         (funcall thunk abs)
+      (ignore-errors (delete-file abs)))))
+
 (defun %sized-lisp-source (total-length)
   "Return Lisp source of exactly TOTAL-LENGTH characters: a `target' defun
 followed by a line comment padded with `x' out to TOTAL-LENGTH, for
@@ -2601,3 +2634,41 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                           :content "(defun target () :new)"
                           :guard guard)
           (ok (search ":new" (fs-read-file path))))))))
+
+(deftest lisp-edit-form-guard-refuses-a-file-that-is-not-valid-utf-8
+  (testing "an invalid byte outside the edited form is refused, never rewritten"
+    (with-octet-file "tests/tmp/edit-form-guard-invalid-utf8.lisp"
+        (octets (format nil "(defun target () :old)~%~%;; caf") #(233) (format nil "~%"))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (file-octets path))
+              (kind nil)
+              (message nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :new)"
+                              :guard guard)
+            (edit-guard-conflict-error () (setf kind :conflict))
+            (error (e) (setf kind :plain message (princ-to-string e))))
+          (ok (eq kind :plain) "a plain refusal: an undecodable file is not a guard conflict")
+          (ok (and message (search "UTF-8" message)) message)
+          (ok (equalp before (file-octets path))
+              "every byte is intact, the invalid one included")))))
+  (testing "a valid UTF-8 file with multibyte characters still edits"
+    (with-octet-file "tests/tmp/edit-form-guard-valid-utf8.lisp"
+        (octets (format nil "(defun target () :old)~%~%;; caf~C~%" (code-char 233)))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :new)"
+                          :guard guard)
+          (let ((after (fs-read-file path)))
+            (ok (search ":new" after))
+            (ok (search (format nil "caf~C" (code-char 233)) after)
+                "the multibyte comment came through unharmed")))))))

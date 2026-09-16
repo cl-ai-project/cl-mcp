@@ -33,6 +33,7 @@
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/source-snapshot
                 #:read-source-snapshot
+                #:snapshot-decode-lossy-p
                 #:snapshot-range-digest)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-condition-text
@@ -68,6 +69,7 @@
            #:file-unparseable-message
            #:make-file-unparseable-condition
            #:signal-file-unparseable
+           #:+edit-guard-version+
            #:check-edit-guard
            #:edit-guard-conflict-error
            #:edit-guard-conflict))
@@ -757,7 +759,12 @@ READ-SOURCE-SNAPSHOT never truncates, so this path re-applies
 CL-MCP/SRC/FS:*FS-READ-MAX-BYTES* by hand against the whole text it read,
 refusing (not truncating) a file over the same limit FS-READ-FILE enforces
 below -- a GUARD never lets this tool read more than an unguarded call
-could. Without GUARD, behavior is unchanged.
+could. A file that is not valid UTF-8 is refused there too
+(SNAPSHOT-DECODE-LOSSY-P), with a plain error rather than an
+EDIT-GUARD-CONFLICT-ERROR: the snapshot's text has already replaced that
+file's invalid bytes with #\\?, so writing it back would destroy them, and
+the unguarded path's FS-READ-FILE refuses the same file with a decoding
+error. Without GUARD, behavior is unchanged.
 
 Returns eight values:
   ABS — absolute pathname
@@ -790,6 +797,20 @@ Returns eight values:
                           this large, and fs-write-file will not overwrite it ~
                           either. Split the file or edit it outside cl-mcp."
                          (namestring abs) (length text)))
+                ;; The snapshot decodes an invalid byte to #\? (its :TEXT is
+                ;; what would be written back), so a file that is not valid
+                ;; UTF-8 must be refused outright: the unguarded path's
+                ;; FS-READ-FILE signals a decoding error on it, and a guarded
+                ;; call must not quietly rewrite bytes it could not read.
+                ;; This is a plain refusal, not a guard conflict -- nothing
+                ;; about GUARD is wrong -- and it comes before the parse and
+                ;; before CHECK-EDIT-GUARD.
+                (when (snapshot-decode-lossy-p snap)
+                  (error "~A is not valid UTF-8: reading it replaced at least one byte ~
+                          with #\\?, and writing the file back would destroy that byte. ~
+                          lisp-edit-form and lisp-patch-form cannot edit this file; ~
+                          fix its encoding first."
+                         (namestring abs)))
                 (setf snapshot snap
                       original text)))
             (multiple-value-bind (text truncated file-length) (fs-read-file abs)
