@@ -71,6 +71,24 @@ PACKAGE's reader would read it, or a placeholder when it cannot be printed."
     ((symbolp name) (qualified-symbol-name name))
     (t (%datum-text name))))
 
+(defun %identity-symbol (symbol)
+  "Return SYMBOL's identity as {package, name}: its home package's name, or
+NIL when SYMBOL is uninterned, and SYMBOL-NAME exactly as it prints -- case
+kept, no reader-macro prefix."
+  (make-ht "package" (let ((package (symbol-package symbol)))
+                       (and package (package-name package)))
+           "name" (symbol-name symbol)))
+
+(defun %identity-function-name (name)
+  "Return the identity of a function NAME -- a symbol, or (SETF symbol) -- as
+{package, name, setf}: %IDENTITY-SYMBOL of the base symbol plus whether NAME
+is a SETF function name."
+  (let* ((setf-p (consp name))
+         (symbol (if setf-p (second name) name))
+         (identity (%identity-symbol symbol)))
+    (setf (gethash "setf" identity) (json-bool setf-p))
+    identity))
+
 (defun %qualifier-string (qualifier)
   "Return a method QUALIFIER as written: :AROUND for a keyword, the bare name
 of any other symbol (+ for the + method combination)."
@@ -92,6 +110,72 @@ of any other symbol (+ for the + method combination)."
     ((and (typep specializer 'class) (%proper-class-name specializer))
      (qualified-symbol-name (%proper-class-name specializer)))
     (t (%datum-text specializer))))
+
+(defun %decimal-string (integer)
+  "Return INTEGER printed in base 10 without a radix marker, so a bignum
+travels as JSON text instead of a float."
+  (let ((*print-base* 10) (*print-radix* nil))
+    (princ-to-string integer)))
+
+(defun %eql-unverifiable-reason (object)
+  "Return one sentence explaining why OBJECT cannot be an EQL datum: it is not
+on the tagged allow-list of spec 3.3 (integer, ratio, character, keyword,
+boolean, or an interned symbol)."
+  (cond
+    ((floatp object) "a float compares unsoundly by printed value")
+    ((complexp object) "a complex number compares unsoundly by printed value")
+    ((stringp object) "a string is not EQL-comparable by content")
+    ((consp object) "a list is not EQL-comparable by content")
+    ((arrayp object) "an array is not EQL-comparable by content")
+    ((symbolp object) "an uninterned symbol has no package to resolve it by")
+    (t (format nil "a value of type ~(~A~) is not on the EQL datum allow-list"
+               (type-of object)))))
+
+(defun %eql-datum-identity (object)
+  "Return OBJECT's EQL datum, tagged per spec 3.3, built from the live object
+an EQL specializer holds -- never from source text or a printed
+representation.  Anything off the allow-list (float, complex, string, list,
+array, uninterned symbol, or any other object) comes back
+{\"kind\": \"unverifiable\", \"reason\": ...} instead of a guess."
+  (cond
+    ((eq object t) (make-ht "kind" "boolean" "value" "T"))
+    ((null object) (make-ht "kind" "boolean" "value" "NIL"))
+    ((keywordp object) (make-ht "kind" "keyword" "name" (symbol-name object)))
+    ((integerp object) (make-ht "kind" "integer" "value" (%decimal-string object)))
+    ((typep object 'ratio)
+     (make-ht "kind" "ratio"
+              "numerator" (%decimal-string (numerator object))
+              "denominator" (%decimal-string (denominator object))))
+    ((characterp object) (make-ht "kind" "character" "value" (string object)))
+    ((and (symbolp object) (symbol-package object))
+     (make-ht "kind" "symbol"
+              "package" (package-name (symbol-package object))
+              "name" (symbol-name object)))
+    (t (make-ht "kind" "unverifiable" "reason" (%eql-unverifiable-reason object)))))
+
+(defun %specializer-identity (specializer)
+  "Return SPECIALIZER's identity: {kind: \"class\", package, name} for a class
+with a proper name, {kind: \"eql\", datum: <spec 3.3 tagged datum>} for an EQL
+specializer, or {kind: \"unverifiable\", reason} for a class with none -- an
+anonymous or forward-referenced superclass."
+  (cond
+    ((typep specializer 'sb-mop:eql-specializer)
+     (make-ht "kind" "eql"
+              "datum" (%eql-datum-identity (sb-mop:eql-specializer-object specializer))))
+    ((typep specializer 'class)
+     (let ((name (%proper-class-name specializer)))
+       (if name
+           (let ((identity (%identity-symbol name)))
+             (setf (gethash "kind" identity) "class")
+             identity)
+           (make-ht "kind" "unverifiable" "reason" "anonymous class has no name to match"))))
+    (t (make-ht "kind" "unverifiable" "reason" "specializer is neither a class nor EQL"))))
+
+(defun %accessor-owner-name (method)
+  "Return the symbol naming the class METHOD, a standard accessor method, was
+generated for: its last specializer -- the sole one for a reader, the second
+of two for a writer -- or NIL when that class has no proper name."
+  (%proper-class-name (car (last (sb-mop:method-specializers method)))))
 
 (defun %standard-combination-p (gf)
   "True when GF uses the STANDARD method combination."
@@ -180,29 +264,42 @@ form_type, form_name and note for the parent to fill from the source file."
 (defun %method-entry (method &key via)
   "Return the JSON object for METHOD.  VIA, a class, is recorded when METHOD
 was found through that class's specialized methods."
-  (let ((ht (%set-location (make-ht) (%method-source method))))
+  (let ((ht (%set-location (make-ht) (%method-source method)))
+        (identity (make-ht "kind" "method" "generic_function" nil
+                           "qualifiers" (vector) "specializers" (vector)
+                           "class" nil "slot" nil "access" nil)))
     (setf (gethash "generic_function" ht) nil
           (gethash "qualifiers" ht) (vector)
           (gethash "specializers" ht) (vector)
           (gethash "kind" ht) "method"
-          (gethash "slot" ht) nil)
+          (gethash "slot" ht) nil
+          (gethash "identity" ht) identity)
     (when via
       (setf (gethash "via" ht) (%class-name-string via)))
     (handler-case
-        (let ((gf (sb-mop:method-generic-function method)))
+        (let ((gf (sb-mop:method-generic-function method))
+              (qualifiers (method-qualifiers method))
+              (specializers (sb-mop:method-specializers method)))
           (setf (gethash "generic_function" ht)
                 (and gf (%name-string (sb-mop:generic-function-name gf)))
-                (gethash "qualifiers" ht)
-                (map 'vector #'%qualifier-string (method-qualifiers method))
-                (gethash "specializers" ht)
-                (map 'vector #'%specializer-string (sb-mop:method-specializers method)))
+                (gethash "qualifiers" ht) (map 'vector #'%qualifier-string qualifiers)
+                (gethash "specializers" ht) (map 'vector #'%specializer-string specializers)
+                (gethash "generic_function" identity)
+                (and gf (%identity-function-name (sb-mop:generic-function-name gf)))
+                (gethash "qualifiers" identity) (map 'vector #'%identity-symbol qualifiers)
+                (gethash "specializers" identity)
+                (map 'vector #'%specializer-identity specializers))
           (when (typep method 'sb-mop:standard-accessor-method)
-            (setf (gethash "kind" ht)
-                  (if (typep method 'sb-mop:standard-reader-method) "reader" "writer")
-                  (gethash "slot" ht)
-                  (qualified-symbol-name
-                   (sb-mop:slot-definition-name
-                    (sb-mop:accessor-method-slot-definition method))))))
+            (let ((slot-name (sb-mop:slot-definition-name
+                              (sb-mop:accessor-method-slot-definition method)))
+                  (owner (%accessor-owner-name method))
+                  (access (if (typep method 'sb-mop:standard-reader-method)
+                              "reader" "writer")))
+              (setf (gethash "kind" ht) access
+                    (gethash "slot" ht) (qualified-symbol-name slot-name)
+                    (gethash "access" identity) access
+                    (gethash "slot" identity) (%identity-symbol slot-name)
+                    (gethash "class" identity) (and owner (%identity-symbol owner))))))
       (error (e)
         (setf (gethash "note" ht)
               (format nil "could not read this method: ~A" (%first-line e)))))
@@ -238,7 +335,10 @@ sorted before any is located, so only the listed ones read their files."
           (gethash "method_count" ht) (length methods)
           (gethash "truncated" ht) (json-bool (> (length methods) limit))
           (gethash "methods" ht)
-          (map 'vector #'%method-entry (subseq sorted 0 (min limit (length sorted)))))
+          (map 'vector #'%method-entry (subseq sorted 0 (min limit (length sorted))))
+          (gethash "identity" ht)
+          (make-ht "kind" "generic-function"
+                   "generic_function" (%identity-function-name name)))
     ht))
 
 (defun %class-name-string (class)
@@ -475,7 +575,9 @@ methods, and the notes the report should carry about it."
             (gethash "methods" ht)
             (map 'vector (lambda (pair) (%method-entry (car pair) :via (cdr pair)))
                  (subseq pairs 0 (min limit (length pairs))))
-            (gethash "omitted_classes" ht) (map 'vector #'%class-name-string omitted))
+            (gethash "omitted_classes" ht) (map 'vector #'%class-name-string omitted)
+            (gethash "identity" ht)
+            (make-ht "kind" "class" "class" (and name (%identity-symbol name))))
       (cond
         ((null cpl)
          (let ((undefined (coerce (gethash "undefined_superclasses" ht) 'list)))

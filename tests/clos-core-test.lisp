@@ -297,3 +297,180 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
       (ok (equal superclass (second (%strings class "precedence_list"))))
       (ok (notany (lambda (name) (search "COMMON-LISP:NIL" name))
                   (%strings class "precedence_list"))))))
+
+(defparameter *identity-fixture*
+  (asdf/system:system-relative-pathname :cl-mcp "tests/fixtures/clos-identity-fixture.lisp")
+  "CLOS definitions across two packages, exercising identity's package/name
+and EQL tagging apart from clos-fixture's display-string tests.")
+
+(defun %load-identity-fixture ()
+  "Compile and load the identity fixture with its truename as the source
+namestring, as %LOAD-FIXTURE does for the display-string fixture."
+  (let ((truename (truename *identity-fixture*)))
+    (uiop:with-temporary-file (:pathname fasl :type "fasl")
+      (with-compilation-unit (:override t :source-namestring (namestring truename))
+        (handler-bind ((warning #'muffle-warning))
+          (load (compile-file truename :output-file fasl :verbose nil :print nil)))))))
+
+(defun %identity-report (designator &key (limit 50))
+  "Load the identity fixture and return DESIGNATOR's report with the project
+root bound."
+  (%load-identity-fixture)
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (clos-describe-report designator :limit limit)))
+
+(defun %identity (entry)
+  "Return ENTRY's identity object."
+  (gethash "identity" entry))
+
+(defun %eql-datum-of (methods predicate)
+  "Return the tagged EQL datum of the first of METHODS whose sole specializer
+is an EQL specializer and whose datum PREDICATE accepts."
+  (loop for method in methods
+        for specializer = (first (sequence->list
+                                  (gethash "specializers" (%identity method))))
+        when (and specializer (equal "eql" (gethash "kind" specializer))
+                 (funcall predicate (gethash "datum" specializer)))
+          return (gethash "datum" specializer)))
+
+(defun %method-with-specializer-name (methods name)
+  "Return the entry in METHODS whose first specializer is a named class
+matching NAME exactly (case-sensitive), found by identity, not display text."
+  (find-if (lambda (method)
+             (let ((specializer (first (sequence->list
+                                        (gethash "specializers" (%identity method))))))
+               (and specializer (equal "class" (gethash "kind" specializer))
+                    (equal name (gethash "name" specializer)))))
+           methods))
+
+(deftest identity-distinguishes-generic-function-package-and-setf
+  (testing "package A's ACT and its SETF function carry package and setf apart"
+    (let* ((report (%identity-report "cl-mcp-identity-a:act"))
+           (gfs (%gfs report))
+           (act-fn (gethash "generic_function" (%identity (first gfs))))
+           (setf-act-fn (gethash "generic_function" (%identity (second gfs)))))
+      (ok (= 2 (length gfs)))
+      (ok (equal "generic-function" (gethash "kind" (%identity (first gfs)))))
+      (ok (equal "CL-MCP-IDENTITY-A" (gethash "package" act-fn)))
+      (ok (equal "ACT" (gethash "name" act-fn)))
+      (ok (eq yason:false (gethash "setf" act-fn)))
+      (ok (equal "CL-MCP-IDENTITY-A" (gethash "package" setf-act-fn)))
+      (ok (equal "ACT" (gethash "name" setf-act-fn)))
+      (ok (eq t (gethash "setf" setf-act-fn)))))
+  (testing "package B's ACT identity names package B, not A"
+    (let* ((gf (first (%gfs (%identity-report "cl-mcp-identity-b:act"))))
+           (fn (gethash "generic_function" (%identity gf))))
+      (ok (equal "CL-MCP-IDENTITY-B" (gethash "package" fn)))
+      (ok (equal "ACT" (gethash "name" fn)))
+      (ok (eq yason:false (gethash "setf" fn))))))
+
+(deftest identity-tags-qualifiers-by-package-and-name
+  (testing "a keyword qualifier resolves to the KEYWORD package"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:area"))))
+           (around (first (%methods gf)))
+           (qualifier (first (sequence->list (gethash "qualifiers" (%identity around))))))
+      (ok (equal "KEYWORD" (gethash "package" qualifier)))
+      (ok (equal "AROUND" (gethash "name" qualifier)))))
+  (testing "a symbol qualifier from the method-combination protocol"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:combine"))))
+           (method (first (%methods gf)))
+           (qualifier (first (sequence->list (gethash "qualifiers" (%identity method))))))
+      (ok (equal "COMMON-LISP" (gethash "package" qualifier)))
+      (ok (equal "+" (gethash "name" qualifier))))))
+
+(deftest identity-tags-eql-data-by-kind
+  (let ((methods (%methods (first (%gfs (%identity-report "cl-mcp-identity-a:act"))))))
+    (testing "an integer literal carries its decimal value as text"
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "integer" (gethash "kind" d))
+                                                  (equal "3" (gethash "value" d)))))))
+    (testing "a ratio carries numerator and denominator as text"
+      (let ((datum (%eql-datum-of methods (lambda (d) (equal "ratio" (gethash "kind" d))))))
+        (ok (equal "1" (gethash "numerator" datum)))
+        (ok (equal "3" (gethash "denominator" datum)))))
+    (testing "character data keep case, as two distinct characters"
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "character" (gethash "kind" d))
+                                                  (equal "A" (gethash "value" d))))))
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "character" (gethash "kind" d))
+                                                  (equal "B" (gethash "value" d)))))))
+    (testing "a keyword datum is named without a package"
+      (let ((datum (%eql-datum-of methods (lambda (d) (equal "keyword" (gethash "kind" d))))))
+        (ok (equal "UNIT" (gethash "name" datum)))))
+    (testing "T and NIL are tagged boolean, not symbol or a missing value"
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "boolean" (gethash "kind" d))
+                                                  (equal "T" (gethash "value" d))))))
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "boolean" (gethash "kind" d))
+                                                  (equal "NIL" (gethash "value" d)))))))
+    (testing "a quoted interned symbol carries its package and name"
+      (let ((datum (%eql-datum-of methods (lambda (d) (equal "symbol" (gethash "kind" d))))))
+        (ok (equal "CL-MCP-IDENTITY-A" (gethash "package" datum)))
+        (ok (equal "SYM" (gethash "name" datum)))))
+    (testing "a variable reference's evaluated value is tagged by its own type"
+      (ok (%eql-datum-of methods (lambda (d) (and (equal "integer" (gethash "kind" d))
+                                                  (equal "7" (gethash "value" d)))))))))
+
+(deftest identity-marks-unverifiable-eql-data-with-a-reason
+  (testing "a string EQL datum is unverifiable, with a one-sentence reason"
+    (let* ((methods (%methods (first (%gfs (%identity-report "cl-mcp-identity-a:act")))))
+           (datum (%eql-datum-of methods (lambda (d) (equal "unverifiable" (gethash "kind" d))))))
+      (ok (stringp (gethash "reason" datum)))
+      (ok (plusp (length (gethash "reason" datum))))
+      (ok (null (position #\Newline (gethash "reason" datum))))
+      (ok (nth-value 1 (gethash "reason" datum)))
+      (ok (null (gethash "value" datum)))
+      (ok (null (gethash "name" datum))))))
+
+(deftest identity-tags-class-specializers-by-package-not-display-string
+  (testing "same-named PROBE classes in two packages resolve to different identities"
+    (let* ((a-methods (%methods (first (%gfs (%identity-report "cl-mcp-identity-a:act")))))
+           (b-methods (%methods (first (%gfs (%identity-report "cl-mcp-identity-b:act")))))
+           (a-probe (%method-with-specializer-name a-methods "PROBE"))
+           (b-probe (%method-with-specializer-name b-methods "PROBE")))
+      (ok a-probe)
+      (ok b-probe)
+      (ok (equal "CL-MCP-IDENTITY-A"
+                 (gethash "package" (first (sequence->list
+                                            (gethash "specializers" (%identity a-probe)))))))
+      (ok (equal "CL-MCP-IDENTITY-B"
+                 (gethash "package" (first (sequence->list
+                                            (gethash "specializers" (%identity b-probe)))))))))
+  (testing "|Foo| and |FOO| keep their exact case as distinct specializers"
+    (let* ((methods (%methods (first (%gfs (%identity-report "cl-mcp-identity-a:act")))))
+           (foo (%method-with-specializer-name methods "Foo"))
+           (foo-upper (%method-with-specializer-name methods "FOO")))
+      (ok foo)
+      (ok foo-upper)
+      (ok (not (eq foo foo-upper))))))
+
+(deftest identity-reports-accessor-slot-class-and-access
+  (testing "PROBE's reader and writer both carry access, slot, and owning class identity"
+    (let* ((gfs (%gfs (%identity-report "cl-mcp-identity-a:probe-value")))
+           (reader (first (%methods (first gfs))))
+           (writer (first (%methods (second gfs))))
+           (reader-identity (%identity reader))
+           (writer-identity (%identity writer)))
+      (ok (equal "method" (gethash "kind" reader-identity)))
+      (ok (equal "method" (gethash "kind" writer-identity)))
+      (ok (equal "reader" (gethash "access" reader-identity)))
+      (ok (equal "writer" (gethash "access" writer-identity)))
+      (dolist (identity (list reader-identity writer-identity))
+        (ok (equal "CL-MCP-IDENTITY-A" (gethash "package" (gethash "slot" identity))))
+        (ok (equal "VALUE" (gethash "name" (gethash "slot" identity))))
+        (ok (equal "CL-MCP-IDENTITY-A" (gethash "package" (gethash "class" identity))))
+        (ok (equal "PROBE" (gethash "name" (gethash "class" identity))))))))
+
+(deftest identity-reports-class-identity
+  (testing "a class's identity names its package and symbol, not a display string"
+    (let* ((report (%identity-report "cl-mcp-identity-b:probe"))
+           (class (gethash "class" report))
+           (identity (%identity class)))
+      (ok (equal "class" (gethash "kind" identity)))
+      (ok (equal "CL-MCP-IDENTITY-B" (gethash "package" (gethash "class" identity))))
+      (ok (equal "PROBE" (gethash "name" (gethash "class" identity)))))))
+
+(deftest identity-defaults-accessor-fields-to-nil-for-plain-methods
+  (testing "a non-accessor method's identity has no accessor fields, present but nil"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:combine"))))
+           (identity (%identity (first (%methods gf)))))
+      (ok (null (gethash "access" identity)))
+      (ok (null (gethash "slot" identity)))
+      (ok (null (gethash "class" identity))))))
