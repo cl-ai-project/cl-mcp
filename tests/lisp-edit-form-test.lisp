@@ -26,6 +26,7 @@
                 #:cst-node-start
                 #:cst-node-end)
   (:import-from #:cl-mcp/src/fs
+                #:*fs-read-max-bytes*
                 #:fs-read-file
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -82,6 +83,17 @@ standing in for an earlier clos-describe observation."
            "form_end" end
            (unless omit-form-digest
              (list "form_digest" (snapshot-range-digest snapshot start end))))))
+
+(defun %sized-lisp-source (total-length)
+  "Return Lisp source of exactly TOTAL-LENGTH characters: a `target' defun
+followed by a line comment padded with `x' out to TOTAL-LENGTH, for
+guard read-limit tests. Built programmatically so the suite never commits
+a large fixture file. TOTAL-LENGTH must be large enough to hold the fixed
+prefix and trailing newline."
+  (let* ((prefix (format nil "(defun target () :old)~%~%;; "))
+         (suffix (string #\Newline))
+         (pad (- total-length (length prefix) (length suffix))))
+    (concatenate 'string prefix (make-string pad :initial-element #\x) suffix)))
 
 (defun large-file-source (form-count)
   "Return Lisp source with a `target' defun followed by FORM-COUNT filler defuns.
@@ -2305,7 +2317,33 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (multiple-value-bind (ok-p conflict)
               (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
             (ok ok-p)
-            (ok (null conflict))))))))
+            (ok (null conflict)))))))
+  (testing "a guard missing form_start entirely is rejected, not treated as unset"
+    (with-temp-file "tests/tmp/check-guard-missing-form-start.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (remhash "form_start" guard)
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "valid range" (getf conflict :reason))))))))
+  (testing "a negative form_start is rejected"
+    (with-temp-file "tests/tmp/check-guard-negative-form-start.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "form_start" guard) -1)
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "valid range" (getf conflict :reason)))))))))
 
 (deftest lisp-edit-form-guard-allows-and-rejects-replace
   (testing "a fresh guard lets a matching replace go through"
@@ -2529,3 +2567,37 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                         :content "(defun target () :new)"
                         :guard nil)
         (ok (search ":new" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-guard-respects-the-read-limit
+  (testing "a guarded edit over the read limit is refused with the read-limit message"
+    (with-temp-file "tests/tmp/edit-form-guard-over-limit.lisp"
+        (%sized-lisp-source (+ *fs-read-max-bytes* 100))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (fs-read-file path))
+              (kind nil)
+              (message nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :new)"
+                              :guard guard)
+            (edit-guard-conflict-error () (setf kind :conflict))
+            (error (e) (setf kind :plain message (princ-to-string e))))
+          (ok (eq kind :plain))
+          (ok (and message (search "exceeds the read limit" message)))
+          (ok (string= before (fs-read-file path)))))))
+  (testing "a guarded edit just under the read limit still works"
+    (with-temp-file "tests/tmp/edit-form-guard-under-limit.lisp"
+        (%sized-lisp-source (1- *fs-read-max-bytes*))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :new)"
+                          :guard guard)
+          (ok (search ":new" (fs-read-file path))))))))

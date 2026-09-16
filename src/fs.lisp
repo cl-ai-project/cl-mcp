@@ -41,6 +41,7 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis)
   (:export #:*lisp-file-unparseable-hook*
+           #:*fs-read-max-bytes*
            #:fs-resolve-read-path
            #:fs-read-file
            #:fs-read-source-text

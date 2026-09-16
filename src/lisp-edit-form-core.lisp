@@ -28,6 +28,7 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
                 #:*lisp-file-unparseable-hook*
+                #:*fs-read-max-bytes*
                 #:fs-read-file
                 #:fs-resolve-read-path)
   (:import-from #:cl-mcp/src/source-snapshot
@@ -752,9 +753,11 @@ same bytes -- this function never reads the file twice for one call. Once
 TARGET is located, CHECK-EDIT-GUARD (design doc section 4.2) is run and
 EDIT-GUARD-CONFLICT-ERROR is signaled on the first failing check, before any
 value is returned, so a stale or mismatched GUARD never reaches a write.
-FS-READ-FILE's read cap does not apply on this path; READ-SOURCE-SNAPSHOT
-reads the whole file regardless of size. Without GUARD, behavior is
-unchanged.
+READ-SOURCE-SNAPSHOT never truncates, so this path re-applies
+CL-MCP/SRC/FS:*FS-READ-MAX-BYTES* by hand against the whole text it read,
+refusing (not truncating) a file over the same limit FS-READ-FILE enforces
+below -- a GUARD never lets this tool read more than an unguarded call
+could. Without GUARD, behavior is unchanged.
 
 Returns eight values:
   ABS — absolute pathname
@@ -776,8 +779,19 @@ Returns eight values:
                        (if (eq failure :denied)
                            "read not permitted for this path"
                            failure)))
-              (setf snapshot snap
-                    original (getf snap :text)))
+              (let ((text (getf snap :text)))
+                ;; READ-SOURCE-SNAPSHOT never truncates, so the read cap
+                ;; FS-READ-FILE enforces below must be re-applied here by
+                ;; hand: a guarded call must refuse a file the unguarded
+                ;; path would refuse too, not read it in full instead.
+                (when (> (length text) *fs-read-max-bytes*)
+                  (error "~A exceeds the read limit (~D characters); ~
+                          lisp-edit-form and lisp-patch-form cannot edit files ~
+                          this large, and fs-write-file will not overwrite it ~
+                          either. Split the file or edit it outside cl-mcp."
+                         (namestring abs) (length text)))
+                (setf snapshot snap
+                      original text)))
             (multiple-value-bind (text truncated file-length) (fs-read-file abs)
               (when truncated
                 (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
