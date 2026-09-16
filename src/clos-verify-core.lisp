@@ -33,6 +33,25 @@ UNVERIFIED instead of a crash."
 signals for a VALUE that is not a string, unlike STRING= on a non-designator."
   (and (stringp value) (string= value tag)))
 
+(defun %true-p (value)
+  "True when VALUE is a genuine JSON true, not merely non-NIL.  JSON-BOOL's
+false value is the symbol YASON:FALSE, a non-NIL object that (AND value T)
+would misread as true.  A boolean only crosses an actual JSON wire when the
+worker pool is enabled; with MCP_NO_WORKER_POOL=1 (src/run.lisp)
+VERIFY-ENTRIES is called in-process on a live CLOS-DESCRIBE-REPORT identity
+whose \"setf\" field can still be YASON:FALSE, never having been encoded and
+parsed back into plain NIL."
+  (and value (not (eq value 'yason:false))))
+
+(defun %as-list (value)
+  "Return VALUE, an untrusted JSON field expected to be an array, as a list
+via SEQUENCE->LIST, or NIL when VALUE is not list- or vector-shaped (a
+string included, since a JSON string is never this field's array shape) --
+so a malformed field never aborts the whole batch with a type error; it
+just carries no elements to judge."
+  (and (or (listp value) (and (vectorp value) (not (stringp value))))
+       (sequence->list value)))
+
 (defun %find-package-named (name)
   "Return the package NAME designates, trying NAME as given and then
 upcased -- CL-MCP/SRC/CODE-REFS-CORE:FIND-PACKAGE-NAMED's own logic, kept
@@ -98,12 +117,14 @@ FIND-PACKAGE/FIND-SYMBOL only and comparing with EQ.  Returns (values
   "Compare SOURCE-NAME, a {token, setf, in_package} source name (spec 3.2),
 against IDENTITY, a {package, name, setf} function-name identity, or a
 {package, name} class identity when SETF cannot apply -- a missing \"setf\"
-key on either side reads as false.  A SETF mismatch is conclusive on its
-own and is reported before the base name is even resolved."
+key on either side reads as false, and so does YASON:FALSE (%TRUE-P), since
+an in-process caller's boolean may not have crossed a JSON wire at all.  A
+SETF mismatch is conclusive on its own and is reported before the base name
+is even resolved."
   (cond
     ((null source-name) (values :unverified "this form's name could not be located"))
     ((null identity) (values :unverified "this identity has no name to match"))
-    ((not (eq (and (%get source-name "setf") t) (and (%get identity "setf") t)))
+    ((not (eq (%true-p (%get source-name "setf")) (%true-p (%get identity "setf"))))
      (values :mismatched "(setf ...) status differs"))
     (t (%compare-symbol-token source-name identity))))
 
@@ -128,8 +149,8 @@ candidate's or one inline method's components (spec 3.1's tail rule): any
   "Compare SOURCE, a candidate's list of {token, in_package} qualifier
 tokens, against IDENTITY, a method identity's list of {package, name}
 qualifier identities, pairwise in order (spec 3.2)."
-  (let ((source (sequence->list source))
-        (identity (sequence->list identity)))
+  (let ((source (%as-list source))
+        (identity (%as-list identity)))
     (if (/= (length source) (length identity))
         (values :mismatched "qualifier count differs")
         (%combine (mapcar (lambda (s i) (%mv-cons (%compare-symbol-token s i)))
@@ -212,8 +233,8 @@ unverifiable), against TARGET, the identity's specializer (spec 3.2/3.3)."
 (defun %compare-specializer-lists (source identity)
   "Compare SOURCE and IDENTITY, parallel lists of specializers (spec 3.2),
 pairwise in order; a length mismatch is a conclusive contradiction."
-  (let ((source (sequence->list source))
-        (identity (sequence->list identity)))
+  (let ((source (%as-list source))
+        (identity (%as-list identity)))
     (if (/= (length source) (length identity))
         (values :mismatched "specializer count differs")
         (%combine (mapcar (lambda (s i) (%mv-cons (%compare-specializer s i)))
@@ -290,7 +311,7 @@ qualifiers and specializers.  Zero or more than one is not a match."
     (if (not (eq name-status :matched))
         (values name-status name-reason)
         (let ((matched 0) (mismatched-reason nil) (unverified-reason nil))
-          (dolist (method (sequence->list (%get candidate "methods")))
+          (dolist (method (%as-list (%get candidate "methods")))
             (multiple-value-bind (status reason)
                 (%combine (list (%mv-cons (%compare-qualifiers
                                             (%get method "qualifiers")
@@ -324,7 +345,7 @@ IDENTITY, a {package, name} structured identity: :MATCHED when one does,
 :MISMATCHED when at least one resolves to a real, different symbol and none
 match, :UNVERIFIED when none resolve at all."
   (let ((any-resolved nil))
-    (dolist (token (sequence->list tokens))
+    (dolist (token (%as-list tokens))
       (multiple-value-bind (status reason) (%compare-symbol-token token identity)
         (declare (ignore reason))
         (when (eq status :matched) (return-from %any-token-matches (values :matched nil)))
@@ -343,7 +364,7 @@ IDENTITY's generic function (spec 3.4)."
     (if (null accessor-key)
         (values :unverified "accessor kind is neither reader nor writer")
         (let ((named '()) (any-unresolved nil))
-          (dolist (slot (sequence->list (%get candidate "slots")))
+          (dolist (slot (%as-list (%get candidate "slots")))
             (multiple-value-bind (status reason)
                 (%compare-symbol-token (%get slot "name") (%get identity "slot"))
               (declare (ignore reason))
@@ -412,7 +433,7 @@ UNVERIFIED."
             (matched-indices '())
             (mismatched-reason nil)
             (unverified-reason nil))
-        (loop for candidate in (sequence->list (gethash "candidates" entry))
+        (loop for candidate in (%as-list (gethash "candidates" entry))
               for index from 0
               do (multiple-value-bind (status reason) (%verify-candidate identity candidate)
                    (case status
@@ -475,4 +496,4 @@ STATUS is \"matched\", \"mismatched\" or \"unverified\"; REASON is an
 English sentence, or null for \"matched\"; CANDIDATE_INDEX is CANDIDATES'
 0-based position of the matching entry, or null unless STATUS is
 \"matched\"."
-  (make-ht "results" (map 'vector #'%verify-entry (sequence->list entries))))
+  (make-ht "results" (map 'vector #'%verify-entry (%as-list entries))))

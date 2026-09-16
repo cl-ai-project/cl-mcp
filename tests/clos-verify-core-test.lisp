@@ -232,6 +232,12 @@ shape a real request carries after crossing the wire once."
   "Round-trip ENTRIES through JSON and return VERIFY-ENTRIES' results list."
   (sequence->list (gethash "results" (verify-entries (%through-json entries)))))
 
+(defun %verify-raw (entries)
+  "Call VERIFY-ENTRIES directly, with no JSON round trip -- for testing the
+MCP_NO_WORKER_POOL=1 in-process path, where a CLOS-DESCRIBE-REPORT
+identity's booleans may still be YASON:FALSE rather than plain NIL."
+  (sequence->list (gethash "results" (verify-entries entries))))
+
 (defun %verify1 (id identity candidates)
   "Call %VERIFY with a single ID/IDENTITY/CANDIDATES entry and return that
 one result's \"status\"."
@@ -550,6 +556,50 @@ identity has no class/slot/access, and the DEFINE-CONDITION container is not one
             "the specializer matches; only the unknown name is unresolved"))
       (ok (null (find-symbol "VERIFY-CORE-NEVER-INTERNED-XYZ" "CL-MCP-CLOS-FIXTURE"))
           "still not present after"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Booleans that never cross a JSON wire (MCP_NO_WORKER_POOL=1, src/run.lisp)
+;;; ---------------------------------------------------------------------------
+
+(deftest verify-entries-treats-yason-false-as-false-without-a-json-round-trip
+  (testing "a real non-setf method's identity carries YASON:FALSE, not NIL, in-process"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:describe-shape"))))
+           (identity (%identity (first (%methods gf))))
+           (path (namestring (truename *clos-fixture*)))
+           (candidates (%candidates-for path "(defmethod describe-shape")))
+      (ok (eq 'yason:false (gethash "setf" (gethash "generic_function" identity)))
+          "confirms the in-process shape this test relies on")
+      (ok (equal "matched"
+                 (gethash "status"
+                          (first (%verify-raw (vector (%entry "y1" identity candidates))))))
+          "a genuine non-setf method still matches, not \"(setf ...) status differs\"")))
+  (testing "a real (setf x) generic function's identity carries T, and still matches"
+    (%load-clos-fixture)
+    (let* ((identity (%identity (first (%gfs (%report "cl-mcp-clos-fixture:label")))))
+           (path (namestring (truename *clos-fixture*)))
+           (candidates (%candidates-for path "(defgeneric (setf label)")))
+      (ok (eq t (gethash "setf" (gethash "generic_function" identity))))
+      (ok (equal "matched"
+                 (gethash "status"
+                          (first (%verify-raw (vector (%entry "y2" identity candidates))))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Malformed "candidates" or ENTRIES never crash the batch
+;;; ---------------------------------------------------------------------------
+
+(deftest verify-entries-treats-a-non-array-candidates-field-as-unverified
+  (testing "a non-array \"candidates\" field is unverified, not a type-error crash"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:describe-shape"))))
+           (identity (%identity (first (%methods gf))))
+           (entry (%entry "m1" identity "not-an-array")))
+      (ok (equal "unverified" (%verify1 "m1" identity "not-an-array")))
+      (ok (equal "unverified" (gethash "status" (first (%verify-raw (vector entry)))))))))
+
+(deftest verify-entries-treats-a-non-array-entries-argument-as-empty
+  (testing "a non-array top-level ENTRIES returns no results, without crashing"
+    (ok (equalp #() (gethash "results" (verify-entries "not-an-array"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Combination rule (spec 3.1's tail rule, over multiple candidates)
