@@ -474,3 +474,26 @@ matching NAME exactly (case-sensitive), found by identity, not display text."
       (ok (null (gethash "access" identity)))
       (ok (null (gethash "slot" identity)))
       (ok (null (gethash "class" identity))))))
+
+(deftest identity-reports-a-condition-readers-slot-class-and-access
+  (testing "PROBE-ERROR-CODE is not a standard-accessor-method in this SBCL, but its
+identity is still filled from CLASS-DIRECT-SLOTS: exactly one slot of PROBE-ERROR
+names it as a reader"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:probe-error-code"))))
+           (identity (%identity (first (%methods gf)))))
+      (ok (equal "method" (gethash "kind" identity)))
+      (ok (equal "reader" (gethash "access" identity)))
+      (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "slot" identity))))
+      (ok (equal "CODE" (gethash "name" (gethash "slot" identity))))
+      (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "class" identity))))
+      (ok (equal "PROBE-ERROR" (gethash "name" (gethash "class" identity)))))))
+
+(deftest identity-leaves-an-ambiguous-condition-reader-unfilled
+  (testing "PROBE-ERROR-AMBIGUOUS names two of PROBE-ERROR's slots' readers, so
+neither can be picked without a guess -- class/slot/access stay nil, fail-closed"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture::probe-error-ambiguous"))))
+           (identity (%identity (first (%methods gf)))))
+      (ok (equal "method" (gethash "kind" identity)))
+      (ok (null (gethash "access" identity)))
+      (ok (null (gethash "slot" identity)))
+      (ok (null (gethash "class" identity))))))

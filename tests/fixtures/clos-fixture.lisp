@@ -65,7 +65,12 @@
   (print-unreadable-object (shape stream :type t :identity t)))
 
 (define-condition probe-error (error)
-  ((code :initarg :code :reader probe-error-code)))
+  ((code :initarg :code :reader probe-error-code)
+   ;; Two slots sharing one reader name: PROBE-ERROR-AMBIGUOUS cannot be
+   ;; mapped to either slot alone, so its identity's class/slot/access must
+   ;; stay unfilled (fail-closed), unlike PROBE-ERROR-CODE above.
+   (left :initarg :left :reader probe-error-ambiguous)
+   (right :initarg :right :reader probe-error-ambiguous)))
 
 (defstruct point x (y 0))
 

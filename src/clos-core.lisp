@@ -177,6 +177,34 @@ generated for: its last specializer -- the sole one for a reader, the second
 of two for a writer -- or NIL when that class has no proper name."
   (%proper-class-name (car (last (sb-mop:method-specializers method)))))
 
+(defun %condition-accessor-slot (method)
+  "Return (values SLOT-NAME ACCESS OWNER) when METHOD, a plain
+(non-accessor) method -- SBCL never makes a DEFINE-CONDITION slot reader or
+writer a STANDARD-ACCESSOR-METHOD -- is unambiguously identifiable as one
+anyway: its sole specializer is a proper class OWNER, and exactly one of
+OWNER's direct slots' READERS or WRITERS names METHOD's generic function.
+Returns NIL fail-closed otherwise: more than one specializer, an anonymous
+specializer, no matching slot, or a slot matching in more than one role or
+more than one slot matching at all -- never a guess between them.  Any MOP
+read that signals (a metaclass whose accessors misbehave) is caught the same
+way, degrading to NIL instead of failing the report."
+  (ignore-errors
+    (let ((specializers (sb-mop:method-specializers method)))
+      (when (= (length specializers) 1)
+        (let* ((class (first specializers))
+               (owner (%proper-class-name class))
+               (gf (sb-mop:method-generic-function method))
+               (name (and gf (sb-mop:generic-function-name gf)))
+               (matches '()))
+          (when (and owner name)
+            (dolist (slot (sb-mop:class-direct-slots class))
+              (when (member name (sb-mop:slot-definition-readers slot) :test #'equal)
+                (push (cons (sb-mop:slot-definition-name slot) "reader") matches))
+              (when (member name (sb-mop:slot-definition-writers slot) :test #'equal)
+                (push (cons (sb-mop:slot-definition-name slot) "writer") matches)))
+            (when (= (length matches) 1)
+              (values (caar matches) (cdar matches) owner))))))))
+
 (defun %standard-combination-p (gf)
   "True when GF uses the STANDARD method combination."
   (let ((name-fn (%sbcl-function "SB-PCL" "METHOD-COMBINATION-TYPE-NAME")))
@@ -289,17 +317,26 @@ was found through that class's specialized methods."
                 (gethash "qualifiers" identity) (map 'vector #'%identity-symbol qualifiers)
                 (gethash "specializers" identity)
                 (map 'vector #'%specializer-identity specializers))
-          (when (typep method 'sb-mop:standard-accessor-method)
-            (let ((slot-name (sb-mop:slot-definition-name
-                              (sb-mop:accessor-method-slot-definition method)))
-                  (owner (%accessor-owner-name method))
-                  (access (if (typep method 'sb-mop:standard-reader-method)
-                              "reader" "writer")))
-              (setf (gethash "kind" ht) access
-                    (gethash "slot" ht) (qualified-symbol-name slot-name)
-                    (gethash "access" identity) access
-                    (gethash "slot" identity) (%identity-symbol slot-name)
-                    (gethash "class" identity) (and owner (%identity-symbol owner))))))
+          (cond
+            ((typep method 'sb-mop:standard-accessor-method)
+             (let ((slot-name (sb-mop:slot-definition-name
+                               (sb-mop:accessor-method-slot-definition method)))
+                   (owner (%accessor-owner-name method))
+                   (access (if (typep method 'sb-mop:standard-reader-method)
+                               "reader" "writer")))
+               (setf (gethash "kind" ht) access
+                     (gethash "slot" ht) (qualified-symbol-name slot-name)
+                     (gethash "access" identity) access
+                     (gethash "slot" identity) (%identity-symbol slot-name)
+                     (gethash "class" identity) (and owner (%identity-symbol owner)))))
+            (t
+             (multiple-value-bind (slot-name access owner) (%condition-accessor-slot method)
+               (when slot-name
+                 (setf (gethash "kind" ht) access
+                       (gethash "slot" ht) (qualified-symbol-name slot-name)
+                       (gethash "access" identity) access
+                       (gethash "slot" identity) (%identity-symbol slot-name)
+                       (gethash "class" identity) (and owner (%identity-symbol owner))))))))
       (error (e)
         (setf (gethash "note" ht)
               (format nil "could not read this method: ~A" (%first-line e)))))

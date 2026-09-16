@@ -484,17 +484,47 @@ one result's \"status\"."
       (let ((square-candidates (%candidates-for path "(defclass square (shape)")))
         (ok (equal "mismatched" (%verify1 "r3" reader-identity square-candidates)))))))
 
-(deftest verify-entries-does-not-match-a-condition-readers-plain-method-identity
-  (testing "PROBE-ERROR-CODE is not a standard-accessor-method in this SBCL, so its
-identity has no class/slot/access, and the DEFINE-CONDITION container is not one
-%VERIFY-METHOD-CANDIDATE accepts for a plain method -- unverified, never a false match"
+(deftest verify-entries-matches-a-condition-readers-slot-and-generic-function
+  (testing "PROBE-ERROR-CODE is not a standard-accessor-method in this SBCL, but its
+identity now carries class/slot/access (task 10), so its own DEFINE-CONDITION
+form matches"
     (%load-clos-fixture)
     (let* ((report (%report "cl-mcp-clos-fixture:probe-error-code"))
            (identity (%identity (first (%methods (first (%gfs report))))))
            (path (namestring (truename *clos-fixture*)))
            (candidates (%candidates-for path "(define-condition probe-error")))
-      (ok (null (gethash "access" identity)) "confirms the SBCL behavior this test relies on")
-      (ok (equal "unverified" (%verify1 "d1" identity candidates))))))
+      (ok (equal "reader" (gethash "access" identity)))
+      (ok (equal "matched" (%verify1 "d1" identity candidates)))))
+  (testing "a candidate whose slot is named differently does not match"
+    (%load-clos-fixture)
+    (let* ((report (%report "cl-mcp-clos-fixture:probe-error-code"))
+           (identity (%identity (first (%methods (first (%gfs report))))))
+           (path (%write-tmp
+                  "verify-core-condition-slot-renamed.lisp"
+                  (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-clos-fixture)"
+                               (concatenate 'string
+                                "(define-condition probe-error (error) "
+                                "((other :initarg :code :reader probe-error-code)))")))))
+           (candidates (%candidates-at path 2)))
+      (unwind-protect
+           (ok (equal "mismatched" (%verify1 "d2" identity candidates)))
+        (ignore-errors (delete-file path)))))
+  (testing "a candidate whose reader names a different generic function does not match"
+    (%load-clos-fixture)
+    (let* ((report (%report "cl-mcp-clos-fixture:probe-error-code"))
+           (identity (%identity (first (%methods (first (%gfs report))))))
+           (path (%write-tmp
+                  "verify-core-condition-accessor-renamed.lisp"
+                  (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-clos-fixture)"
+                               (concatenate 'string
+                                "(define-condition probe-error (error) "
+                                "((code :initarg :code :reader shape-name)))")))))
+           (candidates (%candidates-at path 2)))
+      (unwind-protect
+           (ok (equal "mismatched" (%verify1 "d3" identity candidates)))
+        (ignore-errors (delete-file path))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; defstruct
