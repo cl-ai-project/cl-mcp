@@ -16,7 +16,9 @@
                 #:*reason-verification-unavailable*
                 #:*reason-not-locatable*
                 #:*reason-not-readable*
-                #:*reason-no-source-line*)
+                #:*reason-no-source-line*
+                #:*reason-source-not-on-disk*
+                #:*reason-no-source-recorded*)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
   (:import-from #:cl-mcp/src/clos-verify-core
@@ -160,7 +162,8 @@ so arrays are lists and false is NIL."
                 "Area."
                 "Defined at src/shapes.lisp:3 (defgeneric area)"
                 "  :AROUND (CIRCLE)  src/shapes.lisp:9 (defmethod area :around ((s circle)))"
-                "  (SQUARE)          (no source)  [could not read this method: boom]"
+                (concatenate 'string "  (SQUARE)          (no source) "
+                             "[unverified: no source recorded]  [could not read this method: boom]")
                 "  … and 1 more (raise limit to see them)")
                (%text (build-clos-describe-response (%gf-report) #'%verify-inline))))))
 
@@ -294,6 +297,53 @@ so arrays are lists and false is NIL."
         (ok (null (gethash "form_type" method)))
         (ok (null (gethash "form_name" method)))
         (ok (search "src/shapes.lisp [unverified: no source line recorded]" text))))))
+
+(deftest annotate-report-forms-reports-a-repl-eval-defined-entry
+  (testing "a repl-eval pseudo-path with no abs_path is unverified, not silently skipped"
+    (let* ((method (%method :path "repl-eval" :line nil))
+           (report (make-ht "symbol" "pkg::area" "symbol_status" "found"
+                            "resolved_symbol" "PKG::AREA" "symbol_kind" "generic-function"
+                            "lookup_package" "PKG" "lookup_name" "AREA"
+                            "generic_functions"
+                            (vector (make-ht "name" "PKG::AREA" "lambda_list" "(SHAPE)"
+                                             "documentation" nil "method_combination" "STANDARD"
+                                             "path" "src/shapes.lisp" "line" 3
+                                             "stale" yason:false
+                                             "form_type" "defgeneric" "form_name" "area"
+                                             "note" nil "source_match" "matched"
+                                             "source_match_reason" nil
+                                             "method_count" 1 "truncated" nil
+                                             "methods" (vector method)))
+                            "class" nil "limit" 50 "notes" (vector)))
+           (text (%text (build-clos-describe-response report #'%verify-inline))))
+      (ok (equal "unverified" (gethash "source_match" method)))
+      (ok (equal *reason-source-not-on-disk* (gethash "source_match_reason" method)))
+      (ok (null (gethash "form_type" method)))
+      (ok (null (gethash "form_name" method)))
+      (ok (search "repl-eval [unverified: source not on disk]" text)))))
+
+(deftest annotate-report-forms-reports-no-source-at-all
+  (testing "an entry with no source location at all still gets a verdict, shown in the text"
+    (let* ((method (%method))
+           (report (make-ht "symbol" "pkg::area" "symbol_status" "found"
+                            "resolved_symbol" "PKG::AREA" "symbol_kind" "generic-function"
+                            "lookup_package" "PKG" "lookup_name" "AREA"
+                            "generic_functions"
+                            (vector (make-ht "name" "PKG::AREA" "lambda_list" "(SHAPE)"
+                                             "documentation" nil "method_combination" "STANDARD"
+                                             "path" "src/shapes.lisp" "line" 3
+                                             "stale" yason:false
+                                             "form_type" "defgeneric" "form_name" "area"
+                                             "note" nil "source_match" "matched"
+                                             "source_match_reason" nil
+                                             "method_count" 1 "truncated" nil
+                                             "methods" (vector method)))
+                            "class" nil "limit" 50 "notes" (vector)))
+           (text (%text (build-clos-describe-response report #'%verify-inline))))
+      (ok (equal "unverified" (gethash "source_match" method)))
+      (ok (equal *reason-no-source-recorded* (gethash "source_match_reason" method)))
+      (ok (null (gethash "form_type" method)))
+      (ok (search "(no source) [unverified: no source recorded]" text)))))
 
 (deftest annotate-report-forms-clamps-an-unexpected-verifier-status
   (testing "a status the three-word contract doesn't define is clamped to unverified"

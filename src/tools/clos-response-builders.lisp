@@ -34,7 +34,9 @@
            #:*reason-verification-unavailable*
            #:*reason-not-locatable*
            #:*reason-not-readable*
-           #:*reason-no-source-line*))
+           #:*reason-no-source-line*
+           #:*reason-source-not-on-disk*
+           #:*reason-no-source-recorded*))
 
 (in-package #:cl-mcp/src/tools/clos-response-builders)
 
@@ -186,6 +188,19 @@ LINE: DEFINITION-SOURCE-LOCATION computes them independently and either may
 be NIL (src/code-core.lisp).  There is no line to scan TOP-LEVEL-FORMS-AT
 for, so this is decided locally, without a VERIFY-FN round trip.")
 
+(defparameter *reason-source-not-on-disk* "source not on disk"
+  "SOURCE_MATCH_REASON when ENTRY has a display PATH -- DEFINITION-SOURCE-
+LOCATION still names one, such as \"repl-eval\" for a definition made
+through repl-eval -- but no usable ABS_PATH: there is no file to read a
+candidate from at all, so this is decided by ANNOTATE-REPORT-FORMS's
+closing sweep, without ever reaching TOP-LEVEL-FORMS-AT.")
+
+(defparameter *reason-no-source-recorded* "no source recorded"
+  "SOURCE_MATCH_REASON when ENTRY has neither PATH nor ABS_PATH: the image
+recorded no source location for it at all.  Set by ANNOTATE-REPORT-FORMS's
+closing sweep so every located entry ends with a SOURCE_MATCH (spec 3.1),
+even one %LOCATION-TEXT renders as \"(no source)\".")
+
 (defun %verification-results (raw)
   "Return RAW's \"results\" array as a list, or NIL when RAW is not a valid
 {\"results\": [...]} object -- a worker error or crash notice
@@ -314,9 +329,17 @@ top-level form (*NOTE-NO-FORM-AT-LINE*) -- is decided locally, without a
 VERIFY-FN round trip: there is nothing to send.  An entry with a source file
 but no LINE at all (*REASON-NO-SOURCE-LINE*: DEFINITION-SOURCE-LOCATION
 computes them independently, spec src/code-core.lisp) is decided the same
-way, since there is no line to scan for.  An entry with no source file at
-all is left untouched: %LOCATION-TEXT already renders it (no source)
-unconditionally, so it carries no SOURCE_MATCH."
+way, since there is no line to scan for.
+
+Every located entry ends this function with a SOURCE_MATCH: this is an
+invariant, not a case analysis left to each caller.  A closing sweep gives
+any entry the scan above never touched -- one with a display PATH but no
+usable ABS_PATH (a REPL-defined method's PATH is the literal string
+\"repl-eval\", never a file; *REASON-SOURCE-NOT-ON-DISK*), or one with
+neither at all (*REASON-NO-SOURCE-RECORDED*) -- UNVERIFIED with the reason
+that fits.  %LOCATION-TEXT relies on this: it renders EVERY entry's
+SOURCE_MATCH, including the \"(no source)\" case, so the text can never
+assert a state (or its absence) the JSON disagrees with."
   (let ((by-file (make-hash-table :test #'equal))
         (contexts (make-hash-table :test #'equal))
         (node-cache (make-hash-table :test #'equal))
@@ -362,6 +385,12 @@ unconditionally, so it carries no SOURCE_MATCH."
                    (%apply-verification entry forms (gethash id results-by-id) node-cache)))
                contexts))
     (dolist (entry (%located-entries report))
+      (when (null (gethash "source_match" entry))
+        (%set-source-match entry "unverified"
+                            (if (gethash "path" entry)
+                                *reason-source-not-on-disk*
+                                *reason-no-source-recorded*))))
+    (dolist (entry (%located-entries report))
       (remhash "abs_path" entry))
     report))
 
@@ -381,32 +410,30 @@ COMMON-LISP, as a reader in HOME would write them."
                     result "")))))
 
 (defun %location-text (entry)
-  "Return where ENTRY is defined.  With a known PATH, this is PATH:LINE
-(FORM_TYPE FORM_NAME) when SOURCE_MATCH is \"matched\" -- with an extra
+  "Return where ENTRY is defined: PATH:LINE, or (no source) when ENTRY has no
+PATH at all, followed by (FORM_TYPE FORM_NAME) -- with an extra
 [edit_unit: X] when editing FORM_TYPE/FORM_NAME edits a container around
-ENTRY, not ENTRY's own form (spec 3.4) -- or PATH:LINE [STATE: REASON]
-otherwise, so the text never invites an edit the JSON does not support
-(spec 3.1).  Without a PATH, this is (no source).  ENTRY's NOTE, when
-present -- a live-object read failure unrelated to source matching -- is
-always appended in its own bracket."
+ENTRY, not ENTRY's own form (spec 3.4) -- when SOURCE_MATCH is \"matched\",
+or [STATE: REASON] otherwise (spec 3.1), so the text never invites an edit
+the JSON does not support, and never shows a bracketed state (or its
+absence) the JSON disagrees with: ANNOTATE-REPORT-FORMS guarantees every
+located entry -- (no source) ones included -- ends with a SOURCE_MATCH.
+ENTRY's NOTE, when present -- a live-object read failure unrelated to
+source matching -- is always appended in its own bracket."
   (let* ((path (gethash "path" entry))
          (line (gethash "line" entry))
          (match (gethash "source_match" entry))
          (note (gethash "note" entry))
+         (location (if path (format nil "~A~@[:~D~]" path line) "(no source)"))
          (body
-           (cond
-             ((null path) "(no source)")
-             ((equal match "matched")
-              (let* ((form-type (gethash "form_type" entry))
-                     (form-name (gethash "form_name" entry))
-                     (edit-unit (gethash "edit_unit" entry))
-                     (form-text (and form-type (format nil "~A~@[ ~A~]" form-type form-name))))
-                (format nil "~A~@[:~D~]~@[ (~A)~]~@[  [edit_unit: ~A]~]"
-                        path line form-text edit-unit)))
-             (t
-              (format nil "~A~@[:~D~] [~A~@[: ~A~]]"
-                      path line (or match "unverified")
-                      (gethash "source_match_reason" entry))))))
+           (if (equal match "matched")
+               (let* ((form-type (gethash "form_type" entry))
+                      (form-name (gethash "form_name" entry))
+                      (edit-unit (gethash "edit_unit" entry))
+                      (form-text (and form-type (format nil "~A~@[ ~A~]" form-type form-name))))
+                 (format nil "~A~@[ (~A)~]~@[  [edit_unit: ~A]~]" location form-text edit-unit))
+               (format nil "~A [~A~@[: ~A~]]" location (or match "unverified")
+                       (gethash "source_match_reason" entry)))))
     (concatenate 'string body (if note (format nil "  [~A]" note) ""))))
 
 (defun %method-signature (method home &key with-name class-name)
