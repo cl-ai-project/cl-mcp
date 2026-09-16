@@ -12,9 +12,12 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%normalize-string
+                #:locate-form-in-nodes
                 #:file-unparseable-error
                 #:file-unparseable-message
                 #:make-file-unparseable-condition)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
@@ -59,6 +62,31 @@ Used to prove that a dry-run summary does not grow with the size of the file."
     (dotimes (i form-count)
       (format s "(defun filler-~D (x)~%  ;; padding to keep this fixture large~%  (+ x ~D))~%~%"
               i i))))
+
+(deftest locate-form-in-nodes-finds-a-unique-match
+  (testing "one matching node is returned with no error"
+    (let ((nodes (parse-top-level-forms
+                  (format nil "(defun other () 1)~%~%(defun target () :old)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defun" "target")
+        (ok node)
+        (ok (null reason))))))
+
+(deftest locate-form-in-nodes-reports-multiple-matches
+  (testing "two matches without an index return no node and a descriptive reason"
+    (let ((nodes (parse-top-level-forms
+                  (format nil "(defmethod process ((x string))~%  x)~%~%~
+(defmethod process ((x integer))~%  x)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defmethod" "process")
+        (ok (null node))
+        (ok (and reason (search "Multiple matches" reason)
+                 (search "[0]" reason) (search "[1]" reason)))))))
+
+(deftest locate-form-in-nodes-returns-nil-for-an-absent-form
+  (testing "no match is a plain absence, not an error"
+    (let ((nodes (parse-top-level-forms (format nil "(defun other () 1)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defun" "missing")
+        (ok (null node))
+        (ok (null reason))))))
 
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"

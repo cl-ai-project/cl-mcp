@@ -43,6 +43,7 @@
            #:%normalize-paths
            #:%strip-name-prefix
            #:%find-target
+           #:locate-form-in-nodes
            #:%resolve-named-readtable
            #:%nonstandard-readtable-p
            #:%parse-readtable-designator
@@ -357,15 +358,24 @@ is kept."
                      (write-char c out)
                      (incf i)))))))))))
 
-(defun %find-target (nodes form-type form-name)
-  "Find a target node matching FORM-TYPE and FORM-NAME.
-If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
-If multiple matches exist without an index, signals an error with candidate info.
-For a defmethod, FORM-NAME is compared after %NORMALIZE-FORM-NAME-TEXT, so
-package prefixes and line breaks in it do not matter: its candidates are
-printed that way.  Other form types compare FORM-NAME as written (reader
-prefixes and case aside), since their names may be strings such as
-\"/users/:id\" whose colons and spaces are part of the name."
+(defun locate-form-in-nodes (nodes form-type form-name)
+  "Find the CST node among NODES -- top-level nodes as PARSE-TOP-LEVEL-FORMS
+returns them -- matching FORM-TYPE and FORM-NAME, the same rules %FIND-TARGET
+documents (the [N] index suffix, defmethod's normalized signature matching,
+reader-prefix stripping).  Returns (VALUES NODE ERROR-STRING).
+
+NODE is the sole matching node, or NIL when it cannot be resolved to exactly
+one: zero matches, an [N] index out of range, or more than one match without
+a disambiguating index.  ERROR-STRING is NIL for zero matches -- a plain,
+non-exceptional absence -- and a descriptive message for the other two: an
+out-of-range index, or an ambiguous set of matches (naming each candidate's
+own signature and its [N] index).  A FORM-NAME that strips down to the empty
+string is also reported this way, before any node is searched.
+
+%FIND-TARGET re-signals ERROR-STRING as a Lisp error, preserving its own
+contract for lisp-edit-form/lisp-patch-form.  The clos-describe observer
+calls this directly instead, to decide a round trip failed (spec 3.5)
+without installing a condition handler around every candidate it checks."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
@@ -376,52 +386,59 @@ prefixes and case aside), since their names may be strings such as
                        (%normalize-form-name-text stripped)
                        stripped))
            (matches nil))
-      (when (zerop (length target))
-        (error "form_name resolved to empty string after prefix stripping; ~
+      (if (zerop (length target))
+          (values nil (format nil "form_name resolved to empty string after prefix stripping; ~
 provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
-      (loop for node in nodes
-            when (and (typep node 'cst-node)
-                      (eq (cst-node-kind node) :expr))
-              do (let ((value (cst-node-value node)))
-                   (when (and (consp value)
-                              (string= (string-downcase (symbol-name (car value))) form-type)
-                              (some (lambda (cand) (string= cand target))
-                                    (%definition-candidates value form-type)))
-                     (push (cons node value) matches))))
-      (setf matches (nreverse matches))
-      ;; A method's candidates include its lambda list without its qualifiers,
-      ;; so "area ((s circle))" names both the primary method and the :around
-      ;; one.  When no index was given, a form whose full signature is exactly
-      ;; FORM-NAME wins over forms it only abbreviates.
-      (unless index
-        (let ((exact (remove-if-not
-                      (lambda (match)
-                        (string= target
-                                 (car (last (%definition-candidates (cdr match) form-type)))))
-                      matches)))
-          (when exact
-            (setf matches exact))))
-      (cond
-        ((null matches)
-         nil)
-        ((and index (< index (length matches)))
-         (car (nth index matches)))
-        (index
-         (error "Index [~D] out of range, only ~D match~:P found for ~A"
-                index (length matches) form-name))
-        ((= (length matches) 1)
-         (car (first matches)))
-        (t
-         ;; Multiple matches without index - provide helpful error
-         (let ((descriptions
-                 (loop for (node . form) in matches
-                       for i from 0
-                       collect (format nil "[~D] ~A"
-                                       i
-                                       (let ((candidates (%definition-candidates form form-type)))
-                                         (or (car (last candidates)) (first candidates)))))))
-           (error "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
-                  form-type form-name descriptions)))))))
+          (progn
+            (loop for node in nodes
+                  when (and (typep node 'cst-node)
+                            (eq (cst-node-kind node) :expr))
+                    do (let ((value (cst-node-value node)))
+                         (when (and (consp value)
+                                    (string= (string-downcase (symbol-name (car value))) form-type)
+                                    (some (lambda (cand) (string= cand target))
+                                          (%definition-candidates value form-type)))
+                           (push (cons node value) matches))))
+            (setf matches (nreverse matches))
+            ;; A method's candidates include its lambda list without its
+            ;; qualifiers, so "area ((s circle))" names both the primary
+            ;; method and the :around one.  When no index was given, a form
+            ;; whose full signature is exactly FORM-NAME wins over forms it
+            ;; only abbreviates.
+            (unless index
+              (let ((exact (remove-if-not
+                            (lambda (match)
+                              (string= target
+                                       (car (last (%definition-candidates (cdr match) form-type)))))
+                            matches)))
+                (when exact
+                  (setf matches exact))))
+            (cond
+              ((null matches) (values nil nil))
+              ((and index (< index (length matches))) (values (car (nth index matches)) nil))
+              (index
+               (values nil (format nil "Index [~D] out of range, only ~D match~:P found for ~A"
+                                    index (length matches) form-name)))
+              ((= (length matches) 1) (values (car (first matches)) nil))
+              (t
+               (let ((descriptions
+                       (loop for (node . form) in matches
+                             for i from 0
+                             collect (let ((candidates (%definition-candidates form form-type)))
+                                       (format nil "[~D] ~A" i
+                                               (or (car (last candidates)) (first candidates)))))))
+                 (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
+                                     form-type form-name descriptions))))))))))
+
+(defun %find-target (nodes form-type form-name)
+  "Find a target node matching FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES
+documents the matching rules in full).  Returns the node, or NIL when
+nothing matches; signals a Lisp error when LOCATE-FORM-IN-NODES reports one
+instead (an out-of-range [N] index, ambiguous matches, or an empty
+FORM-NAME) -- the contract lisp-edit-form and lisp-patch-form already rely
+on."
+  (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
+    (if reason (error "~A" reason) node)))
 
 (defun %detect-readtable-before-node (nodes target)
   "Return the readtable designator active before TARGET, or NIL.
