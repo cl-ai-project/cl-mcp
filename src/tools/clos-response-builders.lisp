@@ -12,7 +12,16 @@
   (:import-from #:cl-mcp/src/code-refs-core
                 #:sequence->list
                 #:*note-stale*)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:locate-form-in-nodes)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-start
+                #:cst-node-end)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-source-text)
   (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht
                 #:text-content)
   (:import-from #:cl-ppcre
                 #:regex-replace-all
@@ -22,7 +31,9 @@
            #:build-clos-describe-response
            #:*note-no-form-at-line*
            #:*note-unparseable*
-           #:*note-different-definition*))
+           #:*reason-verification-unavailable*
+           #:*reason-not-locatable*
+           #:*reason-not-readable*))
 
 (in-package #:cl-mcp/src/tools/clos-response-builders)
 
@@ -31,13 +42,6 @@
 
 (defparameter *note-unparseable* "file could not be parsed"
   "Note on a definition whose source file does not parse.")
-
-(defparameter *note-different-definition*
-  (concatenate 'string "the form on this line is a different definition; the file no longer "
-               "has this one as loaded (reload for accurate results)")
-  "Note on a definition whose recorded line starts a form defining something else:
-the file was edited and reloaded, and this definition, still in the image, is no
-longer in it.")
 
 (defun %true-p (value)
   "True when VALUE, a JSON boolean, is true.  False arrives as YASON:FALSE
@@ -67,234 +71,273 @@ function and its methods, the class and its methods."
           (push method entries))))
     (nreverse entries)))
 
-(defun %add-note (entry note)
-  "Append NOTE to ENTRY's note, separated by '; '."
-  (let ((old (gethash "note" entry)))
-    (setf (gethash "note" entry)
-          (if (and (stringp old) (plusp (length old)))
-              (format nil "~A; ~A" old note)
-              note))))
+(defun %json-token (plist)
+  "Convert PLIST, a source token (:TOKEN .. :IN-PACKAGE ..) from
+CODE-REFS-SCAN's %DEFINITION-SOURCE-SIGNATURE (spec 3.2), to the JSON token
+CL-MCP/SRC/CLOS-VERIFY-CORE:VERIFY-ENTRIES documents, or NIL."
+  (and plist
+       (make-ht "token" (getf plist :token) "in_package" (getf plist :in-package))))
 
-(defun %base-name (text)
-  "Return TEXT, a symbol name or (SETF name) as a report or a signature writes
-it, without its package prefix: the text after the last colon, and
-(SETF PKG::X) as (SETF X)."
-  (let ((end (length text)))
-    (if (and (> end 7)
-             (string-equal "(SETF " text :end2 6)
-             (char= #\) (char text (1- end))))
-        (format nil "(SETF ~A)" (%base-name (subseq text 6 (1- end))))
-        (let ((colon (position #\: text :from-end t)))
-          (if colon (subseq text (1+ colon)) text)))))
+(defun %json-tokens (plists)
+  "Convert PLISTS, a list of source tokens, to a JSON array."
+  (map 'vector #'%json-token (sequence->list plists)))
 
-(defun %same-name-p (a b)
-  "True when A and B, names as strings, are equal without package prefixes and
-ignoring case."
-  (and (stringp a) (stringp b)
-       (string-equal (%base-name a) (%base-name b))))
+(defun %json-name (plist)
+  "Convert PLIST, a source name (:TOKEN .. :SETF .. :IN-PACKAGE ..) from
+%DEFINITION-SOURCE-SIGNATURE, to JSON, or NIL."
+  (and plist
+       (make-ht "token" (getf plist :token)
+                "setf" (and (getf plist :setf) t)
+                "in_package" (getf plist :in-package))))
 
-(defun %eql-inner-text (text)
-  "Return the datum text inside TEXT, an (EQL ...) specializer string --
-\"(EQL)\" or \"(EQL <datum>)\" -- between \"(EQL \" and the final \")\"; NIL
-when TEXT does not have that shape.  \"(EQL)\" gives the empty string: an
-older signature, or one whose datum could not be printed."
-  (when (and (stringp text) (>= (length text) 5)
-             (string-equal "(EQL" text :end2 4)
-             (char= #\) (char text (1- (length text)))))
-    (string-trim " " (subseq text 4 (1- (length text))))))
+(defun %json-eql-datum (plist)
+  "Convert PLIST, a tagged EQL datum (spec 3.3), to JSON."
+  (ecase (getf plist :kind)
+    (:keyword (make-ht "kind" "keyword" "name" (getf plist :name)))
+    (:integer (make-ht "kind" "integer" "value" (getf plist :value)))
+    (:ratio (make-ht "kind" "ratio"
+                     "numerator" (getf plist :numerator)
+                     "denominator" (getf plist :denominator)))
+    (:character (make-ht "kind" "character" "value" (getf plist :value)))
+    (:boolean (make-ht "kind" "boolean" "value" (getf plist :value)))
+    (:symbol
+     (let ((ht (make-ht "kind" "symbol"
+                        "token" (getf plist :token)
+                        "in_package" (getf plist :in-package)
+                        "quoted" (string-downcase (symbol-name (getf plist :quoted))))))
+       (when (getf plist :quote-token)
+         (setf (gethash "quote_token" ht) (%json-token (getf plist :quote-token))))
+       ht))
+    (:unverifiable (make-ht "kind" "unverifiable" "reason" (getf plist :reason)))))
 
-(defun %eql-datum-comparable-p (text)
-  "True when TEXT, an (EQL ...) specializer's inner datum text, holds only
-characters that can appear in symbol, keyword or number syntax, so it can be
-compared against another such text reliably.  A string, a list or a character
-literal holds a double quote, a parenthesis, `#', a backslash, or a space
-(from more than one token), and returns NIL for those."
-  (every (lambda (ch) (and (not (find ch "\"()#\\ ")) (not (char= ch #\Tab)))) text))
+(defun %json-specializer (plist)
+  "Convert PLIST, a specializer (spec 3.2/3.3: kind class, eql or
+unverifiable), to JSON."
+  (ecase (getf plist :kind)
+    (:class (make-ht "kind" "class"
+                     "token" (getf plist :token)
+                     "in_package" (getf plist :in-package)))
+    (:eql (make-ht "kind" "eql" "datum" (%json-eql-datum (getf plist :datum))))
+    (:unverifiable (make-ht "kind" "unverifiable" "reason" (getf plist :reason)))))
 
-(defun %same-specializers-p (entry-specializers form-specializers)
-  "True when ENTRY-SPECIALIZERS, a method entry's, match FORM-SPECIALIZERS, a
-defmethod signature's, pairwise: class names by %SAME-NAME-P, and an EQL
-specializer -- both texts start \"(EQL \" -- by its datum: the inner texts
-(%EQL-INNER-TEXT), compared like a name (package prefixes dropped token-wise,
-case-insensitively) when both hold only symbol/keyword/number syntax
-(%EQL-DATUM-COMPARABLE-P).  Either inner text empty, or either not comparable
-that way -- a string, a list, or a character literal -- counts as a match:
-those cases cannot be told apart reliably and must not report a false
-mismatch.  A specializer that is EQL on only one side never matches."
-  (and (= (length entry-specializers) (length form-specializers))
-       (every (lambda (entry-specializer form-specializer)
-                (and (stringp entry-specializer)
-                     (let ((entry-inner (%eql-inner-text entry-specializer)))
-                       (if entry-inner
-                           (let ((form-inner (and (stringp form-specializer)
-                                                  (%eql-inner-text form-specializer))))
-                             (and form-inner
-                                  (or (zerop (length entry-inner))
-                                      (zerop (length form-inner))
-                                      (not (%eql-datum-comparable-p entry-inner))
-                                      (not (%eql-datum-comparable-p form-inner))
-                                      (%same-name-p entry-inner form-inner))))
-                           (%same-name-p entry-specializer form-specializer)))))
-              entry-specializers form-specializers)))
+(defun %json-specializers (plists)
+  "Convert PLISTS, a list of specializers, to a JSON array, or NIL."
+  (and plists (map 'vector #'%json-specializer (sequence->list plists))))
 
-(defun %form-describes-entry-p (form entry)
-  "True unless FORM, a TOP-LEVEL-FORMS-AT value (FORM-TYPE FORM-NAME SIGNATURE)
-for the line ENTRY was recorded on, is a definition that cannot be ENTRY.
+(defun %json-slot (plist)
+  "Convert PLIST, a slot (:NAME :READERS :WRITERS) from
+%DEFINITION-SOURCE-SIGNATURE, to JSON."
+  (make-ht "name" (%json-token (getf plist :name))
+           "readers" (%json-tokens (getf plist :readers))
+           "writers" (%json-tokens (getf plist :writers))))
 
-The line comes from the image, the form from the file as it is now, so after a
-method is renamed in place and the file reloaded, the old method still in the
-image points at the new one's form.  Names are compared by %SAME-NAME-P:
-- a method (it has specializers) of kind method: a defmethod needs its generic
-  function's name, its qualifiers and its specializers (%SAME-SPECIALIZERS-P);
-  a defgeneric, holding the method as a :method option, needs the name
-- a slot reader or writer: a defclass or define-condition needs the name of the
-  class specialized on, the first specializer of a reader, the second of a writer
-- a generic function (it has a lambda_list): a defgeneric needs its name
-- a class (it has a metaclass): a defclass, define-condition or defstruct needs
-  its name
-Any other form -- a user macro, a PROGN, a form too malformed for a signature --
-cannot be checked and is accepted, as is a method whose generic function the
-worker could not read."
-  (destructuring-bind (form-type form-name &optional signature) form
-    (declare (ignore form-name))
-    (flet ((type-p (&rest types)
-             (and signature (member form-type types :test #'equal)))
-           (named-p (name)
-             (%same-name-p name (getf signature :name))))
-      (cond
-        ((nth-value 1 (gethash "specializers" entry))
-         (let ((kind (gethash "kind" entry))
-               (generic-function (gethash "generic_function" entry))
-               (specializers (sequence->list (gethash "specializers" entry))))
-           (cond
-             ((not (stringp generic-function)) t)
-             ((equal kind "method")
-              (cond
-                ((type-p "defmethod")
-                 (let ((qualifiers (sequence->list (gethash "qualifiers" entry))))
-                   (and (named-p generic-function)
-                        (= (length qualifiers) (length (getf signature :qualifiers)))
-                        (every #'equalp qualifiers (getf signature :qualifiers))
-                        (%same-specializers-p specializers (getf signature :specializers)))))
-                ((type-p "defgeneric") (named-p generic-function))
-                (t t)))
-             ((and (member kind '("reader" "writer") :test #'equal)
-                   (type-p "defclass" "define-condition"))
-              (named-p (nth (if (equal kind "reader") 0 1) specializers)))
-             (t t))))
-        ((nth-value 1 (gethash "lambda_list" entry))
-         (if (type-p "defgeneric") (named-p (gethash "name" entry)) t))
-        ((nth-value 1 (gethash "metaclass" entry))
-         (if (type-p "defclass" "define-condition" "defstruct")
-             (named-p (gethash "name" entry))
-             t))
-        (t t)))))
+(defun %json-method-option (plist)
+  "Convert PLIST, a DEFGENERIC (:method ...) option, to JSON."
+  (make-ht "qualifiers" (%json-tokens (getf plist :qualifiers))
+           "specializers" (%json-specializers (getf plist :specializers))))
 
-(defun %legacy-eql-datum-text (datum)
-  "Return DATUM, a CODE-REFS-SCAN %SOURCE-EQL-DATUM tagged plist (spec 3.3),
-rendered the way this file's predecessor (value-based %DEFINITION-SIGNATURE)
-used to render an EQL specializer's datum -- close enough for
-%SAME-SPECIALIZERS-P's text-based, case-insensitive, prefix-stripping
-comparison -- or NIL when DATUM cannot be rendered that way (UNVERIFIABLE),
-matching the old \"cannot print\" case and its safe (EQL) fallback."
-  (case (getf datum :kind)
-    (:keyword (format nil ":~A" (getf datum :name)))
-    (:integer (getf datum :value))
-    (:ratio (format nil "~A/~A" (getf datum :numerator) (getf datum :denominator)))
-    (:character (format nil "#\\~A" (getf datum :value)))
-    (:boolean (getf datum :value))
-    (:symbol (getf datum :token))
-    (t nil)))
-
-(defun %legacy-specializer-text (specializer)
-  "Return SPECIALIZER, a CODE-REFS-SCAN %SOURCE-SPECIALIZER tagged plist,
-rendered the way this file's predecessor rendered a DEFMETHOD specializer,
-or NIL when SPECIALIZER is UNVERIFIABLE -- the caller then treats the whole
-form as un-checkable, as the old code did for anything it could not render."
-  (case (getf specializer :kind)
-    (:class (getf specializer :token))
-    (:eql (let ((text (%legacy-eql-datum-text (getf specializer :datum))))
-            (if text (format nil "(EQL ~A)" text) "(EQL)")))
-    (t nil)))
-
-(defun %legacy-name-text (name)
-  "Return NAME, a CODE-REFS-SCAN %SOURCE-NAME tagged plist, rendered the way
-this file's predecessor rendered a definition's name, or NIL when NAME is
-absent (a malformed definer %DEFINITION-SOURCE-SIGNATURE could not name)."
-  (and name
-       (if (getf name :setf)
-           (format nil "(SETF ~A)" (getf name :token))
-           (getf name :token))))
-
-(defun %legacy-signature (signature)
-  "Return SIGNATURE, a CODE-REFS-SCAN %DEFINITION-SOURCE-SIGNATURE plist
-(spec 3.2), as the (:NAME :QUALIFIERS :SPECIALIZERS) plist
-%FORM-DESCRIBES-ENTRY-P still expects -- a provisional bridge kept only
-until A4 replaces that predicate with worker-verified identity matching.
-NIL when SIGNATURE's kind is :OTHER, its name is missing, or (for a
-DEFMETHOD) any specializer is UNVERIFIABLE: %FORM-DESCRIBES-ENTRY-P then
-accepts the form unchecked, as the old code did for anything it could not
-confidently render as text."
-  (let ((name (%legacy-name-text (getf signature :name))))
-    (case (getf signature :kind)
+(defun %json-signature (plist)
+  "Convert PLIST, TOP-LEVEL-FORMS-AT's :SIGNATURE (CODE-REFS-SCAN's
+%DEFINITION-SOURCE-SIGNATURE, spec 3.2), to the candidate JSON
+CL-MCP/SRC/CLOS-VERIFY-CORE:VERIFY-ENTRIES documents."
+  (let* ((kind (getf plist :kind))
+         (ht (make-ht "kind" (string-downcase (symbol-name kind)))))
+    (when (getf plist :head)
+      (setf (gethash "head" ht) (%json-token (getf plist :head))))
+    (case kind
       (:defmethod
-        (and name
-             (let ((specializers (mapcar #'%legacy-specializer-text
-                                         (getf signature :specializers))))
-               (and (notany #'null specializers)
-                    (list :name name
-                          :qualifiers (mapcar (lambda (q) (getf q :token))
-                                              (getf signature :qualifiers))
-                          :specializers specializers)))))
-      ((:defgeneric :defclass :define-condition :defstruct)
-       (and name (list :name name)))
+        (setf (gethash "name" ht) (%json-name (getf plist :name))
+              (gethash "qualifiers" ht) (%json-tokens (getf plist :qualifiers))
+              (gethash "specializers" ht) (%json-specializers (getf plist :specializers))))
+      (:defgeneric
+        (setf (gethash "name" ht) (%json-name (getf plist :name))
+              (gethash "methods" ht)
+              (map 'vector #'%json-method-option (sequence->list (getf plist :methods)))))
+      ((:defclass :define-condition)
+        (setf (gethash "name" ht) (%json-name (getf plist :name))
+              (gethash "slots" ht)
+              (and (getf plist :slots)
+                   (map 'vector #'%json-slot (sequence->list (getf plist :slots))))))
+      (:defstruct
+        (setf (gethash "name" ht) (%json-name (getf plist :name)))))
+    ht))
+
+(defparameter *reason-verification-unavailable* "verification unavailable"
+  "SOURCE_MATCH_REASON when the clos-verify-source step could not be
+completed: a worker error, a crash notice, or any signalled condition
+(spec 3.6).  Every located entry falls back to UNVERIFIED and the report
+is still returned; the tool call itself never fails.")
+
+(defparameter *reason-not-locatable* "not uniquely locatable for editing"
+  "SOURCE_MATCH_REASON for a MATCHED verdict LOCATE-FORM-IN-NODES cannot
+confirm with a unique, same-span round trip (spec 3.5): lisp-edit-form's
+own matching would not resolve FORM_TYPE/FORM_NAME back to this exact
+form, so returning them would invite an edit the JSON does not support.")
+
+(defparameter *reason-not-readable* "file is outside the readable paths"
+  "SOURCE_MATCH_REASON when TOP-LEVEL-FORMS-AT's read policy refuses the
+file: every located entry still gets a SOURCE_MATCH (spec 3.1), even one
+whose file cannot be opened at all.")
+
+(defun %verification-results (raw)
+  "Return RAW's \"results\" array as a list, or NIL when RAW is not a valid
+{\"results\": [...]} object -- a worker error or crash notice
+(PROXY-TO-WORKER's shape for either), which carries \"content\"/\"isError\"
+and no \"results\" key."
+  (and (hash-table-p raw) (nth-value 1 (gethash "results" raw))
+       (sequence->list (gethash "results" raw))))
+
+(defun %call-verify-fn (verify-fn entries)
+  "Call VERIFY-FN with ENTRIES (spec 3.6's batch) and return its results
+list, or NIL when verification is unavailable: VERIFY-FN signalled a
+condition, or its return value is not a valid results object."
+  (handler-case (%verification-results (funcall verify-fn entries))
+    (error () nil)))
+
+(defun %edit-unit (identity signature-kind)
+  "Return the container form_type SIGNATURE-KIND (a %DEFINITION-SOURCE-SIGNATURE
+:KIND, spec 3.2) edits on IDENTITY's behalf, or NIL when IDENTITY's own
+form is its edit unit (spec 3.4).  Only a method IDENTITY matched through a
+DEFGENERIC's inline (:method ...) option or a DEFCLASS/DEFINE-CONDITION's
+slot options has a container: editing FORM_TYPE/FORM_NAME there changes
+more than this one IDENTITY."
+  (when (equal (gethash "kind" identity) "method")
+    (case signature-kind
+      (:defgeneric "defgeneric")
+      (:defclass "defclass")
+      (:define-condition "define-condition")
       (t nil))))
 
-(defun annotate-report-forms (report)
-  "Fill in the form_type, form_name and note of every located object in
-REPORT from its source file, then remove abs_path from each; return REPORT.
+(defun %file-nodes (abs-path cache)
+  "Return ABS-PATH's parsed top-level CST nodes, memoized in CACHE (an
+EQUAL hash table), or NIL when the file cannot be read or parsed -- a
+MATCHED verdict there then cannot be round-trip-confirmed (spec 3.5) and
+falls back to UNVERIFIED."
+  (multiple-value-bind (value found) (gethash abs-path cache)
+    (if found
+        value
+        (setf (gethash abs-path cache)
+              (ignore-errors
+                (parse-top-level-forms (fs-read-source-text abs-path)
+                                       :source-path (pathname abs-path)))))))
 
-Each file is read once (TOP-LEVEL-FORMS-AT), which now returns every
-top-level form starting on a line, not just one.  An object gets the form
-that starts on its line only when exactly one form starts there and that
-form describes something else (%FORM-DESCRIBES-ENTRY-P, fed a
-%LEGACY-SIGNATURE bridge from the new token-based source_signature): the
-object then gets *NOTE-DIFFERENT-DEFINITION* and no form, so its form_name
-never leads an edit to another definition.  Zero forms on the line, more
-than one (ambiguous), or no note-worthy match falls through the same way:
-the file does not parse, or it changed since it was loaded (stale), or
-neither, in which case the recorded line simply starts no (uniquely
-identifiable) form.  A file the read policy refuses gets neither form nor
-note -- the text still gives path:line.  A4 replaces this provisional
-one-form-per-line rule with worker-verified identity matching across every
-candidate on the line (spec 3.4)."
-  (let ((by-file (make-hash-table :test #'equal)))
+(defun %round-trip-ok-p (nodes form-type form-name start end)
+  "True when NODES resolve FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES,
+the same matching lisp-edit-form uses) to the single CST node spanning
+exactly START/END (spec 3.5) -- comparing spans, not line numbers, and
+never accepting an ambiguous or absent match."
+  (and nodes
+       (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
+         (and node (null reason)
+              (= (cst-node-start node) start) (= (cst-node-end node) end)))))
+
+(defun %set-source-match (entry status reason)
+  "Set ENTRY's SOURCE_MATCH and SOURCE_MATCH_REASON (spec 3.1); REASON is
+NIL exactly when STATUS is \"matched\"."
+  (setf (gethash "source_match" entry) status
+        (gethash "source_match_reason" entry) reason))
+
+(defun %set-matched-form (entry candidate identity)
+  "Set ENTRY's FORM_TYPE and FORM_NAME from CANDIDATE, a TOP-LEVEL-FORMS-AT
+plist, and its EDIT_UNIT (spec 3.4) when IDENTITY's own form is not
+CANDIDATE's -- after a MATCHED verdict's round trip is confirmed."
+  (setf (gethash "form_type" entry) (getf candidate :form-type)
+        (gethash "form_name" entry) (getf candidate :form-name))
+  (let ((edit-unit (%edit-unit identity (getf (getf candidate :signature) :kind))))
+    (when edit-unit
+      (setf (gethash "edit_unit" entry) edit-unit))))
+
+(defun %apply-verification (entry forms result node-cache)
+  "Set ENTRY's SOURCE_MATCH (and, once confirmed, FORM_TYPE/FORM_NAME/
+EDIT_UNIT) from RESULT, worker/clos-verify-source's verdict for ENTRY's
+candidates FORMS (spec 3.1, 3.5), or *REASON-VERIFICATION-UNAVAILABLE* when
+RESULT is NIL.  A stale ENTRY (spec 3.1) never keeps a MATCHED verdict."
+  (if (null result)
+      (%set-source-match entry "unverified" *reason-verification-unavailable*)
+      (let ((status (gethash "status" result))
+            (reason (gethash "reason" result)))
+        (if (not (equal status "matched"))
+            (%set-source-match entry status reason)
+            (let* ((index (gethash "candidate_index" result))
+                   (candidate (and (integerp index) (nth index forms)))
+                   (nodes (and candidate
+                               (%file-nodes (gethash "abs_path" entry) node-cache))))
+              (if (and candidate
+                       (%round-trip-ok-p nodes (getf candidate :form-type)
+                                         (getf candidate :form-name)
+                                         (getf candidate :start) (getf candidate :end)))
+                  (progn
+                    (%set-source-match entry "matched" nil)
+                    (%set-matched-form entry candidate (gethash "identity" entry)))
+                  (%set-source-match entry "unverified" *reason-not-locatable*))))))
+  (when (and (%true-p (gethash "stale" entry))
+             (equal (gethash "source_match" entry) "matched"))
+    (setf (gethash "form_type" entry) nil (gethash "form_name" entry) nil)
+    (remhash "edit_unit" entry)
+    (%set-source-match entry "unverified" *note-stale*)))
+
+(defun annotate-report-forms (report verify-fn)
+  "Fill in the form_type, form_name, source_match, source_match_reason and
+(spec 3.4) edit_unit of every located object in REPORT, then remove
+abs_path from each; return REPORT.
+
+Each file's top-level forms starting on a located line are scanned once
+(TOP-LEVEL-FORMS-AT) and converted to the candidate JSON spec 3.2 defines
+(%JSON-SIGNATURE); every located entry, across every file, is sent to
+VERIFY-FN in one batch (spec 3.6) -- a callback CLOS.LISP supplies, calling
+worker/clos-verify-source over the pool or CLOS-VERIFY-CORE:VERIFY-ENTRIES
+in-process.  A MATCHED verdict only reaches FORM_TYPE/FORM_NAME once
+LOCATE-FORM-IN-NODES confirms it resolves back to that very CST span (spec
+3.5); anything else -- a real mismatch, an unresolvable identity, a
+signalled condition, or a non-conforming VERIFY-FN result -- is MISMATCHED
+or UNVERIFIED, never a silent fallback to MATCHED.
+
+A line with no candidates at all -- the file could not be read
+(*REASON-NOT-READABLE*) or parsed (*NOTE-UNPARSEABLE*), or simply starts no
+top-level form (*NOTE-NO-FORM-AT-LINE*) -- is decided locally, without a
+VERIFY-FN round trip: there is nothing to send."
+  (let ((by-file (make-hash-table :test #'equal))
+        (contexts (make-hash-table :test #'equal))
+        (node-cache (make-hash-table :test #'equal))
+        (entries-json '())
+        (counter 0))
     (dolist (entry (%located-entries report))
       (let ((abs-path (gethash "abs_path" entry)))
         (when (and (stringp abs-path) (integerp (gethash "line" entry)))
           (push entry (gethash abs-path by-file)))))
-    (maphash (lambda (abs-path entries)
-               (multiple-value-bind (table failure)
-                   (top-level-forms-at abs-path
-                                       (mapcar (lambda (entry) (gethash "line" entry))
-                                               entries))
-                 (dolist (entry entries)
-                   (let* ((forms (gethash (gethash "line" entry) table))
-                          (form (and forms (null (rest forms))
-                                    (list (getf (first forms) :form-type)
-                                          (getf (first forms) :form-name)
-                                          (%legacy-signature (getf (first forms) :signature))))))
-                     (cond
-                       ((and form (%form-describes-entry-p form entry))
-                        (setf (gethash "form_type" entry) (first form)
-                              (gethash "form_name" entry) (second form)))
-                       (form (%add-note entry *note-different-definition*))
-                       ((eq failure :denied))
-                       (failure
-                        (%add-note entry (format nil "~A: ~A" *note-unparseable* failure)))
-                       ((%true-p (gethash "stale" entry)) (%add-note entry *note-stale*))
-                       (t (%add-note entry *note-no-form-at-line*)))))))
-             by-file)
+    (maphash
+     (lambda (abs-path file-entries)
+       (multiple-value-bind (table failure)
+           (top-level-forms-at abs-path
+                               (mapcar (lambda (e) (gethash "line" e)) file-entries))
+         (dolist (entry file-entries)
+           (let ((forms (gethash (gethash "line" entry) table)))
+             (cond
+               (forms
+                (let ((id (format nil "~D" (incf counter))))
+                  (setf (gethash id contexts) (list entry forms))
+                  (push (make-ht "id" id "identity" (gethash "identity" entry)
+                                 "candidates"
+                                 (map 'vector
+                                      (lambda (f) (%json-signature (getf f :signature)))
+                                      forms))
+                        entries-json)))
+               ((eq failure :denied)
+                (%set-source-match entry "unverified" *reason-not-readable*))
+               (failure
+                (%set-source-match entry "unverified"
+                                   (format nil "~A: ~A" *note-unparseable* failure)))
+               (t (%set-source-match entry "unverified" *note-no-form-at-line*)))))))
+     by-file)
+    (let* ((batch (coerce (nreverse entries-json) 'vector))
+           (results (and (plusp (length batch)) (%call-verify-fn verify-fn batch)))
+           (results-by-id (make-hash-table :test #'equal)))
+      (dolist (result results)
+        (setf (gethash (gethash "id" result) results-by-id) result))
+      (maphash (lambda (id context)
+                 (destructuring-bind (entry forms) context
+                   (%apply-verification entry forms (gethash id results-by-id) node-cache)))
+               contexts))
     (dolist (entry (%located-entries report))
       (remhash "abs_path" entry))
     report))
@@ -315,20 +358,33 @@ COMMON-LISP, as a reader in HOME would write them."
                     result "")))))
 
 (defun %location-text (entry)
-  "Return where ENTRY is defined: PATH:LINE (FORM-TYPE FORM-NAME), with the
-note in brackets, or (no source)."
-  (let ((path (gethash "path" entry))
-        (line (gethash "line" entry))
-        (form-type (gethash "form_type" entry))
-        (form-name (gethash "form_name" entry))
-        (note (gethash "note" entry)))
-    (concatenate 'string
-                 (if path
-                     (format nil "~A~@[:~D~]~@[ (~A)~]"
-                             path line
-                             (and form-type (format nil "~A~@[ ~A~]" form-type form-name)))
-                     "(no source)")
-                 (if note (format nil "  [~A]" note) ""))))
+  "Return where ENTRY is defined.  With a known PATH, this is PATH:LINE
+(FORM_TYPE FORM_NAME) when SOURCE_MATCH is \"matched\" -- with an extra
+[edit_unit: X] when editing FORM_TYPE/FORM_NAME edits a container around
+ENTRY, not ENTRY's own form (spec 3.4) -- or PATH:LINE [STATE: REASON]
+otherwise, so the text never invites an edit the JSON does not support
+(spec 3.1).  Without a PATH, this is (no source).  ENTRY's NOTE, when
+present -- a live-object read failure unrelated to source matching -- is
+always appended in its own bracket."
+  (let* ((path (gethash "path" entry))
+         (line (gethash "line" entry))
+         (match (gethash "source_match" entry))
+         (note (gethash "note" entry))
+         (body
+           (cond
+             ((null path) "(no source)")
+             ((equal match "matched")
+              (let* ((form-type (gethash "form_type" entry))
+                     (form-name (gethash "form_name" entry))
+                     (edit-unit (gethash "edit_unit" entry))
+                     (form-text (and form-type (format nil "~A~@[ ~A~]" form-type form-name))))
+                (format nil "~A~@[:~D~]~@[ (~A)~]~@[  [edit_unit: ~A]~]"
+                        path line form-text edit-unit)))
+             (t
+              (format nil "~A~@[:~D~] [~A~@[: ~A~]]"
+                      path line (or match "unverified")
+                      (gethash "source_match_reason" entry))))))
+    (concatenate 'string body (if note (format nil "  [~A]" note) ""))))
 
 (defun %method-signature (method home &key with-name class-name)
   "Return METHOD's signature: [NAME] QUALIFIERS (SPECIALIZERS) [kind], plus
@@ -504,14 +560,16 @@ and its initargs, initform, type, class allocation and accessors."
       (dolist (note (sequence->list (gethash "notes" report)))
         (format s "Note: ~A~%" note)))))
 
-(defun build-clos-describe-response (report)
-  "Return REPORT, a clos-describe payload, annotated and with its content text.
+(defun build-clos-describe-response (report verify-fn)
+  "Return REPORT, a clos-describe payload, annotated (VERIFY-FN, spec 3.6)
+and with its content text.
 
-A result that is not a report (CLOS-REPORT-P), such as the error PROXY-TO-WORKER
-returns when the worker crashed, is returned unchanged."
+A result that is not a report (CLOS-REPORT-P), such as the error
+PROXY-TO-WORKER returns when the worker crashed, is returned unchanged;
+VERIFY-FN is never called for it."
   (if (clos-report-p report)
       (progn
-        (annotate-report-forms report)
+        (annotate-report-forms report verify-fn)
         (setf (gethash "content" report)
               (text-content (%format-clos-report report)))
         report)

@@ -8,6 +8,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
+  (:import-from #:cl-mcp/src/clos-verify-core
+                #:verify-entries)
   (:import-from #:cl-mcp/src/tools/clos-response-builders
                 #:build-clos-describe-response)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -30,8 +32,11 @@ the structure a source search cannot see:
   (initargs, initform as code, type, accessors, and the class each comes from),
   default initargs, and the methods specialized on it or its superclasses
 A symbol naming a class and a generic function, or a SETF generic function,
-gets every section.  Each definition's form_type and form_name can be passed
-straight to lisp-edit-form.
+gets every section.  Each definition's source_match reports whether its form
+was independently verified against the running image: only \"matched\"
+carries a form_type and form_name that can be passed straight to
+lisp-edit-form; \"mismatched\" or \"unverified\" carries a
+source_match_reason instead.
 
 Reads only: a class is never finalized, no initform is evaluated, and nothing
 is interned.
@@ -58,8 +63,9 @@ the total is always reported"))
              :arg-name "limit"
              :message "limit must be a positive integer"))
     (let ((limit (or limit 50)))
-      ;; Not WITH-PROXY-DISPATCH: the worker returns only the report, and both
-      ;; paths finish it here, in the process that can parse source files.
+      ;; Not WITH-PROXY-DISPATCH: each stage returns only its own payload
+      ;; (the report, then the verification results), and both paths finish
+      ;; the flow here, in the process that can parse source files (spec 3.6).
       (result id
               (build-clos-describe-response
                (if *use-worker-pool*
@@ -67,4 +73,9 @@ the total is always reported"))
                                     (make-ht "symbol" symbol
                                              "package" package
                                              "limit" limit))
-                   (clos-describe-report symbol :package package :limit limit)))))))
+                   (clos-describe-report symbol :package package :limit limit))
+               (lambda (entries)
+                 (if *use-worker-pool*
+                     (proxy-to-worker id "worker/clos-verify-source"
+                                      (make-ht "entries" entries))
+                     (verify-entries entries))))))))

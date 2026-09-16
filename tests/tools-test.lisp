@@ -508,6 +508,46 @@
            (result (gethash "result" obj)))
       (ok (or (gethash "error" obj) (and result (gethash "isError" result)))))))
 
+(deftest tools-call-clos-describe-reports-fail-closed-source-match
+  (testing "clos-describe's JSON and text agree: form_type/form_name only appear when matched"
+    (with-test-project-root
+      (let ((fixture (asdf/system:system-relative-pathname
+                       :cl-mcp "tests/fixtures/clos-fixture.lisp")))
+        (let ((truename (truename fixture)))
+          (uiop:with-temporary-file (:pathname fasl :type "fasl")
+            (with-compilation-unit (:override t :source-namestring (namestring truename))
+              (handler-bind ((warning #'muffle-warning))
+                (load (compile-file truename :output-file fasl :verbose nil :print nil))))))
+        (let* ((req (concatenate 'string
+                      "{\"jsonrpc\":\"2.0\",\"id\":700,\"method\":\"tools/call\","
+                      "\"params\":{\"name\":\"clos-describe\","
+                      "\"arguments\":{\"symbol\":\"cl-mcp-clos-fixture:probe-error\"}}}"))
+               (resp (%pjl req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (content (gethash "content" result))
+               (text (gethash "text" (aref content 0)))
+               (class (gethash "class" result))
+               (methods (coerce (gethash "methods" class) 'list))
+               (unverified-count 0))
+          (ok (stringp (gethash "source_match" class)))
+          (dolist (method methods)
+            (let ((match (gethash "source_match" method))
+                  (form-type (gethash "form_type" method))
+                  (form-name (gethash "form_name" method))
+                  (path (gethash "path" method))
+                  (line (gethash "line" method)))
+              (if (equal "matched" match)
+                  (ok (stringp form-type))
+                  (progn
+                    (incf unverified-count)
+                    (ok (null form-type))
+                    (ok (null form-name))
+                    (ok (stringp (gethash "source_match_reason" method)))
+                    (ok (search (format nil "~A:~D [~A" path line match) text))))))
+          (ok (> unverified-count 0)
+              "at least one accessor is unverified, proving the check is not vacuous"))))))
+
 (deftest tools-call-code-find-references
   (testing "tools/call code-find-references returns references"
     ;; Skip this test on macOS due to XREF instability

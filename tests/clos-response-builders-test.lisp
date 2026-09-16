@@ -13,9 +13,13 @@
                 #:clos-report-p
                 #:*note-no-form-at-line*
                 #:*note-unparseable*
-                #:*note-different-definition*)
+                #:*reason-verification-unavailable*
+                #:*reason-not-locatable*
+                #:*reason-not-readable*)
   (:import-from #:cl-mcp/src/clos-core
                 #:clos-describe-report)
+  (:import-from #:cl-mcp/src/clos-verify-core
+                #:verify-entries)
   (:import-from #:cl-mcp/src/code-refs-core
                 #:sequence->list
                 #:*note-stale*)
@@ -33,28 +37,41 @@
   (asdf/system:system-relative-pathname :cl-mcp "tests/fixtures/clos-fixture.lisp")
   "CLOS definitions compiled so that SBCL records their source locations.")
 
-(defun %load-fixture ()
-  "Compile and load the fixture with its truename as the source namestring.
-repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
-  (let ((truename (truename *fixture*)))
+(defun %compile-and-load (path)
+  "Compile and load the fixture at PATH with its truename as the source
+namestring.  repl-eval's compilation unit would otherwise name the file
+\"repl-eval\"."
+  (let ((truename (truename path)))
     (uiop:with-temporary-file (:pathname fasl :type "fasl")
       (with-compilation-unit (:override t :source-namestring (namestring truename))
         (handler-bind ((warning #'muffle-warning))
           (load (compile-file truename :output-file fasl :verbose nil :print nil)))))))
+
+(defun %load-fixture ()
+  "Compile and load the fixture with its truename as the source namestring."
+  (%compile-and-load *fixture*))
+
+(defun %verify-inline (entries)
+  "A VERIFY-FN calling CLOS-VERIFY-CORE:VERIFY-ENTRIES directly, as
+CLOS.LISP's inline (worker pool disabled) path does."
+  (verify-entries entries))
 
 (defun %text (response)
   "Return the text of RESPONSE's first content part."
   (gethash "text" (elt (gethash "content" response) 0)))
 
 (defun %method (&key (gf "PKG::AREA") qualifiers specializers (kind "method") slot via
-                  path line form-type form-name note)
+                  path line form-type form-name note edit-unit
+                  (source-match (and form-type "matched")) source-match-reason)
   "Return a synthetic method object."
   (make-ht "generic_function" gf
            "qualifiers" (coerce qualifiers 'vector)
            "specializers" (coerce specializers 'vector)
            "kind" kind "slot" slot "via" via
            "path" path "line" line "stale" yason:false
-           "form_type" form-type "form_name" form-name "note" note))
+           "form_type" form-type "form_name" form-name "note" note
+           "source_match" source-match "source_match_reason" source-match-reason
+           "edit_unit" edit-unit))
 
 (defun %slot (&key name from initargs initform (type "T") (allocation "instance")
                 readers writers)
@@ -73,6 +90,7 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
                             "method_combination" "STANDARD"
                             "path" "src/shapes.lisp" "line" 3 "stale" yason:false
                             "form_type" "defgeneric" "form_name" "area" "note" nil
+                            "source_match" "matched" "source_match_reason" nil
                             "method_count" 3 "truncated" t
                             "methods"
                             (vector (%method :qualifiers '(":AROUND") :specializers '("PKG::CIRCLE")
@@ -93,6 +111,7 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
                     "documentation" nil "finalized" yason:false
                     "path" "src/shapes.lisp" "line" 20 "stale" yason:false
                     "form_type" "defclass" "form_name" "circle" "note" nil
+                    "source_match" "matched" "source_match_reason" nil
                     "direct_superclasses" (vector "PKG::SHAPE") "direct_subclasses" (vector)
                     "precedence_list" (vector "PKG:CIRCLE" "PKG::SHAPE"
                                               "COMMON-LISP:STANDARD-OBJECT" "COMMON-LISP:T")
@@ -112,7 +131,8 @@ repl-eval's compilation unit would otherwise name the file \"repl-eval\"."
                     (vector (%method :gf "PKG:RADIUS" :specializers '("PKG:CIRCLE") :kind "reader"
                                      :slot "PKG:RADIUS" :via "PKG:CIRCLE"
                                      :path "src/shapes.lisp" :line 20
-                                     :form-type "defclass" :form-name "circle")
+                                     :form-type "defclass" :form-name "circle"
+                                     :edit-unit "defclass")
                             (%method :gf "(SETF PKG::LABEL)"
                                      :specializers '("COMMON-LISP:T" "PKG::SHAPE")
                                      :via "PKG::SHAPE" :path "src/shapes.lisp" :line 30
@@ -141,7 +161,7 @@ so arrays are lists and false is NIL."
                 "  :AROUND (CIRCLE)  src/shapes.lisp:9 (defmethod area :around ((s circle)))"
                 "  (SQUARE)          (no source)  [could not read this method: boom]"
                 "  … and 1 more (raise limit to see them)")
-               (%text (build-clos-describe-response (%gf-report)))))))
+               (%text (build-clos-describe-response (%gf-report) #'%verify-inline))))))
 
 (deftest clos-text-for-a-class
   (testing "hierarchy, aligned slots, initargs and methods with their origin"
@@ -159,24 +179,27 @@ so arrays are lists and false is NIL."
                 "Default initargs:"
                 "  :NAME \"round\" from SHAPE"
                 "Methods (2; standard protocol on STANDARD-OBJECT, T omitted):"
-                "  RADIUS (CIRCLE) [reader]          src/shapes.lisp:20 (defclass circle)"
+                (concatenate 'string "  RADIUS (CIRCLE) [reader]          src/shapes.lisp:20 "
+                             "(defclass circle)  [edit_unit: defclass]")
                 (concatenate 'string "  (SETF LABEL) (T SHAPE) via SHAPE  src/shapes.lisp:30 "
                              "(defmethod (setf label) (value (s shape)))")
                 (concatenate 'string "Note: not finalized; precedence list and slots were computed "
                              "without finalizing the class"))
-               (%text (build-clos-describe-response (%class-report)))))))
+               (%text (build-clos-describe-response (%class-report) #'%verify-inline))))))
 
 (deftest clos-text-is-the-same-after-the-worker-round-trip
   (testing "lists for vectors and NIL for false render the same text"
     (dolist (make (list #'%gf-report #'%class-report))
-      (ok (equal (%text (build-clos-describe-response (funcall make)))
-                 (%text (build-clos-describe-response (%round-trip (funcall make)))))))))
+      (ok (equal (%text (build-clos-describe-response (funcall make) #'%verify-inline))
+                 (%text (build-clos-describe-response (%round-trip (funcall make))
+                                                       #'%verify-inline)))))))
 
 (deftest clos-text-explains-an-empty-answer
   (flet ((text-for (&rest pairs)
            (%text (build-clos-describe-response
                    (apply #'make-ht "symbol" "x" "generic_functions" (vector) "class" nil
-                          "notes" (vector) pairs)))))
+                          "notes" (vector) pairs)
+                   #'%verify-inline))))
     (testing "missing symbol and missing package"
       (ok (search "Symbol \"FOO\" not found in PKG (nothing was interned)"
                   (text-for "symbol_status" "not_found" "lookup_name" "FOO"
@@ -196,13 +219,14 @@ so arrays are lists and false is NIL."
   (testing "a crash notice or worker error is returned untouched"
     (let ((error-result (make-ht "isError" t "content" (text-content "Worker error: boom"))))
       (ok (not (clos-report-p error-result)))
-      (ok (eq error-result (build-clos-describe-response error-result))))))
+      (ok (eq error-result (build-clos-describe-response error-result #'%verify-inline))))))
 
 (deftest annotate-report-forms-reads-the-fixture
   (testing "each definition gets the form starting on its line, and abs_path goes"
     (%load-fixture)
     (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
-           (report (annotate-report-forms (clos-describe-report "cl-mcp-clos-fixture:circle")))
+           (report (annotate-report-forms (clos-describe-report "cl-mcp-clos-fixture:circle")
+                                           #'%verify-inline))
            (class (gethash "class" report)))
       (ok (equal '("defclass" "circle")
                  (list (gethash "form_type" class) (gethash "form_name" class))))
@@ -219,26 +243,106 @@ so arrays are lists and false is NIL."
                            (list (gethash "form_type" method) (gethash "form_name" method)))
                          (sequence->list (gethash "methods" class))))))))
 
+(deftest annotate-report-forms-never-matches-a-stale-entry
+  (testing "a stale entry never becomes matched even when its form does verify"
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (clos-describe-report "cl-mcp-clos-fixture:circle"))
+           (class (gethash "class" report)))
+      (setf (gethash "stale" class) t)
+      (annotate-report-forms report #'%verify-inline)
+      (ok (equal "unverified" (gethash "source_match" class)))
+      (ok (equal *note-stale* (gethash "source_match_reason" class)))
+      (ok (null (gethash "form_type" class))))))
+
+(deftest annotate-report-forms-falls-back-when-verify-fn-is-unavailable
+  (testing "a verify-fn that signals never blocks the report"
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (clos-describe-report "cl-mcp-clos-fixture:circle"))
+           (class (gethash "class" report)))
+      (annotate-report-forms report (lambda (entries)
+                                       (declare (ignore entries))
+                                       (error "boom")))
+      (ok (equal "unverified" (gethash "source_match" class)))
+      (ok (equal *reason-verification-unavailable* (gethash "source_match_reason" class)))
+      (ok (null (gethash "form_type" class))))))
+
+(deftest annotate-report-forms-reports-a-real-mismatch
+  (testing "a method whose specializer changed on disk after compilation becomes mismatched"
+    (let ((file (asdf/system:system-relative-pathname
+                 :cl-mcp "tests/tmp/clos-mismatch-round-trip.lisp"))
+          (header (concatenate 'string "(defpackage #:cl-mcp-clos-mismatch-fixture (:use #:cl))~%"
+                               "(in-package #:cl-mcp-clos-mismatch-fixture)~%~%"
+                               "(defclass box () ())~%~%"
+                               "(defgeneric bulk (x))~%~%")))
+      (ensure-directories-exist file)
+      (unwind-protect
+           (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out (concatenate 'string header "(defmethod bulk ((x box)) :boxed)~%")))
+             (%compile-and-load file)
+             ;; Rewrite the file so the recorded line now defines something else,
+             ;; without reloading: the in-image identity is now stale relative to
+             ;; what is on disk (a genuine mismatch, spec 3.1).
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out (concatenate 'string header "(defmethod bulk ((x integer)) :int)~%")))
+             (let* ((report (clos-describe-report "cl-mcp-clos-mismatch-fixture:bulk"))
+                    (gf (elt (sequence->list (gethash "generic_functions" report)) 0))
+                    (method (elt (sequence->list (gethash "methods" gf)) 0))
+                    (text (%text (build-clos-describe-response report #'%verify-inline))))
+               (ok (equal "mismatched" (gethash "source_match" method)))
+               (ok (stringp (gethash "source_match_reason" method)))
+               (ok (null (gethash "form_type" method)))
+               (ok (search "[mismatched:" text))
+               (ok (not (search "(defmethod" text)))))
+        (ignore-errors (delete-file file))))))
+
+(deftest annotate-report-forms-falls-back-when-the-edit-tool-cannot-locate-it-uniquely
+  (testing "a matched verdict whose form_name is ambiguous file-wide becomes unverified"
+    (let ((file (asdf/system:system-relative-pathname
+                 :cl-mcp "tests/tmp/clos-ambiguous-round-trip.lisp")))
+      (ensure-directories-exist file)
+      (with-open-file (out file :direction :output :if-exists :supersede)
+        (format out (concatenate 'string
+                                 "(defpackage #:cl-mcp-clos-ambiguous-fixture (:use #:cl))~%"
+                                 "(in-package #:cl-mcp-clos-ambiguous-fixture)~%~%"
+                                 "(defclass box () ())~%~%"
+                                 "(defgeneric bulk (x))~%~%"
+                                 "(defmethod bulk ((x box)) :first)~%~%"
+                                 "(defmethod bulk ((x box)) :second)~%")))
+      (unwind-protect
+           (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+             (%compile-and-load file)
+             (let* ((report (clos-describe-report "cl-mcp-clos-ambiguous-fixture:bulk"))
+                    (gf (elt (sequence->list (gethash "generic_functions" report)) 0))
+                    (method (elt (sequence->list (gethash "methods" gf)) 0))
+                    (text (%text (build-clos-describe-response report #'%verify-inline))))
+               (ok (equal "unverified" (gethash "source_match" method)))
+               (ok (equal *reason-not-locatable* (gethash "source_match_reason" method)))
+               (ok (null (gethash "form_type" method)))
+               (ok (not (search "(defmethod" text)))))
+        (ignore-errors (delete-file file))))))
+
 (deftest annotate-report-forms-explains-a-missing-form
   (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
-    (flet ((annotated (abs-path line &key stale)
+    (flet ((annotated (abs-path line)
              (let ((entry (make-ht "abs_path" abs-path "path" "x.lisp" "line" line
-                                   "stale" (if stale t yason:false)
+                                   "stale" yason:false
                                    "form_type" nil "form_name" nil "note" nil)))
                (annotate-report-forms
                 (make-ht "symbol_status" "found" "generic_functions" (vector)
                          "class" (make-ht "abs_path" abs-path "path" "x.lisp" "line" line
-                                          "stale" (if stale t yason:false)
+                                          "stale" yason:false
                                           "form_type" nil "form_name" nil "note" nil
-                                          "methods" (vector entry))))
+                                          "methods" (vector entry)))
+                #'%verify-inline)
                entry)))
       (testing "a line that starts no form"
         (let ((entry (annotated (namestring (truename *fixture*)) 2)))
           (ok (null (gethash "form_name" entry)))
-          (ok (equal *note-no-form-at-line* (gethash "note" entry)))))
-      (testing "a stale file"
-        (ok (equal *note-stale*
-                   (gethash "note" (annotated (namestring (truename *fixture*)) 2 :stale t)))))
+          (ok (equal "unverified" (gethash "source_match" entry)))
+          (ok (equal *note-no-form-at-line* (gethash "source_match_reason" entry)))))
       (testing "a file that does not parse"
         (let ((file (asdf/system:system-relative-pathname
                      :cl-mcp "tests/tmp/clos-unparseable.lisp")))
@@ -246,132 +350,15 @@ so arrays are lists and false is NIL."
           (with-open-file (out file :direction :output :if-exists :supersede)
             (format out "(defparameter *x* #.(+ 1 2))~%"))
           (unwind-protect
-               (let ((note (gethash "note" (annotated (namestring (truename file)) 1))))
-                 (ok (and note (eql 0 (search *note-unparseable* note))) note))
+               (let* ((entry (annotated (namestring (truename file)) 1))
+                      (reason (gethash "source_match_reason" entry)))
+                 (ok (equal "unverified" (gethash "source_match" entry)))
+                 (ok (and reason (eql 0 (search *note-unparseable* reason))) reason))
             (ignore-errors (delete-file file)))))
-      (testing "a file outside the readable paths gets no note"
-        (ok (null (gethash "note" (annotated "/nonexistent-cl-mcp-dir/x.lisp" 1))))))))
-
-(deftest annotate-report-forms-rejects-a-different-definition
-  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
-        (file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/clos-renamed.lisp")))
-    (ensure-directories-exist file)
-    (with-open-file (out file :direction :output :if-exists :supersede)
-      ;; Lines 3, 6, 9 and 12 start forms.
-      (format out "(in-package #:cl-user)~%~%~
-(defmethod area ((s ellipse))~%  :ellipse)~%~%~
-(defmethod area :around ((s circle))~%  (call-next-method))~%~%~
-(defclass ellipse ()~%  ((radius :reader radius)))~%~%~
-(defgeneric perimeter (shape))~%"))
-    (unwind-protect
-         (let ((abs-path (namestring (truename file))))
-           (labels ((report-of (entry place)
-                      (setf (gethash "abs_path" entry) abs-path)
-                      (make-ht "symbol_status" "found"
-                               "generic_functions" (if (eq place :generic-function)
-                                                       (vector entry)
-                                                       (vector))
-                               "class" (case place
-                                         (:class entry)
-                                         (:method (make-ht "methods" (vector entry))))))
-                    (annotated (entry place)
-                      (annotate-report-forms (report-of entry place))
-                      entry)
-                    (form-of (entry)
-                      (list (gethash "form_type" entry) (gethash "form_name" entry)
-                            (gethash "note" entry)))
-                    (method-at (line &rest keys)
-                      (apply #'%method :path "x.lisp" :line line keys)))
-             (let ((different (list nil nil *note-different-definition*)))
-               (testing "a method whose specializer differs from the defmethod on its line"
-                 (ok (equal different
-                            (form-of (annotated (method-at 3 :specializers '("PKG::CIRCLE"))
-                                                :method))))
-                 (ok (equal '("defmethod" "area ((s ellipse))" nil)
-                            (form-of (annotated (method-at 3 :specializers '("PKG:ELLIPSE"))
-                                                :method)))
-                     "the method the line does define keeps its form"))
-               (testing "the same with lists for vectors, as from the worker"
-                 (let* ((report (let ((yason:*parse-json-arrays-as-vectors* nil))
-                                  (%round-trip (report-of (method-at 3 :specializers
-                                                                     '("PKG::CIRCLE"))
-                                                          :method))))
-                        (entry (elt (gethash "methods" (gethash "class" report)) 0)))
-                   (ok (listp (gethash "specializers" entry)))
-                   (annotate-report-forms report)
-                   (ok (equal different (form-of entry)))))
-               (testing "a method whose qualifiers or generic function differ"
-                 (ok (equal different
-                            (form-of (annotated (method-at 6 :specializers '("PKG::CIRCLE"))
-                                                :method)))
-                     "a primary method on the :around method's line")
-                 (ok (equal '("defmethod" "area :around ((s circle))" nil)
-                            (form-of (annotated (method-at 6 :qualifiers '(":AROUND")
-                                                             :specializers '("PKG::CIRCLE"))
-                                                :method))))
-                 (ok (equal different
-                            (form-of (annotated (method-at 3 :gf "PKG::PERIMETER"
-                                                             :specializers '("PKG::ELLIPSE"))
-                                                :method)))))
-               (testing "a slot reader of another class on a defclass line"
-                 (ok (equal different
-                            (form-of (annotated (method-at 9 :gf "PKG::RADIUS" :kind "reader"
-                                                             :specializers '("PKG::CIRCLE"))
-                                                :method))))
-                 (ok (equal '("defclass" "ellipse" nil)
-                            (form-of (annotated (method-at 9 :gf "PKG::RADIUS" :kind "writer"
-                                                             :specializers
-                                                             '("COMMON-LISP:T" "PKG::ELLIPSE"))
-                                                :method)))
-                     "a writer's class is its second specializer"))
-               (testing "a class or generic function of another name"
-                 (flet ((located (&rest pairs)
-                          (apply #'make-ht "path" "x.lisp" "stale" yason:false
-                                 "form_type" nil "form_name" nil "note" nil
-                                 "methods" (vector) pairs)))
-                   (ok (equal different
-                              (form-of (annotated (located "name" "PKG:CIRCLE" "line" 9
-                                                           "metaclass" "STANDARD-CLASS")
-                                                  :class))))
-                   (ok (equal different
-                              (form-of (annotated (located "name" "PKG::AREA" "line" 12
-                                                           "lambda_list" "(SHAPE)")
-                                                  :generic-function))))
-                   (ok (equal '("defgeneric" "perimeter" nil)
-                              (form-of (annotated (located "name" "PKG::PERIMETER" "line" 12
-                                                           "lambda_list" "(SHAPE)")
-                                                  :generic-function)))))))))
-      (ignore-errors (delete-file file)))))
-
-(deftest annotate-report-forms-compares-the-eql-datum
-  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
-        (file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/clos-eql-renamed.lisp")))
-    (ensure-directories-exist file)
-    (labels ((report-of (entry)
-               (setf (gethash "abs_path" entry) (namestring (truename file)))
-               (make-ht "symbol_status" "found" "generic_functions" (vector)
-                        "class" (make-ht "methods" (vector entry))))
-             (annotated (entry)
-               (annotate-report-forms (report-of entry))
-               entry)
-             (form-of (entry)
-               (list (gethash "form_type" entry) (gethash "form_name" entry)
-                     (gethash "note" entry))))
-      (unwind-protect
-           (progn
-             (testing "a method re-specialized in place is not handed to the old EQL entry"
-               (with-open-file (out file :direction :output :if-exists :supersede)
-                 (format out "(in-package #:cl-user)~%~%(defmethod area ((s (eql :new))) 1)~%"))
-               (ok (equal (list nil nil *note-different-definition*)
-                          (form-of (annotated (%method :specializers '("(EQL :OLD)")
-                                                       :path "x.lisp" :line 3))))))
-             (testing "the same entry against its own datum keeps its form_name"
-               (with-open-file (out file :direction :output :if-exists :supersede)
-                 (format out "(in-package #:cl-user)~%~%(defmethod area ((s (eql :old))) 1)~%"))
-               (ok (equal (list "defmethod" "area ((s (eql :old)))" nil)
-                          (form-of (annotated (%method :specializers '("(EQL :OLD)")
-                                                       :path "x.lisp" :line 3)))))))
-        (ignore-errors (delete-file file))))))
+      (testing "a file outside the readable paths"
+        (let ((entry (annotated "/nonexistent-cl-mcp-dir/x.lisp" 1)))
+          (ok (equal "unverified" (gethash "source_match" entry)))
+          (ok (equal *reason-not-readable* (gethash "source_match_reason" entry))))))))
 
 (deftest clos-describe-form-names-work-in-lisp-edit-form
   (testing "every form_name the fixture's reports carry finds that very form"
@@ -384,7 +371,8 @@ so arrays are lists and false is NIL."
                             "cl-mcp-clos-fixture:combine" "cl-mcp-clos-fixture:describe-shape"
                             "cl-mcp-clos-fixture:probe-error" "cl-mcp-clos-fixture:point"
                             "cl-mcp-clos-fixture:radius"))
-        (let* ((report (build-clos-describe-response (clos-describe-report designator)))
+        (let* ((report (build-clos-describe-response (clos-describe-report designator)
+                                                      #'%verify-inline))
                (class (gethash "class" report))
                (entries (append (loop for gf
                                         in (sequence->list (gethash "generic_functions" report))
@@ -394,7 +382,8 @@ so arrays are lists and false is NIL."
                                      (cons class (sequence->list (gethash "methods" class)))))))
           (dolist (entry entries)
             (let ((path (gethash "path" entry)))
-              (when (and path (search "tests/fixtures/clos-fixture.lisp" path))
+              (when (and path (search "tests/fixtures/clos-fixture.lisp" path)
+                         (equal "matched" (gethash "source_match" entry)))
                 (incf checked)
                 (let* ((result (lisp-edit-form
                                 :file-path (namestring (truename *fixture*))
