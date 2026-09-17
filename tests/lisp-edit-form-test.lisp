@@ -17,6 +17,7 @@
                 #:file-unparseable-message
                 #:make-file-unparseable-condition
                 #:check-edit-guard
+                #:edit-guard-conflict
                 #:edit-guard-conflict-error)
   (:import-from #:cl-mcp/src/source-snapshot
                 #:read-source-snapshot
@@ -2479,6 +2480,107 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (edit-guard-conflict-error () (setf raised t)))
             (ok raised)
             (ok (string= after-first (fs-read-file path)))))))))
+
+(defun %conflict-field (payload key)
+  "Return KEY's value in PAYLOAD when PAYLOAD is an EDIT-GUARD-CONFLICT plist,
+or PAYLOAD's own text when it is the message of some other error.  Lets a test
+assert on a conflict field and report a non-conflict outcome as a mismatched
+value instead of a GETF type error on a string."
+  (if (listp payload) (getf payload key) (princ-to-string payload)))
+
+(defun %guarded-edit-outcome (path form-name guard)
+  "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and
+classify how the call ended.  Returns (VALUES KIND PAYLOAD): :CONFLICT with the
+EDIT-GUARD-CONFLICT plist, :UNPARSEABLE or :PLAIN with the error's text, or :OK
+with the tool's own result.  Lets a test say which contract a failed lookup
+under a guard fell under, instead of only that some error was signalled."
+  (handler-case
+      (values :ok (lisp-edit-form :file-path path
+                                  :form-type "defun"
+                                  :form-name form-name
+                                  :operation "replace"
+                                  :content (format nil "(defun ~A () :new)" form-name)
+                                  :guard guard))
+    (edit-guard-conflict-error (e) (values :conflict (edit-guard-conflict e)))
+    (file-unparseable-error (e) (values :unparseable (princ-to-string e)))
+    (error (e) (values :plain (princ-to-string e)))))
+
+(deftest lisp-edit-form-guard-reports-a-conflict-when-the-lookup-fails
+  (testing "the target renamed after the guard was issued is a conflict, not \"not found\""
+    (with-temp-file "tests/tmp/edit-form-guard-renamed.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun renamed () :old)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "the target deleted after the guard was issued is a conflict"
+    (with-temp-file "tests/tmp/edit-form-guard-deleted.lisp"
+        "(defun keep () :ok)\n\n(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun keep () :ok)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a second definition of the same name added afterwards is a conflict, not ambiguity"
+    (with-temp-file "tests/tmp/edit-form-guard-became-ambiguous.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :a)\n\n(defun target () :b)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a file made unparseable after the guard was issued is a conflict, and nothing is written"
+    (with-temp-file "tests/tmp/edit-form-guard-became-unparseable.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :old)\n\n(defun broken (\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "an unchanged file still gives the plain \"not found\" error, never a conflict"
+    (with-temp-file "tests/tmp/edit-form-guard-unchanged-not-found.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (fs-read-file path)))
+          (multiple-value-bind (kind payload)
+              (%guarded-edit-outcome path "no-such-function" guard)
+            (ok (eq kind :plain) (format nil "~A: ~A" kind payload))
+            (ok (search "not found" payload))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "an unchanged file still gives the plain \"Multiple matches\" error"
+    (with-temp-file "tests/tmp/edit-form-guard-unchanged-ambiguous.lisp"
+        "(defun keep () :ok)\n\n(defun target () :a)\n\n(defun target () :b)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "keep"))
+              (before (fs-read-file path)))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :plain) (format nil "~A: ~A" kind payload))
+            (ok (search "Multiple matches" payload))
+            (ok (string= before (fs-read-file path)))))))))
 
 (deftest lisp-edit-form-guard-applies-to-delete-and-inserts
   (testing "delete honors a fresh guard and rejects a stale one"

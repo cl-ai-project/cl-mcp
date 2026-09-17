@@ -392,6 +392,18 @@ continue — re-run whatever produced `guard` (a fresh `clos-describe`, for inst
 with the new value. Calling without `guard` is unaffected and keeps working as before; it is
 just not protected against this class of surprise.
 
+Checks 1-4 run before the file is parsed; checks 5-6 run once `form_type`/`form_name` has
+matched a form. That split is what a changed file gets: once `guard.file_digest` no longer
+matches, the call reports the `conflict` even when the lookup could not have finished anyway —
+the observed form renamed or deleted, its name now matching several forms, or the file no longer
+parsing at all. The reason names the `file_digest` mismatch, which is the change to look at
+first, rather than the `not found`, `Multiple matches` or unparseable-file error the lookup would
+otherwise have raised. When the file is *unchanged*, none of those is a guard problem: a
+`form_type`/`form_name` that names nothing still gets the ordinary `Form <type> <name> not found
+in <path>` error, and an ambiguous one still gets `Multiple matches ... Specify an index:`, so a
+guard never turns a caller's own mistake into a `conflict`. A path the read policy refuses, a
+file over the read limit and a file that is not valid UTF-8 likewise stay plain errors.
+
 What this does *not* protect against: `guard` is a precondition, not an access token or a
 lock — the existing path validation and write limits still apply unchanged (a guarded call
 reaches no file, and writes no file, that an unguarded call could not). Reading for a guarded

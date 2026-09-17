@@ -655,47 +655,47 @@ a non-string value to one."
                (getf conflict :reason) (getf conflict :expected)
                (getf conflict :actual)))))
   (:documentation
-   "Signaled by %LOCATE-TARGET-FORM, via CHECK-EDIT-GUARD, when a caller's
-GUARD argument no longer matches the file or form it was observed on (design
-doc section 4.2). CONFLICT (reader EDIT-GUARD-CONFLICT) is a plist (:REASON
-string :EXPECTED string :ACTUAL string) naming the first of the six checks
-that failed. Always signaled before %LOCATE-TARGET-FORM returns a value, so
+   "Signaled by %LOCATE-TARGET-FORM when a caller's GUARD argument no longer
+matches the file or form it was observed on (design doc section 4.2), on the
+verdict of %CHECK-EDIT-GUARD-PRE-PARSE before the parse (checks 1-4) or of
+CHECK-EDIT-GUARD once the target is matched (all six). CONFLICT (reader
+EDIT-GUARD-CONFLICT) is a plist (:REASON string :EXPECTED string :ACTUAL
+string) naming the first of the six checks that failed. Always signaled before %LOCATE-TARGET-FORM returns a value, so
 its caller -- LISP-EDIT-FORM in src/lisp-edit-form.lisp -- never sees, and so
 never writes, content that disagrees with GUARD: no name-only fallback, no
 adopting the new digest and continuing."))
 
-(defun check-edit-guard (guard abs-path snapshot node)
-  "Verify GUARD, an edit_guard JSON object (design doc section 4.1), against
-ABS-PATH (a namestring for the file about to be edited), SNAPSHOT (a plist
-from CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT read for this same
-edit), and NODE (the CST node LOCATE-FORM-IN-NODES matched by form_type and
-form_name in that same SNAPSHOT). Returns (VALUES OK-P CONFLICT): OK-P is T
-when every check below passes, with CONFLICT then NIL; otherwise OK-P is NIL
-and CONFLICT is a plist (:REASON string :EXPECTED string :ACTUAL string)
-naming the first check, in order, that failed.
+(defun %guard-field (guard name)
+  "Return GUARD's NAME field, or NIL when GUARD is not a hash-table or carries
+no such field. GUARD is an edit_guard JSON object (design doc section 4.1)
+that reached this file straight from a caller, so every field is read through
+here rather than assuming the object has the shape it should."
+  (and (hash-table-p guard) (gethash name guard)))
 
-Never reads or parses anything itself: SNAPSHOT and NODE are taken as given,
-so this always judges the exact bytes %LOCATE-TARGET-FORM is about to splice
-an edit into, never a second, possibly different, read.
+(defun %check-edit-guard-pre-parse (guard abs-path snapshot)
+  "Run checks 1-4 of CHECK-EDIT-GUARD against GUARD, ABS-PATH and SNAPSHOT --
+the checks that need no matched form, and so can run before SNAPSHOT's text is
+parsed. Returns (VALUES OK-P CONFLICT) in the same shape CHECK-EDIT-GUARD
+returns, CONFLICT naming the first of the four, in order, that failed:
 
-The checks, in order (design doc section 4.2):
  1. GUARD's version is the one this function supports (+EDIT-GUARD-VERSION+).
  2. GUARD's abs_path names the same file as ABS-PATH.
  3. GUARD's file_digest matches SNAPSHOT's own digest of the whole file.
  4. GUARD's form_start/form_end lie within SNAPSHOT's text, with form_end
     greater than form_start.
- 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
-    form_type/form_name search resolves to today is the same span GUARD
-    observed, not a different definition that merely shares the name.
- 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
-    that range. Absent entirely, this check is skipped; a non-NIL value
-    that is not a matching digest string still fails it."
-  (let ((version (and (hash-table-p guard) (gethash "version" guard)))
-        (guard-abs-path (and (hash-table-p guard) (gethash "abs_path" guard)))
-        (guard-file-digest (and (hash-table-p guard) (gethash "file_digest" guard)))
-        (form-start (and (hash-table-p guard) (gethash "form_start" guard)))
-        (form-end (and (hash-table-p guard) (gethash "form_end" guard)))
-        (guard-form-digest (and (hash-table-p guard) (gethash "form_digest" guard)))
+
+%LOCATE-TARGET-FORM runs these as soon as it has SNAPSHOT, so a file that
+changed after GUARD observed it is reported as a guard conflict even when the
+lookup that follows would fail -- the observed form renamed or deleted, its
+name now ambiguous, or the file no longer parsing at all. Without this early
+pass those cases end in a plain \"not found\", \"Multiple matches\" or
+unparseable-file error that says nothing about the guard, even though the
+change the guard exists to catch is exactly what caused them."
+  (let ((version (%guard-field guard "version"))
+        (guard-abs-path (%guard-field guard "abs_path"))
+        (guard-file-digest (%guard-field guard "file_digest"))
+        (form-start (%guard-field guard "form_start"))
+        (form-end (%guard-field guard "form_end"))
         (text (getf snapshot :text))
         (file-digest (getf snapshot :digest)))
     (cond
@@ -717,6 +717,30 @@ The checks, in order (design doc section 4.2):
                     "form_start/form_end are not a valid range in the file"
                     (format nil "0 <= form_start < form_end <= ~D" (length text))
                     (format nil "form_start=~A form_end=~A" form-start form-end))))
+      (t (values t nil)))))
+
+(defun %check-edit-guard-post-match (guard snapshot node)
+  "Run checks 5-6 of CHECK-EDIT-GUARD against GUARD, SNAPSHOT and NODE -- the
+checks that need NODE, the CST node LOCATE-FORM-IN-NODES matched by form_type
+and form_name in that same SNAPSHOT, and so can only run once the lookup has
+succeeded. Returns (VALUES OK-P CONFLICT) in the same shape
+CHECK-EDIT-GUARD returns, CONFLICT naming the first of the two that failed:
+
+ 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
+    form_type/form_name search resolves to today is the same span GUARD
+    observed, not a different definition that merely shares the name.
+ 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
+    that range. Absent entirely, this check is skipped; a non-NIL value
+    that is not a matching digest string still fails it.
+
+Assumes %CHECK-EDIT-GUARD-PRE-PARSE has already passed, which is what makes
+form_start/form_end safe to compare here: CHECK-EDIT-GUARD runs both parts in
+order, and %LOCATE-TARGET-FORM reaches the lookup only after the pre-parse
+part passed."
+  (let ((form-start (%guard-field guard "form_start"))
+        (form-end (%guard-field guard "form_end"))
+        (guard-form-digest (%guard-field guard "form_digest")))
+    (cond
       ((not (and (= (cst-node-start node) form-start)
                  (= (cst-node-end node) form-end)))
        (values nil (%guard-conflict
@@ -735,6 +759,49 @@ The checks, in order (design doc section 4.2):
                         "unavailable"))))
       (t (values t nil)))))
 
+(defun check-edit-guard (guard abs-path snapshot node)
+  "Verify GUARD, an edit_guard JSON object (design doc section 4.1), against
+ABS-PATH (a namestring for the file about to be edited), SNAPSHOT (a plist
+from CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT read for this same
+edit), and NODE (the CST node LOCATE-FORM-IN-NODES matched by form_type and
+form_name in that same SNAPSHOT). Returns (VALUES OK-P CONFLICT): OK-P is T
+when every check below passes, with CONFLICT then NIL; otherwise OK-P is NIL
+and CONFLICT is a plist (:REASON string :EXPECTED string :ACTUAL string)
+naming the first check, in order, that failed.
+
+Never reads or parses anything itself: SNAPSHOT and NODE are taken as given,
+so this always judges the exact bytes %LOCATE-TARGET-FORM is about to splice
+an edit into, never a second, possibly different, read.
+
+The checks, in order (design doc section 4.2), split over two functions by
+what each needs:
+ 1. GUARD's version is the one this function supports (+EDIT-GUARD-VERSION+).
+ 2. GUARD's abs_path names the same file as ABS-PATH.
+ 3. GUARD's file_digest matches SNAPSHOT's own digest of the whole file.
+ 4. GUARD's form_start/form_end lie within SNAPSHOT's text, with form_end
+    greater than form_start.
+      -- 1-4 are %CHECK-EDIT-GUARD-PRE-PARSE: no matched form needed.
+ 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
+    form_type/form_name search resolves to today is the same span GUARD
+    observed, not a different definition that merely shares the name.
+ 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
+    that range. Absent entirely, this check is skipped; a non-NIL value
+    that is not a matching digest string still fails it.
+      -- 5-6 are %CHECK-EDIT-GUARD-POST-MATCH: NODE needed.
+
+%LOCATE-TARGET-FORM calls %CHECK-EDIT-GUARD-PRE-PARSE by itself, before the
+parse, so a file that changed after GUARD observed it conflicts even when the
+lookup that would produce NODE fails; it then calls this function at the point
+where NODE exists. Re-running 1-4 here judges the same GUARD against the same
+SNAPSHOT and so cannot reach a different verdict, and costs four comparisons
+against values already in hand -- worth it to keep all six checks and their
+order visible at the call site that decides whether the edit proceeds."
+  (multiple-value-bind (ok-p conflict)
+      (%check-edit-guard-pre-parse guard abs-path snapshot)
+    (if ok-p
+        (%check-edit-guard-post-match guard snapshot node)
+        (values nil conflict))))
+
 (defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR (through SIGNAL-FILE-UNPARSEABLE, which owns the
@@ -750,11 +817,20 @@ diagnosis.
 GUARD, when non-NIL, is an edit_guard JSON object (design doc section 4.1).
 It changes how the file is read: instead of FS-READ-FILE, the file is read
 once via CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT, so ORIGINAL (below)
-and the digests CHECK-EDIT-GUARD verifies GUARD against come from the exact
-same bytes -- this function never reads the file twice for one call. Once
-TARGET is located, CHECK-EDIT-GUARD (design doc section 4.2) is run and
-EDIT-GUARD-CONFLICT-ERROR is signaled on the first failing check, before any
-value is returned, so a stale or mismatched GUARD never reaches a write.
+and the digests the guard is verified against come from the exact same bytes
+-- this function never reads the file twice for one call. The six checks of
+design doc section 4.2 run in two parts, each as early as it can:
+%CHECK-EDIT-GUARD-PRE-PARSE (checks 1-4) as soon as the snapshot is in hand,
+before the parse, and CHECK-EDIT-GUARD (all six, its first four a free re-run)
+once TARGET is located. EDIT-GUARD-CONFLICT-ERROR is signaled on the first
+failing check, before any value is returned, so a stale or mismatched GUARD
+never reaches a write. Splitting it this way is what makes a file that changed
+since GUARD observed it conflict even when the lookup cannot finish: the
+observed form renamed or deleted, its name now matching several forms, or the
+file no longer parsing all reach the early check first and report the
+file_digest mismatch. When the file is unchanged, none of those is a guard
+problem, so a form_type/form_name the caller got wrong still gets the ordinary
+\"not found\" or \"Multiple matches\" error.
 READ-SOURCE-SNAPSHOT never truncates, so this path re-applies
 CL-MCP/SRC/FS:*FS-READ-MAX-BYTES* by hand against the whole text it read,
 refusing (not truncating) a file over the same limit FS-READ-FILE enforces
@@ -812,7 +888,17 @@ Returns eight values:
                           fix its encoding first."
                          (namestring abs)))
                 (setf snapshot snap
-                      original text)))
+                      original text)
+                ;; Guard checks 1-4 (design doc section 4.2) need only the
+                ;; guard, the path and this snapshot, so they run here rather
+                ;; than only after the lookup: a file that changed since the
+                ;; guard observed it must be reported as a conflict even when
+                ;; the parse or the form lookup below fails first -- that
+                ;; change is precisely what the guard exists to catch.
+                (multiple-value-bind (ok-p conflict)
+                    (%check-edit-guard-pre-parse guard (namestring abs) snapshot)
+                  (unless ok-p
+                    (error 'edit-guard-conflict-error :conflict conflict)))))
             (multiple-value-bind (text truncated file-length) (fs-read-file abs)
               (when truncated
                 (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
