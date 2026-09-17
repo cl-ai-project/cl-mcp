@@ -488,6 +488,14 @@ LABEL goes into its name, so a leftover directory says which test made it."
       (write-string text out))
     (namestring (truename file))))
 
+(defun %name-shapes (names)
+  "Return each source name in NAMES as (TOKEN . SETF-FLAG): the shape a slot
+option contributes to a signature's :readers or :writers.  A NIL name --
+an option value this scanner refuses to guess at -- stays NIL."
+  (mapcar (lambda (name)
+            (and name (cons (getf name :token) (and (getf name :setf) t))))
+          names))
+
 (deftest top-level-forms-at-describes-forms-starting-on-lines
   (testing "form_type and form_name of the forms starting on the given lines"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp))
@@ -705,20 +713,21 @@ LABEL goes into its name, so a leftover directory says which test made it."
                  (ok (equal "square"
                             (getf (first (getf (second methods) :specializers)) :token)))))
           (ignore-errors (delete-file path)))))
-    (testing "a defclass slot's :reader, :writer and :accessor tokens"
+    (testing "a defclass slot's :reader, :writer and :accessor names"
       (let ((path (%write-tmp
                    "top-level-forms-at-defclass-slots.lisp"
                    (format nil "~{~A~%~}"
                           (list "(in-package #:cl-user)"
                                 "(defclass widget ()"
                                 "  ((name :reader widget-name :writer set-widget-name)"
-                                "   (id :accessor widget-id) bare))")))))
+                                "   (id :accessor widget-id)"
+                                "   (tag :writer (setf widget-tag)) bare))")))))
         (unwind-protect
              (multiple-value-bind (table failure) (top-level-forms-at path '(2))
                (ok (null failure))
                (let* ((sig (getf (first (gethash 2 table)) :signature))
                       (slots (getf sig :slots)))
-                 (ok (= 3 (length slots)))
+                 (ok (= 4 (length slots)))
                  (ok (equal "name" (getf (getf (first slots) :name) :token)))
                  (ok (equal '("widget-name")
                             (mapcar (lambda (tok) (getf tok :token))
@@ -733,9 +742,41 @@ LABEL goes into its name, so a leftover directory says which test made it."
                             (mapcar (lambda (tok) (getf tok :token))
                                     (getf (second slots) :writers)))
                      "an accessor contributes to both readers and writers")
-                 (ok (equal "bare" (getf (getf (third slots) :name) :token)))
+                 (ok (equal '(("widget-name")) (%name-shapes (getf (first slots) :readers)))
+                     ":reader x defines the plain function x")
+                 (ok (equal '(("set-widget-name"))
+                            (%name-shapes (getf (first slots) :writers)))
+                     ":writer x defines the plain function x, never (setf x)")
+                 (ok (equal '(("widget-id")) (%name-shapes (getf (second slots) :readers))))
+                 (ok (equal '(("widget-id" . t)) (%name-shapes (getf (second slots) :writers)))
+                     ":accessor x defines the (setf x) writer, not a plain x writer")
+                 (ok (equal "tag" (getf (getf (third slots) :name) :token)))
                  (ok (null (getf (third slots) :readers)))
-                 (ok (null (getf (third slots) :writers)))))
+                 (ok (equal '(("widget-tag" . t)) (%name-shapes (getf (third slots) :writers)))
+                     ":writer (setf x) defines the setf function, named by the inner symbol")
+                 (ok (equal "bare" (getf (getf (fourth slots) :name) :token)))
+                 (ok (null (getf (fourth slots) :readers)))
+                 (ok (null (getf (fourth slots) :writers)))))
+          (ignore-errors (delete-file path)))))
+    (testing "a :reader or :accessor value CL does not allow becomes an unresolvable name"
+      (let ((path (%write-tmp
+                   "top-level-forms-at-defclass-invalid-accessors.lisp"
+                   (format nil "~{~A~%~}"
+                          (list "(in-package #:cl-user)"
+                                "(defclass gizmo ()"
+                                "  ((a :accessor (setf gizmo-a))"
+                                "   (b :reader 42)))")))))
+        (unwind-protect
+             (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+               (ok (null failure))
+               (let* ((sig (getf (first (gethash 2 table)) :signature))
+                      (slots (getf sig :slots)))
+                 (ok (= 2 (length slots)))
+                 (ok (equal '(nil) (getf (first slots) :readers))
+                     "an :accessor that is not a bare symbol resolves to nothing")
+                 (ok (equal '(nil) (getf (first slots) :writers)))
+                 (ok (equal '(nil) (getf (second slots) :readers))
+                     "neither does a :reader that is not a symbol at all")))
           (ignore-errors (delete-file path)))))))
 
 (deftest top-level-forms-at-tracks-in-package-switches

@@ -95,6 +95,12 @@ CL-MCP/SRC/CLOS-VERIFY-CORE:VERIFY-ENTRIES documents, or NIL."
                 "setf" (and (getf plist :setf) t)
                 "in_package" (getf plist :in-package))))
 
+(defun %json-names (plists)
+  "Convert PLISTS, a list of source names, to a JSON array.  A NIL element
+stays NIL -- JSON null -- which is exactly how VERIFY-ENTRIES reads a name
+the parent could not make out, so it judges UNVERIFIED instead of matching."
+  (map 'vector #'%json-name (sequence->list plists)))
+
 (defun %json-eql-datum (plist)
   "Convert PLIST, a tagged EQL datum (spec 3.3), to JSON."
   (ecase (getf plist :kind)
@@ -131,10 +137,12 @@ unverifiable), to JSON."
 
 (defun %json-slot (plist)
   "Convert PLIST, a slot (:NAME :READERS :WRITERS) from
-%DEFINITION-SOURCE-SIGNATURE, to JSON."
+%DEFINITION-SOURCE-SIGNATURE, to JSON.  READERS and WRITERS are function
+names, not bare tokens: whether a slot option defines X or (SETF X) is part
+of which function it defines, so it must cross the wire with the name."
   (make-ht "name" (%json-token (getf plist :name))
-           "readers" (%json-tokens (getf plist :readers))
-           "writers" (%json-tokens (getf plist :writers))))
+           "readers" (%json-names (getf plist :readers))
+           "writers" (%json-names (getf plist :writers))))
 
 (defun %json-method-option (plist)
   "Convert PLIST, a DEFGENERIC (:method ...) option, to JSON."

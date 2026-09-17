@@ -43,6 +43,9 @@
 (defparameter *identity-fixture*
   (asdf/system:system-relative-pathname :cl-mcp "tests/fixtures/clos-identity-fixture.lisp"))
 
+(defparameter *accessor-fixture*
+  (asdf/system:system-relative-pathname :cl-mcp "tests/fixtures/clos-accessor-fixture.lisp"))
+
 (defun %compile-and-load (path)
   "Compile and load the fixture at PATH with its truename as the source
 namestring, as cl-mcp/tests/clos-core-test's fixture loaders do."
@@ -59,6 +62,10 @@ namestring, as cl-mcp/tests/clos-core-test's fixture loaders do."
 (defun %load-identity-fixture ()
   "Compile and load tests/fixtures/clos-identity-fixture.lisp."
   (%compile-and-load *identity-fixture*))
+
+(defun %load-accessor-fixture ()
+  "Compile and load tests/fixtures/clos-accessor-fixture.lisp."
+  (%compile-and-load *accessor-fixture*))
 
 (defun %line-of (path needle)
   "Return the 1-based line of the file at PATH on which NEEDLE starts."
@@ -93,6 +100,16 @@ text."
                     (equal name (gethash "name" specializer)))))
            methods))
 
+(defun %accessor-identity (report gf-name)
+  "Return the identity of the sole method of REPORT's generic function whose
+display name is GF-NAME.  X and (SETF X) are two different generic functions
+one symbol can name at once, so they are told apart by name here, never by
+their position in the report."
+  (let ((gf (find gf-name (%gfs report)
+                  :key (lambda (entry) (gethash "name" entry)) :test #'equal)))
+    (assert gf () "no generic function named ~S in this report" gf-name)
+    (%identity (first (%methods gf)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Temp files for source signatures task 2's fixtures don't already cover
 ;;; ---------------------------------------------------------------------------
@@ -125,6 +142,11 @@ truename namestring."
        (make-ht "token" (getf plist :token)
                 "setf" (and (getf plist :setf) t)
                 "in_package" (getf plist :in-package))))
+
+(defun %json-names (plists)
+  "Convert a list of source name PLISTS to a JSON array; a NIL element stays
+NIL, the JSON null a name the scanner refused to guess at arrives as."
+  (map 'vector #'%json-name (sequence->list plists)))
 
 (defun %json-eql-datum (plist)
   "Convert a tagged EQL datum PLIST (spec 3.3) to JSON."
@@ -160,10 +182,11 @@ truename namestring."
   (and plists (map 'vector #'%json-specializer (sequence->list plists))))
 
 (defun %json-slot (plist)
-  "Convert a slot PLIST (:name :readers :writers) to JSON."
+  "Convert a slot PLIST (:name :readers :writers) to JSON.  Readers and
+writers are function names, SETF flag included, not bare tokens."
   (make-ht "name" (%json-token (getf plist :name))
-           "readers" (%json-tokens (getf plist :readers))
-           "writers" (%json-tokens (getf plist :writers))))
+           "readers" (%json-names (getf plist :readers))
+           "writers" (%json-names (getf plist :writers))))
 
 (defun %json-method-option (plist)
   "Convert a defgeneric (:method ...) PLIST to JSON."
@@ -525,6 +548,64 @@ form matches"
       (unwind-protect
            (ok (equal "mismatched" (%verify1 "d3" identity candidates)))
         (ignore-errors (delete-file path))))))
+
+(deftest verify-entries-keeps-an-accessors-setf-flag-part-of-its-identity
+  (%load-accessor-fixture)
+  (let* ((path (namestring (truename *accessor-fixture*)))
+         (meter (%report "cl-mcp-clos-accessor-fixture:meter-level"))
+         (meter-reader (%accessor-identity
+                        meter "CL-MCP-CLOS-ACCESSOR-FIXTURE:METER-LEVEL"))
+         (meter-writer (%accessor-identity
+                        meter "(SETF CL-MCP-CLOS-ACCESSOR-FIXTURE:METER-LEVEL)"))
+         (gauge-writer (%accessor-identity
+                        (%report "cl-mcp-clos-accessor-fixture:gauge-level")
+                        "CL-MCP-CLOS-ACCESSOR-FIXTURE:GAUGE-LEVEL"))
+         (dial-writer (%accessor-identity
+                       (%report "cl-mcp-clos-accessor-fixture:dial-level")
+                       "(SETF CL-MCP-CLOS-ACCESSOR-FIXTURE:DIAL-LEVEL)")))
+    (testing ":accessor x confirms both the plain x reader and the (setf x) writer"
+      (let ((candidates (%candidates-for path "(defclass meter ()")))
+        (ok (equal "matched" (%verify1 "sa1" meter-reader candidates)))
+        (ok (equal "matched" (%verify1 "sa2" meter-writer candidates)))))
+    (testing ":writer (setf x) confirms the (setf x) writer it really defines"
+      (ok (equal "matched"
+                 (%verify1 "sa3" dial-writer (%candidates-for path "(defclass dial ()")))))
+    (testing ":writer x does not confirm a live (setf x) writer"
+      (let ((candidate-path
+              (%write-tmp "verify-core-accessor-plain-writer.lisp"
+                          (format nil "~{~A~%~}"
+                                 (list "(in-package #:cl-mcp-clos-accessor-fixture)"
+                                       (concatenate 'string
+                                        "(defclass meter () "
+                                        "((level :initarg :level :writer meter-level)))"))))))
+        (unwind-protect
+             (ok (equal "mismatched"
+                        (%verify1 "sa4" meter-writer (%candidates-at candidate-path 2))))
+          (ignore-errors (delete-file candidate-path)))))
+    (testing ":accessor x does not confirm a live plain x writer"
+      (let ((candidate-path
+              (%write-tmp "verify-core-accessor-setf-writer.lisp"
+                          (format nil "~{~A~%~}"
+                                 (list "(in-package #:cl-mcp-clos-accessor-fixture)"
+                                       (concatenate 'string
+                                        "(defclass gauge () "
+                                        "((level :initarg :level :accessor gauge-level)))"))))))
+        (unwind-protect
+             (ok (equal "mismatched"
+                        (%verify1 "sa5" gauge-writer (%candidates-at candidate-path 2))))
+          (ignore-errors (delete-file candidate-path)))))
+    (testing "a writer name this image cannot resolve is unverified, never mismatched"
+      (let ((candidate-path
+              (%write-tmp "verify-core-accessor-unknown-package.lisp"
+                          (format nil "~{~A~%~}"
+                                 (list "(in-package #:cl-mcp-clos-accessor-fixture)"
+                                       (concatenate 'string
+                                        "(defclass dial () ((level :initarg :level "
+                                        ":writer (setf cl-mcp-no-such-pkg:dial-level))))"))))))
+        (unwind-protect
+             (ok (equal "unverified"
+                        (%verify1 "sa6" dial-writer (%candidates-at candidate-path 2))))
+          (ignore-errors (delete-file candidate-path)))))))
 
 (deftest verify-entries-does-not-treat-a-qualified-accessor-shaped-identity-as-an-accessor
   (testing "an identity that carries class/slot/access AND a qualifier -- as

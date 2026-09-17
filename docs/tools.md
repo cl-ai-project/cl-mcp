@@ -605,6 +605,15 @@ string, a list or array, an uninterned symbol, `#.`, a float or a complex number
 whose printed form was truncated, is `unverified` — there is no way to confirm it without
 evaluating source, which this tool never does.
 
+**Accessor matching.** A slot accessor is confirmed against the slot option that actually
+defines it, `(setf name)` included. `:reader x` and `:writer x` each define the plain function
+`x`; `:writer (setf x)` defines `(setf x)`; `:accessor x` defines both, a plain `x` reader and a
+`(setf x)` writer. So `:accessor x` and `:writer x` are not interchangeable: a live `(setf x)`
+writer whose slot option now reads `:writer x` is `mismatched`, not `matched`, and so is a live
+plain `x` writer whose option now reads `:accessor x`. A `:reader` or `:accessor` written with
+anything but a bare symbol is not valid Common Lisp; rather than guess what it meant, that option
+confirms nothing, so an accessor that depends on it is `unverified` rather than `matched`.
+
 **Container edit units.** A method identified as a `defgeneric`'s inline `(:method ...)` option,
 or a class's slot accessor (`:reader`/`:writer`/`:accessor`), is not itself a top-level form —
 editing it means editing the `defgeneric` or the `defclass`/`define-condition` that contains it.

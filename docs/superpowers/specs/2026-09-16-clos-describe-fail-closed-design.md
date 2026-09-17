@@ -142,7 +142,7 @@ head トークンを解決して `CL:QUOTE` と `eq` であることで確認す
 |---|---|---|
 | `defmethod` | 総称関数名・修飾子・特化子をすべて照合 | その `defmethod` |
 | `defgeneric` の `(:method ...)` | 内包メソッドの署名（修飾子・特化子）を照合し、一致するものが**ちょうど 1 つ**のときだけ `matched` | 外側の `defgeneric`（`form_type` は `defgeneric`。本文と JSON の `edit_unit` に明示） |
-| `defclass` / `define-condition` のアクセサ | クラス名、スロット名、`:reader` / `:writer` / `:accessor` の種類、総称関数名を照合 | 外側のクラス定義（`edit_unit` に明示） |
+| `defclass` / `define-condition` のアクセサ | クラス名、スロット名、`:reader` / `:writer` / `:accessor` の種類、総称関数名を照合。総称関数名は SETF フラグまで含めて同一性の一部（`:reader x` と `:writer x` は `x`、`:writer (setf x)` は `(setf x)`、`:accessor x` は `x` と `(setf x)` の両方を定義するので `:writer x` と `:accessor x` は交換可能ではない）。`:reader` / `:accessor` の値が裸のシンボルでなければ推測せず `unverified` | 外側のクラス定義（`edit_unit` に明示） |
 | `defstruct` | クラス名のみ照合（アクセサは MOP に出ないので対象外） | その `defstruct` |
 | ユーザーマクロ、`progn`、`eval-when` などのラッパー | `unverified`（理由: unsupported container） | なし |
 

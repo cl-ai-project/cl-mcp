@@ -834,11 +834,33 @@ DEFGENERIC option such as (:documentation ...)."
               :specializers (and lambda-list
                                  (%source-specializers lambda-list text in-package)))))))
 
+(defun %source-plain-name (node text in-package)
+  "Return NODE's identity as a plain, non-SETF function name in
+%SOURCE-NAME's (:TOKEN .. :SETF .. :IN-PACKAGE ..) shape, or NIL when NODE
+is anything but a bare symbol -- the only value CL allows for a :READER or
+:ACCESSOR slot option.  NIL is a candidate no image can resolve, so an
+accessor judged against it comes back UNVERIFIED rather than confirmed by
+guessing what an invalid option meant."
+  (let ((name (%source-name node text in-package nil)))
+    (and name (not (getf name :setf)) name)))
+
+(defun %setf-writer-name (name)
+  "Return NAME, a plain source name, as the (SETF NAME) writer an :ACCESSOR
+slot option defines alongside its reader; NIL for a NIL NAME, which stays
+the unresolvable candidate %SOURCE-PLAIN-NAME made it."
+  (and name
+       (list :token (getf name :token) :setf t :in-package (getf name :in-package))))
+
 (defun %source-slot (slot-node text in-package)
   "Return SLOT-NODE, a DEFCLASS or DEFINE-CONDITION slot specifier, as
-(:NAME name-token :READERS (token...) :WRITERS (token...)).  A bare slot
-name has no readers or writers.  :ACCESSOR NAME contributes NAME to both
-lists, since it defines both a reader and a (SETF NAME) writer."
+(:NAME name-token :READERS (name...) :WRITERS (name...)).  A bare slot name
+has no readers or writers.  Each reader and writer is a %SOURCE-NAME
+function name, SETF flag included, naming exactly the function that option
+defines: :READER X and :WRITER X a plain X, :WRITER (SETF X) the SETF
+function, and :ACCESSOR X both -- a plain X reader and a (SETF X) writer.
+The flag is part of the identity, so :WRITER X and :ACCESSOR X are never
+interchangeable.  A value CL does not allow (a :READER or :ACCESSOR that is
+not a bare symbol) becomes a NIL entry, an unresolvable candidate."
   (let* ((node (%unwrap slot-node))
          (value (cst-node-value node)))
     (if (symbolp value)
@@ -851,12 +873,15 @@ lists, since it defines both a reader and a (SETF NAME) writer."
                 while (and key-node value-node)
                 do (let ((key (cst-node-value key-node)))
                      (when (keywordp key)
-                       (let ((token (%source-token value-node text in-package)))
-                         (cond
-                           ((string= (symbol-name key) "READER") (push token readers))
-                           ((string= (symbol-name key) "WRITER") (push token writers))
-                           ((string= (symbol-name key) "ACCESSOR")
-                            (push token readers) (push token writers)))))))
+                       (cond
+                         ((string= (symbol-name key) "READER")
+                          (push (%source-plain-name value-node text in-package) readers))
+                         ((string= (symbol-name key) "WRITER")
+                          (push (%source-name value-node text in-package nil) writers))
+                         ((string= (symbol-name key) "ACCESSOR")
+                          (let ((name (%source-plain-name value-node text in-package)))
+                            (push name readers)
+                            (push (%setf-writer-name name) writers)))))))
           (list :name (%source-token name-node text in-package)
                 :readers (nreverse readers) :writers (nreverse writers))))))
 

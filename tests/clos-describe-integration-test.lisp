@@ -663,3 +663,92 @@ spent on a prior edit) is refused, leaving the file untouched.")
                                 (uiop:read-file-string *guard-fixture-path*))
                        "the refused edit left the file byte-identical")))))))
     (%delete-fixture *guard-fixture-path*)))
+
+;;; ---------------------------------------------------------------------------
+;;; Deftest 4: an accessor is confirmed against the slot option that defines it
+;;; ---------------------------------------------------------------------------
+
+(defparameter *accessor-fixture-path*
+  (asdf/system:system-relative-pathname
+   :cl-mcp "tests/tmp/clos-describe-integration-accessor-fixture.lisp")
+  "Scratch file the accessor test writes, compiles and then rewrites in
+place without letting its write date advance.  Never checked in: tests/tmp/
+is gitignored, and %DELETE-FIXTURE removes it (and its .fasl) again.")
+
+(defun %accessor-fixture-text (slot-option)
+  "Return the source of CL-MCP-CLOS-ACCESSOR-E2E-FIXTURE with GAUGE's sole
+slot carrying SLOT-OPTION -- \":accessor gauge-level\" or \":writer
+gauge-level\".  Nothing outside that one option differs between the two
+versions, and the DEFCLASS is the file's last form, so no other definition's
+recorded offset moves."
+  (format nil "~
+;;;; Written by cl-mcp/tests/clos-describe-integration-test; deleted after.
+
+(defpackage #:cl-mcp-clos-accessor-e2e-fixture
+  (:use #:cl)
+  (:export #:gauge #:gauge-level))
+
+(in-package #:cl-mcp-clos-accessor-e2e-fixture)
+
+(defclass gauge ()
+  ((level :initarg :level ~A)))
+"
+          slot-option))
+
+(defun %rewrite-keeping-write-date (path text)
+  "Write TEXT to PATH, then restore PATH's access and modification times.
+FILE-WRITE-DATE therefore never advances past the date SBCL recorded when it
+compiled the old text, so CL-MCP/SRC/CODE-CORE:%SOURCE-STALE-P does not mark
+the entries stale -- the cp -p, rsync -a, same-second-edit and clock-skew
+case, in which source matching has to be right entirely on its own."
+  (require :sb-posix)
+  (let* ((stat (sb-posix:stat path))
+         (atime (sb-posix:stat-atime stat))
+         (mtime (sb-posix:stat-mtime stat)))
+    (%write-text path text)
+    (sb-posix:utimes path atime mtime)))
+
+(defun %method-of-generic-function (methods generic-function)
+  "Return the sole entry in METHODS whose GENERIC_FUNCTION display name is
+GENERIC-FUNCTION, signalling an error naming the count when that is not
+exactly one.  One :ACCESSOR option creates two generic functions, X and
+(SETF X), and this test turns on telling them apart."
+  (let ((matches (remove-if-not
+                  (lambda (method)
+                    (equal generic-function (gethash "generic_function" method)))
+                  methods)))
+    (assert (= 1 (length matches)) ()
+            "expected exactly one method of ~S, found ~D"
+            generic-function (length matches))
+    (first matches)))
+
+(deftest clos-describe-does-not-confirm-an-accessor-against-a-writer-only-slot
+  (testing "a slot rewritten from :accessor x to :writer x stops confirming the
+live (SETF X) writer, even when the file's write date never advanced"
+    (unwind-protect
+         (progn
+           (%write-text *accessor-fixture-path*
+                        (%accessor-fixture-text ":accessor gauge-level"))
+           (%compile-and-load-path *accessor-fixture-path*)
+           ;; :writer gauge-level defines the plain function GAUGE-LEVEL and
+           ;; no (SETF GAUGE-LEVEL) at all, so the writer method still in the
+           ;; image is a different definition from anything this file now
+           ;; holds -- and nothing but the accessor's own SETF flag says so.
+           (%rewrite-keeping-write-date
+            *accessor-fixture-path* (%accessor-fixture-text ":writer gauge-level"))
+           (let* ((*project-root* (system-source-directory :cl-mcp))
+                  (report (%annotated-report "cl-mcp-clos-accessor-e2e-fixture:gauge"))
+                  (class (gethash "class" report))
+                  (writer (%method-of-generic-function
+                           (%methods class)
+                           "(SETF CL-MCP-CLOS-ACCESSOR-E2E-FIXTURE:GAUGE-LEVEL)")))
+             (ok (%falsy-p (gethash "stale" class))
+                 "the restored write date keeps this out of the stale shortcut")
+             (ok (equal "matched" (gethash "source_match" class))
+                 "the DEFCLASS is still the same class, so the file really was read")
+             (ok (not (equal "matched" (gethash "source_match" writer)))
+                 ":writer gauge-level never defined (SETF GAUGE-LEVEL)")
+             (ok (%unedited-p writer))
+             (ok (null (gethash "edit_guard" writer))
+                 "an entry with no edit information carries no guard either")))
+      (%delete-fixture *accessor-fixture-path*))))
