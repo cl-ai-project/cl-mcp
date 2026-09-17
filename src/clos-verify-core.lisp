@@ -156,24 +156,84 @@ qualifier identities, pairwise in order (spec 3.2)."
         (%combine (mapcar (lambda (s i) (%mv-cons (%compare-symbol-token s i)))
                            source identity)))))
 
-(defun %compare-eql-symbol (source target)
-  "Compare a {kind: symbol, ...} source EQL datum against TARGET (spec
-3.3): a reader-quoted token (:QUOTED \"reader\") is confirmed by the source
-text alone; an operator-quoted one (:QUOTED \"operator\") is confirmed only
-when its own QUOTE_TOKEN resolves and is EQ to CL:QUOTE.  Anything else
-cannot be confirmed as a quoted symbol at all."
-  (let ((quoted (%get source "quoted")))
+(defun %resolve-eql-symbol (source)
+  "Resolve SOURCE, a {kind: symbol, ...} source EQL datum (spec 3.3), to the
+symbol its quoted token names.  Returns (values SYMBOL T NIL) once the quote
+is confirmed and the token resolves, else (values NIL NIL REASON): a
+reader-quoted datum (\"quoted\": \"reader\") is confirmed by the source text
+alone, since the ' macro character cannot be shadowed, while an
+operator-quoted one (\"quoted\": \"operator\") is confirmed only when its own
+QUOTE_TOKEN resolves and is EQ to CL:QUOTE.  NIL is itself a symbol this
+resolves to, so the second value, never the first, says whether it did."
+  (flet ((resolve-datum-token ()
+           (multiple-value-bind (symbol resolved-p)
+               (%resolve-token (%get source "token") (%get source "in_package"))
+             (if resolved-p
+                 (values symbol t nil)
+                 (values nil nil "a name could not be resolved to a symbol in this image")))))
+    (let ((quoted (%get source "quoted")))
+      (cond
+        ((%tag= quoted "reader") (resolve-datum-token))
+        ((%tag= quoted "operator")
+         (let ((quote-token (%get source "quote_token")))
+           (multiple-value-bind (quote-symbol resolved-p)
+               (%resolve-token (%get quote-token "token") (%get quote-token "in_package"))
+             (if (and resolved-p (eq quote-symbol 'cl:quote))
+                 (resolve-datum-token)
+                 (values nil nil "the quoting of this EQL symbol could not be confirmed")))))
+        (t (values nil nil "the quoting of this EQL symbol could not be confirmed"))))))
+
+(defun %eql-target-symbol (target)
+  "Return (values SYMBOL STATUS) for TARGET, the runtime side's tagged EQL
+datum (spec 3.3), read as the symbol a quoted source datum would have to
+name: a keyword by its NAME, T or NIL by its boolean VALUE, or any interned
+symbol by its PACKAGE and NAME, all resolved with FIND-SYMBOL only.  STATUS
+is :SYMBOL when SYMBOL is that symbol, :OTHER when TARGET is a well-formed
+datum of a kind no symbol is ever EQL to (an integer, ratio or character),
+and :UNRESOLVED when the tag is one this cannot read or names a symbol this
+image does not have."
+  (let ((kind (%get target "kind")))
     (cond
-      ((%tag= quoted "reader") (%compare-symbol-token source target))
-      ((%tag= quoted "operator")
-       (let ((quote-token (%get source "quote_token")))
-         (multiple-value-bind (quote-symbol resolved-p)
-             (%resolve-token (%get quote-token "token") (%get quote-token "in_package"))
-           (if (and resolved-p (eq quote-symbol 'cl:quote))
-               (%compare-symbol-token source target)
-               (values :unverified
-                       "the quoting of this EQL symbol could not be confirmed")))))
-      (t (values :unverified "the quoting of this EQL symbol could not be confirmed")))))
+      ((%tag= kind "keyword")
+       (let ((name (%get target "name")))
+         (if (stringp name)
+             (multiple-value-bind (symbol status) (find-symbol name "KEYWORD")
+               (if status (values symbol :symbol) (values nil :unresolved)))
+             (values nil :unresolved))))
+      ((%tag= kind "boolean")
+       (let ((value (%get target "value")))
+         (cond
+           ((%tag= value "T") (values t :symbol))
+           ((%tag= value "NIL") (values nil :symbol))
+           (t (values nil :unresolved)))))
+      ((%tag= kind "symbol")
+       (multiple-value-bind (symbol resolved-p) (%resolve-identity-symbol target)
+         (if resolved-p (values symbol :symbol) (values nil :unresolved))))
+      ((or (%tag= kind "integer") (%tag= kind "ratio") (%tag= kind "character"))
+       (values nil :other))
+      (t (values nil :unresolved)))))
+
+(defun %compare-eql-symbol (source target)
+  "Compare SOURCE, a {kind: symbol, ...} source EQL datum, against TARGET,
+the runtime datum of whatever kind (spec 3.3).  SOURCE's quote is resolved
+before anything is decided, so a quoted keyword, T or NIL normalizes to the
+same identity as its unquoted spelling and matches the very method it
+names; the symbol it resolves to is then compared by EQ against the symbol
+TARGET denotes.  A SOURCE whose quote or token cannot be resolved is
+UNVERIFIED, never MISMATCHED -- that would claim a certainty this has none
+of -- while one that does resolve and names something else, a non-symbol
+datum such as an integer included, is MISMATCHED."
+  (multiple-value-bind (source-symbol resolved-p reason) (%resolve-eql-symbol source)
+    (if (not resolved-p)
+        (values :unverified reason)
+        (multiple-value-bind (target-symbol status) (%eql-target-symbol target)
+          (case status
+            (:symbol (if (eq source-symbol target-symbol)
+                         (values :matched nil)
+                         (values :mismatched "the resolved symbols are not the same")))
+            (:other (values :mismatched "EQL datum kinds differ"))
+            (t (values :unverified
+                       "an EQL datum could not be resolved to a symbol in this image")))))))
 
 (defun %string-verdict (a b mismatch-reason)
   "Return (values :MATCHED NIL) when A and B are equal strings (STRING=),
@@ -187,13 +247,19 @@ match."
   "Compare SOURCE and TARGET, tagged EQL datums (spec 3.3), by kind-specific
 rules -- never by evaluating SOURCE or comparing printed representations.
 An \"unverifiable\" tag on either side (an off-allow-list form or value)
-always yields UNVERIFIED, per spec 3.3."
+always yields UNVERIFIED, per spec 3.3.  A SOURCE tagged \"symbol\" is
+judged by %COMPARE-EQL-SYMBOL whatever TARGET's kind is, before the kinds
+are compared at all: the source text of a quoted keyword, T or NIL is a
+symbol only until its quote is resolved, and the runtime object it names is
+tagged \"keyword\" or \"boolean\", so gating on kind equality first would
+call the two spellings of one datum a contradiction."
   (let ((source-kind (%get source "kind"))
         (target-kind (%get target "kind")))
     (cond
       ((or (%tag= source-kind "unverifiable") (%tag= target-kind "unverifiable"))
        (values :unverified (or (%get source "reason") (%get target "reason")
                                 "an EQL datum could not be verified")))
+      ((%tag= source-kind "symbol") (%compare-eql-symbol source target))
       ((not (equal source-kind target-kind))
        (values :mismatched "EQL datum kinds differ"))
       ((%tag= source-kind "keyword")
@@ -212,7 +278,6 @@ always yields UNVERIFIED, per spec 3.3."
        (%string-verdict (%get source "value") (%get target "value") "character values differ"))
       ((%tag= source-kind "boolean")
        (%string-verdict (%get source "value") (%get target "value") "boolean values differ"))
-      ((%tag= source-kind "symbol") (%compare-eql-symbol source target))
       (t (values :unverified "unrecognized EQL datum kind")))))
 
 (defun %compare-specializer (source target)

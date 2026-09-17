@@ -628,7 +628,11 @@ string, `"T"` or `"NIL"`, so `nil`-the-value is never confused with a missing fi
 symbol quoted with `'` or a confirmed `(quote ...)`. A variable reference, a function call, a
 string, a list or array, an uninterned symbol, `#.`, a float or a complex number, or anything
 whose printed form was truncated, is `unverified` — there is no way to confirm it without
-evaluating source, which this tool never does.
+evaluating source, which this tool never does. A quoted keyword, `t` or `nil` — `(eql ':ready)`,
+`(eql 't)`, `(eql 'nil)` — is read through its quote first and then compared as the same datum as
+the unquoted spelling, so it matches the method it names; when the quote cannot be confirmed as
+`CL:QUOTE`, or the quoted token names a package this image does not have, the entry is
+`unverified` rather than `mismatched`.
 
 **Accessor matching.** A slot accessor is confirmed against the slot option that actually
 defines it, `(setf name)` included. `:reader x` and `:writer x` each define the plain function

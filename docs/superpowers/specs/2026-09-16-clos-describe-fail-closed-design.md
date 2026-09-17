@@ -123,6 +123,15 @@ source_signature:
 interned symbol に限る。`'` はソース文字列の先頭が `'` であることで確認し、`(quote x)` は
 head トークンを解決して `CL:QUOTE` と `eq` であることで確認する。
 
+ソース側が `symbol` タグのときは、worker 側の kind を見る前に引用を解決する。`':unit` /
+`'t` / `'nil` は引用を確認したうえで `:unit` / `t` / `nil` と同じ同一性に正規化し、worker 側の
+datum が示すシンボル（`keyword` は `(find-symbol name "KEYWORD")`、`boolean` は `T` / `NIL`、
+`symbol` は `(find-symbol name package)`）と `eq` で照合する。kind の一致を先に見ると、同じ
+datum の 2 通りの綴りを矛盾と呼んでしまう。解決できたうえで別のシンボルなら `mismatched`
+（整数・ratio・character のようにシンボルになり得ない datum との比較も含む）。引用を
+`CL:QUOTE` だと確認できない、`quote_token` が無い、トークンのパッケージがこのイメージに無い
+といった「解決できなかった」場合は `unverified` であり、`mismatched` にはしない。
+
 次は **`unverified`** とする（独立した確実な根拠がない限り）:
 変数参照 `(eql *x*)`、任意の呼び出し `(eql (f))`、`(eql (load-time-value ...))`、
 文字列・リスト・配列・任意オブジェクト、uninterned symbol、`#.`、

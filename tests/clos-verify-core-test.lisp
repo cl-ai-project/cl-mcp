@@ -29,7 +29,8 @@
 
 (defpackage #:cl-mcp-verify-shadow-test
   (:use #:cl)
-  (:shadow #:defmethod #:quote))
+  (:shadow #:defmethod #:quote)
+  (:export #:quote))
 
 (defvar *verify-core-side-effect-counter* 0)
 
@@ -235,6 +236,12 @@ first one)."
 file at PATH."
   (%candidates-at path (%line-of path needle)))
 
+(defun %first-eql-datum (candidates)
+  "Return the tagged EQL datum of the first specializer of CANDIDATES' first
+candidate -- the one place these tests reach into a real signature, to
+simulate a token whose package this image does not have."
+  (gethash "datum" (elt (gethash "specializers" (elt candidates 0)) 0)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; verify-entries call helpers
 ;;; ---------------------------------------------------------------------------
@@ -427,6 +434,66 @@ one result's \"status\"."
         (unwind-protect
              (ok (equal "unverified" (%verify1 "q2" sym-identity candidates)))
           (ignore-errors (delete-file path)))))))
+
+(defun %act-identity (methods needle)
+  "Return the identity of the method in METHODS defined on the line of
+tests/fixtures/clos-identity-fixture.lisp on which NEEDLE starts."
+  (%identity (find (%line-of *identity-fixture* needle) methods
+                   :key (lambda (method) (gethash "line" method)))))
+
+(deftest verify-entries-reads-a-quoted-keyword-t-or-nil-as-that-datum
+  (%load-identity-fixture)
+  (let ((methods (%methods (first (%gfs (%report "cl-mcp-identity-a:act")))))
+        (path (%write-tmp "verify-core-quoted-constants.lisp"
+                          (format nil "~{~A~%~}"
+                                  (list "(in-package #:cl-mcp-identity-a)"
+                                        "(defmethod act ((x (eql ':unit))) x)"
+                                        "(defmethod act ((x (eql 't))) x)"
+                                        "(defmethod act ((x (eql 'nil))) x)"
+                                        "(defmethod act ((x (eql ':other))) x)")))))
+    (unwind-protect
+         (let ((unit (%act-identity methods "(defmethod act ((x (eql :unit)))"))
+               (true (%act-identity methods "(defmethod act ((x (eql t)))"))
+               (false (%act-identity methods "(defmethod act ((x (eql nil)))"))
+               (three (%act-identity methods "(defmethod act ((x (eql 3)))")))
+           (testing "a quoted keyword names the same datum as the unquoted spelling"
+             (ok (equal "matched" (%verify1 "q1" unit (%candidates-at path 2)))))
+           (testing "quoted T and NIL name the boolean methods they resolve to"
+             (ok (equal "matched" (%verify1 "q2" true (%candidates-at path 3))))
+             (ok (equal "matched" (%verify1 "q3" false (%candidates-at path 4)))))
+           (testing "a resolved quoted datum still contradicts a different one"
+             (ok (equal "mismatched" (%verify1 "q4" unit (%candidates-at path 5)))
+                 "':other is a different keyword from :unit")
+             (ok (equal "mismatched" (%verify1 "q5" three (%candidates-at path 2)))
+                 "a quoted symbol is never EQL to an integer")
+             (ok (equal "mismatched" (%verify1 "q6" false (%candidates-at path 3)))
+                 "'t is not the method specialized on NIL")))
+      (ignore-errors (delete-file path)))))
+
+(deftest verify-entries-confirms-a-quoted-keywords-quote-before-judging-it
+  (%load-identity-fixture)
+  (let ((methods (%methods (first (%gfs (%report "cl-mcp-identity-a:act")))))
+        (path (%write-tmp
+               "verify-core-quoted-keyword-operator.lisp"
+               (format nil "~{~A~%~}"
+                       (list "(in-package #:cl-mcp-identity-a)"
+                             "(defmethod act ((x (eql (quote :unit)))) x)"
+                             (concatenate 'string
+                                          "(defmethod act ((x (eql ("
+                                          "cl-mcp-verify-shadow-test:quote :unit)))) x)")
+                             "(defmethod act ((x (eql ':unit))) x)")))))
+    (unwind-protect
+         (let ((unit (%act-identity methods "(defmethod act ((x (eql :unit)))")))
+           (testing "(quote :unit), confirmed as CL:QUOTE, is the keyword :unit"
+             (ok (equal "matched" (%verify1 "o1" unit (%candidates-at path 2)))))
+           (testing "a QUOTE shadowed by another package confirms nothing"
+             (ok (equal "unverified" (%verify1 "o2" unit (%candidates-at path 3)))))
+           (testing "a quoted token this image cannot resolve is unverified, not mismatched"
+             (let ((candidates (%candidates-at path 4)))
+               (setf (gethash "in_package" (%first-eql-datum candidates))
+                     "cl-mcp-no-such-package-for-verify-core")
+               (ok (equal "unverified" (%verify1 "o3" unit candidates))))))
+      (ignore-errors (delete-file path)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; A shadowed defmethod head
