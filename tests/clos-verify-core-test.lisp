@@ -605,6 +605,33 @@ form matches"
         (unwind-protect
              (ok (equal "unverified"
                         (%verify1 "sa6" dial-writer (%candidates-at candidate-path 2))))
+          (ignore-errors (delete-file candidate-path)))))
+    (testing "every writer resolving and none matching is a real mismatch"
+      (let ((candidate-path
+              (%write-tmp "verify-core-accessor-all-resolved.lisp"
+                          (format nil "~{~A~%~}"
+                                 (list "(in-package #:cl-mcp-clos-accessor-fixture)"
+                                       (concatenate 'string
+                                        "(defclass dial () ((level :initarg :level "
+                                        ":writer (setf gauge-level) "
+                                        ":writer (setf meter-level))))"))))))
+        (unwind-protect
+             (ok (equal "mismatched"
+                        (%verify1 "sa7" dial-writer (%candidates-at candidate-path 2))))
+          (ignore-errors (delete-file candidate-path)))))
+    (testing "one unresolvable writer beside a conclusively different one is unverified"
+      (let ((candidate-path
+              (%write-tmp "verify-core-accessor-mixed-resolution.lisp"
+                          (format nil "~{~A~%~}"
+                                 (list "(in-package #:cl-mcp-clos-accessor-fixture)"
+                                       (concatenate 'string
+                                        "(defclass dial () ((level :initarg :level "
+                                        ":writer (setf cl-mcp-no-such-pkg:dial-level) "
+                                        ":writer (setf gauge-level))))"))))))
+        (unwind-protect
+             (ok (equal "unverified"
+                        (%verify1 "sa8" dial-writer (%candidates-at candidate-path 2)))
+                 "the unresolvable option might have been the definition, so nothing is certain")
           (ignore-errors (delete-file candidate-path)))))))
 
 (deftest verify-entries-does-not-treat-a-qualified-accessor-shaped-identity-as-an-accessor

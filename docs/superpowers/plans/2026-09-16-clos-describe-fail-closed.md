@@ -126,7 +126,11 @@ plist `(:form-type F :form-name N :signature S :start I :end J)`（`start`/`end`
                 (:kind :unverifiable :reason "...")
                 ...)
  :methods (...)          ; :defgeneric のとき (:method ...) 各要素の :qualifiers/:specializers
- :slots (...))           ; :defclass / :define-condition のとき (:name トークン :readers (...) :writers (...))
+ :slots (...))           ; :defclass / :define-condition のとき (:name トークン :readers (名前...) :writers (名前...))
+                         ;   readers / writers の要素は :name と同じ名前の形（:token / :setf / :in-package）。
+                         ;   :reader x と :writer x は x、:writer (setf x) は (setf x)、:accessor x は
+                         ;   x（reader）と (setf x)（writer）の両方。裸のシンボルでない :reader / :accessor は
+                         ;   推測せず nil（解決不能な候補）にする。
 ```
 
 `:token` は CST ノードの範囲から取った**ソースの文字列そのもの**、`:in-package` はその位置で有効な

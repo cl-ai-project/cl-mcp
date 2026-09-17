@@ -342,22 +342,34 @@ the same way."
 (defun %any-name-matches (names identity)
   "Judge whether any of NAMES -- the {token, setf, in_package} source names
 one slot's options of a single access kind define (spec 3.2) -- names
-IDENTITY, a {package, name, setf} function-name identity: :MATCHED when one
-does, :MISMATCHED when at least one is conclusively a different function and
-none match, :UNVERIFIED when none could be judged either way.  %COMPARE-NAME
-makes each judgment, so a candidate differing only in its SETF flag -- a
+IDENTITY, a {package, name, setf} function-name identity.  %COMPARE-NAME
+judges each one, so a candidate differing only in its SETF flag -- a
 `:writer x' option against a live (SETF X) writer, say -- is a different
-function, not a match.  A NIL entry is an option whose value the parent could
-not read as a function name at all, and is never conclusive."
-  (let ((any-conclusive nil))
+function, not a match: the option's shape settles that whatever symbol x
+turns out to name, which is why the SETF shortcut counts as conclusive here.
+
+The three-valued rule, in one place: :MATCHED as soon as one name matches;
+otherwise :MISMATCHED only when every candidate reached a conclusive verdict
+and none matched; otherwise :UNVERIFIED.  So a list mixing a name this image
+cannot resolve -- an unknown package, an unreadable token, or a NIL entry the
+parent could not read as a function name at all -- with a conclusively
+different one is :UNVERIFIED: the unresolvable one might have been the
+definition, so there is no certainty to report.  An empty list is
+:UNVERIFIED for the same reason it always was: nothing was judged."
+  (let ((conclusive nil) (inconclusive nil))
     (dolist (name (%as-list names))
       (multiple-value-bind (status reason) (%compare-name name identity)
         (declare (ignore reason))
-        (when (eq status :matched) (return-from %any-name-matches (values :matched nil)))
-        (when (eq status :mismatched) (setf any-conclusive t))))
-    (if any-conclusive
-        (values :mismatched "no accessor of this kind names the expected generic function")
-        (values :unverified "no accessor name could be resolved"))))
+        (case status
+          (:matched (return-from %any-name-matches (values :matched nil)))
+          (:mismatched (setf conclusive t))
+          (:unverified (setf inconclusive t)))))
+    (cond
+      (inconclusive
+       (values :unverified "an accessor of this kind could not be resolved"))
+      (conclusive
+       (values :mismatched "no accessor of this kind names the expected generic function"))
+      (t (values :unverified "no accessor name could be resolved")))))
 
 (defun %compare-accessor-slot (candidate identity)
   "Find the slot in CANDIDATE's :slots whose name matches IDENTITY's slot,
@@ -380,7 +392,7 @@ IDENTITY's generic function, SETF flag and all (spec 3.4)."
             ((> (length named) 1) (values :unverified "ambiguous slot name in this definition"))
             ((= (length named) 1)
              (%any-name-matches (%get (first named) accessor-key)
-                                 (%get identity "generic_function")))
+                                (%get identity "generic_function")))
             (any-unresolved (values :unverified "a slot name could not be resolved"))
             (t (values :mismatched "no slot in this definition matches")))))))
 
