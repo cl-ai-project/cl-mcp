@@ -6,7 +6,11 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:*project-root-lock*)
-  (:import-from #:bordeaux-threads #:with-lock-held)
+  (:import-from #:bordeaux-threads
+                #:with-lock-held
+                #:make-lock
+                #:make-recursive-lock
+                #:with-recursive-lock-held)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content #:rpc-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -14,6 +18,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
                 #:allowed-read-path
+                #:canonical-path
                 #:ensure-write-path
                 #:broad-root-p)
   (:import-from #:cl-mcp/src/utils/system
@@ -42,6 +47,9 @@
                 #:format-delimiter-diagnosis)
   (:export #:*lisp-file-unparseable-hook*
            #:*fs-read-max-bytes*
+           #:file-lock-key
+           #:file-lock
+           #:with-file-lock
            #:fs-resolve-read-path
            #:fs-read-file
            #:fs-read-source-text
@@ -224,13 +232,123 @@ Returns (VALUES 0 0) for a NIL or zero OFFSET."
                          (incf col)))
             (values lines col))))))
 
+(defvar *file-lock-table* (make-hash-table :test #'equal)
+  "Maps a file's lock key (FILE-LOCK-KEY) to the recursive lock that serialises
+cl-mcp's own writes to that file. Read and written only under
+*FILE-LOCK-TABLE-LOCK*.
+
+Entries are never removed. An entry is one small lock object and the set of
+keys is bounded by the files this process has been asked to write: the three
+callers (FS-WRITE-FILE, LISP-EDIT-FORM, LISP-PATCH-FORM) each resolve their
+argument to a path under the project root before taking the lock, so the table
+grows with the project's files, not with uptime. Reclaiming an entry would also
+have to prove that no thread is about to take the lock being dropped, and
+getting that wrong hands two threads two different locks for one file, which
+is exactly the bug the table exists to prevent.")
+
+(defvar *file-lock-table-lock* (make-lock "cl-mcp-file-lock-table")
+  "Guards *FILE-LOCK-TABLE*. Held only around the table lookup and insert in
+FILE-LOCK, never while a file is read or written.")
+
+(defun file-lock-key (path)
+  "Return the string that identifies PATH in *FILE-LOCK-TABLE*.
+
+PATH is made absolute against *PROJECT-ROOT* with CANONICAL-PATH and then
+resolved with TRUENAME -- the same two steps ALLOWED-READ-PATH and
+ENSURE-WRITE-PATH already take, and therefore the same resolution
+%NORMALIZE-PATHS gets for an edit. Two spellings of the same EXISTING file
+(relative and absolute, through a symlink, or with a .. component) collapse to
+one key and so take one lock.
+
+A file that does not exist yet has no TRUENAME and keys on its unresolved
+absolute namestring instead, so creating a path and later editing it may use
+two different locks. That is harmless: until the file exists there is nothing
+for a second writer to lose, and once it exists every caller resolves it the
+same way.
+
+Signals when *PROJECT-ROOT* is unset, as every write path already does."
+  (let* ((abs (canonical-path path))
+         (resolved (or (handler-case (truename abs) (file-error () nil)) abs)))
+    (namestring resolved)))
+
+(defun file-lock (path)
+  "Return the recursive lock that serialises cl-mcp's writes to PATH, creating
+it on first use. The lock is per file, keyed by FILE-LOCK-KEY. WITH-FILE-LOCK
+is the intended entry point; call this directly only to hold the lock over a
+span a macro cannot express."
+  (let ((key (file-lock-key path)))
+    (with-lock-held (*file-lock-table-lock*)
+      (or (gethash key *file-lock-table*)
+          (setf (gethash key *file-lock-table*)
+                (make-recursive-lock key))))))
+
+(defmacro with-file-lock ((path) &body body)
+  "Evaluate BODY holding the per-file lock for PATH, so that cl-mcp's own
+read-verify-write sequences on one file cannot interleave and silently lose
+each other's changes. PATH is evaluated once; every spelling of the same
+existing file takes the same lock (FILE-LOCK-KEY).
+
+The lock is recursive, so an outer holder nests with an inner one:
+LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file
+until after they write it, and FS-WRITE-FILE takes the same lock again
+underneath.
+
+DEADLOCK DISCIPLINE -- this lock is a LEAF. While it is held, take no other
+cl-mcp lock except CL-MCP/SRC/LOG's *LOG-LOCK*, read *PROJECT-ROOT* rather
+than setting it, and never make a worker RPC (CL-MCP/SRC/PROXY:PROXY-TO-WORKER)
+or any other call that blocks on another process or on a reply. The three
+tools that hold it today run inline in the parent and call no worker.
+
+What it does NOT provide: it serialises cl-mcp's own writes only. A writer
+outside cl-mcp is not coordinated, and the lock is neither a transaction nor a
+crash-safety mechanism."
+  (let ((lock (gensym "FILE-LOCK")))
+    `(let ((,lock (file-lock ,path)))
+       (with-recursive-lock-held (,lock)
+         ,@body))))
+
+(defvar *temp-name-serial* 0
+  "Counter behind %NEXT-TEMP-SERIAL. Only that function reads or writes it,
+and only under *TEMP-NAME-LOCK*.")
+
+(defvar *temp-name-lock* (make-lock "cl-mcp-temp-name")
+  "Guards *TEMP-NAME-SERIAL*. Independent of *FILE-LOCK-TABLE-LOCK* and of any
+per-file lock, and held for one INCF only.")
+
+(defun %next-temp-serial ()
+  "Return a fresh integer, distinct for every call in this process.
+Used to make a temp file name unique per write."
+  (with-lock-held (*temp-name-lock*)
+    (incf *temp-name-serial*)))
+
+(defun %temp-pathname-for (pn)
+  "Return the pathname %WRITE-STRING-TO-FILE writes before renaming it onto PN.
+
+The name carries the process id and a per-process serial, so it is unique to
+one call: two writers -- two threads, or two cl-mcp processes over the same
+checkout -- can never share one temp file, interleave their content into it,
+or delete one out from under the other's RENAME-FILE. It stays in PN's own
+directory so the rename remains a same-filesystem rename, and it keeps the
+leading dot of the old fixed name so directory listings still hide it."
+  (make-pathname :name (format nil ".~A.~D.~D.tmp"
+                               (or (pathname-name pn) "file")
+                               (sb-posix:getpid)
+                               (%next-temp-serial))
+                 :type (pathname-type pn)
+                 :defaults pn))
+
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
-On failure the original file is preserved."
+On failure the original file is preserved.
+
+The temp file is unique to this call (%TEMP-PATHNAME-FOR) and the cleanup
+deletes only that file, so concurrent writers in the same directory cannot
+corrupt or delete each other's temp. The rename makes each write all-or-
+nothing on its own; it does not order two writes. A caller that must not lose
+another writer's change takes CL-MCP/SRC/FS:WITH-FILE-LOCK around its whole
+read-modify-write, as FS-WRITE-FILE does."
   (ensure-directories-exist pn)
-  (let ((tmp (make-pathname :name (format nil ".~A.tmp" (pathname-name pn))
-                            :type (pathname-type pn)
-                            :defaults pn)))
+  (let ((tmp (%temp-pathname-for pn)))
     (unwind-protect
          (progn
            (with-open-file (out tmp
@@ -242,23 +360,30 @@ On failure the original file is preserved."
              (finish-output out))
            (rename-file tmp pn)
            t)
-      ;; Clean up temp file on failure
+      ;; Clean up this call's temp file on failure
       (when (probe-file tmp)
         (handler-case (delete-file tmp) (file-error () nil))))))
 
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
-Returns T on success."
+Returns T on success.
+
+The write is serialised against cl-mcp's other writes to the same file by
+WITH-FILE-LOCK. A caller that already holds that lock over a wider span --
+LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file --
+nests here, since the lock is recursive. Writers outside cl-mcp are not
+coordinated by it."
   (let ((pn (ensure-write-path path)))
-    (log-event :debug "fs.write.open"
-               "path" (namestring pn)
-               "bytes" (length content)
-               "fd" (fd-count))
-    (unwind-protect
-         (%write-string-to-file pn content)
-      (log-event :debug "fs.write.close"
+    (with-file-lock (pn)
+      (log-event :debug "fs.write.open"
                  "path" (namestring pn)
-                 "fd" (fd-count)))))
+                 "bytes" (length content)
+                 "fd" (fd-count))
+      (unwind-protect
+           (%write-string-to-file pn content)
+        (log-event :debug "fs.write.close"
+                   "path" (namestring pn)
+                   "fd" (fd-count))))))
 
 (defun %lisp-source-pathname-p (pn)
   "Return T when PN has a Common Lisp source extension."

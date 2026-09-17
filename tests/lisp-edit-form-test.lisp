@@ -31,6 +31,12 @@
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:bordeaux-threads
+                #:make-thread
+                #:join-thread
+                #:make-semaphore
+                #:signal-semaphore
+                #:wait-on-semaphore)
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
@@ -2672,3 +2678,91 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (search ":new" after))
             (ok (search (format nil "caf~C" (code-char 233)) after)
                 "the multibyte comment came through unharmed")))))))
+
+(defun run-in-parallel (thunk-a thunk-b)
+  "Run THUNK-A and THUNK-B in two threads released together and return their
+two primary values as a list, a signalled condition standing in for the value
+of a thunk that failed.
+
+The release is a two-party semaphore barrier -- each thread signals its own
+semaphore and then waits for the other's -- so neither thunk starts until both
+threads are running. No SLEEP and no timing assumption: the barrier is the
+synchronisation, and the WAIT-ON-SEMAPHORE timeout only keeps a broken run
+from hanging the suite."
+  (let ((a-ready (make-semaphore))
+        (b-ready (make-semaphore))
+        (results (make-array 2 :initial-element nil)))
+    (flet ((runner (index mine theirs thunk)
+             (lambda ()
+               (signal-semaphore mine)
+               (wait-on-semaphore theirs :timeout 30)
+               (setf (aref results index)
+                     (handler-case (funcall thunk)
+                       (error (e) e))))))
+      (let ((thread-a (make-thread (runner 0 a-ready b-ready thunk-a)
+                                   :name "cl-mcp-edit-lock-test-a"))
+            (thread-b (make-thread (runner 1 b-ready a-ready thunk-b)
+                                   :name "cl-mcp-edit-lock-test-b")))
+        (join-thread thread-a)
+        (join-thread thread-b)))
+    (coerce results 'list)))
+
+(defun %concurrent-guarded-edit-verdict (rounds)
+  "Run ROUNDS rounds of two threads editing one form of one file with the SAME
+edit_guard and different replacement text, and return NIL when every round
+behaved. A non-NIL return describes the first round that did not.
+
+Expected in every round: exactly one call returns, the other signals
+EDIT-GUARD-CONFLICT-ERROR because the first already rewrote the file out from
+under its guard, and the file holds the winner's text alone and still parses.
+
+Without the per-file lock held across read -> guard -> write, both calls can
+read the same original, both find the guard valid, and both write -- the
+loser's text disappearing with no conflict reported anywhere."
+  (let ((verdict nil))
+    (dotimes (round rounds verdict)
+      (with-temp-file "tests/tmp/edit-form-lock-concurrent.lisp"
+          (format nil "(defun target () :old)~%")
+        (lambda (path)
+          (let* ((guard (%edit-guard-for path "defun" "target"))
+                 (results (run-in-parallel
+                           (lambda ()
+                             (lisp-edit-form :file-path path :form-type "defun"
+                                             :form-name "target" :operation "replace"
+                                             :content "(defun target () :from-a)"
+                                             :guard guard))
+                           (lambda ()
+                             (lisp-edit-form :file-path path :form-type "defun"
+                                             :form-name "target" :operation "replace"
+                                             :content "(defun target () :from-b)"
+                                             :guard guard))))
+                 (conflicts (count-if (lambda (r)
+                                        (typep r 'edit-guard-conflict-error))
+                                      results))
+                 (others (remove-if-not (lambda (r)
+                                          (and (typep r 'error)
+                                               (not (typep r 'edit-guard-conflict-error))))
+                                        results))
+                 (after (fs-read-file path))
+                 (has-a (search ":from-a" after))
+                 (has-b (search ":from-b" after)))
+            (cond (others
+                   (setf verdict (or verdict (list round :unexpected-error
+                                                   (princ-to-string (first others))))))
+                  ((/= conflicts 1)
+                   (setf verdict (or verdict (list round :conflicts conflicts after))))
+                  ((not (or has-a has-b))
+                   (setf verdict (or verdict (list round :no-winner after))))
+                  ((and has-a has-b)
+                   (setf verdict (or verdict (list round :both-written after))))
+                  ((not (eql 1 (ignore-errors
+                                (length (parse-top-level-forms after)))))
+                   (setf verdict (or verdict (list round :does-not-parse after)))))))))))
+
+(deftest lisp-edit-form-concurrent-guarded-edits-let-exactly-one-win
+  (testing "two edits sharing one guard: one writes, the other gets the conflict"
+    (let ((verdict (%concurrent-guarded-edit-verdict 15)))
+      (ok (null verdict)
+          (if verdict
+              (format nil "round ~S: ~A" (first verdict) (rest verdict))
+              "every round: one winner, one edit_guard conflict, a file that parses")))))

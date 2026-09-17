@@ -12,7 +12,8 @@
                           #:cst-node-start
                           #:cst-node-end)
   (:import-from #:cl-mcp/src/fs
-                #:fs-write-file)
+                #:fs-write-file
+                #:with-file-lock)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/state
@@ -42,6 +43,7 @@
                 #:%parse-readtable-designator
                 #:%detect-readtable-before-node
                 #:%whitespace-char-p
+                #:%normalize-paths
                 #:%locate-target-form
                 #:file-unparseable-error)
   (:documentation "Scoped text replacement within a matched top-level Lisp form.")
@@ -272,6 +274,13 @@ patched form really does fail to parse.
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 
+The whole read -> locate -> patch -> write span runs under
+CL-MCP/SRC/FS:WITH-FILE-LOCK for the target file, so cl-mcp's own concurrent
+edits of one file are serialised: two patches to two different forms of one
+file both survive, instead of the second overwriting the first from a stale
+copy. A DRY-RUN call takes the same lock -- it reads the file -- but writes
+nothing. A writer outside cl-mcp is not coordinated by it.
+
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing the file.
 
@@ -288,75 +297,76 @@ silently accepts as part of a symbol), so the caller can check it."
   (when (zerop (length old-text))
     (error 'arg-validation-error :arg-name "old_text"
            :message "old_text must not be empty"))
-  (multiple-value-bind (abs rel original nodes target target-snippet _
-                        file-package-name)
-      (%locate-target-form file-path form-type form-name readtable)
-    (declare (ignore _))
-    (multiple-value-bind (updated modified-form form-text match-pos)
-        (%apply-patch-operation original target old-text new-text)
-      (let* ((would-change (not (string= original updated)))
-             (readtable-designator
-               (or readtable (%detect-readtable-before-node nodes target)))
-             ;; Computed once: the readtable comparison probes 256 characters.
-             (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
-             ;; Counted in the form's lexical context: a ")" inside a string
-             ;; or comment is not code and must not produce a depth message.
-             ;; Under a readtable that changes the syntax the standard lexical
-             ;; rules cannot be trusted (a reader macro may consume raw
-             ;; parentheses as data), so no depth message is offered at all;
-             ;; the reader's own failure is reported through the normal
-             ;; diagnosis path.
-             ;; A ] or } typed for ) changes the net count too, but "add 1 )"
-             ;; would then write code that reads (as a symbol ending in ]);
-             ;; let the bracket diagnosis speak instead.
-             ;; Deferred: the scans behind it run only once the patched form
-             ;; has failed to parse, so a successful patch pays nothing.
-             (depth-reason
-               (lambda ()
-                 (and (not nonstandard-rt)
-                      (not (%bracket-mismatch-p modified-form))
-                      (%check-depth-balance form-text modified-form
-                                            match-pos old-text new-text)))))
-        (when would-change
-          (%validate-form-parseable
-           modified-form
-           :readtable-designator readtable-designator
-           :package-name file-package-name
-           :source-path abs
-           :depth-reason depth-reason
-           :nonstandard-rt nonstandard-rt))
-        ;; The form reads, but a ] or } where ) was meant reads too (as part
-        ;; of a symbol). Written as asked -- the caller may mean it -- but
-        ;; flagged, since silently accepting it is how such typos survive.
-        ;; Only the found side: an unmatched [ or { opener is a symbol
-        ;; character in standard syntax and carries no ) typo to flag.
-        (let ((bracket-warning
-                (and would-change
-                     (not nonstandard-rt)
-                     (format-bracket-warning modified-form
-                                             :target "the patched form"))))
-          (log-event :debug "lisp.patch.form"
-                     "path" (namestring abs)
-                     "form_type" form-type
-                     "form_name" form-name
-                     "dry_run" dry-run
-                     "would_change" would-change)
-          (cond
-            (dry-run
-             (let ((result (make-hash-table :test #'equal)))
-               (setf (gethash "would_change" result) would-change
-                     (gethash "original" result) target-snippet
-                     (gethash "preview" result) modified-form
-                     (gethash "file_path" result) (namestring abs)
-                     (gethash "operation" result) "patch")
-               (when bracket-warning
-                 (setf (gethash "bracket_warning" result) bracket-warning))
-               result))
-            (would-change
-             (fs-write-file rel updated)
-             (values updated t bracket-warning))
-            (t
-             (values updated nil nil))))))))
+  (with-file-lock ((%normalize-paths file-path))
+    (multiple-value-bind (abs rel original nodes target target-snippet _
+                          file-package-name)
+        (%locate-target-form file-path form-type form-name readtable)
+      (declare (ignore _))
+      (multiple-value-bind (updated modified-form form-text match-pos)
+          (%apply-patch-operation original target old-text new-text)
+        (let* ((would-change (not (string= original updated)))
+               (readtable-designator
+                 (or readtable (%detect-readtable-before-node nodes target)))
+               ;; Computed once: the readtable comparison probes 256 characters.
+               (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
+               ;; Counted in the form's lexical context: a ")" inside a string
+               ;; or comment is not code and must not produce a depth message.
+               ;; Under a readtable that changes the syntax the standard lexical
+               ;; rules cannot be trusted (a reader macro may consume raw
+               ;; parentheses as data), so no depth message is offered at all;
+               ;; the reader's own failure is reported through the normal
+               ;; diagnosis path.
+               ;; A ] or } typed for ) changes the net count too, but "add 1 )"
+               ;; would then write code that reads (as a symbol ending in ]);
+               ;; let the bracket diagnosis speak instead.
+               ;; Deferred: the scans behind it run only once the patched form
+               ;; has failed to parse, so a successful patch pays nothing.
+               (depth-reason
+                 (lambda ()
+                   (and (not nonstandard-rt)
+                        (not (%bracket-mismatch-p modified-form))
+                        (%check-depth-balance form-text modified-form
+                                              match-pos old-text new-text)))))
+          (when would-change
+            (%validate-form-parseable
+             modified-form
+             :readtable-designator readtable-designator
+             :package-name file-package-name
+             :source-path abs
+             :depth-reason depth-reason
+             :nonstandard-rt nonstandard-rt))
+          ;; The form reads, but a ] or } where ) was meant reads too (as part
+          ;; of a symbol). Written as asked -- the caller may mean it -- but
+          ;; flagged, since silently accepting it is how such typos survive.
+          ;; Only the found side: an unmatched [ or { opener is a symbol
+          ;; character in standard syntax and carries no ) typo to flag.
+          (let ((bracket-warning
+                  (and would-change
+                       (not nonstandard-rt)
+                       (format-bracket-warning modified-form
+                                               :target "the patched form"))))
+            (log-event :debug "lisp.patch.form"
+                       "path" (namestring abs)
+                       "form_type" form-type
+                       "form_name" form-name
+                       "dry_run" dry-run
+                       "would_change" would-change)
+            (cond
+              (dry-run
+               (let ((result (make-hash-table :test #'equal)))
+                 (setf (gethash "would_change" result) would-change
+                       (gethash "original" result) target-snippet
+                       (gethash "preview" result) modified-form
+                       (gethash "file_path" result) (namestring abs)
+                       (gethash "operation" result) "patch")
+                 (when bracket-warning
+                   (setf (gethash "bracket_warning" result) bracket-warning))
+                 result))
+              (would-change
+               (fs-write-file rel updated)
+               (values updated t bracket-warning))
+              (t
+               (values updated nil nil)))))))))
 
 (define-tool "lisp-patch-form"
   :description "Scoped text replacement within a matched top-level Lisp form.

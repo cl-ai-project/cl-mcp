@@ -402,11 +402,16 @@ never lets this tool read more than an unguarded call could. A file that is not 
 refused the same way, with a plain error rather than a `conflict`: its undecodable bytes would
 be replaced by `?` on the way back to disk, and an unguarded call refuses it too (its decoder
 signals). This is not compare-and-swap.
-Between the check above and the write, a concurrent, uncoordinated writer
-(an external editor, another process) can still slip in; that narrow window is not closed. What
-*is* caught: any change after `guard` was built, reusing the same `guard` for a second edit
-after the first one already succeeded, and a change anywhere else in the file (an edited
-`in-package`, say) even when the target form's own text is untouched.
+Between the check above and the write, no *other cl-mcp call* can slip in: `lisp-edit-form`,
+`lisp-patch-form` and `fs-write-file` take one per-file lock, and `lisp-edit-form` holds it
+from before it reads the file until after it writes, so read → check → build → write is one
+critical section. A second concurrent edit of the same file therefore runs after this one
+finishes, reads what it wrote, and — with the same `guard` — gets a `conflict` instead of
+silently overwriting it. A writer *outside* cl-mcp (an external editor, another process) is
+still not coordinated, and that window is not closed. What *is* caught: any change after
+`guard` was built, reusing the same `guard` for a second edit after the first one already
+succeeded, and a change anywhere else in the file (an edited `in-package`, say) even when the
+target form's own text is untouched.
 
 ## `lisp-patch-form`
 Scoped text replacement within a matched top-level Lisp form. Finds `old_text` (exact,
@@ -447,6 +452,12 @@ No `guard`: `lisp-patch-form` takes no guard argument, so it always patches what
 read observed. An edit built from a `clos-describe` result should therefore go through
 `lisp-edit-form` with that entry's `edit_guard` passed as `guard` — that is the only path where
 a file or form changed since the observation stops the write.
+
+Concurrent cl-mcp calls: like `lisp-edit-form`, a patch holds one per-file lock from before it
+reads the file until after it writes, so two patches to two different forms of one file both
+land instead of the second silently dropping the first. This serialises cl-mcp's own writes
+only; a writer outside cl-mcp is not coordinated, and — since there is no `guard` here — a
+change made between your read and this patch is neither detected nor reported.
 
 Output:
 - `path`, `form_type`, `form_name`
@@ -631,8 +642,10 @@ through as `guard` on the `lisp-edit-form` call `form_type`/`form_name` heads to
 for every edit built from a `clos-describe` result, not just when a race seems likely. Doing so
 catches a change to the target form, or anywhere else in the file, made after this
 `clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
-the first one already consumed it — it does not catch an uncoordinated writer racing between
-`lisp-edit-form`'s own check and its write; no guard can close that window. On a conflict, call
+the first one already consumed it. Another cl-mcp call cannot race between `lisp-edit-form`'s own
+check and its write — cl-mcp serialises its own writes to one file, so the second call runs after
+the first and sees the changed file — but a writer outside cl-mcp is not coordinated, and
+`edit_guard` remains a precondition, not a lock or an access token. On a conflict, call
 `clos-describe` again for a fresh `edit_guard` rather than retrying without one or falling back
 to a plain `form_type`/`form_name` call against possibly-changed source. `edit_guard` is present
 exactly when `form_type`/`form_name` carry values: an entry with no edit information (both of

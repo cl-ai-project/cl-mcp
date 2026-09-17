@@ -4,7 +4,14 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok #:ng)
-  (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
+  (:import-from #:uiop #:getcwd #:ensure-directory-pathname
+                #:merge-pathnames* #:native-namestring)
+  (:import-from #:bordeaux-threads
+                #:make-thread
+                #:join-thread
+                #:make-semaphore
+                #:signal-semaphore
+                #:wait-on-semaphore)
   (:import-from #:asdf #:system-source-directory)
   ;; Named so ASDF loads it: fs-write-file's post-write warning and its
   ;; overwrite guard both follow *lisp-file-unparseable-hook*, which this
@@ -17,6 +24,8 @@
                 #:fs-read-source-text
                 #:fs-read-source-octets
                 #:fs-write-file
+                #:file-lock-key
+                #:file-lock
                 #:fs-window-start
                 #:fs-list-directory
                 #:fs-resolve-read-path
@@ -622,3 +631,118 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
           (ng (search "allow_unparseable_overwrite=true" text)
               "no promise the overwrite guard cannot keep")
           (ok (eq t (gethash "unparseable" payload))))))))
+
+(defun run-in-parallel (thunk-a thunk-b)
+  "Run THUNK-A and THUNK-B in two threads released together and return their
+two primary values as a list, a signalled condition standing in for the value
+of a thunk that failed.
+
+The release is a two-party semaphore barrier -- each thread signals its own
+semaphore and then waits for the other's -- so neither thunk starts until both
+threads are running. No SLEEP and no timing assumption: the barrier is the
+synchronisation, and the WAIT-ON-SEMAPHORE timeout only keeps a broken run
+from hanging the suite."
+  (let ((a-ready (make-semaphore))
+        (b-ready (make-semaphore))
+        (results (make-array 2 :initial-element nil)))
+    (flet ((runner (index mine theirs thunk)
+             (lambda ()
+               (signal-semaphore mine)
+               (wait-on-semaphore theirs :timeout 30)
+               (setf (aref results index)
+                     (handler-case (funcall thunk)
+                       (error (e) e))))))
+      (let ((thread-a (make-thread (runner 0 a-ready b-ready thunk-a)
+                                   :name "cl-mcp-file-lock-test-a"))
+            (thread-b (make-thread (runner 1 b-ready a-ready thunk-b)
+                                   :name "cl-mcp-file-lock-test-b")))
+        (join-thread thread-a)
+        (join-thread thread-b)))
+    (coerce results 'list)))
+
+(deftest file-lock-key-collapses-spellings-of-one-file
+  (testing "relative, absolute and dot-dot spellings of one file share a lock"
+    (with-test-project-root
+      (let* ((root cl-mcp/src/project-root:*project-root*)
+             (relative "src/fs.lisp")
+             (absolute (native-namestring (merge-pathnames* relative root)))
+             (round-trip (native-namestring
+                          (merge-pathnames* "src/../src/fs.lisp" root))))
+        (ok (string= (file-lock-key relative) (file-lock-key absolute))
+            "a relative and an absolute spelling give one key")
+        (ok (string= (file-lock-key relative) (file-lock-key round-trip))
+            "a .. component is resolved away")
+        (ok (eq (file-lock relative) (file-lock absolute))
+            "and one key means one lock object"))))
+  (testing "a symlink and its target share a lock"
+    (with-test-project-root
+      (let* ((root cl-mcp/src/project-root:*project-root*)
+             (link (native-namestring
+                    (merge-pathnames* "tests/tmp/fs-lock-link.lisp" root)))
+             (target (native-namestring (merge-pathnames* "src/fs.lisp" root))))
+        (ensure-directories-exist link)
+        (ignore-errors (delete-file link))
+        (unwind-protect
+             (progn
+               (uiop:run-program (list "ln" "-s" target link))
+               (ok (string= (file-lock-key link) (file-lock-key target))
+                   "the link resolves to its target's key")
+               (ok (eq (file-lock link) (file-lock target))
+                   "so both spellings take the same lock"))
+          (ignore-errors (delete-file link))))))
+  (testing "a file that does not exist yet keys on its unresolved absolute path"
+    (with-test-project-root
+      (let ((key (file-lock-key "tests/tmp/fs-lock-no-such-file.lisp")))
+        (ok (search "tests/tmp/fs-lock-no-such-file.lisp" key)
+            "the key is still absolute and still names the file")))))
+
+(deftest fs-write-file-uses-a-temp-name-unique-to-the-call
+  (testing "no two writes of one file can share, interleave or delete one temp"
+    (with-test-project-root
+      (let* ((pn (merge-pathnames* "tests/tmp/fs-lock-temp-name.txt"
+                                   cl-mcp/src/project-root:*project-root*))
+             (temps (loop repeat 8
+                          collect (cl-mcp/src/fs::%temp-pathname-for pn)))
+             (names (mapcar #'native-namestring temps)))
+        (ok (= (length names)
+               (length (remove-duplicates names :test #'string=)))
+            "every temp name is distinct")
+        (ok (every (lambda (p) (equal (pathname-directory p)
+                                      (pathname-directory pn)))
+                   temps)
+            "each temp stays in the target's own directory, so the rename is atomic")
+        (ok (every (lambda (n) (search "/.fs-lock-temp-name." n)) names)
+            "and each keeps the leading dot that hides it from listings")))))
+
+(deftest fs-write-file-serialises-concurrent-writes-of-one-file
+  (testing "two threads writing one file leave exactly one of the two, and no temp"
+    (with-test-project-root
+      (let* ((root cl-mcp/src/project-root:*project-root*)
+             ;; A directory of this test's own, so "what is left behind" can be
+             ;; asserted exactly rather than filtered out of the shared tmp dir.
+             (relative "tests/tmp/fs-lock-write/concurrent.txt")
+             (abs (merge-pathnames* relative root))
+             (dir (uiop:pathname-directory-pathname abs))
+             (content-a (make-string 40000 :initial-element #\a))
+             (content-b (make-string 40000 :initial-element #\b))
+             (bad-round nil))
+        (ensure-directories-exist abs)
+        (unwind-protect
+             (dotimes (round 10)
+               (run-in-parallel (lambda () (fs-write-file relative content-a))
+                                (lambda () (fs-write-file relative content-b)))
+               (let ((after (fs-read-file (native-namestring abs)))
+                     (files (uiop:directory-files dir)))
+                 (unless (or (string= after content-a) (string= after content-b))
+                   (setf bad-round (or bad-round (list round :mixed-content
+                                                       (length after)))))
+                 (unless (= 1 (length files))
+                   (setf bad-round (or bad-round
+                                       (list round :files-left
+                                             (mapcar #'native-namestring files)))))))
+          (ignore-errors (delete-file abs))
+          (ignore-errors (uiop:delete-empty-directory dir)))
+        (ok (null bad-round)
+            (if bad-round
+                (format nil "round ~S is not one writer's content alone" bad-round)
+                "every round left one writer's content whole, with no temp behind"))))))
