@@ -326,6 +326,20 @@ Input:
   `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
   form an earlier read observed — `clos-describe`'s own `edit_guard` field, on a `matched`
   entry, is one. See "Edit guard" below.
+- `guard_token` (string, optional): the same guard in the compact one-line form `clos-describe`
+  prints beside a matched definition as `[guard: ...]`:
+  `version|file_digest|form_start|form_end|form_digest|abs_path`, with `abs_path`
+  percent-encoded so neither the separator nor a line break can appear inside it. Copy it
+  verbatim; it is read back into the object above and runs the identical six checks. This is the
+  form to use when working from `clos-describe`'s content text, which is where the token appears
+  — the `edit_guard` object itself is a sibling JSON field many clients never render.
+
+  Both guard arguments are judged on the key being **present**, not on its value being useful.
+  Sending `guard` and `guard_token` together is an error rather than one silently winning, and
+  sending either as `null`, `false` or any other value of the wrong shape is an argument error —
+  not a silent fall-back to an unguarded edit. Omit the argument entirely to edit without a
+  guard. A token that is present but cannot be read is likewise a guard *conflict*, not a
+  missing guard: the edit is refused, never downgraded.
 
 Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
 ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
@@ -380,8 +394,10 @@ Dry-run output (when `dry_run` is true):
 **Edit guard.** Without `guard`, `lisp-edit-form` matches `form_type`/`form_name` against
 whatever is on disk right now — there is no guarantee that form is the same one an earlier
 read (a `clos-describe` call, say) observed; something else may have replaced, moved or
-deleted it since. Passing `guard` closes that gap: `replace`, `insert_before`, `insert_after`,
-`delete` and `dry_run` all run the same six checks, in order, **before writing anything**:
+deleted it since. Passing `guard` — or `guard_token`, its compact one-line spelling, which is
+read back into the same object first — closes that gap: `replace`, `insert_before`,
+`insert_after`, `delete` and `dry_run` all run the same six checks, in order, **before writing
+anything**:
 
 1. `guard.version` is `1` (the only version this tool understands).
 2. `guard.abs_path` names the same file `file_path` resolves to.
@@ -478,8 +494,9 @@ abbreviates, and same-name methods from different packages need a `[N]` suffix.
 No `guard`: `lisp-patch-form` takes no guard argument, so it always patches whatever
 `form_type`/`form_name` match on disk right now, with no check that it is the form an earlier
 read observed. An edit built from a `clos-describe` result should therefore go through
-`lisp-edit-form` with that entry's `edit_guard` passed as `guard` — that is the only path where
-a file or form changed since the observation stops the write.
+`lisp-edit-form` with that entry's `edit_guard` passed as `guard`, or its printed `[guard: ...]`
+token passed as `guard_token` — that is the only path where a file or form changed since the
+observation stops the write.
 
 Concurrent cl-mcp calls: like `lisp-edit-form`, a patch holds one per-file lock from before it
 reads the file until after it writes, so two patches to two different forms of one file both
@@ -680,7 +697,24 @@ argument accepts (see that tool's "Edit guard" section for the six checks it run
 `form_end` and `form_digest` — all computed from the exact same read and CST span that produced
 this entry's `form_type`/`form_name`, never a second, possibly different, read. Pass it straight
 through as `guard` on the `lisp-edit-form` call `form_type`/`form_name` heads toward; recommended
-for every edit built from a `clos-describe` result, not just when a race seems likely. Doing so
+for every edit built from a `clos-describe` result, not just when a race seems likely.
+
+The `edit_guard` object is a sibling JSON field of the tool result, which a client that renders
+only `content[].text` never sees. So the content text prints the same guard beside the matched
+definition, after `form_type`/`form_name` and any `edit_unit`, as a compact one-line token:
+
+```
+AREA (RECTANGLE)  src/shapes.lisp:70 (defmethod area ((s rectangle)))  [guard: 1|md5:fee09e…|2193|2262|md5:9cbd88…|/abs/path/shapes.lisp]
+```
+
+The fields are `version|file_digest|form_start|form_end|form_digest|abs_path`, in that order.
+`abs_path` is percent-encoded (`%`, `|`, `[`, `]` and every control character, including a
+newline) and comes last, so the token is always one line, with exactly five separators and no
+`]` before the one that closes `[guard: ...]`, however odd the path is — which is what makes
+"copy the text between `[guard: ` and the next `]`" true rather than usually true.
+`path` is left out; no check reads it. Copy the token verbatim into `lisp-edit-form`'s
+`guard_token` — it is read back into the object above and checked identically. An entry that is
+not `matched` prints no token, because it carries no `edit_guard` to print. Doing so
 catches a change to the target form, or anywhere else in the file, made after this
 `clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
 the first one already consumed it. Only cl-mcp's three parent-side write tools — `fs-write-file`,

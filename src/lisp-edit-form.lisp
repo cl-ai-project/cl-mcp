@@ -521,8 +521,10 @@ READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-
 to use for parsing both the file and the new content.
 
 GUARD, if provided, is an edit_guard JSON object (clos-describe's edit_guard,
-design doc 2026-09-16-clos-describe-fail-closed section 4.1) that must still
-describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
+design doc 2026-09-16-clos-describe-fail-closed section 4.1), or the compact
+token clos-describe prints for it in its content text -- the form a client
+that renders only content[].text can actually get hold of. Either way it must
+still describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
 %LOCATE-TARGET-FORM signals EDIT-GUARD-CONFLICT-ERROR, before any value is
 returned and before anything is written, when it does not. Without GUARD,
 this call behaves as before -- there is no guarantee the located form still
@@ -635,6 +637,47 @@ or NIL."
                  (t (values updated parinfer-warning nil repair-fixes
                             validated-content bracket-warning))))))))))
 
+(defun %resolve-guard-argument (args guard guard-token)
+  "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
+call.  ARGS is the tool's raw JSON argument table; GUARD and GUARD-TOKEN are
+what EXTRACT-ARG pulled out of it.
+
+Decided on whether the KEYS are present, not on whether their values are
+true.  EXTRACT-ARG sees only a value, and YASON decodes both `null` and
+`false` to NIL, so `\"guard_token\": null` is indistinguishable there from a
+key that was never sent: the type check is skipped and the call proceeds
+unguarded.  That is the one outcome a caller who asked for a guard must never
+get -- it is the same downgrade PARSE-EDIT-GUARD-TOKEN refuses to make for a
+token it cannot read -- so a key that is present is checked here even when its
+value is NIL, and only a call that sent neither key runs unguarded."
+  (flet ((present-p (key) (and args (nth-value 1 (gethash key args)))))
+    (let ((guard-present (present-p "guard"))
+          (token-present (present-p "guard_token")))
+      (cond
+        ;; Two spellings of one guard: refuse both rather than pick a winner,
+        ;; so a caller that sent a stale one alongside a fresh one is told.
+        ((and guard-present token-present)
+         (error 'arg-validation-error :arg-name "guard_token"
+                :message "pass either guard or guard_token, not both"))
+        (token-present
+         (unless (and (stringp guard-token) (plusp (length guard-token)))
+           (error 'arg-validation-error :arg-name "guard_token"
+                  :message (concatenate
+                            'string
+                            "guard_token must be the [guard: ...] token clos-describe "
+                            "printed, as a string; omit the argument entirely to edit "
+                            "without a guard")))
+         guard-token)
+        (guard-present
+         (unless (hash-table-p guard)
+           (error 'arg-validation-error :arg-name "guard"
+                  :message (concatenate
+                            'string
+                            "guard must be an edit_guard object; omit the argument "
+                            "entirely to edit without a guard")))
+         guard)
+        (t nil)))))
+
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
 Supports replace, insert_before, insert_after, and delete operations while preserving
@@ -677,7 +720,16 @@ is used instead of Eclector, which means comments are NOT preserved.")
 file_digest, form_start, form_end, form_digest}. When given, the edit (including
 dry_run) is refused with a conflict object, and nothing is written, unless the
 file and the matched form still look exactly as observed. Without it, this call
-behaves as before: the located form may not be the one an earlier read saw."))
+behaves as before: the located form may not be the one an earlier read saw.")
+         (guard-token :type :string
+                      :description "The same edit guard in the compact one-line form
+clos-describe prints beside a matched definition as [guard: ...]:
+version|file_digest|form_start|form_end|form_digest|abs_path. Copy that token
+verbatim; it is checked exactly as the guard object is. Use this rather than
+'guard' when reading clos-describe's content text, which is where the token
+appears. Passing both is an error, and so is sending either one as null,
+false or any other non-token value: omit the argument entirely to edit
+without a guard."))
   :body
   (progn
     (when (and (not content) (string/= (string-downcase operation) "delete"))
@@ -694,7 +746,7 @@ behaves as before: the located form may not be the one an earlier read saw."))
                             :dry-run dry_run
                             :normalize-blank-lines normalize_blank_lines
                             :readtable (%parse-readtable-designator readtable)
-                            :guard guard)
+                            :guard (%resolve-guard-argument args guard guard-token))
           (if dry_run
               ;; The summary inlines only the edited FORM (preview_form), never
               ;; the whole updated file: "preview" holds the full file and is
@@ -790,6 +842,14 @@ behaves as before: the located form may not be the one an earlier read saw."))
                                 "remediation" (%multiple-top-level-forms-error-data)))
             (rpc-error id -32602 (%multiple-top-level-forms-error-message)
                        (%multiple-top-level-forms-error-data))))
+      ;; A rejected guard argument is an argument error, not an internal one.
+      ;; Without this clause the generic ERROR clause below would relabel it
+      ;; -32603, unlike every other argument this tool refuses -- and
+      ;; %RESOLVE-GUARD-ARGUMENT signals from inside the call below, so
+      ;; DEFINE-TOOL's own ARG-VALIDATION-ERROR handler never sees it.
+      (arg-validation-error (e)
+        (tool-error id (princ-to-string e)
+                    :protocol-version (protocol-version state)))
       (error (e)
         (let ((msg (sanitize-for-json
                     (sanitize-error-message (format nil "~A" e)))))

@@ -42,10 +42,12 @@ source_match_reason instead.  A matched method inside a defgeneric's
 (:method ...) option or a defclass/define-condition accessor names that
 container as form_type/form_name, with edit_unit saying so, since the
 method itself is not a top-level form.  A matched definition also carries
-an edit_guard: pass that object through unchanged as lisp-edit-form's
-guard argument, and the edit is refused -- with nothing written -- when the
-file or that form changed after this call.  On such a conflict, call
-clos-describe again for a fresh edit_guard instead of editing without one.
+an edit guard, printed at the end of its line as [guard: TOKEN] and repeated
+as an edit_guard object in the JSON: pass the token as lisp-edit-form's
+guard_token argument (or the object, unchanged, as its guard), and the edit
+is refused -- with nothing written -- when the file or that form changed
+after this call.  On such a conflict, call clos-describe again for a fresh
+guard instead of editing without one.
 
 Reads only: a class is never finalized, no initform is evaluated, and nothing
 is interned.

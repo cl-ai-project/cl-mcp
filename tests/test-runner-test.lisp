@@ -423,6 +423,47 @@
               (stringp (gethash "reason" failure)))
           "reason should be nil or a string"))))
 
+(deftest failure-detail-prints-form-and-values-as-source
+  (testing "a string value stays distinguishable from a number printing the same"
+    ;; PRINC-TO-STRING stood here once and reported the failing (equal "6" 6)
+    ;; as the visibly true (EQUAL 6 6), with "6" and 6 as the same Got: entry.
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t"
+                   :form '(equal "6" 6)
+                   :values (list "6" 6))))
+      (ok (search "\"6\"" (gethash "form" detail))
+          "the string literal keeps its quotes in the form")
+      (ok (equal '("\"6\"" "6") (coerce (gethash "values" detail) 'list))
+          "and the two values no longer print as one and the same")))
+  (testing "a keyword keeps its colon"
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t"
+                   :form '(make-instance 'rect :width 2))))
+      (ok (search ":WIDTH" (gethash "form" detail))
+          "an initarg printed without its colon is not readable-back code")))
+  (testing "a form that is itself a string still keeps its quotes"
+    ;; Rove records the quoted form a user wrote, so (ng "truthy") records the
+    ;; string itself.  Passing a string through as already-rendered text would
+    ;; print it as the bare, symbol-looking truthy -- the very confusion this
+    ;; function exists to avoid.
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t" :form "truthy")))
+      (ok (equal "\"truthy\"" (gethash "form" detail))))))
+
+(deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
+  (testing "a real Rove failure whose form is a bare string reports it quoted"
+    ;; The whole path, not just MAKE-FAILURE-DETAIL: Rove's ASSERTION-FORM
+    ;; hands back the quoted form a user wrote, which for (ng "truthy") is the
+    ;; string itself.
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-string-form"))
+           (failures (gethash "failed_tests" result))
+           (failure (and (plusp (length failures)) (aref failures 0))))
+      (ok (plusp (gethash "failed" result)) "the helper test does fail")
+      (ok failure "and the failure is reported with details")
+      (when failure
+        (ok (equal "\"truthy\"" (gethash "form" failure))
+            "the form is the quoted string, not a bare truthy")))))
+
 (deftest run-tests-handles-direct-assertion-failures
   (testing "run-tests handles failures from direct assertions without (testing ...) wrapper"
     (let* ((result (run-tests "cl-mcp/tests/test-runner-test-direct-assertion"))
