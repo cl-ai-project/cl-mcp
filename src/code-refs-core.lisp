@@ -23,7 +23,9 @@
            #:resolve-site-token
            #:resolve-scan-forms
            #:merge-references
-           #:build-references-report))
+           #:build-references-report
+           #:%status-string
+           #:*note-stale*))
 
 (in-package #:cl-mcp/src/code-refs-core)
 
@@ -38,9 +40,11 @@ goes through this so the two paths cannot diverge."
   "Split TEXT, a symbol as it would be written in source, without reading it.
 
 Returns (values NAME PACKAGE-PART PROBLEM).  NAME and PACKAGE-PART follow the
-standard reader: unescaped characters are upcased, characters inside |...| or
-after a backslash are kept as written, and one or two colons separate the
-package from the name.  PACKAGE-PART is NIL for an unqualified symbol and
+standard reader: unescaped characters are upcased; a backslash escapes the one
+character after it, inside |...| as well as outside, and is itself dropped;
+other characters inside |...| are kept as written; and one or two colons
+separate the package from the name, unless escaped either way.
+PACKAGE-PART is NIL for an unqualified symbol and
 \"KEYWORD\" for :NAME.  When TEXT is not a symbol name, NAME and PACKAGE-PART
 are NIL and PROBLEM is a sentence saying why."
   (let* ((text (string-trim '(#\Space #\Tab #\Newline #\Return) (or text "")))
@@ -60,16 +64,19 @@ are NIL and PROBLEM is a sentence saying why."
         (fail "~A is an uninterned symbol; it has no references to find" text))
       (loop while (< i length)
             do (let ((ch (char text i)))
+                 ;; Clause order follows CLHS 2.4.8.1: a single escape wins over
+                 ;; a multiple escape, so a backslash quotes the next character
+                 ;; inside |...| as well as outside it.
                  (cond
-                   ((char= ch #\|)
-                    (setf in-bars (not in-bars)))
-                   (in-bars
-                    (write-char ch buffer))
                    ((char= ch #\\)
                     (incf i)
                     (when (>= i length)
                       (fail "~A ends with an escaping backslash" text))
                     (write-char (char text i) buffer))
+                   ((char= ch #\|)
+                    (setf in-bars (not in-bars)))
+                   (in-bars
+                    (write-char ch buffer))
                    ((char= ch #\:)
                     (cond
                       ((null package-part)

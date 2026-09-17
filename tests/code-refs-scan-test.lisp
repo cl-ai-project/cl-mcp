@@ -17,7 +17,12 @@
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:target-name-from-designator
                 #:scan-text
-                #:scan-project))
+                #:scan-project
+                #:top-level-forms-at)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest
+                #:digest-string-octets))
 
 (in-package #:cl-mcp/tests/code-refs-scan-test)
 
@@ -137,6 +142,16 @@
         (ok (equal "P2" (field 2 "in_package")))
         (ok (equal "eval-when" (field 3 "form_type")))
         (ok (null (field 3 "form_name")))))))
+
+(deftest scan-text-form-name-is-one-line
+  (testing "a defmethod's form_name has no line break however long its lambda list"
+    (let* ((text (format nil "(defmethod write-out ((stream sink) string &optional (start 0) end ~
+(fill-pointer-output nil) (element-type 'character))~%  (target stream))"))
+           (form (first (scan-text text "TARGET"))))
+      (ok (equal (concatenate 'string
+                              "write-out ((stream sink) string &optional (start 0) end "
+                              "(fill-pointer-output nil) (element-type 'character))")
+                 (gethash "form_name" form))))))
 
 (deftest scan-text-keeps-token-column-and-context
   (testing "the token as written, its 1-based column and its line"
@@ -464,3 +479,383 @@ LABEL goes into its name, so a leftover directory says which test made it."
                    "the package stays absent from the parent")
                (ok (= 1 reads) "the defining file is read by one walk, not one per file")))
         (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(defun %write-tmp (name text)
+  "Write TEXT to tests/tmp/NAME in the cl-mcp source tree; return its truename namestring."
+  (let ((file (asdf/system:system-relative-pathname :cl-mcp (format nil "tests/tmp/~A" name))))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede :external-format :utf-8)
+      (write-string text out))
+    (namestring (truename file))))
+
+(defun %name-shapes (names)
+  "Return each source name in NAMES as (TOKEN . SETF-FLAG): the shape a slot
+option contributes to a signature's :readers or :writers.  A NIL name --
+an option value this scanner refuses to guess at -- stays NIL."
+  (mapcar (lambda (name)
+            (and name (cons (getf name :token) (and (getf name :setf) t))))
+          names))
+
+(deftest top-level-forms-at-describes-forms-starting-on-lines
+  (testing "form_type and form_name of the forms starting on the given lines"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at.lisp"
+                            (format nil "(in-package #:cl-user)~%~%(defclass widget ()~%  ())~%~%~
+(defmethod paint ((w widget) stream)~%  (list w stream))~%~%#+sbcl~%(defun gated () 1)~%"))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(3 6 9 10 4))
+             (ok (null failure))
+             (ok (equal '("defclass" "widget")
+                        (list (getf (first (gethash 3 table)) :form-type)
+                              (getf (first (gethash 3 table)) :form-name))))
+             (ok (equal :defclass (getf (getf (first (gethash 3 table)) :signature) :kind)))
+             (ok (equal '("defmethod" "paint ((w widget) stream)")
+                        (list (getf (first (gethash 6 table)) :form-type)
+                              (getf (first (gethash 6 table)) :form-name))))
+             (ok (equal '("defun" "gated")
+                        (list (getf (first (gethash 9 table)) :form-type)
+                              (getf (first (gethash 9 table)) :form-name)))
+                 "the #+sbcl line")
+             (ok (eq (first (gethash 9 table)) (first (gethash 10 table)))
+                 "the wrapped form's own line shares the same entry")
+             (ok (null (gethash 4 table)) "a line inside a form"))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-gives-definition-signatures
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (path (%write-tmp "top-level-forms-at-signatures.lisp"
+                          (format nil "(in-package #:cl-user)~%~
+(defmethod fx:render :around ((w fx:widget) stream (mode (eql :fast))~%    ~
+&optional (depth 0) &key k)~%  (list w stream mode depth k))~%~
+(defmethod (setf title) (value (w widget))~%  value)~%~
+(defmethod combine + ((a integer) b)~%  a)~%~
+(defgeneric (setf title) (value w))~%~
+(defclass fx:widget () ())~%~
+(define-condition oops (error) ())~%~
+(defstruct (point (:constructor mk)) x)~%~
+(defstruct plain x)~%~
+(defun helper () 1)~%"))))
+    (unwind-protect
+         (multiple-value-bind (table failure)
+             (top-level-forms-at path '(2 5 7 9 10 11 12 13 14))
+           (flet ((signature (line) (getf (first (gethash line table)) :signature))
+                  (tokens (plists) (mapcar (lambda (p) (getf p :token)) plists)))
+             (ok (null failure))
+             (testing "a defmethod's tokens are the source text, unresolved"
+               (let ((sig (signature 2)))
+                 (ok (equal :defmethod (getf sig :kind)))
+                 (ok (equal "fx:render" (getf (getf sig :name) :token)))
+                 (ok (null (getf (getf sig :name) :setf)))
+                 (ok (equal '(":around") (tokens (getf sig :qualifiers))))
+                 (let ((specializers (getf sig :specializers)))
+                   (ok (equal '(:class :class :eql)
+                              (mapcar (lambda (s) (getf s :kind)) specializers))
+                       "widget, T (an unspecialized parameter) and the EQL mode")
+                   (ok (equal "fx:widget" (getf (first specializers) :token)))
+                   (ok (equal "CL-USER" (getf (first specializers) :in-package))
+                       "a specializer the source spells out keeps the file's own package")
+                   (ok (equal "T" (getf (second specializers) :token)))
+                   (ok (equal "COMMON-LISP" (getf (second specializers) :in-package))
+                       "the synthesized T names COMMON-LISP:T, never the file package's T")
+                   (ok (equal :keyword (getf (getf (third specializers) :datum) :kind)))
+                   (ok (equal "FAST" (getf (getf (third specializers) :datum) :name))))))
+             (testing "a (setf x) name"
+               (let ((sig (signature 5)))
+                 (ok (equal "title" (getf (getf sig :name) :token)))
+                 (ok (eq t (getf (getf sig :name) :setf)))
+                 (ok (equal '("T" "widget") (tokens (getf sig :specializers))))))
+             (testing "a symbol qualifier"
+               (let ((sig (signature 7)))
+                 (ok (equal '("+") (tokens (getf sig :qualifiers))))
+                 (ok (equal '("integer" "T") (tokens (getf sig :specializers))))))
+             (testing "the name of other definitions"
+               (ok (equal "title" (getf (getf (signature 9) :name) :token)) "defgeneric")
+               (ok (equal :defgeneric (getf (signature 9) :kind)))
+               (ok (equal "fx:widget" (getf (getf (signature 10) :name) :token)) "defclass")
+               (ok (equal "oops" (getf (getf (signature 11) :name) :token)) "define-condition")
+               (ok (equal "point" (getf (getf (signature 12) :name) :token))
+                   "defstruct with options")
+               (ok (equal "plain" (getf (getf (signature 13) :name) :token)) "defstruct"))
+             (testing "no kind-specific fields for other forms"
+               (ok (equal '("defun" "helper")
+                          (list (getf (first (gethash 14 table)) :form-type)
+                                (getf (first (gethash 14 table)) :form-name))))
+               (ok (equal :other (getf (signature 14) :kind)))
+               (ok (equal "defun" (getf (getf (signature 14) :head) :token))))))
+      (ignore-errors (delete-file path)))))
+
+(deftest top-level-forms-at-tags-the-eql-datum
+  (testing "an EQL specializer's datum is tagged per spec 3.3, kind by kind"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-eql.lisp"
+                            (format nil "~{~A~%~}"
+                                   (list "(in-package #:cl-user)"
+                                         "(defmethod area ((s (eql \"str\"))) 1)"
+                                         "(defmethod area ((s (eql *v*))) 2)"
+                                         "(defmethod area ((s (eql (f)))) 3)"
+                                         "(defmethod area ((s (eql #\\A))) 4)"
+                                         "(defmethod area ((s (eql 'foo))) 5)"
+                                         "(defmethod area ((s (eql (quote foo)))) 6)"
+                                         "(defmethod area ((s (eql :k))) 7)"
+                                         "(defmethod area ((s (eql t))) 8)"
+                                         "(defmethod area ((s (eql nil))) 9)"
+                                         "(defmethod area ((s (eql 3))) 10)")))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2 3 4 5 6 7 8 9 10 11))
+             (ok (null failure))
+             (flet ((eql-datum (line)
+                      (getf (first (getf (getf (first (gethash line table)) :signature)
+                                         :specializers))
+                            :datum)))
+               (testing "unverifiable data keep a specific reason"
+                 (ok (equal :unverifiable (getf (eql-datum 2) :kind)) "a string")
+                 (ok (search "string" (getf (eql-datum 2) :reason)) "the reason names the type")
+                 (ok (equal :unverifiable (getf (eql-datum 3) :kind)) "a variable reference")
+                 (ok (equal :unverifiable (getf (eql-datum 4) :kind)) "an arbitrary call"))
+               (ok (equal '(:kind :character :value "A") (eql-datum 5)))
+               (testing "'foo is confirmed by the reader macro character alone"
+                 (ok (equal '(:kind :symbol :token "foo" :in-package "CL-USER" :quoted :reader)
+                            (eql-datum 6))))
+               (testing "(quote foo) carries the operator's own token for the worker to resolve"
+                 (let ((datum (eql-datum 7)))
+                   (ok (equal :symbol (getf datum :kind)))
+                   (ok (equal "foo" (getf datum :token)))
+                   (ok (equal "CL-USER" (getf datum :in-package)))
+                   (ok (equal :operator (getf datum :quoted)))
+                   (ok (equal '(:token "quote" :in-package "CL-USER") (getf datum :quote-token)))))
+               (ok (equal '(:kind :keyword :name "K") (eql-datum 8)))
+               (ok (equal '(:kind :boolean :value "T") (eql-datum 9)))
+               (ok (equal '(:kind :boolean :value "NIL") (eql-datum 10)))
+               (ok (equal '(:kind :integer :value "3") (eql-datum 11)))))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-tags-an-explicit-quote-as-operator-even-if-shadowable
+  (testing "(quote x) stays :operator, with a token, when the package might shadow quote"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-quote-shadow.lisp"
+                            (format nil "~{~A~%~}"
+                                   (list "(in-package #:cl-mcp-refs-scan-quote-shadow)"
+                                         "(defmethod area ((s (eql (quote foo)))) 1)")))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+             (ok (null failure))
+             (let ((datum (getf (first (getf (getf (first (gethash 2 table)) :signature)
+                                             :specializers))
+                                :datum)))
+               (ok (equal :symbol (getf datum :kind)))
+               (ok (equal :operator (getf datum :quoted))
+                   "the parent never decides quote is shadowed; it just hands over the token")
+               (ok (equal '(:token "quote" :in-package "CL-MCP-REFS-SCAN-QUOTE-SHADOW")
+                          (getf datum :quote-token)))))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-returns-every-form-starting-on-a-line
+  (testing "two top-level forms on the same line both come back, in source order"
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (source (format nil "~{~A~%~}"
+                           (list "(in-package #:cl-user)"
+                                 "(defun a () 1) (defmethod area ((s circle)) 2)")))
+           (path (%write-tmp "top-level-forms-at-same-line.lisp" source)))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+             (ok (null failure))
+             (let ((forms (gethash 2 table)))
+               (ok (equal '("a" "area ((s circle))")
+                          (mapcar (lambda (form) (getf form :form-name)) forms)))
+               (ok (equal "(defun a () 1)"
+                          (subseq source (getf (first forms) :start) (getf (first forms) :end))))
+               (ok (equal "(defmethod area ((s circle)) 2)"
+                          (subseq source (getf (second forms) :start)
+                                  (getf (second forms) :end))))))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-keeps-tokens-unresolved
+  (testing "a token from an unknown package comes back exactly as written, not resolved"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-unknown-package.lisp"
+                            (format nil "~{~A~%~}"
+                                   (list "(in-package #:cl-user)"
+                                         (concatenate 'string
+                                          "(defmethod area :around ((s pkg-a:circle) "
+                                          "(n (eql 3/4)) other &optional x) 1)"))))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+             (ok (null failure))
+             (let* ((sig (getf (first (gethash 2 table)) :signature))
+                    (specializers (getf sig :specializers)))
+               (ok (= 3 (length specializers)) "s, n and the unspecialized other; x is &optional")
+               (ok (equal "pkg-a:circle" (getf (first specializers) :token)))
+               (ok (equal :eql (getf (second specializers) :kind)))
+               (ok (equal '(:kind :ratio :numerator "3" :denominator "4")
+                          (getf (second specializers) :datum)))
+               (ok (equal :class (getf (third specializers) :kind)))
+               (ok (equal "T" (getf (third specializers) :token))
+                   "an unspecialized parameter synthesizes the literal T")
+               (ok (equal "CL-USER" (getf (first specializers) :in-package))
+                   "an explicit specializer resolves in the package the file was read in")
+               (ok (equal "COMMON-LISP" (getf (third specializers) :in-package))
+                   "the synthesized T resolves in COMMON-LISP instead")))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-describes-defgeneric-methods-and-defclass-slots
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "defgeneric's (:method ...) options carry qualifiers and specializers"
+      (let ((path (%write-tmp
+                   "top-level-forms-at-defgeneric-methods.lisp"
+                   (format nil "~{~A~%~}"
+                          (list "(in-package #:cl-user)"
+                                (concatenate 'string
+                                 "(defgeneric area (shape) (:method ((s circle)) 1) "
+                                 "(:method :around ((s square)) 2))"))))))
+        (unwind-protect
+             (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+               (ok (null failure))
+               (let* ((sig (getf (first (gethash 2 table)) :signature))
+                      (methods (getf sig :methods)))
+                 (ok (= 2 (length methods)))
+                 (ok (null (getf (first methods) :qualifiers)))
+                 (ok (equal "circle"
+                            (getf (first (getf (first methods) :specializers)) :token)))
+                 (ok (equal ":around"
+                            (getf (first (getf (second methods) :qualifiers)) :token)))
+                 (ok (equal "square"
+                            (getf (first (getf (second methods) :specializers)) :token)))))
+          (ignore-errors (delete-file path)))))
+    (testing "a defclass slot's :reader, :writer and :accessor names"
+      (let ((path (%write-tmp
+                   "top-level-forms-at-defclass-slots.lisp"
+                   (format nil "~{~A~%~}"
+                          (list "(in-package #:cl-user)"
+                                "(defclass widget ()"
+                                "  ((name :reader widget-name :writer set-widget-name)"
+                                "   (id :accessor widget-id)"
+                                "   (tag :writer (setf widget-tag)) bare))")))))
+        (unwind-protect
+             (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+               (ok (null failure))
+               (let* ((sig (getf (first (gethash 2 table)) :signature))
+                      (slots (getf sig :slots)))
+                 (ok (= 4 (length slots)))
+                 (ok (equal "name" (getf (getf (first slots) :name) :token)))
+                 (ok (equal '("widget-name")
+                            (mapcar (lambda (tok) (getf tok :token))
+                                    (getf (first slots) :readers))))
+                 (ok (equal '("set-widget-name")
+                            (mapcar (lambda (tok) (getf tok :token))
+                                    (getf (first slots) :writers))))
+                 (ok (equal '("widget-id")
+                            (mapcar (lambda (tok) (getf tok :token))
+                                    (getf (second slots) :readers))))
+                 (ok (equal '("widget-id")
+                            (mapcar (lambda (tok) (getf tok :token))
+                                    (getf (second slots) :writers)))
+                     "an accessor contributes to both readers and writers")
+                 (ok (equal '(("widget-name")) (%name-shapes (getf (first slots) :readers)))
+                     ":reader x defines the plain function x")
+                 (ok (equal '(("set-widget-name"))
+                            (%name-shapes (getf (first slots) :writers)))
+                     ":writer x defines the plain function x, never (setf x)")
+                 (ok (equal '(("widget-id")) (%name-shapes (getf (second slots) :readers))))
+                 (ok (equal '(("widget-id" . t)) (%name-shapes (getf (second slots) :writers)))
+                     ":accessor x defines the (setf x) writer, not a plain x writer")
+                 (ok (equal "tag" (getf (getf (third slots) :name) :token)))
+                 (ok (null (getf (third slots) :readers)))
+                 (ok (equal '(("widget-tag" . t)) (%name-shapes (getf (third slots) :writers)))
+                     ":writer (setf x) defines the setf function, named by the inner symbol")
+                 (ok (equal "bare" (getf (getf (fourth slots) :name) :token)))
+                 (ok (null (getf (fourth slots) :readers)))
+                 (ok (null (getf (fourth slots) :writers)))))
+          (ignore-errors (delete-file path)))))
+    (testing "a :reader or :accessor value CL does not allow becomes an unresolvable name"
+      (let ((path (%write-tmp
+                   "top-level-forms-at-defclass-invalid-accessors.lisp"
+                   (format nil "~{~A~%~}"
+                          (list "(in-package #:cl-user)"
+                                "(defclass gizmo ()"
+                                "  ((a :accessor (setf gizmo-a))"
+                                "   (b :reader 42)))")))))
+        (unwind-protect
+             (multiple-value-bind (table failure) (top-level-forms-at path '(2))
+               (ok (null failure))
+               (let* ((sig (getf (first (gethash 2 table)) :signature))
+                      (slots (getf sig :slots)))
+                 (ok (= 2 (length slots)))
+                 (ok (equal '(nil) (getf (first slots) :readers))
+                     "an :accessor that is not a bare symbol resolves to nothing")
+                 (ok (equal '(nil) (getf (first slots) :writers)))
+                 (ok (equal '(nil) (getf (second slots) :readers))
+                     "neither does a :reader that is not a symbol at all")))
+          (ignore-errors (delete-file path)))))))
+
+(deftest top-level-forms-at-tracks-in-package-switches
+  (testing "a token's in-package is the designator in effect where it is written"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-in-package.lisp"
+                            (format nil "~{~A~%~}"
+                                   (list "(in-package #:common-lisp-user)"
+                                         "(defclass one () ())"
+                                         "(in-package #:keyword)"
+                                         "(defclass two () ())")))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(2 4))
+             (ok (null failure))
+             (ok (equal "COMMON-LISP-USER"
+                        (getf (getf (getf (first (gethash 2 table)) :signature) :name)
+                              :in-package)))
+             (ok (equal "KEYWORD"
+                        (getf (getf (getf (first (gethash 4 table)) :signature) :name)
+                              :in-package))))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-reports-why-it-found-nothing
+  (testing "a file that does not parse gives its reader error"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-bad.lisp"
+                            (format nil "(in-package #:cl-user)~%~%~
+(defparameter *x* #.(+ 1 2))~%"))))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '(3))
+             (ok (zerop (hash-table-count table)))
+             (ok (and (stringp failure) (search "*READ-EVAL*" failure)) failure))
+        (ignore-errors (delete-file path)))))
+  (testing "a file outside the readable paths is not opened"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (outside (merge-pathnames "cl-mcp-top-level-forms-at-outside.lisp"
+                                    (uiop:temporary-directory))))
+      (with-open-file (out outside :direction :output :if-exists :supersede)
+        (write-string "(defun outside () 1)" out))
+      (unwind-protect
+           (ok (eq :denied (nth-value 1 (top-level-forms-at (namestring outside) '(1)))))
+        (ignore-errors (delete-file outside))))))
+
+(deftest top-level-forms-at-without-lines-reads-nothing
+  (testing "no lines asked for is no failure and an empty table"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-empty.lisp" "(defun one () 1)")))
+      (unwind-protect
+           (multiple-value-bind (table failure) (top-level-forms-at path '())
+             (ok (zerop (hash-table-count table)))
+             (ok (null failure)))
+        (ignore-errors (delete-file path))))))
+
+(deftest top-level-forms-at-accepts-a-source-snapshots-text
+  (testing "READ-SOURCE-SNAPSHOT's :TEXT drives the CST and the digest from one read"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (path (%write-tmp "top-level-forms-at-snapshot.lisp"
+                            (format nil "(in-package #:cl-user)~%(defun widget () 1)~%"))))
+      (unwind-protect
+           (multiple-value-bind (snapshot snapshot-failure) (read-source-snapshot path)
+             (ok (null snapshot-failure))
+             (multiple-value-bind (table failure)
+                 (top-level-forms-at "/does/not/exist.lisp" '(2) :text (getf snapshot :text))
+               (ok (null failure) "the read policy is not consulted when TEXT is given")
+               (let ((entry (first (gethash 2 table))))
+                 (ok (equal '("defun" "widget")
+                            (list (getf entry :form-type) (getf entry :form-name))))
+                 (ok (equal "(defun widget () 1)"
+                            (subseq (getf snapshot :text) (getf entry :start) (getf entry :end)))
+                     "the form's [start, end) matches the snapshot's own text")
+                 (ok (equal (snapshot-range-digest snapshot (getf entry :start) (getf entry :end))
+                            (digest-string-octets "(defun widget () 1)"))
+                     "the range digest covers exactly the CST span the snapshot's text produced"))))
+        (ignore-errors (delete-file path))))))

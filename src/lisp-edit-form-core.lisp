@@ -28,10 +28,16 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/fs
                 #:*lisp-file-unparseable-hook*
+                #:*fs-read-max-bytes*
                 #:fs-read-file
                 #:fs-resolve-read-path)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-decode-lossy-p
+                #:snapshot-range-digest)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-condition-text)
+                #:sanitize-condition-text
+                #:sanitize-for-json)
   (:import-from #:uiop
                 #:ensure-directory-pathname
                 #:enough-pathname
@@ -43,6 +49,7 @@
            #:%normalize-paths
            #:%strip-name-prefix
            #:%find-target
+           #:locate-form-in-nodes
            #:%resolve-named-readtable
            #:%nonstandard-readtable-p
            #:%parse-readtable-designator
@@ -61,7 +68,11 @@
            #:file-unparseable-editable-prefix-p
            #:file-unparseable-message
            #:make-file-unparseable-condition
-           #:signal-file-unparseable))
+           #:signal-file-unparseable
+           #:+edit-guard-version+
+           #:check-edit-guard
+           #:edit-guard-conflict-error
+           #:edit-guard-conflict))
 
 (in-package #:cl-mcp/src/lisp-edit-form-core)
 
@@ -73,6 +84,38 @@ Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
        (symbol-name thing)
        (princ-to-string thing))))
 
+(defun %names-only (tree)
+  "Return TREE with each symbol outside COMMON-LISP and KEYWORD replaced by an
+uninterned symbol of the same name, so %SIGNATURE-TEXT prints it bare.
+COMMON-LISP symbols are kept so the pretty printer still writes (QUOTE X) as
+'X; they print without a prefix from COMMON-LISP-USER anyway."
+  (let ((cl (find-package "COMMON-LISP"))
+        (keyword (find-package "KEYWORD")))
+    (labels ((walk (node)
+               (cond
+                 ((consp node) (cons (walk (car node)) (walk (cdr node))))
+                 ((and (symbolp node)
+                       (not (member (symbol-package node) (list cl keyword))))
+                  (make-symbol (symbol-name node)))
+                 (t node))))
+      (walk tree))))
+
+(defun %signature-text (object)
+  "Return OBJECT, part of a definition's signature, printed as form names are
+compared: lower case, on one line, and with no package prefix on any symbol.
+
+The package a form was read in decides how PRIN1 qualifies its symbols, so
+printing them as read made a method's lambda list come out as
+\"((stream cl-mcp/src/utils/bounded-stream:bounded-output-stream) character)\"
+in one process and unqualified in another, and a long lambda list gained line
+breaks.  Neither matched what a caller writes."
+  (let ((*package* (find-package "COMMON-LISP-USER"))
+        (*print-gensym* nil)
+        (*print-pretty* t)
+        (*print-right-margin* most-positive-fixnum)
+        (*print-readably* nil))
+    (string-downcase (prin1-to-string (%names-only object)))))
+
 (defun %defmethod-candidates (form)
   "Return candidate signature strings for a DEFMETHOD FORM.
 Candidates are generated in order of specificity:
@@ -81,10 +124,9 @@ Candidates are generated in order of specificity:
 3. name + lambda-list: \"resize ((s shape) factor)\"
 4. name + qualifier + lambda-list: \"resize :after ((s shape) factor)\"
 
-Every candidate is passed through %STRIP-HASH-COLON so that lambda-list
-prints from package-inferred-system sources (which surface uninterned
-symbols as '#:foo') compare equal to user inputs written without the
-'#:' reader-macro prefix."
+Qualifiers and the lambda list are printed by %SIGNATURE-TEXT, so symbols
+carry no package prefix and '#:' never appears, whichever package the form
+was read in."
   (destructuring-bind
       (_ name &rest rest)
       form
@@ -94,16 +136,11 @@ symbols as '#:foo') compare equal to user inputs written without the
         (when (listp part) (setf lambda-list part) (return))
         (push part qualifiers))
       (let ((name-str (%normalize-string name))
-            (lambda-str
-             (and lambda-list
-                  (%strip-hash-colon
-                   (%normalize-string
-                    (with-output-to-string (s) (prin1 lambda-list s))))))
+            (lambda-str (and lambda-list (%signature-text lambda-list)))
             (qual-str
              (and qualifiers
-                  (%strip-hash-colon
-                   (%normalize-string
-                    (format nil "~{~S~^ ~}" (nreverse qualifiers)))))))
+                  (format nil "~{~A~^ ~}"
+                          (mapcar #'%signature-text (nreverse qualifiers))))))
         (remove nil
                 (list name-str
                       (and qual-str (format nil "~A ~A" name-str qual-str))
@@ -280,52 +317,138 @@ remain distinguishable."
              (write-char c out)
              (incf i))))))))
 
-(defun %find-target (nodes form-type form-name)
-  "Find a target node matching FORM-TYPE and FORM-NAME.
-If FORM-NAME ends with [N] (e.g., 'resize[1]'), select the Nth match (0-indexed).
-If multiple matches exist without an index, signals an error with candidate info."
+(defun %normalize-form-name-text (s)
+  "Return S, a form_name a caller wrote, as the candidates are written.
+Outside string literals, each run of whitespace becomes one space and a
+package prefix -- 'pkg:' or 'pkg::' at the start of a token -- is dropped, so
+\"sb-gray:stream-write-char ((stream\\n  bounded-output-stream) character)\"
+reads as the candidate does.  A token starting with a colon is a keyword and
+is kept."
+  (with-output-to-string (out)
+    (let ((len (length s))
+          (in-string nil)
+          (pending-space nil)
+          (i 0))
+      (flet ((token-start-p ()
+               ;; I begins a token when nothing, whitespace or an opening
+               ;; delimiter precedes it.
+               (or (zerop i)
+                   (find (char s (1- i)) '(#\( #\' #\` #\, #\Space #\Tab
+                                           #\Newline #\Return #\Page)))))
+        (loop while (< i len) do
+          (let ((c (char s i)))
+            (cond
+              ((and in-string (char= c #\\) (< (1+ i) len))
+               (write-char c out)
+               (write-char (char s (1+ i)) out)
+               (incf i 2))
+              (in-string
+               (when (char= c #\") (setf in-string nil))
+               (write-char c out)
+               (incf i))
+              ((%whitespace-char-p c)
+               (setf pending-space t)
+               (incf i))
+              (t
+               (when pending-space
+                 (write-char #\Space out)
+                 (setf pending-space nil))
+               (if (and (token-start-p) (not (find c "():\"'`,#")))
+                   ;; Copy the token from just past its last colon.
+                   (let* ((end (or (position-if (lambda (ch)
+                                                  (or (%whitespace-char-p ch)
+                                                      (find ch "()\"'`,")))
+                                                s :start i)
+                                   len))
+                          (colon (position #\: s :start i :end end :from-end t)))
+                     (write-string s out :start (if colon (1+ colon) i) :end end)
+                     (setf i end))
+                   (progn
+                     (when (char= c #\") (setf in-string t))
+                     (write-char c out)
+                     (incf i)))))))))))
+
+(defun locate-form-in-nodes (nodes form-type form-name)
+  "Find the CST node among NODES -- top-level nodes as PARSE-TOP-LEVEL-FORMS
+returns them -- matching FORM-TYPE and FORM-NAME, the same rules %FIND-TARGET
+documents (the [N] index suffix, defmethod's normalized signature matching,
+reader-prefix stripping).  Returns (VALUES NODE ERROR-STRING).
+
+NODE is the sole matching node, or NIL when it cannot be resolved to exactly
+one: zero matches, an [N] index out of range, or more than one match without
+a disambiguating index.  ERROR-STRING is NIL for zero matches -- a plain,
+non-exceptional absence -- and a descriptive message for the other two: an
+out-of-range index, or an ambiguous set of matches (naming each candidate's
+own signature and its [N] index).  A FORM-NAME that strips down to the empty
+string is also reported this way, before any node is searched.
+
+%FIND-TARGET re-signals ERROR-STRING as a Lisp error, preserving its own
+contract for lisp-edit-form/lisp-patch-form.  The clos-describe observer
+calls this directly instead, to decide a round trip failed (spec 3.5)
+without installing a condition handler around every candidate it checks."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let ((target (%strip-hash-colon
-                   (string-downcase (%strip-name-prefix base-name))))
-          (matches nil))
-      (when (zerop (length target))
-        (error "form_name resolved to empty string after prefix stripping; ~
+    (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
+           (target (if (string= form-type "defmethod")
+                       (%normalize-form-name-text stripped)
+                       stripped))
+           (matches nil))
+      (if (zerop (length target))
+          (values nil (format nil "form_name resolved to empty string after prefix stripping; ~
 provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
-      (loop for node in nodes
-            when (and (typep node 'cst-node)
-                      (eq (cst-node-kind node) :expr))
-              do (let ((value (cst-node-value node)))
-                   (when (and (consp value)
-                              (string= (string-downcase (symbol-name (car value))) form-type)
-                              (some (lambda (cand) (string= cand target))
-                                    (%definition-candidates value form-type)))
-                     (push (cons node value) matches))))
-      (setf matches (nreverse matches))
-      (cond
-        ((null matches)
-         nil)
-        ((and index (< index (length matches)))
-         (car (nth index matches)))
-        (index
-         (error "Index [~D] out of range, only ~D match~:P found for ~A"
-                index (length matches) form-name))
-        ((= (length matches) 1)
-         (car (first matches)))
-        (t
-         ;; Multiple matches without index - provide helpful error
-         (let ((descriptions
-                 (loop for (node . form) in matches
-                       for i from 0
-                       collect (format nil "[~D] ~A"
-                                       i
-                                       (let ((candidates (%definition-candidates form form-type)))
-                                         (or (car (last candidates)) (first candidates)))))))
-           (error "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
-                  form-type form-name descriptions)))))))
+          (progn
+            (loop for node in nodes
+                  when (and (typep node 'cst-node)
+                            (eq (cst-node-kind node) :expr))
+                    do (let ((value (cst-node-value node)))
+                         (when (and (consp value)
+                                    (string= (string-downcase (symbol-name (car value))) form-type)
+                                    (some (lambda (cand) (string= cand target))
+                                          (%definition-candidates value form-type)))
+                           (push (cons node value) matches))))
+            (setf matches (nreverse matches))
+            ;; A method's candidates include its lambda list without its
+            ;; qualifiers, so "area ((s circle))" names both the primary
+            ;; method and the :around one.  When no index was given, a form
+            ;; whose full signature is exactly FORM-NAME wins over forms it
+            ;; only abbreviates.
+            (unless index
+              (let ((exact (remove-if-not
+                            (lambda (match)
+                              (string= target
+                                       (car (last (%definition-candidates (cdr match) form-type)))))
+                            matches)))
+                (when exact
+                  (setf matches exact))))
+            (cond
+              ((null matches) (values nil nil))
+              ((and index (< index (length matches))) (values (car (nth index matches)) nil))
+              (index
+               (values nil (format nil "Index [~D] out of range, only ~D match~:P found for ~A"
+                                    index (length matches) form-name)))
+              ((= (length matches) 1) (values (car (first matches)) nil))
+              (t
+               (let ((descriptions
+                       (loop for (node . form) in matches
+                             for i from 0
+                             collect (let ((candidates (%definition-candidates form form-type)))
+                                       (format nil "[~D] ~A" i
+                                               (or (car (last candidates)) (first candidates)))))))
+                 (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
+                                     form-type form-name descriptions))))))))))
+
+(defun %find-target (nodes form-type form-name)
+  "Find a target node matching FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES
+documents the matching rules in full).  Returns the node, or NIL when
+nothing matches; signals a Lisp error when LOCATE-FORM-IN-NODES reports one
+instead (an out-of-range [N] index, ambiguous matches, or an empty
+FORM-NAME) -- the contract lisp-edit-form and lisp-patch-form already rely
+on."
+  (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
+    (if reason (error "~A" reason) node)))
 
 (defun %detect-readtable-before-node (nodes target)
   "Return the readtable designator active before TARGET, or NIL.
@@ -506,7 +629,181 @@ ABS, TEXT and CAUSE. Never returns."
                                          :readtable readtable
                                          :editable-prefix editable-prefix)))
 
-(defun %locate-target-form (file-path form-type form-name readtable)
+(defconstant +edit-guard-version+ 1
+  "The only value GUARD's version field may carry for CHECK-EDIT-GUARD to
+accept it (design doc 2026-09-16-clos-describe-fail-closed, section 4.1).")
+
+(defun %guard-conflict (reason expected actual)
+  "Build one of CHECK-EDIT-GUARD's CONFLICT values: a plist (:REASON REASON
+:EXPECTED EXPECTED :ACTUAL ACTUAL). EXPECTED and ACTUAL are run through
+SANITIZE-FOR-JSON, since ACTUAL -- and sometimes EXPECTED -- echoes a value
+read from GUARD, a caller-supplied argument; SANITIZE-FOR-JSON also coerces
+a non-string value to one."
+  (list :reason reason
+        :expected (sanitize-for-json expected)
+        :actual (sanitize-for-json actual)))
+
+(define-condition edit-guard-conflict-error (error)
+  ((conflict :initarg :conflict :reader edit-guard-conflict))
+  (:report
+   (lambda (condition stream)
+     (let ((conflict (edit-guard-conflict condition)))
+       (format stream
+               "Edit guard conflict: ~A (expected: ~A; actual: ~A). Call ~
+                clos-describe again for a fresh edit_guard and retry with ~
+                it; do not retry without a guard or through another tool."
+               (getf conflict :reason) (getf conflict :expected)
+               (getf conflict :actual)))))
+  (:documentation
+   "Signaled by %LOCATE-TARGET-FORM when a caller's GUARD argument no longer
+matches the file or form it was observed on (design doc section 4.2), on the
+verdict of %CHECK-EDIT-GUARD-PRE-PARSE before the parse (checks 1-4) or of
+CHECK-EDIT-GUARD once the target is matched (all six). CONFLICT (reader
+EDIT-GUARD-CONFLICT) is a plist (:REASON string :EXPECTED string :ACTUAL
+string) naming the first of the six checks that failed. Always signaled
+before %LOCATE-TARGET-FORM returns a value, so its caller -- LISP-EDIT-FORM
+in src/lisp-edit-form.lisp -- never sees, and so never writes, content that
+disagrees with GUARD: no name-only fallback, no adopting the new digest and
+continuing."))
+
+(defun %guard-field (guard name)
+  "Return GUARD's NAME field, or NIL when GUARD is not a hash-table or carries
+no such field. GUARD is an edit_guard JSON object (design doc section 4.1)
+that reached this file straight from a caller, so every field is read through
+here rather than assuming the object has the shape it should."
+  (and (hash-table-p guard) (gethash name guard)))
+
+(defun %check-edit-guard-pre-parse (guard abs-path snapshot)
+  "Run checks 1-4 of CHECK-EDIT-GUARD against GUARD, ABS-PATH and SNAPSHOT --
+the checks that need no matched form, and so can run before SNAPSHOT's text is
+parsed. Returns (VALUES OK-P CONFLICT) in the same shape CHECK-EDIT-GUARD
+returns, CONFLICT naming the first of the four, in order, that failed:
+
+ 1. GUARD's version is the one this function supports (+EDIT-GUARD-VERSION+).
+ 2. GUARD's abs_path names the same file as ABS-PATH.
+ 3. GUARD's file_digest matches SNAPSHOT's own digest of the whole file.
+ 4. GUARD's form_start/form_end lie within SNAPSHOT's text, with form_end
+    greater than form_start.
+
+%LOCATE-TARGET-FORM runs these as soon as it has SNAPSHOT, so a file that
+changed after GUARD observed it is reported as a guard conflict even when the
+lookup that follows would fail -- the observed form renamed or deleted, its
+name now ambiguous, or the file no longer parsing at all. Without this early
+pass those cases end in a plain \"not found\", \"Multiple matches\" or
+unparseable-file error that says nothing about the guard, even though the
+change the guard exists to catch is exactly what caused them."
+  (let ((version (%guard-field guard "version"))
+        (guard-abs-path (%guard-field guard "abs_path"))
+        (guard-file-digest (%guard-field guard "file_digest"))
+        (form-start (%guard-field guard "form_start"))
+        (form-end (%guard-field guard "form_end"))
+        (text (getf snapshot :text))
+        (file-digest (getf snapshot :digest)))
+    (cond
+      ((not (eql version +edit-guard-version+))
+       (values nil (%guard-conflict "unsupported guard version"
+                                     +edit-guard-version+ version)))
+      ((not (and (stringp guard-abs-path) (string= guard-abs-path abs-path)))
+       (values nil (%guard-conflict "abs_path does not match the file being edited"
+                                     abs-path guard-abs-path)))
+      ((not (and (stringp guard-file-digest) (stringp file-digest)
+                 (string= guard-file-digest file-digest)))
+       (values nil (%guard-conflict
+                    "file changed since the guard observed it (file_digest mismatch)"
+                    guard-file-digest (or file-digest "unavailable"))))
+      ((not (and (integerp form-start) (integerp form-end)
+                 (<= 0 form-start) (<= form-end (length text))
+                 (> form-end form-start)))
+       (values nil (%guard-conflict
+                    "form_start/form_end are not a valid range in the file"
+                    (format nil "0 <= form_start < form_end <= ~D" (length text))
+                    (format nil "form_start=~A form_end=~A" form-start form-end))))
+      (t (values t nil)))))
+
+(defun %check-edit-guard-post-match (guard snapshot node)
+  "Run checks 5-6 of CHECK-EDIT-GUARD against GUARD, SNAPSHOT and NODE -- the
+checks that need NODE, the CST node LOCATE-FORM-IN-NODES matched by form_type
+and form_name in that same SNAPSHOT, and so can only run once the lookup has
+succeeded. Returns (VALUES OK-P CONFLICT) in the same shape
+CHECK-EDIT-GUARD returns, CONFLICT naming the first of the two that failed:
+
+ 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
+    form_type/form_name search resolves to today is the same span GUARD
+    observed, not a different definition that merely shares the name.
+ 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
+    that range. Absent entirely, this check is skipped; a non-NIL value
+    that is not a matching digest string still fails it.
+
+Assumes %CHECK-EDIT-GUARD-PRE-PARSE has already passed, which is what makes
+form_start/form_end safe to compare here: CHECK-EDIT-GUARD runs both parts in
+order, and %LOCATE-TARGET-FORM reaches the lookup only after the pre-parse
+part passed."
+  (let ((form-start (%guard-field guard "form_start"))
+        (form-end (%guard-field guard "form_end"))
+        (guard-form-digest (%guard-field guard "form_digest")))
+    (cond
+      ((not (and (= (cst-node-start node) form-start)
+                 (= (cst-node-end node) form-end)))
+       (values nil (%guard-conflict
+                    "the form moved, was replaced, or was deleted since the guard observed it"
+                    (format nil "start=~D end=~D" form-start form-end)
+                    (format nil "start=~D end=~D"
+                            (cst-node-start node) (cst-node-end node)))))
+      ((and guard-form-digest
+            (not (and (stringp guard-form-digest)
+                      (equal guard-form-digest
+                             (snapshot-range-digest snapshot form-start form-end)))))
+       (values nil (%guard-conflict
+                    "form content changed since the guard observed it (form_digest mismatch)"
+                    guard-form-digest
+                    (or (snapshot-range-digest snapshot form-start form-end)
+                        "unavailable"))))
+      (t (values t nil)))))
+
+(defun check-edit-guard (guard abs-path snapshot node)
+  "Verify GUARD, an edit_guard JSON object (design doc section 4.1), against
+ABS-PATH (a namestring for the file about to be edited), SNAPSHOT (a plist
+from CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT read for this same
+edit), and NODE (the CST node LOCATE-FORM-IN-NODES matched by form_type and
+form_name in that same SNAPSHOT). Returns (VALUES OK-P CONFLICT): OK-P is T
+when every check below passes, with CONFLICT then NIL; otherwise OK-P is NIL
+and CONFLICT is a plist (:REASON string :EXPECTED string :ACTUAL string)
+naming the first check, in order, that failed.
+
+Never reads or parses anything itself: SNAPSHOT and NODE are taken as given,
+so this always judges the exact bytes %LOCATE-TARGET-FORM is about to splice
+an edit into, never a second, possibly different, read.
+
+The checks, in order (design doc section 4.2), split over two functions by
+what each needs:
+ 1. GUARD's version is the one this function supports (+EDIT-GUARD-VERSION+).
+ 2. GUARD's abs_path names the same file as ABS-PATH.
+ 3. GUARD's file_digest matches SNAPSHOT's own digest of the whole file.
+ 4. GUARD's form_start/form_end lie within SNAPSHOT's text, with form_end
+    greater than form_start.
+      -- 1-4 are %CHECK-EDIT-GUARD-PRE-PARSE: no matched form needed.
+ 5. NODE's own CST span is exactly form_start/form_end -- the form a plain
+    form_type/form_name search resolves to today is the same span GUARD
+    observed, not a different definition that merely shares the name.
+ 6. When GUARD carries a form_digest, it matches SNAPSHOT-RANGE-DIGEST of
+    that range. Absent entirely, this check is skipped; a non-NIL value
+    that is not a matching digest string still fails it.
+      -- 5-6 are %CHECK-EDIT-GUARD-POST-MATCH: NODE needed.
+
+%LOCATE-TARGET-FORM calls %CHECK-EDIT-GUARD-PRE-PARSE by itself, before the
+parse, so a file that changed after GUARD observed it conflicts even when the
+lookup that would produce NODE fails; it then calls this function at the point
+where NODE exists. Re-running 1-4 here judges the same GUARD against the same
+SNAPSHOT and so cannot reach a different verdict, and costs four comparisons
+against values already in hand -- worth it to keep all six checks and their
+order visible at the call site that decides whether the edit proceeds."
+  (multiple-value-bind (ok-p conflict)
+      (%check-edit-guard-pre-parse guard abs-path snapshot)
+    (if ok-p
+        (%check-edit-guard-post-match guard snapshot node)
+        (values nil conflict))))
+
+(defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR (through SIGNAL-FILE-UNPARSEABLE, which owns the
 classification), carrying a delimiter diagnosis, when the file cannot be parsed
@@ -517,6 +814,35 @@ editable, whereas the Eclector pass yields no forms at all from a file that
 does not parse. A file larger than the fs read cap is reported as such
 instead, because its truncated prefix would only yield a misleading delimiter
 diagnosis.
+
+GUARD, when non-NIL, is an edit_guard JSON object (design doc section 4.1).
+It changes how the file is read: instead of FS-READ-FILE, the file is read
+once via CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT, so ORIGINAL (below)
+and the digests the guard is verified against come from the exact same bytes
+-- this function never reads the file twice for one call. The six checks of
+design doc section 4.2 run in two parts, each as early as it can:
+%CHECK-EDIT-GUARD-PRE-PARSE (checks 1-4) as soon as the snapshot is in hand,
+before the parse, and CHECK-EDIT-GUARD (all six, its first four a free re-run)
+once TARGET is located. EDIT-GUARD-CONFLICT-ERROR is signaled on the first
+failing check, before any value is returned, so a stale or mismatched GUARD
+never reaches a write. Splitting it this way is what makes a file that changed
+since GUARD observed it conflict even when the lookup cannot finish: the
+observed form renamed or deleted, its name now matching several forms, or the
+file no longer parsing all reach the early check first and report the
+file_digest mismatch. When the file is unchanged, none of those is a guard
+problem, so a form_type/form_name the caller got wrong still gets the ordinary
+\"not found\" or \"Multiple matches\" error.
+READ-SOURCE-SNAPSHOT never truncates, so this path re-applies
+CL-MCP/SRC/FS:*FS-READ-MAX-BYTES* by hand against the whole text it read,
+refusing (not truncating) a file over the same limit FS-READ-FILE enforces
+below -- a GUARD never lets this tool read more than an unguarded call
+could. A file that is not valid UTF-8 is refused there too
+(SNAPSHOT-DECODE-LOSSY-P), with a plain error rather than an
+EDIT-GUARD-CONFLICT-ERROR: the snapshot's text has already replaced that
+file's invalid bytes with #\\?, so writing it back would destroy them, and
+the unguarded path's FS-READ-FILE refuses the same file with a decoding
+error. Without GUARD, behavior is unchanged.
+
 Returns eight values:
   ABS — absolute pathname
   REL — relative namestring for FS write
@@ -529,15 +855,60 @@ Returns eight values:
   (let ((form-type-str (string-downcase form-type)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
-      (multiple-value-bind (original truncated file-length)
-          (fs-read-file abs)
-        (when truncated
-          (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
-                  lisp-edit-form and lisp-patch-form cannot edit files this large, ~
-                  and fs-write-file will not overwrite it either (a truncated read ~
-                  cannot prove the file is broken). Split the file or edit it ~
-                  outside cl-mcp."
-                 (namestring abs) file-length (length original)))
+      (let (original snapshot)
+        (if guard
+            (multiple-value-bind (snap failure) (read-source-snapshot abs)
+              (when (null snap)
+                (error "Cannot read ~A to verify guard: ~A" (namestring abs)
+                       (if (eq failure :denied)
+                           "read not permitted for this path"
+                           failure)))
+              (let ((text (getf snap :text)))
+                ;; READ-SOURCE-SNAPSHOT never truncates, so the read cap
+                ;; FS-READ-FILE enforces below must be re-applied here by
+                ;; hand: a guarded call must refuse a file the unguarded
+                ;; path would refuse too, not read it in full instead.
+                (when (> (length text) *fs-read-max-bytes*)
+                  (error "~A exceeds the read limit (~D characters); ~
+                          lisp-edit-form and lisp-patch-form cannot edit files ~
+                          this large, and fs-write-file will not overwrite it ~
+                          either. Split the file or edit it outside cl-mcp."
+                         (namestring abs) (length text)))
+                ;; The snapshot decodes an invalid byte to #\? (its :TEXT is
+                ;; what would be written back), so a file that is not valid
+                ;; UTF-8 must be refused outright: the unguarded path's
+                ;; FS-READ-FILE signals a decoding error on it, and a guarded
+                ;; call must not quietly rewrite bytes it could not read.
+                ;; This is a plain refusal, not a guard conflict -- nothing
+                ;; about GUARD is wrong -- and it comes before the parse and
+                ;; before CHECK-EDIT-GUARD.
+                (when (snapshot-decode-lossy-p snap)
+                  (error "~A is not valid UTF-8: reading it replaced at least one byte ~
+                          with #\\?, and writing the file back would destroy that byte. ~
+                          lisp-edit-form and lisp-patch-form cannot edit this file; ~
+                          fix its encoding first."
+                         (namestring abs)))
+                (setf snapshot snap
+                      original text)
+                ;; Guard checks 1-4 (design doc section 4.2) need only the
+                ;; guard, the path and this snapshot, so they run here rather
+                ;; than only after the lookup: a file that changed since the
+                ;; guard observed it must be reported as a conflict even when
+                ;; the parse or the form lookup below fails first -- that
+                ;; change is precisely what the guard exists to catch.
+                (multiple-value-bind (ok-p conflict)
+                    (%check-edit-guard-pre-parse guard (namestring abs) snapshot)
+                  (unless ok-p
+                    (error 'edit-guard-conflict-error :conflict conflict)))))
+            (multiple-value-bind (text truncated file-length) (fs-read-file abs)
+              (when truncated
+                (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
+                        lisp-edit-form and lisp-patch-form cannot edit files this large, ~
+                        and fs-write-file will not overwrite it either (a truncated read ~
+                        cannot prove the file is broken). Split the file or edit it ~
+                        outside cl-mcp."
+                       (namestring abs) file-length (length text)))
+              (setf original text)))
         (multiple-value-bind (nodes swallowed)
             (handler-case
                 (parse-top-level-forms original
@@ -555,6 +926,11 @@ Returns eight values:
                                         :editable-prefix (and nodes t)))
               (error "Form ~A ~A not found in ~A" form-type form-name
                      (namestring abs)))
+            (when guard
+              (multiple-value-bind (ok-p conflict)
+                  (check-edit-guard guard (namestring abs) snapshot target)
+                (unless ok-p
+                  (error 'edit-guard-conflict-error :conflict conflict))))
             (let ((target-snippet (subseq original
                                           (cst-node-start target)
                                           (cst-node-end target))))

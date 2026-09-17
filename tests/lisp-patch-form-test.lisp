@@ -13,6 +13,16 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms)
+  (:import-from #:bordeaux-threads
+                #:make-thread
+                #:join-thread
+                #:thread-alive-p
+                #:destroy-thread
+                #:make-semaphore
+                #:signal-semaphore
+                #:wait-on-semaphore)
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
@@ -1202,3 +1212,130 @@ running as root), THUNK is skipped instead."
             (ok (search "unclosed (form starting at line 1: \"(defun a ()\")" text))
             (ok (search "Next top-level form probably begins at line 4" text))
             (ok (search "Run lisp-check-parens with path=" text))))))))
+
+(defparameter *parallel-wait-seconds* 30
+  "Seconds RUN-IN-PARALLEL waits at the barrier and for each thread to finish.
+Long enough that a loaded machine never trips it, short enough that a deadlock
+regression fails the suite instead of hanging it.")
+
+(defun run-in-parallel (thunk-a thunk-b)
+  "Run THUNK-A and THUNK-B in two threads released together and return their
+two primary values as a list.
+
+The release is a two-party semaphore barrier -- each thread signals its own
+semaphore and then waits for the other's -- so neither thunk starts until both
+threads are running. No SLEEP and no timing assumption: the barrier is the
+synchronisation.
+
+A thunk that fails contributes the SERIOUS-CONDITION it signalled, not only an
+ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
+Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
+this function waits on that instead of blocking in JOIN-THREAD, so a thread
+still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
+and is then destroyed and joined, so a deadlock regression fails the calling
+test rather than hanging the suite, and no thread outlives this call. Callers
+must treat :DID-NOT-FINISH as a failure."
+  (let ((a-ready (make-semaphore))
+        (b-ready (make-semaphore))
+        (finished (make-semaphore))
+        (results (make-array 2 :initial-element :did-not-finish)))
+    (flet ((runner (index mine theirs thunk)
+             (lambda ()
+               (unwind-protect
+                    (progn
+                      (signal-semaphore mine)
+                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                      (setf (aref results index)
+                            (handler-case (funcall thunk)
+                              (serious-condition (c) c))))
+                 (signal-semaphore finished)))))
+      (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
+                                        :name "cl-mcp-patch-lock-test-a")
+                           (make-thread (runner 1 b-ready a-ready thunk-b)
+                                        :name "cl-mcp-patch-lock-test-b"))))
+        (let ((finished-p
+                (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                     (wait-on-semaphore finished :timeout *parallel-wait-seconds*))))
+          ;; Reap every thread before returning, whichever way the wait ended:
+          ;; a thread still running would keep writing files into the rest of
+          ;; the suite.  One that timed out is destroyed first, which unwinds
+          ;; it and releases any lock it holds, and JOIN-THREAD on a destroyed
+          ;; thread signals, so the join is guarded.
+          (dolist (thread threads)
+            (unless finished-p
+              (when (thread-alive-p thread)
+                (ignore-errors (destroy-thread thread))))
+            (ignore-errors (join-thread thread))))))
+    (coerce results 'list)))
+
+(defun %concurrent-patch-verdict (path-for-alpha path-for-beta rounds)
+  "Patch two different top-level forms of one file from two threads, ROUNDS
+times, and return NIL when every round kept both changes.
+
+PATH-FOR-ALPHA and PATH-FOR-BETA are two designators for the SAME file (the
+caller varies the spelling to show the lock keys on the file, not on the
+string). Each round rewrites the fixture, releases the two threads together
+(RUN-IN-PARALLEL) and then checks the file. A non-NIL return is a list
+describing the first round that failed, and the loop stops there, so a round
+that deadlocks costs one RUN-IN-PARALLEL timeout rather than ROUNDS of them.
+
+Without the per-file lock in lisp-patch-form both threads read the same
+original text and the later write silently drops the earlier one: this is the
+direct lost-update regression."
+  (let ((verdict nil))
+    (dotimes (round rounds verdict)
+      (when verdict (return verdict))
+      (with-temp-file "tests/tmp/patch-lock-concurrent.lisp"
+          (format nil "(defun alpha () :alpha-old)~%~%(defun beta () :beta-old)~%")
+        (lambda (abs)
+          (declare (ignore abs))
+          (let* ((outcomes
+                  (run-in-parallel
+                   (lambda ()
+                     (lisp-patch-form :file-path path-for-alpha
+                                      :form-type "defun" :form-name "alpha"
+                                      :old-text ":alpha-old"
+                                      :new-text ":alpha-new"))
+                   (lambda ()
+                     (lisp-patch-form :file-path path-for-beta
+                                      :form-type "defun" :form-name "beta"
+                                      :old-text ":beta-old"
+                                      :new-text ":beta-new"))))
+                 (failures (remove-if-not (lambda (r) (typep r 'serious-condition))
+                                          outcomes))
+                 (after (fs-read-file (project-path
+                                       "tests/tmp/patch-lock-concurrent.lisp"))))
+            (cond ((member :did-not-finish outcomes)
+                   (setf verdict (list round :did-not-finish)))
+                  (failures
+                   (setf verdict (list round :error
+                                       (princ-to-string (first failures)))))
+                  ((not (and (search ":alpha-new" after)
+                             (search ":beta-new" after)))
+                   (setf verdict (list round :lost-update after)))
+                  ((not (eql 2 (ignore-errors
+                                (length (parse-top-level-forms after)))))
+                   (setf verdict (list round :does-not-parse after))))))))))
+
+(deftest lisp-patch-form-concurrent-patches-keep-both-changes
+  (testing "two threads patching two forms of one file both land"
+    (let ((verdict (%concurrent-patch-verdict
+                    (project-path "tests/tmp/patch-lock-concurrent.lisp")
+                    (project-path "tests/tmp/patch-lock-concurrent.lisp")
+                    20)))
+      (ok (null verdict)
+          (if verdict
+              (format nil "round ~S: ~A" (first verdict) (rest verdict))
+              "both patches survive every round and the file still parses"))))
+  (testing "the same holds when the two threads spell the path differently"
+    ;; One thread passes the path relative to the project root, the other an
+    ;; absolute namestring: the lock is keyed on the resolved file, so the two
+    ;; spellings must still exclude each other.
+    (let ((verdict (%concurrent-patch-verdict
+                    "tests/tmp/patch-lock-concurrent.lisp"
+                    (project-path "tests/tmp/patch-lock-concurrent.lisp")
+                    20)))
+      (ok (null verdict)
+          (if verdict
+              (format nil "round ~S: ~A" (first verdict) (rest verdict))
+              "a relative and an absolute spelling take the same lock")))))

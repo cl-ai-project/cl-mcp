@@ -8,6 +8,10 @@
   (:import-from #:cl-mcp/tests/code-test)
   (:import-from #:cl-mcp/tests/code-refs-core-test)
   (:import-from #:cl-mcp/tests/code-refs-scan-test)
+  (:import-from #:cl-mcp/tests/clos-core-test)
+  (:import-from #:cl-mcp/tests/clos-verify-core-test)
+  (:import-from #:cl-mcp/tests/clos-response-builders-test)
+  (:import-from #:cl-mcp/tests/clos-describe-integration-test)
   (:import-from #:cl-mcp/tests/core-test)
   (:import-from #:cl-mcp/tests/fs-test)
   (:import-from #:cl-mcp/tests/frame-inspector-test)
@@ -65,7 +69,8 @@
   (:import-from #:cl-mcp/tests/spec-tools-test)
   (:import-from #:cl-mcp/tests/spec-integration-test)
   (:import-from #:cl-mcp/tests/spec-worker-test)
-  (:import-from #:cl-mcp/tests/lisp-macroexpand-test))
+  (:import-from #:cl-mcp/tests/lisp-macroexpand-test)
+  (:import-from #:cl-mcp/tests/source-snapshot-test))
 
 (in-package #:cl-mcp/tests)
 

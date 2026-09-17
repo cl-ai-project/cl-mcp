@@ -11,7 +11,12 @@
                 #:code-describe-symbol
                 #:code-find-references)
   (:import-from #:cl-mcp/src/code-core
-                #:code-find-references-report)
+                #:code-find-references-report
+                #:definition-source-line
+                #:definition-source-location
+                #:%read-form-starts
+                #:%offset->line
+                #:generic-function-method-count)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:scan-project)
   (:import-from #:cl-mcp/src/project-root
@@ -728,3 +733,258 @@ than SBCL.  The feature is removed again afterwards unless it was already there.
     (testing "no note when nothing was denied, or the scan predates the count"
       (ok (null (notes 0)))
       (ok (null (notes nil))))))
+
+(defparameter *clos-fixture*
+  (asdf/system:system-relative-pathname :cl-mcp "tests/fixtures/clos-fixture.lisp")
+  "CLOS definitions compiled so that SBCL records their source locations.")
+
+(defun %compile-and-load-under-own-name (file)
+  "Compile and load FILE with its truename as the source namestring.
+repl-eval wraps evaluation in a compilation unit that names every file it
+compiles \"repl-eval\"; overriding the unit keeps FILE's own path when the
+tests run from there."
+  (let ((truename (truename file)))
+    (uiop:with-temporary-file (:pathname fasl :type "fasl")
+      (with-compilation-unit (:override t :source-namestring (namestring truename))
+        (handler-bind ((warning #'muffle-warning))
+          (load (compile-file truename :output-file fasl :verbose nil :print nil)))))))
+
+(defun %find-definition-sources (package-name name kind)
+  "Return SB-INTROSPECT's definition sources of kind KIND for PACKAGE-NAME::NAME."
+  (uiop:symbol-call :sb-introspect :find-definition-sources-by-name
+                    (find-symbol name package-name) kind))
+
+(deftest code-find-definition-returns-lines-of-classes
+  (testing "defclass, define-condition and defstruct get the line of their form"
+    (%compile-and-load-under-own-name *clos-fixture*)
+    (dolist (case '(("cl-mcp-clos-fixture:circle" "(defclass circle")
+                    ("cl-mcp-clos-fixture:probe-error" "(define-condition probe-error")
+                    ("cl-mcp-clos-fixture:point" "(defstruct point")))
+      (destructuring-bind (designator needle) case
+        (multiple-value-bind (path line) (code-find-definition designator)
+          (ok (search "tests/fixtures/clos-fixture.lisp" path) designator)
+          (ok (eql (%fixture-line needle *clos-fixture*) line) designator))))))
+
+(deftest definition-source-line-resolves-methods-and-accessors
+  (testing "a method and a slot accessor resolve to their own top-level form"
+    (%compile-and-load-under-own-name *clos-fixture*)
+    (flet ((method-lines (name)
+             (sort (mapcar (lambda (method)
+                             (definition-source-line
+                              (uiop:symbol-call :sb-introspect :find-definition-source method)))
+                           (sb-mop:generic-function-methods (fdefinition name)))
+                   #'<)))
+      (ok (equal (sort (list (%fixture-line "(defgeneric area" *clos-fixture*)
+                             (%fixture-line "(defmethod area ((shape circle" *clos-fixture*)
+                             (%fixture-line "(defmethod area ((shape square" *clos-fixture*)
+                             (%fixture-line "(defmethod area :around" *clos-fixture*))
+                       #'<)
+                 (method-lines (find-symbol "AREA" "CL-MCP-CLOS-FIXTURE"))))
+      (ok (equal (list (%fixture-line "(defclass circle" *clos-fixture*))
+                 (method-lines (find-symbol "RADIUS" "CL-MCP-CLOS-FIXTURE")))))))
+
+(deftest definition-source-location-reports-path-line-and-staleness
+  (testing "absolute truename, display path and line for a file definition"
+    (%compile-and-load-under-own-name *clos-fixture*)
+    (multiple-value-bind (abs-path path line stale)
+        (definition-source-location
+         (first (%find-definition-sources "CL-MCP-CLOS-FIXTURE" "SQUARE" :class)))
+      (ok (equal (namestring (truename *clos-fixture*)) abs-path))
+      (ok (search "tests/fixtures/clos-fixture.lisp" path))
+      (ok (eql (%fixture-line "(defclass square" *clos-fixture*) line))
+      (ok (null stale))))
+  (testing "no source means no location"
+    (ok (equal '(nil nil nil nil) (multiple-value-list (definition-source-location nil)))))
+  (testing "a file written after it was compiled is stale"
+    (let ((file (asdf/system:system-relative-pathname
+                 :cl-mcp "tests/tmp/clos-stale-fixture.lisp")))
+      (ensure-directories-exist file)
+      (with-open-file (out file :direction :output :if-exists :supersede)
+        (format out "(defpackage #:cl-mcp-clos-stale-fixture (:use #:cl))~%~
+(in-package #:cl-mcp-clos-stale-fixture)~%~
+(defclass stale-probe () ())~%~
+(defun stale-probe-function () 1)~%"))
+      (unwind-protect
+           (progn
+             (%compile-and-load-under-own-name file)
+             ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+             (let ((later (+ (- (file-write-date file) 2208988800) 100)))
+               (uiop:symbol-call :sb-posix :utimes (namestring (truename file)) later later))
+             (ok (nth-value 3 (definition-source-location
+                               (first (%find-definition-sources "CL-MCP-CLOS-STALE-FIXTURE"
+                                                                "STALE-PROBE" :class))))))
+        (ignore-errors (delete-file file))))))
+
+(deftest read-form-starts-counts-forms-as-the-compiler-does
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a form a reader conditional excludes leaves no position"
+      (let ((file (asdf/system:system-relative-pathname :cl-mcp "tests/tmp/read-form-starts.lisp")))
+        (ensure-directories-exist file)
+        (with-open-file (out file :direction :output :if-exists :supersede :external-format :utf-8)
+          (format out ";;; 日本語のコメント~%(defun one () 1)~%#+(or) (defun never () 0)~%~
+#-sbcl (defun not-sbcl () 0)~%#+sbcl~%(defun two () 2)~%#| block~%comment |#~%~
+(defparameter *three* #.(+ 1 2))~%#+(or) #+sbcl (defun stacked () 0)~%~
+(defun four () (list #\\) \"str)ing\" '|a b|))~%"))
+        (unwind-protect
+             (let ((starts (%read-form-starts file)))
+               (ok starts "a file under the project root still yields positions")
+               (ok (= 4 (length starts)))
+               (ok (equal '(2 6 9 11)
+                          (map 'list (lambda (start) (%offset->line file start)) starts))))
+          (ignore-errors (delete-file file)))))))
+
+(deftest read-form-starts-denies-a-file-outside-the-project-root
+  (testing "the read policy refuses a file outside *project-root* and any registered system"
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (file (merge-pathnames "cl-mcp-read-form-starts-outside.lisp"
+                                 (uiop:temporary-directory))))
+      (with-open-file (out file :direction :output :if-exists :supersede)
+        (write-string "(defun outside () 1)" out))
+      (unwind-protect
+           (ok (null (%read-form-starts file)))
+        (ignore-errors (delete-file file))))))
+
+(deftest definition-source-line-survives-collected-code
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a file holding only a class still yields a line after a full GC"
+      (let ((file (asdf/system:system-relative-pathname
+                    :cl-mcp "tests/tmp/clos-classes-only.lisp")))
+        (ensure-directories-exist file)
+        (with-open-file (out file :direction :output :if-exists :supersede)
+          (format out "(defpackage #:cl-mcp-clos-classes-only (:use #:cl))~%~
+(in-package #:cl-mcp-clos-classes-only)~%~%~
+(defclass only-probe ()~%  ((a :initarg :a :accessor only-a)))~%"))
+        (unwind-protect
+             (progn
+               (%compile-and-load-under-own-name file)
+               ;; Once collected, the file's debug source and its recorded form
+               ;; positions are gone, and the line has to come from reading it.
+               (uiop:symbol-call :sb-ext :gc :full t)
+               (ok (eql 4 (definition-source-line
+                           (first (%find-definition-sources "CL-MCP-CLOS-CLASSES-ONLY"
+                                                            "ONLY-PROBE" :class))))))
+          (ignore-errors (delete-file file)))))))
+
+(deftest debug-sources-by-namestring-ignores-ambiguous-same-second-reload
+  ;; Run in isolation (rove:run-test), no earlier test has required
+  ;; SB-INTROSPECT yet, and METHOD-LINE below calls into it directly.
+  (require :sb-introspect)
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (testing "a same-second recompile with fewer forms resolves the file as it is now"
+      (let ((file (asdf/system:system-relative-pathname
+                   :cl-mcp "tests/tmp/same-second-fixture.lisp"))
+            (full-text (format nil "~
+(defpackage #:cl-mcp-same-second-fixture (:use #:cl))
+(in-package #:cl-mcp-same-second-fixture)
+(defgeneric probe (x))
+
+(defmethod probe ((x integer))
+  (declare (ignore x))
+  :before-probe)
+
+(defmethod probe ((x symbol))
+  (declare (ignore x))
+  ;; Padding so DOOMED's own form is far longer than its neighbors: deleting
+  ;; it below shifts every later top-level form's byte offset by much more
+  ;; than a line, so a wrong (stale) offset lands nowhere near the truth.
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  ;; padding padding padding padding padding padding padding padding
+  :doomed-probe)
+
+(defmethod probe ((x string))
+  (declare (ignore x))
+  :mid-probe)
+
+(defmethod probe ((x float))
+  (declare (ignore x))
+  :after-probe)
+
+(defmethod probe ((x cons))
+  (declare (ignore x))
+  :tail-probe)
+"))
+            (shrunk-text (format nil "~
+(defpackage #:cl-mcp-same-second-fixture (:use #:cl))
+(in-package #:cl-mcp-same-second-fixture)
+(defgeneric probe (x))
+
+(defmethod probe ((x integer))
+  (declare (ignore x))
+  :before-probe)
+
+(defmethod probe ((x string))
+  (declare (ignore x))
+  :mid-probe)
+
+(defmethod probe ((x float))
+  (declare (ignore x))
+  :after-probe)
+
+(defmethod probe ((x cons))
+  (declare (ignore x))
+  :tail-probe)
+")))
+        (ensure-directories-exist file)
+        (unwind-protect
+             (flet ((write-and-compile (text)
+                      (with-open-file (out file :direction :output :if-exists :supersede)
+                        (write-string text out))
+                      (%compile-and-load-under-own-name file))
+                    (method-line (specializer-class-name)
+                      (definition-source-line
+                       (uiop:symbol-call
+                        :sb-introspect :find-definition-source
+                        (find-method
+                         (fdefinition (find-symbol "PROBE" "CL-MCP-SAME-SECOND-FIXTURE"))
+                         nil (list (find-class specializer-class-name)))))))
+               (let ((landed nil))
+                 ;; Retry, not sleep: two compiles of a few lines each are far
+                 ;; faster than a second, so they almost always land in the
+                 ;; same wall-clock second on the first try; verifying it
+                 ;; (rather than hoping) keeps this deterministic instead of
+                 ;; flaky in either direction.
+                 (dotimes (attempt 200)
+                   (let ((before (get-universal-time)))
+                     (write-and-compile full-text)
+                     (let ((mid (get-universal-time)))
+                       (write-and-compile shrunk-text)
+                       (let ((after (get-universal-time)))
+                         (when (= before mid after)
+                           (setf landed t)
+                           (return))))))
+                 (ok landed
+                     "both compiles landed in the same wall-clock second within 200 tries"))
+               (ok (eql (%fixture-line "(defmethod probe ((x integer)" file)
+                        (method-line 'integer))
+                   "INTEGER, before the deletion, still resolves to its own line")
+               (ok (eql (%fixture-line "(defmethod probe ((x float)" file)
+                        (method-line 'float))
+                   "FLOAT, two forms after the deletion, resolves to its line in the file as it is now")
+               (ok (eql (%fixture-line "(defmethod probe ((x cons)" file)
+                        (method-line 'cons))
+                   "CONS, three forms after the deletion, resolves to its line in the file as it is now"))
+          (ignore-errors (delete-file file)))))))
+
+(deftest generic-function-method-count-counts-methods
+  (testing "a generic function's method count, and NIL for anything else"
+    (%compile-and-load-under-own-name *clos-fixture*)
+    (ok (eql 4 (generic-function-method-count "cl-mcp-clos-fixture:area")))
+    (ok (null (generic-function-method-count "cl-mcp-clos-fixture:circle")))
+    (ok (null (generic-function-method-count "cl:car")))
+    (ok (null (generic-function-method-count "cl-mcp-clos-fixture::no-such-counted-name")))
+    (ok (null (find-symbol "NO-SUCH-COUNTED-NAME" "CL-MCP-CLOS-FIXTURE")))))
+
+(deftest generic-function-method-count-tolerates-unresolvable-names
+  (testing "a keyword or an unparseable designator counts as no generic function"
+    (ok (null (handler-case (generic-function-method-count ":test")
+                (error (e) e))))
+    (ok (null (handler-case (generic-function-method-count "#:uninterned")
+                (error (e) e))))
+    (multiple-value-bind (name type)
+        (code-describe-symbol ":test")
+      (declare (ignore name))
+      (ok (equal "variable" type)))))

@@ -8,9 +8,19 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-start
+                #:cst-node-end)
+  (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:locate-form-in-nodes)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
   (:import-from #:uiop #:getcwd #:ensure-directory-pathname)
   (:import-from #:asdf #:system-source-directory)
-  (:import-from #:yason #:parse))
+  (:import-from #:yason #:parse #:encode))
 
 (in-package #:cl-mcp/tests/tools-test)
 
@@ -470,6 +480,83 @@
         (ok (string= (gethash "type" result) "function"))
         (ok (stringp (gethash "arglist" result)))
         (ok (stringp (gethash "documentation" result)))))))
+
+(deftest tools-call-clos-describe
+  (testing "tools/list describes clos-describe"
+    (multiple-value-bind (obj result tools) (%tools-list)
+      (declare (ignore obj result))
+      (let* ((desc (%find-tool-descriptor tools "clos-describe"))
+             (schema (and desc (gethash "inputSchema" desc)))
+             (props (and schema (gethash "properties" schema))))
+        (ok desc)
+        (ok (find "symbol" (gethash "required" schema) :test #'string=))
+        (ok (equal "integer" (gethash "type" (gethash "limit" props)))))))
+  (testing "tools/call clos-describe lists a generic function's methods in its text"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl:print-object\",\"limit\":1}}}"))
+           (result (gethash "result" (parse (%pjl req))))
+           (text (gethash "text" (elt (gethash "content" result) 0))))
+      (ok (equal "found" (gethash "symbol_status" result)))
+      (ok (search "Generic function COMMON-LISP:PRINT-OBJECT" text))
+      (ok (search "more (raise limit to see them)" text))))
+  (testing "a missing symbol is explained, not an error"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl-user::no-such-clos-describe-name\"}}}"))
+           (result (gethash "result" (parse (%pjl req)))))
+      (ok (search "nothing was interned" (gethash "text" (elt (gethash "content" result) 0))))
+      (ok (null (find-symbol "NO-SUCH-CLOS-DESCRIBE-NAME" "COMMON-LISP-USER")))))
+  (testing "a non-positive limit is an argument error"
+    (let* ((req (concatenate 'string
+                  "{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\","
+                  "\"params\":{\"name\":\"clos-describe\","
+                  "\"arguments\":{\"symbol\":\"cl:print-object\",\"limit\":0}}}"))
+           (obj (parse (%pjl req)))
+           (result (gethash "result" obj)))
+      (ok (or (gethash "error" obj) (and result (gethash "isError" result)))))))
+
+(deftest tools-call-clos-describe-reports-fail-closed-source-match
+  (testing "clos-describe's JSON and text agree: form_type/form_name only appear when matched"
+    (with-test-project-root
+      (let ((fixture (asdf/system:system-relative-pathname
+                       :cl-mcp "tests/fixtures/clos-fixture.lisp")))
+        (let ((truename (truename fixture)))
+          (uiop:with-temporary-file (:pathname fasl :type "fasl")
+            (with-compilation-unit (:override t :source-namestring (namestring truename))
+              (handler-bind ((warning #'muffle-warning))
+                (load (compile-file truename :output-file fasl :verbose nil :print nil))))))
+        (let* ((req (concatenate 'string
+                      "{\"jsonrpc\":\"2.0\",\"id\":700,\"method\":\"tools/call\","
+                      "\"params\":{\"name\":\"clos-describe\","
+                      "\"arguments\":{\"symbol\":\"cl-mcp-clos-fixture:probe-error\"}}}"))
+               (resp (%pjl req))
+               (obj (parse resp))
+               (result (gethash "result" obj))
+               (content (gethash "content" result))
+               (text (gethash "text" (aref content 0)))
+               (class (gethash "class" result))
+               (methods (coerce (gethash "methods" class) 'list))
+               (unverified-count 0))
+          (ok (stringp (gethash "source_match" class)))
+          (dolist (method methods)
+            (let ((match (gethash "source_match" method))
+                  (form-type (gethash "form_type" method))
+                  (form-name (gethash "form_name" method))
+                  (path (gethash "path" method))
+                  (line (gethash "line" method)))
+              (if (equal "matched" match)
+                  (ok (stringp form-type))
+                  (progn
+                    (incf unverified-count)
+                    (ok (null form-type))
+                    (ok (null form-name))
+                    (ok (stringp (gethash "source_match_reason" method)))
+                    (ok (search (format nil "~A:~D [~A" path line match) text))))))
+          (ok (> unverified-count 0)
+              "at least one accessor is unverified, proving the check is not vacuous"))))))
 
 (deftest tools-call-code-find-references
   (testing "tools/call code-find-references returns references"
@@ -1645,6 +1732,46 @@
                    "form_name '#:' should produce an error")
                (ok (and (stringp msg) (search "empty" (string-downcase msg)))
                    "error message should mention 'empty'"))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-edit-form-guard-conflict
+  (testing "tools/call lisp-edit-form with a stale guard is refused with a conflict object"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-guard-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string "(defun target () :old)" out))
+        (unwind-protect
+             (let* ((snapshot (read-source-snapshot abs-path))
+                    (nodes (parse-top-level-forms (getf snapshot :text)))
+                    (node (locate-form-in-nodes nodes "defun" "target"))
+                    (guard (make-ht "version" 1
+                                    "abs_path" (getf snapshot :abs-path)
+                                    "file_digest" "md5:00000000000000000000000000000000"
+                                    "form_start" (cst-node-start node)
+                                    "form_end" (cst-node-end node)))
+                    (guard-json (with-output-to-string (s) (encode guard s)))
+                    (req (format nil
+                                 (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":9101,\"method\":\"tools/call\","
+                                  "\"params\":{\"name\":\"lisp-edit-form\","
+                                  "\"arguments\":{\"file_path\":\"~A\","
+                                  "\"form_type\":\"defun\",\"form_name\":\"target\","
+                                  "\"operation\":\"replace\","
+                                  "\"content\":\"(defun target () :new)\","
+                                  "\"guard\":~A}}}")
+                                 tmp-path guard-json))
+                    (before (uiop:read-file-string abs-path))
+                    (resp (%pjl req))
+                    (obj (parse resp))
+                    (err (gethash "error" obj))
+                    (data (and err (gethash "data" err))))
+               (ok err)
+               (ok (hash-table-p data))
+               (ok (stringp (gethash "reason" data)))
+               (ok (search "file_digest" (gethash "reason" data)))
+               (ok (string= (uiop:read-file-string abs-path) before)))
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-lisp-check-parens-reader-error

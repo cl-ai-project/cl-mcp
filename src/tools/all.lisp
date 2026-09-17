@@ -33,6 +33,8 @@
                 #:code-find-definition
                 #:code-describe-symbol
                 #:code-find-references)
+  (:import-from #:cl-mcp/src/clos
+                #:clos-describe-report)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens)
   (:import-from #:cl-mcp/src/clgrep

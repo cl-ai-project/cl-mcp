@@ -178,7 +178,7 @@ you keep your SLIME/Sly session while Codex works through the bridge.
 ## Worker Pool Isolation
 
 Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-*`,
-`inspect-object`) run in isolated child SBCL processes. Each session gets
+`clos-describe`, `inspect-object`) run in isolated child SBCL processes. Each session gets
 a dedicated worker with automatic crash recovery and circuit breaker protection.
 File-system and editing tools run inline in the parent process.
 

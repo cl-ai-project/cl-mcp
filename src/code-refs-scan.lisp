@@ -40,7 +40,8 @@
   (:export #:*max-scan-sites*
            #:target-name-from-designator
            #:scan-text
-           #:scan-project))
+           #:scan-project
+           #:top-level-forms-at))
 
 (in-package #:cl-mcp/src/code-refs-scan)
 
@@ -666,3 +667,364 @@ JSON-ready hash-table:
                              (fail file abs-path
                                    (%first-line (princ-to-string e))))))))))))))
       (report))))
+
+(defparameter *method-lambda-list-keywords*
+  '("&OPTIONAL" "&REST" "&KEY" "&AUX" "&ALLOW-OTHER-KEYS")
+  "Names of the lambda-list keywords that end a method's required parameters.")
+
+(defun %decimal-text (integer)
+  "Return INTEGER printed in base 10 without a radix marker, matching
+CLOS-CORE's %DECIMAL-STRING so the worker compares an EQL datum's integer or
+ratio parts (spec 3.3) as plain decimal text, never a float."
+  (let ((*print-base* 10) (*print-radix* nil))
+    (princ-to-string integer)))
+
+(defun %source-eql-unverifiable-reason (value)
+  "Return one sentence explaining why VALUE, an (EQL ...) specializer's
+unevaluated source form, is not on the tagged allow-list of spec 3.3 (a
+literal integer, ratio, character, keyword, boolean, or a quoted interned
+symbol)."
+  (cond
+    ((stringp value) "a string is not EQL-comparable by content")
+    ((floatp value) "a float compares unsoundly by printed value")
+    ((typep value 'complex) "a complex number compares unsoundly by printed value")
+    ((arrayp value) "an array is not EQL-comparable by content")
+    ((consp value) "an arbitrary form is not evaluated for source matching")
+    ((and (symbolp value) (null (symbol-package value)))
+     "an uninterned symbol has no package to resolve it by")
+    ((symbolp value) "a variable reference is not a literal datum")
+    (t (format nil "a value of type ~(~A~) is not on the EQL datum allow-list" (type-of value)))))
+
+(defun %source-eql-datum (node text in-package)
+  "Return NODE, an (EQL datum)'s unevaluated source form, tagged per spec
+3.3.  KEYWORD, INTEGER, RATIO, CHARACTER and BOOLEAN come straight from the
+read value: always safe, since none of those types depend on a package the
+parent might lack.  SYMBOL instead carries :TOKEN/:IN-PACKAGE for the
+worker to resolve, since an arbitrary quoted symbol's home package may not
+exist in the parent's image, plus :QUOTED naming how the quote was
+confirmed: :READER when the source starts with the ' reader macro character
+-- that alone confirms it, since the macro character cannot be shadowed --
+or :OPERATOR when it is a (quote x) call, whose head could be a same-named
+operator from another package; that datum also carries :QUOTE-TOKEN, the
+head's own :TOKEN/:IN-PACKAGE, for the worker to resolve and require EQ to
+CL:QUOTE.  As JSON, :QUOTED would serialize as the string \"reader\" or
+\"operator\" and :QUOTE-TOKEN as a {token, in_package} object, matching how
+the rest of this plist's token fields are meant to serialize; that
+conversion happens in a later task.  Anything else is UNVERIFIABLE."
+  (let* ((node (%unwrap node))
+         (value (cst-node-value node)))
+    (cond
+      ((keywordp value) (list :kind :keyword :name (symbol-name value)))
+      ((integerp value) (list :kind :integer :value (%decimal-text value)))
+      ((typep value 'ratio)
+       (list :kind :ratio :numerator (%decimal-text (numerator value))
+             :denominator (%decimal-text (denominator value))))
+      ((characterp value) (list :kind :character :value (string value)))
+      ((eq value t) (list :kind :boolean :value "T"))
+      ((null value) (list :kind :boolean :value "NIL"))
+      (t
+       (let ((quoted (%quoted-symbol-node node)))
+         (cond
+           ((null quoted)
+            (list :kind :unverifiable :reason (%source-eql-unverifiable-reason value)))
+           ((char= (char text (cst-node-start node)) #\')
+            (list :kind :symbol
+                  :token (subseq text (cst-node-start quoted) (cst-node-end quoted))
+                  :in-package in-package :quoted :reader))
+           (t
+            (list :kind :symbol
+                  :token (subseq text (cst-node-start quoted) (cst-node-end quoted))
+                  :in-package in-package :quoted :operator
+                  :quote-token (%source-token (first (%expr-children node)) text in-package)))))))))
+
+(defun %source-specializer (param text in-package)
+  "Return PARAM, one required parameter of a method's lambda list, as its
+specializer identity: {:KIND :CLASS :TOKEN .. :IN-PACKAGE ..} for a class
+name or an unspecialized parameter, {:KIND :EQL :DATUM ..} for (EQL datum),
+or {:KIND :UNVERIFIABLE :REASON ..} for any other shape this cannot
+describe.
+
+An unspecialized parameter has no token in the source to quote, so its
+specializer is synthesized as \"T\" in COMMON-LISP rather than in IN-PACKAGE:
+what it names is the standard class COMMON-LISP:T, whatever the file's own
+package makes of the name T -- a package defined with (:USE) has no T at
+all, and one that shadows T has a different one, so resolving the synthesized
+token there would report an untouched method as UNVERIFIED or, worse,
+MISMATCHED.  A specializer the source does spell out keeps IN-PACKAGE, since
+it has to resolve exactly as written."
+  (let* ((param (%unwrap param))
+         (value (cst-node-value param)))
+    (cond
+      ((symbolp value) (list :kind :class :token "T" :in-package "COMMON-LISP"))
+      ((and (consp value) (consp (rest value)) (null (cddr value)))
+       (let* ((children (%expr-children param))
+              (specializer (%unwrap (second children)))
+              (specializer-value (cst-node-value specializer)))
+         (cond
+           ((symbolp specializer-value)
+            (list :kind :class
+                  :token (subseq text (cst-node-start specializer) (cst-node-end specializer))
+                  :in-package in-package))
+           ((and (consp specializer-value) (symbolp (first specializer-value))
+                 (string= "EQL" (symbol-name (first specializer-value)))
+                 (consp (rest specializer-value)) (null (cddr specializer-value)))
+            (list :kind :eql
+                  :datum (%source-eql-datum (second (%expr-children specializer)) text
+                                            in-package)))
+           (t (list :kind :unverifiable
+                    :reason "specializer is neither a class name nor an EQL form")))))
+      (t (list :kind :unverifiable
+               :reason "parameter is not a name or a (name specializer) list")))))
+
+(defun %source-specializers (lambda-list text in-package)
+  "Return one %SOURCE-SPECIALIZER plist per required parameter of LAMBDA-LIST,
+a method's specialized lambda list node: every child up to the first lambda
+list keyword (&OPTIONAL, &REST, ...), which ends the required parameters."
+  (loop for param in (%expr-children lambda-list)
+        until (and (symbolp (cst-node-value param))
+                  (member (symbol-name (cst-node-value param))
+                          *method-lambda-list-keywords* :test #'string=))
+        collect (%source-specializer param text in-package)))
+
+(defun %split-qualifiers (nodes)
+  "Return (values QUALIFIER-NODES LAMBDA-LIST-NODE) splitting NODES, the
+children after a DEFMETHOD's or (:METHOD ...)'s name, at the first whose
+value is a list (the lambda list; an empty lambda list () counts, since NIL
+is a list).  (values NIL NIL) when NODES never reaches one."
+  (let ((qualifiers '()))
+    (loop for tail on nodes
+          do (if (listp (cst-node-value (car tail)))
+                 (return (values (nreverse qualifiers) (car tail)))
+                 (push (car tail) qualifiers))
+          finally (return (values (nreverse qualifiers) nil)))))
+
+(defun %source-token (node text in-package)
+  "Return NODE's source text and IN-PACKAGE as (:TOKEN .. :IN-PACKAGE ..):
+the literal characters at NODE's span, never a resolved or normalized name."
+  (let ((node (%unwrap node)))
+    (list :token (subseq text (cst-node-start node) (cst-node-end node))
+          :in-package in-package)))
+
+(defun %source-name (name-node text in-package struct-p)
+  "Return NAME-NODE's identity as (:TOKEN .. :SETF .. :IN-PACKAGE ..), or NIL
+when NAME-NODE is absent or not a name shape this recognizes: a bare symbol,
+a (SETF symbol) list (STRUCT-P NIL), or -- for DEFSTRUCT (STRUCT-P T), whose
+name may carry options -- a (name . options) list, taking its first element."
+  (when name-node
+    (let* ((node (%unwrap name-node))
+           (value (cst-node-value node)))
+      (cond
+        ((symbolp value)
+         (list :token (subseq text (cst-node-start node) (cst-node-end node))
+               :setf nil :in-package in-package))
+        ((and (not struct-p) (consp value) (symbolp (first value))
+              (string= "SETF" (symbol-name (first value)))
+              (consp (rest value)) (symbolp (second value)) (null (cddr value)))
+         (let ((inner (second (%expr-children node))))
+           (list :token (subseq text (cst-node-start inner) (cst-node-end inner))
+                 :setf t :in-package in-package)))
+        ((and struct-p (consp value) (symbolp (first value)))
+         (let ((inner (first (%expr-children node))))
+           (list :token (subseq text (cst-node-start inner) (cst-node-end inner))
+                 :setf nil :in-package in-package)))
+        (t nil)))))
+
+(defun %source-method-option (option-node text in-package)
+  "Return OPTION-NODE's (:QUALIFIERS .. :SPECIALIZERS ..) when it is a
+DEFGENERIC (:METHOD ...) method-description, else NIL for an ordinary
+DEFGENERIC option such as (:documentation ...)."
+  (let ((value (cst-node-value option-node)))
+    (when (and (consp value) (keywordp (first value))
+              (string= "METHOD" (symbol-name (first value))))
+      (multiple-value-bind (qualifiers lambda-list)
+          (%split-qualifiers (rest (%expr-children option-node)))
+        (list :qualifiers (mapcar (lambda (q) (%source-token q text in-package)) qualifiers)
+              :specializers (and lambda-list
+                                 (%source-specializers lambda-list text in-package)))))))
+
+(defun %source-plain-name (node text in-package)
+  "Return NODE's identity as a plain, non-SETF function name in
+%SOURCE-NAME's (:TOKEN .. :SETF .. :IN-PACKAGE ..) shape, or NIL when NODE
+is anything but a bare symbol -- the only value CL allows for a :READER or
+:ACCESSOR slot option.  NIL is a candidate no image can resolve, so an
+accessor judged against it comes back UNVERIFIED rather than confirmed by
+guessing what an invalid option meant."
+  (let ((name (%source-name node text in-package nil)))
+    (and name (not (getf name :setf)) name)))
+
+(defun %setf-writer-name (name)
+  "Return NAME, a plain source name, as the (SETF NAME) writer an :ACCESSOR
+slot option defines alongside its reader; NIL for a NIL NAME, which stays
+the unresolvable candidate %SOURCE-PLAIN-NAME made it."
+  (and name
+       (list :token (getf name :token) :setf t :in-package (getf name :in-package))))
+
+(defun %source-slot (slot-node text in-package)
+  "Return SLOT-NODE, a DEFCLASS or DEFINE-CONDITION slot specifier, as
+(:NAME name-token :READERS (name...) :WRITERS (name...)).  A bare slot name
+has no readers or writers.  Each reader and writer is a %SOURCE-NAME
+function name, SETF flag included, naming exactly the function that option
+defines: :READER X and :WRITER X a plain X, :WRITER (SETF X) the SETF
+function, and :ACCESSOR X both -- a plain X reader and a (SETF X) writer.
+The flag is part of the identity, so :WRITER X and :ACCESSOR X are never
+interchangeable.  A value CL does not allow (a :READER or :ACCESSOR that is
+not a bare symbol) becomes a NIL entry, an unresolvable candidate."
+  (let* ((node (%unwrap slot-node))
+         (value (cst-node-value node)))
+    (if (symbolp value)
+        (list :name (%source-token node text in-package) :readers nil :writers nil)
+        (let* ((children (%expr-children node))
+               (name-node (first children))
+               (readers '())
+               (writers '()))
+          (loop for (key-node value-node) on (rest children) by #'cddr
+                while (and key-node value-node)
+                do (let ((key (cst-node-value key-node)))
+                     (when (keywordp key)
+                       (cond
+                         ((string= (symbol-name key) "READER")
+                          (push (%source-plain-name value-node text in-package) readers))
+                         ((string= (symbol-name key) "WRITER")
+                          (push (%source-name value-node text in-package nil) writers))
+                         ((string= (symbol-name key) "ACCESSOR")
+                          (let ((name (%source-plain-name value-node text in-package)))
+                            (push name readers)
+                            (push (%setf-writer-name name) writers)))))))
+          (list :name (%source-token name-node text in-package)
+                :readers (nreverse readers) :writers (nreverse writers))))))
+
+(defun %source-slots (slots-node text in-package)
+  "Return one %SOURCE-SLOT plist per slot specifier in SLOTS-NODE, a
+DEFCLASS or DEFINE-CONDITION's slot list; NIL when SLOTS-NODE is absent or
+not a list."
+  (and slots-node (listp (cst-node-value slots-node))
+       (mapcar (lambda (slot) (%source-slot slot text in-package))
+               (%expr-children slots-node))))
+
+(defparameter *source-signature-kinds*
+  '(("DEFMETHOD" . :defmethod) ("DEFGENERIC" . :defgeneric) ("DEFCLASS" . :defclass)
+    ("DEFINE-CONDITION" . :define-condition) ("DEFSTRUCT" . :defstruct))
+  "Head names %DEFINITION-SOURCE-SIGNATURE builds kind-specific fields for;
+every other head becomes :OTHER.")
+
+(defun %source-signature-kind (head-name)
+  "Return HEAD-NAME's source_signature :KIND (spec 3.2): one of
+*SOURCE-SIGNATURE-KINDS*, matched by name only, or :OTHER.  A shadowing
+operator of the same name is not ruled out here; only the worker, which can
+resolve HEAD-NAME, may confirm it (spec 3.4)."
+  (or (cdr (assoc head-name *source-signature-kinds* :test #'string=)) :other))
+
+(defun %source-signature-body (kind children text in-package)
+  "Return the KIND-specific fields of %DEFINITION-SOURCE-SIGNATURE's plist,
+CHILDREN being the node's expression children including the head."
+  (case kind
+    (:defmethod
+      (multiple-value-bind (qualifiers lambda-list) (%split-qualifiers (nthcdr 2 children))
+        (list :name (%source-name (nth 1 children) text in-package nil)
+              :qualifiers (mapcar (lambda (q) (%source-token q text in-package)) qualifiers)
+              :specializers (and lambda-list (%source-specializers lambda-list text in-package)))))
+    (:defgeneric
+      (list :name (%source-name (nth 1 children) text in-package nil)
+            :methods (loop for option in (nthcdr 2 children)
+                          for parsed = (%source-method-option option text in-package)
+                          when parsed collect parsed)))
+    ((:defclass :define-condition)
+      (list :name (%source-name (nth 1 children) text in-package nil)
+            :slots (%source-slots (nth 3 children) text in-package)))
+    (:defstruct
+      (list :name (%source-name (nth 1 children) text in-package t)))))
+
+(defun %definition-source-signature (node text in-package)
+  "Return NODE's source_signature (spec 3.2): a plist (:KIND kind :HEAD head
+...), with kind-specific fields from %SOURCE-SIGNATURE-BODY.  Every :TOKEN in
+it is the literal source text at that node's span -- (subseq text start end)
+-- never a resolved or normalized name; :IN-PACKAGE is IN-PACKAGE, the
+package in effect for every token in NODE (an in-package form cannot occur
+inside another top-level form, so one value covers the whole of NODE).  KIND
+is :DEFMETHOD, :DEFGENERIC, :DEFCLASS, :DEFINE-CONDITION or :DEFSTRUCT when
+NODE's head is spelled that way (%SOURCE-SIGNATURE-KIND, by name only -- a
+shadowing operator is the worker's problem, spec 3.4), and :OTHER for
+anything else, including a malformed definer too broken for the rest of this
+to describe."
+  (let* ((value (cst-node-value node))
+         (children (%expr-children node))
+         (head (first children)))
+    (if (or (not (consp value)) (null head) (not (symbolp (cst-node-value head))))
+        (list :kind :other)
+        (let ((kind (%source-signature-kind (symbol-name (cst-node-value head)))))
+          (if (eq kind :other)
+              (list :kind :other :head (%source-token head text in-package))
+              (list* :kind kind :head (%source-token head text in-package)
+                     (%source-signature-body kind children text in-package)))))))
+
+(defun top-level-forms-at (abs-path lines &key text)
+  "Describe every top-level form of the file at ABS-PATH that starts on LINES.
+
+Returns (values TABLE FAILURE).  TABLE maps each line in LINES on which one
+or more top-level forms start to the list of those forms -- more than one
+when two top-level forms begin on the same line -- each a plist (:FORM-TYPE
+:FORM-NAME :SIGNATURE :START :END).  FORM-TYPE and FORM-NAME are what
+%FORM-METADATA gives code-find-references, with the package from the file's
+IN-PACKAGE forms.  SIGNATURE is %DEFINITION-SOURCE-SIGNATURE's token-based
+source_signature (spec 3.2) for a DEFMETHOD, DEFGENERIC, DEFCLASS,
+DEFINE-CONDITION or DEFSTRUCT, and (:KIND :OTHER) for any other form.  START
+and END are character offsets into the file's text, END exclusive, spanning
+that one form -- (subseq text start end) reproduces it.  A line no form
+starts on is absent from TABLE.  A form wrapped in #+feature or #-feature is
+found both on its own line and on the line of the form it wraps (%UNWRAP),
+the same entry under both keys.
+
+TEXT, when given, is used instead of reading ABS-PATH from disk: pass the
+:TEXT of a CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT result so the CST
+built here and a caller's digest (CL-MCP/SRC/SOURCE-SNAPSHOT:SNAPSHOT-RANGE-DIGEST
+over this call's :START/:END) come from the exact same read of the file. The
+read policy is not consulted in that case, since no file is opened.
+
+FAILURE is NIL when the file was read and parsed.  It is :DENIED when the
+read policy refuses ABS-PATH (%READABLE-PATH) and TEXT was not given -- the
+file is then not opened -- and a one-line string when the file cannot be
+read or does not parse; TABLE is empty in both cases."
+  (let ((table (make-hash-table))
+        (wanted (remove-duplicates (remove-if-not #'integerp lines))))
+    (labels ((add (line entry)
+               (push entry (gethash line table)))
+             (scan (file-text)
+               (handler-case
+                   (let ((in-package nil)
+                         (nodes (parse-top-level-forms file-text :source-path (pathname abs-path))))
+                     (dolist (node nodes)
+                       (when (eq (cst-node-kind node) :expr)
+                         (let* ((value (cst-node-value node))
+                                (unwrapped (%unwrap node))
+                                (line1 (cst-node-start-line node))
+                                (line2 (cst-node-start-line unwrapped))
+                                (wanted1 (member line1 wanted))
+                                (wanted2 (member line2 wanted)))
+                           (when (or wanted1 wanted2)
+                             (multiple-value-bind (form-type form-name)
+                                 (%form-metadata value in-package)
+                               (let ((entry (list :form-type form-type :form-name form-name
+                                                  :signature (%definition-source-signature
+                                                              unwrapped file-text in-package)
+                                                  :start (cst-node-start unwrapped)
+                                                  :end (cst-node-end unwrapped))))
+                                 (when wanted1 (add line1 entry))
+                                 (when (and wanted2 (/= line1 line2)) (add line2 entry)))))
+                           (let ((designator (%in-package-form-p value)))
+                             (when designator
+                               (setf in-package designator))))))
+                     (dolist (line (loop for key being the hash-keys of table collect key))
+                       (setf (gethash line table) (nreverse (gethash line table))))
+                     (values table nil))
+                 (error (e) (values table (%first-line (princ-to-string e)))))))
+      (cond
+        ((null wanted) (values table nil))
+        (text (scan text))
+        (t (let ((readable (%readable-path abs-path)))
+             (if (null readable)
+                 (values table :denied)
+                 (multiple-value-bind (file-text read-condition)
+                     (ignore-errors (fs-read-source-text readable))
+                   (if (null file-text)
+                       (values table (%first-line (princ-to-string read-condition)))
+                       (scan file-text))))))))))

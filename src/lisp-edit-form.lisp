@@ -13,7 +13,8 @@
                 #:stray-right-parenthesis
                 #:*standard-readtable*)
   (:import-from #:cl-mcp/src/fs
-                #:fs-write-file)
+                #:fs-write-file
+                #:with-file-lock)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/parinfer
@@ -48,10 +49,13 @@
                 #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
                 #:%whitespace-char-p
+                #:%normalize-paths
                 #:%locate-target-form
                 #:%reader-level-failure-p
                 #:%detect-readtable-before-node
-                #:file-unparseable-error)
+                #:file-unparseable-error
+                #:edit-guard-conflict-error
+                #:edit-guard-conflict)
   (:documentation "Structure-aware editing of top-level Lisp forms.")
   (:export #:lisp-edit-form))
 
@@ -501,7 +505,7 @@ same words. The bracket-opener reminder is part of WARNING, built by
 
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
-        (normalize-blank-lines t) readtable)
+        (normalize-blank-lines t) readtable guard)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, and OPERATION are always required. CONTENT is required for
@@ -511,9 +515,29 @@ OPERATION must be one of: \"replace\", \"insert_before\", \"insert_after\", \"de
 Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
+The same GUARD validation runs whether DRY-RUN is true or not.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing both the file and the new content.
+
+GUARD, if provided, is an edit_guard JSON object (clos-describe's edit_guard,
+design doc 2026-09-16-clos-describe-fail-closed section 4.1) that must still
+describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
+%LOCATE-TARGET-FORM signals EDIT-GUARD-CONFLICT-ERROR, before any value is
+returned and before anything is written, when it does not. Without GUARD,
+this call behaves as before -- there is no guarantee the located form still
+matches what an earlier read observed.
+
+The whole read -> locate -> guard -> build -> write span runs under
+CL-MCP/SRC/FS:WITH-FILE-LOCK for the target file, so cl-mcp's own concurrent
+edits of one file are serialised: a second edit reads what the first wrote
+instead of overwriting it from a stale copy. A DRY-RUN call takes the same
+lock -- it reads the file, and excluding it would let it report a preview of a
+file another thread is halfway through replacing -- but of course writes
+nothing. The lock lives in this image, so only ONE cl-mcp process's calls are
+ordered: an external editor, and equally a second cl-mcp server over the same
+checkout, is not coordinated. GUARD remains the only check against one, and it
+is a precondition, not a lock.
 
 For non-delete operations without DRY-RUN, returns six values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
@@ -536,47 +560,15 @@ or NIL."
                 (t (error "Unsupported operation: ~A" operation)))))
     (unless (or (eq op-key :delete) (stringp content))
       (error "content is required for ~A operation" operation))
-    (multiple-value-bind
-        (abs rel original nodes target target-snippet _ file-package-name)
-        (%locate-target-form file-path form-type form-name readtable)
-      (declare (ignore _))
-      (if (eq op-key :delete)
-          ;; Delete path: no content validation needed
-          (let* ((updated
-                  (%apply-operation original target op-key nil
-                                    normalize-blank-lines))
-                 (would-change (not (string= original updated))))
-            (log-event :debug "lisp.edit.form" "path" (namestring abs)
-                       "operation" op-normalized "form_type" form-type
-                       "form_name" form-name "normalize_blank_lines"
-                       normalize-blank-lines "bytes" (length updated) "dry_run"
-                       dry-run "would_change" would-change)
-            (cond
-             (dry-run
-              (let ((result (make-hash-table :test #'equal)))
-                (setf (gethash "would_change" result) would-change
-                      (gethash "original" result) target-snippet
-                      (gethash "preview" result) updated
-                      (gethash "preview_form" result)
-                      (%preview-form-text op-key nil normalize-blank-lines)
-                      (gethash "file_path" result) (namestring abs)
-                      (gethash "operation" result) op-normalized)
-                result))
-             (would-change (fs-write-file rel updated)
-              (values updated nil t))
-             (t (values updated nil nil))))
-          ;; Non-delete path: validate and repair content
-          ;; Content is validated under the readtable in effect at the target:
-          ;; the caller's argument, or an (in-readtable ...) earlier in the
-          ;; file, as lisp-patch-form does.
-          (multiple-value-bind (validated-content parinfer-warning repair-fixes
-                                bracket-warning)
-              (%validate-and-repair-content
-               content
-               (or readtable (%detect-readtable-before-node nodes target))
-               file-package-name abs)
+    (with-file-lock ((%normalize-paths file-path))
+      (multiple-value-bind
+          (abs rel original nodes target target-snippet _ file-package-name)
+          (%locate-target-form file-path form-type form-name readtable guard)
+        (declare (ignore _))
+        (if (eq op-key :delete)
+            ;; Delete path: no content validation needed
             (let* ((updated
-                    (%apply-operation original target op-key validated-content
+                    (%apply-operation original target op-key nil
                                       normalize-blank-lines))
                    (would-change (not (string= original updated))))
               (log-event :debug "lisp.edit.form" "path" (namestring abs)
@@ -591,24 +583,57 @@ or NIL."
                         (gethash "original" result) target-snippet
                         (gethash "preview" result) updated
                         (gethash "preview_form" result)
-                        (%preview-form-text op-key validated-content
-                                            normalize-blank-lines)
-                        ;; The untrimmed content the repair line numbers
-                        ;; refer to, for the relocation note in the summary.
-                        (gethash "validated_content" result) validated-content
+                        (%preview-form-text op-key nil normalize-blank-lines)
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized)
-                  (when parinfer-warning
-                    (setf (gethash "parinfer_warning" result) parinfer-warning
-                          (gethash "repair_fixes" result) repair-fixes))
-                  (when bracket-warning
-                    (setf (gethash "bracket_warning" result) bracket-warning))
                   result))
                (would-change (fs-write-file rel updated)
-                (values updated parinfer-warning t repair-fixes validated-content
-                        bracket-warning))
-               (t (values updated parinfer-warning nil repair-fixes
-                          validated-content bracket-warning)))))))))
+                (values updated nil t))
+               (t (values updated nil nil))))
+            ;; Non-delete path: validate and repair content
+            ;; Content is validated under the readtable in effect at the target:
+            ;; the caller's argument, or an (in-readtable ...) earlier in the
+            ;; file, as lisp-patch-form does.
+            (multiple-value-bind (validated-content parinfer-warning repair-fixes
+                                  bracket-warning)
+                (%validate-and-repair-content
+                 content
+                 (or readtable (%detect-readtable-before-node nodes target))
+                 file-package-name abs)
+              (let* ((updated
+                      (%apply-operation original target op-key validated-content
+                                        normalize-blank-lines))
+                     (would-change (not (string= original updated))))
+                (log-event :debug "lisp.edit.form" "path" (namestring abs)
+                           "operation" op-normalized "form_type" form-type
+                           "form_name" form-name "normalize_blank_lines"
+                           normalize-blank-lines "bytes" (length updated) "dry_run"
+                           dry-run "would_change" would-change)
+                (cond
+                 (dry-run
+                  (let ((result (make-hash-table :test #'equal)))
+                    (setf (gethash "would_change" result) would-change
+                          (gethash "original" result) target-snippet
+                          (gethash "preview" result) updated
+                          (gethash "preview_form" result)
+                          (%preview-form-text op-key validated-content
+                                              normalize-blank-lines)
+                          ;; The untrimmed content the repair line numbers
+                          ;; refer to, for the relocation note in the summary.
+                          (gethash "validated_content" result) validated-content
+                          (gethash "file_path" result) (namestring abs)
+                          (gethash "operation" result) op-normalized)
+                    (when parinfer-warning
+                      (setf (gethash "parinfer_warning" result) parinfer-warning
+                            (gethash "repair_fixes" result) repair-fixes))
+                    (when bracket-warning
+                      (setf (gethash "bracket_warning" result) bracket-warning))
+                    result))
+                 (would-change (fs-write-file rel updated)
+                  (values updated parinfer-warning t repair-fixes validated-content
+                          bracket-warning))
+                 (t (values updated parinfer-warning nil repair-fixes
+                            validated-content bracket-warning))))))))))
 
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
@@ -645,7 +670,14 @@ Applies to replace, insert_before, insert_after, and delete operations.")
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
-is used instead of Eclector, which means comments are NOT preserved."))
+is used instead of Eclector, which means comments are NOT preserved.")
+         (guard :type :object
+                :description "Edit guard from clos-describe's edit_guard (design doc
+2026-09-16-clos-describe-fail-closed section 4.1): {version, path, abs_path,
+file_digest, form_start, form_end, form_digest}. When given, the edit (including
+dry_run) is refused with a conflict object, and nothing is written, unless the
+file and the matched form still look exactly as observed. Without it, this call
+behaves as before: the located form may not be the one an earlier read saw."))
   :body
   (progn
     (when (and (not content) (string/= (string-downcase operation) "delete"))
@@ -661,7 +693,8 @@ is used instead of Eclector, which means comments are NOT preserved."))
                             :content content
                             :dry-run dry_run
                             :normalize-blank-lines normalize_blank_lines
-                            :readtable (%parse-readtable-designator readtable))
+                            :readtable (%parse-readtable-designator readtable)
+                            :guard guard)
           (if dry_run
               ;; The summary inlines only the edited FORM (preview_form), never
               ;; the whole updated file: "preview" holds the full file and is
@@ -733,6 +766,18 @@ is used instead of Eclector, which means comments are NOT preserved."))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))
+      (edit-guard-conflict-error (e)
+        (let* ((conflict (edit-guard-conflict e))
+               (message (sanitize-for-json (princ-to-string e)))
+               (conflict-ht (make-ht "reason" (getf conflict :reason)
+                                     "expected" (getf conflict :expected)
+                                     "actual" (getf conflict :actual))))
+          (if (and (protocol-version state)
+                   (string>= (protocol-version state) "2025-11-25"))
+              (result id (make-ht "content" (text-content message)
+                                  "isError" t
+                                  "conflict" conflict-ht))
+              (rpc-error id -32602 message conflict-ht))))
       (file-unparseable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))

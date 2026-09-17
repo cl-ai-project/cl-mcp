@@ -13,7 +13,12 @@
   (:import-from #:cl-mcp/src/code-core
                 #:code-find-definition
                 #:code-describe-symbol
-                #:code-find-references-report)
+                #:code-find-references-report
+                #:generic-function-method-count)
+  (:import-from #:cl-mcp/src/clos-core
+                #:clos-describe-report)
+  (:import-from #:cl-mcp/src/clos-verify-core
+                #:verify-entries)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:load-system
                 #:*system-load-lock-wrapper*)
@@ -275,7 +280,9 @@ caller is answered at the deadline even while the suite is still blocked."
       (error "symbol is required"))
     (multiple-value-bind (name type arglist doc path line)
         (code-describe-symbol symbol :package package)
-      (build-code-describe-response name type arglist doc path line))))
+      (build-code-describe-response
+       name type arglist doc path line
+       :method-count (generic-function-method-count symbol :package package)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find-references
@@ -300,6 +307,28 @@ its sites against the symbols loaded in this image and merges them with xref."
                                   :project-only project-only
                                   :limit limit
                                   :scan scan))))
+
+(defun %handle-clos-describe (params)
+  "Describe a class or generic function.  Returns the clos-describe report
+without content text: the parent annotates it from the source files, which
+this image cannot parse, and renders the text."
+  (let ((symbol (gethash "symbol" params))
+        (package (gethash "package" params))
+        (limit (or (gethash "limit" params) 50)))
+    (unless symbol
+      (error "symbol is required"))
+    (clos-describe-report symbol :package package :limit limit)))
+
+(defun %handle-clos-verify-source (params)
+  "Resolve and judge the parent's clos-describe source signatures against
+their identities.  Returns WORKER/CLOS-VERIFY-SOURCE's payload: {results:
+[...]} (CL-MCP/SRC/CLOS-VERIFY-CORE:VERIFY-ENTRIES), which the parent uses
+to decide, per report entry, whether its source_signature candidates
+matched, mismatched, or could not be verified (spec 3.1-3.4)."
+  (let ((entries (gethash "entries" params)))
+    (unless entries
+      (error "entries is required"))
+    (verify-entries entries)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/inspect-object
@@ -438,6 +467,8 @@ hand-maintained count is wrong again the next time a method is added."
                    (cons "worker/code-find" #'%handle-code-find)
                    (cons "worker/code-describe" #'%handle-code-describe)
                    (cons "worker/code-find-references" #'%handle-code-find-references)
+                   (cons "worker/clos-describe" #'%handle-clos-describe)
+                   (cons "worker/clos-verify-source" #'%handle-clos-verify-source)
                    (cons "worker/inspect-object" #'%handle-inspect-object)
                    (cons "worker/macroexpand" #'%handle-macroexpand)
                    (cons "worker/spec-list" #'%handle-spec-list)

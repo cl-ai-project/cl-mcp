@@ -830,6 +830,57 @@ Cleans up server and socket on exit."
             (ok (gethash "count" result)
                 "result has count field")))))))
 
+(deftest worker-clos-describe-returns-the-report
+  (testing "worker/clos-describe returns the report, which the parent renders"
+    (with-handler-server (stream)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "cl:print-object"
+              (gethash "limit" params) 1)
+        (let* ((response (%send-and-receive stream 420 "worker/clos-describe" params))
+               (result (%result-of response))
+               (gfs (gethash "generic_functions" result)))
+          (ok (equal "found" (gethash "symbol_status" result)))
+          (ok (= 1 (length gfs)))
+          (ok (= 1 (length (gethash "methods" (elt gfs 0)))))
+          (ok (not (nth-value 1 (gethash "content" result))) "no content text yet")))))
+  (testing "worker/clos-describe needs a symbol"
+    (with-handler-server (stream)
+      (let ((response (%send-and-receive stream 421 "worker/clos-describe"
+                                         (make-hash-table :test 'equal))))
+        (ok (gethash "error" response))))))
+
+(deftest worker-clos-verify-source-judges-entries-over-json
+  (testing "worker/clos-verify-source resolves a matching defgeneric name over the wire"
+    (with-handler-server (stream)
+      (let ((name-identity (make-hash-table :test 'equal))
+            (identity (make-hash-table :test 'equal))
+            (head (make-hash-table :test 'equal))
+            (name-token (make-hash-table :test 'equal))
+            (candidate (make-hash-table :test 'equal))
+            (entry (make-hash-table :test 'equal))
+            (params (make-hash-table :test 'equal)))
+        (setf (gethash "package" name-identity) "COMMON-LISP"
+              (gethash "name" name-identity) "CAR")
+        (setf (gethash "kind" identity) "generic-function"
+              (gethash "generic_function" identity) name-identity)
+        (setf (gethash "token" head) "defgeneric" (gethash "in_package" head) "CL-USER")
+        (setf (gethash "token" name-token) "car" (gethash "in_package" name-token) "CL-USER")
+        (setf (gethash "kind" candidate) "defgeneric"
+              (gethash "head" candidate) head
+              (gethash "name" candidate) name-token
+              (gethash "methods" candidate) (vector))
+        (setf (gethash "id" entry) "w1"
+              (gethash "identity" entry) identity
+              (gethash "candidates" entry) (vector candidate))
+        (setf (gethash "entries" params) (vector entry))
+        (let* ((response (%send-and-receive stream 500 "worker/clos-verify-source" params))
+               (result (%result-of response))
+               (results (coerce (gethash "results" result) 'list)))
+          (ok (= 1 (length results)))
+          (ok (equal "w1" (gethash "id" (first results))))
+          (ok (equal "matched" (gethash "status" (first results))))
+          (ok (= 0 (gethash "candidate_index" (first results)))))))))
+
 (deftest worker-code-find-references-resolves-scan-sites
   (testing "worker/code-find-references resolves the sites the parent scanned"
     (with-handler-server (stream)

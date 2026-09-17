@@ -12,12 +12,34 @@
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%normalize-string
+                #:locate-form-in-nodes
                 #:file-unparseable-error
                 #:file-unparseable-message
-                #:make-file-unparseable-condition)
+                #:make-file-unparseable-condition
+                #:check-edit-guard
+                #:edit-guard-conflict
+                #:edit-guard-conflict-error)
+  (:import-from #:cl-mcp/src/source-snapshot
+                #:read-source-snapshot
+                #:snapshot-range-digest)
+  (:import-from #:cl-mcp/src/cst
+                #:parse-top-level-forms
+                #:cst-node-start
+                #:cst-node-end)
   (:import-from #:cl-mcp/src/fs
+                #:*fs-read-max-bytes*
                 #:fs-read-file
                 #:fs-write-file)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
+  (:import-from #:bordeaux-threads
+                #:make-thread
+                #:join-thread
+                #:thread-alive-p
+                #:destroy-thread
+                #:make-semaphore
+                #:signal-semaphore
+                #:wait-on-semaphore)
   (:import-from #:asdf
                 #:system-source-directory)
   (:import-from #:uiop
@@ -29,6 +51,12 @@
 
 (setf cl-mcp/src/project-root:*project-root*
       (uiop:ensure-directory-pathname (system-source-directory :cl-mcp)))
+
+;;; A package the CST reader reads the method fixtures below into.  Printing
+;;; their symbols from any other package qualified them, which is what made
+;;; defmethod form_names fail to match.
+(defpackage #:cl-mcp-edit-form-method-fixture
+  (:use #:cl))
 
 (defun project-path (relative)
   "Return an absolute namestring under the cl-mcp project for RELATIVE."
@@ -45,6 +73,70 @@ then clean up."
          (funcall thunk abs)
       (ignore-errors (delete-file abs)))))
 
+(defun %edit-guard-for (path form-type form-name &key (version 1) omit-form-digest)
+  "Build an edit_guard hash-table (design doc section 4.1) observing PATH's
+current on-disk content for the form matching FORM-TYPE/FORM-NAME. Reads
+PATH itself, independently of whatever lisp-edit-form call comes after --
+standing in for an earlier clos-describe observation."
+  (let* ((snapshot (read-source-snapshot path))
+         (nodes (parse-top-level-forms (getf snapshot :text)))
+         (node (locate-form-in-nodes nodes form-type form-name))
+         (start (cst-node-start node))
+         (end (cst-node-end node)))
+    (apply #'make-ht
+           "version" version
+           "path" form-name
+           "abs_path" (getf snapshot :abs-path)
+           "file_digest" (getf snapshot :digest)
+           "form_start" start
+           "form_end" end
+           (unless omit-form-digest
+             (list "form_digest" (snapshot-range-digest snapshot start end))))))
+
+(defun octets (&rest parts)
+  "Return PARTS concatenated into one (UNSIGNED-BYTE 8) vector: a string part
+is encoded as UTF-8, a vector part is taken byte for byte.  Lets a fixture
+hold a byte no encoder would produce, such as a lone #xE9."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                           :adjustable t :fill-pointer 0)))
+    (dolist (part parts (coerce out '(vector (unsigned-byte 8))))
+      (let ((bytes (if (stringp part)
+                       (sb-ext:string-to-octets part :external-format :utf-8)
+                       part)))
+        (loop for byte across bytes do (vector-push-extend byte out))))))
+
+(defun file-octets (abs)
+  "Return the bytes of the file at ABS as a (UNSIGNED-BYTE 8) vector, so a
+test can compare a file with itself without decoding it."
+  (with-open-file (in abs :element-type '(unsigned-byte 8))
+    (let ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (read-sequence buffer in)
+      buffer)))
+
+(defun with-octet-file (relative bytes thunk)
+  "Create RELATIVE holding exactly BYTES, call THUNK with its absolute path,
+then clean up.  FS-WRITE-FILE encodes a string, so a file carrying an invalid
+byte can only be written this way."
+  (let ((abs (project-path relative)))
+    (ensure-directories-exist abs)
+    (with-open-file (out abs :direction :output :element-type '(unsigned-byte 8)
+                             :if-exists :supersede)
+      (write-sequence bytes out))
+    (unwind-protect
+         (funcall thunk abs)
+      (ignore-errors (delete-file abs)))))
+
+(defun %sized-lisp-source (total-length)
+  "Return Lisp source of exactly TOTAL-LENGTH characters: a `target' defun
+followed by a line comment padded with `x' out to TOTAL-LENGTH, for
+guard read-limit tests. Built programmatically so the suite never commits
+a large fixture file. TOTAL-LENGTH must be large enough to hold the fixed
+prefix and trailing newline."
+  (let* ((prefix (format nil "(defun target () :old)~%~%;; "))
+         (suffix (string #\Newline))
+         (pad (- total-length (length prefix) (length suffix))))
+    (concatenate 'string prefix (make-string pad :initial-element #\x) suffix)))
+
 (defun large-file-source (form-count)
   "Return Lisp source with a `target' defun followed by FORM-COUNT filler defuns.
 Used to prove that a dry-run summary does not grow with the size of the file."
@@ -53,6 +145,31 @@ Used to prove that a dry-run summary does not grow with the size of the file."
     (dotimes (i form-count)
       (format s "(defun filler-~D (x)~%  ;; padding to keep this fixture large~%  (+ x ~D))~%~%"
               i i))))
+
+(deftest locate-form-in-nodes-finds-a-unique-match
+  (testing "one matching node is returned with no error"
+    (let ((nodes (parse-top-level-forms
+                  (format nil "(defun other () 1)~%~%(defun target () :old)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defun" "target")
+        (ok node)
+        (ok (null reason))))))
+
+(deftest locate-form-in-nodes-reports-multiple-matches
+  (testing "two matches without an index return no node and a descriptive reason"
+    (let ((nodes (parse-top-level-forms
+                  (format nil "(defmethod process ((x string))~%  x)~%~%~
+(defmethod process ((x integer))~%  x)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defmethod" "process")
+        (ok (null node))
+        (ok (and reason (search "Multiple matches" reason)
+                 (search "[0]" reason) (search "[1]" reason)))))))
+
+(deftest locate-form-in-nodes-returns-nil-for-an-absent-form
+  (testing "no match is a plain absence, not an error"
+    (let ((nodes (parse-top-level-forms (format nil "(defun other () 1)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "defun" "missing")
+        (ok (null node))
+        (ok (null reason))))))
 
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
@@ -741,6 +858,100 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search ":hash-keep)" updated)))
           ;; The plain "keep" method must be untouched.
           (ok (search ":plain-keep" updated)))))))
+
+(deftest lisp-edit-form-defmethod-in-another-package
+  (testing "a defmethod read in a package of its own matches name + lambda list"
+    (with-temp-file "tests/tmp/edit-form-method-package.lisp"
+        (format nil "(in-package #:cl-mcp-edit-form-method-fixture)~%~%~
+(defmethod paint ((w widget) stream)~%  (list :widget w stream))~%~%~
+(defmethod paint ((g gadget) stream)~%  (list :gadget g stream))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "paint ((g gadget) stream)"
+                        :operation "replace"
+                        :content (format nil "(defmethod paint ((g gadget) stream)~%  ~
+(list :gadget-replaced g stream))"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":gadget-replaced" updated))
+          (ok (search "(list :widget w stream)" updated)))))))
+
+(deftest lisp-edit-form-defmethod-ignores-prefixes-and-line-breaks
+  (testing "package prefixes and line breaks in form_name do not matter"
+    (with-temp-file "tests/tmp/edit-form-method-prefix.lisp"
+        (format nil "(in-package #:cl-mcp-edit-form-method-fixture)~%~%~
+(defmethod paint ((w widget) stream)~%  (list :widget w stream))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name (format nil "cl-mcp-edit-form-method-fixture::paint ~
+((w cl-mcp-edit-form-method-fixture::widget)~%    stream)")
+                        :operation "replace"
+                        :content (format nil "(defmethod paint ((w widget) stream)~%  ~
+(list :widget-replaced w stream))"))
+        (ok (search ":widget-replaced" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-defmethod-long-lambda-list
+  (testing "a lambda list longer than a printed line still matches on one line"
+    (with-temp-file "tests/tmp/edit-form-method-long.lisp"
+        (format nil "(defmethod write-out ((stream sink) string &optional (start 0) end ~
+(fill-pointer-output nil) (element-type 'character))~%  ~
+(list stream string start end fill-pointer-output element-type))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name (concatenate 'string
+                            "write-out ((stream sink) string &optional (start 0) end "
+                            "(fill-pointer-output nil) (element-type 'character))")
+                        :operation "replace"
+                        :content (format nil "(defmethod write-out ((stream sink) string ~
+&optional (start 0) end (fill-pointer-output nil) (element-type 'character))~%  :long-replaced)"))
+        (ok (search ":long-replaced" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-defmethod-prefers-the-exact-signature
+  (testing "a primary method's full signature does not also pick the :around method"
+    (with-temp-file "tests/tmp/edit-form-method-around.lisp"
+        (format nil "(defmethod area ((s circle))~%  :primary)~%~%~
+(defmethod area :around ((s circle))~%  (call-next-method))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defmethod"
+                        :form-name "area ((s circle))"
+                        :operation "replace"
+                        :content (format nil "(defmethod area ((s circle))~%  :primary-replaced)"))
+        (let ((updated (fs-read-file path)))
+          (ok (search ":primary-replaced" updated))
+          (ok (search "(call-next-method)" updated)))))))
+
+(deftest lisp-edit-form-string-name-with-colon
+  (testing "a string form name holding a colon matches, with or without its quotes"
+    (dolist (form-name '("my-lib:feature" "\"my-lib:feature\""))
+      (with-temp-file "tests/tmp/edit-form-string-colon.lisp"
+          (format nil "(deftest \"my-lib:feature\"~%  (ok t))~%~%(defun untouched () :ok)~%")
+        (lambda (path)
+          (lisp-edit-form :file-path path
+                          :form-type "deftest"
+                          :form-name form-name
+                          :operation "replace"
+                          :content (format nil "(deftest \"my-lib:feature\"~%  (ok :replaced))"))
+          (let ((updated (fs-read-file path)))
+            (ok (search "(ok :replaced)" updated) form-name)
+            (ok (search "(defun untouched () :ok)" updated))))))))
+
+(deftest lisp-edit-form-string-name-with-two-spaces
+  (testing "a string form name holding two consecutive spaces still matches"
+    (dolist (form-name '("adds  two" "\"adds  two\""))
+      (with-temp-file "tests/tmp/edit-form-string-spaces.lisp"
+          (format nil "(deftest \"adds  two\"~%  (ok t))~%~%(deftest \"adds two\"~%  (ok t))~%")
+        (lambda (path)
+          (lisp-edit-form :file-path path
+                          :form-type "deftest"
+                          :form-name form-name
+                          :operation "replace"
+                          :content (format nil "(deftest \"adds  two\"~%  (ok :replaced))"))
+          (let ((updated (fs-read-file path)))
+            (ok (search "(ok :replaced)" updated) form-name)
+            (ok (search (format nil "(deftest \"adds two\"~%  (ok t))") updated))))))))
 
 (deftest lisp-edit-form-with-package-qualified-readtable
   (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
@@ -2041,3 +2252,660 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (gethash "isError" result-obj))
             (ok (search "Run lisp-check-parens with path=" text))
             (ok (search "Next top-level form probably begins at line 4" text))))))))
+
+(deftest check-edit-guard-verifies-checks-in-order
+  (testing "a guard built from the current file passes every check"
+    (with-temp-file "tests/tmp/check-guard-match.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok ok-p)
+            (ok (null conflict)))))))
+  (testing "an unknown guard version is rejected before any other check"
+    (with-temp-file "tests/tmp/check-guard-version.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target" :version 2)))
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "version" (getf conflict :reason))))))))
+  (testing "a guard claiming a different file is rejected"
+    (with-temp-file "tests/tmp/check-guard-abspath.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "abs_path" guard) "/nonexistent/other-file.lisp")
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "abs_path" (getf conflict :reason))))))))
+  (testing "a stale file_digest is rejected even when everything else matches"
+    (with-temp-file "tests/tmp/check-guard-file-digest.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "file_digest" guard) "md5:00000000000000000000000000000000")
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "file_digest" (getf conflict :reason))))))))
+  (testing "form_start/form_end outside the file text is rejected"
+    (with-temp-file "tests/tmp/check-guard-bounds.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "form_end" guard) (+ 10000 (gethash "form_start" guard)))
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "valid range" (getf conflict :reason))))))))
+  (testing "a guard whose range no longer matches the located node is rejected"
+    (with-temp-file "tests/tmp/check-guard-range.lisp"
+        "(defun target () :old)\n\n(defun other () :ok)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (other (locate-form-in-nodes nodes "defun" "other"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "form_start" guard) (cst-node-start other)
+                (gethash "form_end" guard) (cst-node-end other)
+                (gethash "form_digest" guard)
+                (snapshot-range-digest snapshot (cst-node-start other) (cst-node-end other)))
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "moved" (getf conflict :reason))))))))
+  (testing "a stale form_digest is rejected even with a matching range"
+    (with-temp-file "tests/tmp/check-guard-form-digest.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "form_digest" guard) "md5:11111111111111111111111111111111")
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "form_digest" (getf conflict :reason))))))))
+  (testing "a guard with no form_digest field still passes the other checks"
+    (with-temp-file "tests/tmp/check-guard-no-form-digest.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target" :omit-form-digest t)))
+          (ok (null (gethash "form_digest" guard)))
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok ok-p)
+            (ok (null conflict)))))))
+  (testing "a guard missing form_start entirely is rejected, not treated as unset"
+    (with-temp-file "tests/tmp/check-guard-missing-form-start.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (remhash "form_start" guard)
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "valid range" (getf conflict :reason))))))))
+  (testing "a negative form_start is rejected"
+    (with-temp-file "tests/tmp/check-guard-negative-form-start.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let* ((snapshot (read-source-snapshot path))
+               (nodes (parse-top-level-forms (getf snapshot :text)))
+               (node (locate-form-in-nodes nodes "defun" "target"))
+               (guard (%edit-guard-for path "defun" "target")))
+          (setf (gethash "form_start" guard) -1)
+          (multiple-value-bind (ok-p conflict)
+              (check-edit-guard guard (getf snapshot :abs-path) snapshot node)
+            (ok (not ok-p))
+            (ok (search "valid range" (getf conflict :reason)))))))))
+
+(deftest lisp-edit-form-guard-allows-and-rejects-replace
+  (testing "a fresh guard lets a matching replace go through"
+    (with-temp-file "tests/tmp/edit-form-guard-replace-ok.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :new)"
+                          :guard guard)
+          (ok (search ":new" (fs-read-file path)))))))
+  (testing "a guard is refused once the target form itself changed"
+    (with-temp-file "tests/tmp/edit-form-guard-target-changed.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :changed-externally)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :content "(defun target () :new)"
+                                :guard guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a change elsewhere in the file is caught as a whole-file digest change"
+    (with-temp-file "tests/tmp/edit-form-guard-unrelated-change.lisp"
+        "(defun target () :old)\n\n(defun other () :ok)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string
+             "(defun target () :old)\n\n(defun other () :changed)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :content "(defun target () :new)"
+                                :guard guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a same-length content change elsewhere is still caught by the digest"
+    (with-temp-file "tests/tmp/edit-form-guard-same-length.lisp"
+        "(defun target () :old)\n\n(defun other () 1)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string
+             "(defun target () :old)\n\n(defun other () 2)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :content "(defun target () :new)"
+                                :guard guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))))))
+  (testing "the same guard cannot be reused for a second edit after the first succeeded"
+    (with-temp-file "tests/tmp/edit-form-guard-reuse.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :first)"
+                          :guard guard)
+          (let ((after-first (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :content "(defun target () :second)"
+                                :guard guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= after-first (fs-read-file path)))))))))
+
+(defun %conflict-field (payload key)
+  "Return KEY's value in PAYLOAD when PAYLOAD is an EDIT-GUARD-CONFLICT plist,
+or PAYLOAD's own text when it is the message of some other error.  Lets a test
+assert on a conflict field and report a non-conflict outcome as a mismatched
+value instead of a GETF type error on a string."
+  (if (listp payload) (getf payload key) (princ-to-string payload)))
+
+(defun %guarded-edit-outcome (path form-name guard)
+  "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and
+classify how the call ended.  Returns (VALUES KIND PAYLOAD): :CONFLICT with the
+EDIT-GUARD-CONFLICT plist, :UNPARSEABLE or :PLAIN with the error's text, or :OK
+with the tool's own result.  Lets a test say which contract a failed lookup
+under a guard fell under, instead of only that some error was signalled."
+  (handler-case
+      (values :ok (lisp-edit-form :file-path path
+                                  :form-type "defun"
+                                  :form-name form-name
+                                  :operation "replace"
+                                  :content (format nil "(defun ~A () :new)" form-name)
+                                  :guard guard))
+    (edit-guard-conflict-error (e) (values :conflict (edit-guard-conflict e)))
+    (file-unparseable-error (e) (values :unparseable (princ-to-string e)))
+    (error (e) (values :plain (princ-to-string e)))))
+
+(deftest lisp-edit-form-guard-reports-a-conflict-when-the-lookup-fails
+  (testing "the target renamed after the guard was issued is a conflict, not \"not found\""
+    (with-temp-file "tests/tmp/edit-form-guard-renamed.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun renamed () :old)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "the target deleted after the guard was issued is a conflict"
+    (with-temp-file "tests/tmp/edit-form-guard-deleted.lisp"
+        "(defun keep () :ok)\n\n(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun keep () :ok)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a second definition of the same name added afterwards is a conflict, not ambiguity"
+    (with-temp-file "tests/tmp/edit-form-guard-became-ambiguous.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :a)\n\n(defun target () :b)\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "a file made unparseable after the guard is a conflict, and nothing is written"
+    (with-temp-file "tests/tmp/edit-form-guard-became-unparseable.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before nil))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :old)\n\n(defun broken (\n" out))
+          (setf before (fs-read-file path))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
+            (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "an unchanged file still gives the plain \"not found\" error, never a conflict"
+    (with-temp-file "tests/tmp/edit-form-guard-unchanged-not-found.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (fs-read-file path)))
+          (multiple-value-bind (kind payload)
+              (%guarded-edit-outcome path "no-such-function" guard)
+            (ok (eq kind :plain) (format nil "~A: ~A" kind payload))
+            (ok (search "not found" payload))
+            (ok (string= before (fs-read-file path))))))))
+  (testing "an unchanged file still gives the plain \"Multiple matches\" error"
+    (with-temp-file "tests/tmp/edit-form-guard-unchanged-ambiguous.lisp"
+        "(defun keep () :ok)\n\n(defun target () :a)\n\n(defun target () :b)\n"
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "keep"))
+              (before (fs-read-file path)))
+          (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
+            (ok (eq kind :plain) (format nil "~A: ~A" kind payload))
+            (ok (search "Multiple matches" payload))
+            (ok (string= before (fs-read-file path)))))))))
+
+(deftest lisp-edit-form-guard-applies-to-delete-and-inserts
+  (testing "delete honors a fresh guard and rejects a stale one"
+    (with-temp-file "tests/tmp/edit-form-guard-delete.lisp"
+        "(defun keep () :ok)\n\n(defun target () :old)\n"
+      (lambda (path)
+        (let ((stale-guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun keep () :ok)\n\n(defun target () :changed)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "delete"
+                                :guard stale-guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))
+          (let ((fresh-guard (%edit-guard-for path "defun" "target")))
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "delete"
+                            :guard fresh-guard)
+            (ok (null (search "(defun target" (fs-read-file path))))
+            (ok (search "(defun keep" (fs-read-file path))))))))
+  (testing "insert_before honors a fresh guard and rejects a stale one"
+    (with-temp-file "tests/tmp/edit-form-guard-insert-before.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((stale-guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :changed)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "insert_before"
+                                :content "(defun helper () :h)"
+                                :guard stale-guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))
+          (let ((fresh-guard (%edit-guard-for path "defun" "target")))
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "insert_before"
+                            :content "(defun helper () :h)"
+                            :guard fresh-guard)
+            (ok (search "defun helper" (fs-read-file path))))))))
+  (testing "insert_after honors a fresh guard and rejects a stale one"
+    (with-temp-file "tests/tmp/edit-form-guard-insert-after.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((stale-guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :changed)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "insert_after"
+                                :content "(defun helper () :h)"
+                                :guard stale-guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))
+          (let ((fresh-guard (%edit-guard-for path "defun" "target")))
+            (lisp-edit-form :file-path path
+                            :form-type "defun"
+                            :form-name "target"
+                            :operation "insert_after"
+                            :content "(defun helper () :h)"
+                            :guard fresh-guard)
+            (ok (search "defun helper" (fs-read-file path)))))))))
+
+(deftest lisp-edit-form-guard-applies-to-dry-run-and-guardless-calls
+  (testing "dry_run runs the same guard validation as a real write"
+    (with-temp-file "tests/tmp/edit-form-guard-dry-run.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (let ((stale-guard (%edit-guard-for path "defun" "target")))
+          (with-open-file (out path :direction :output :if-exists :supersede)
+            (write-string "(defun target () :changed)\n" out))
+          (let ((before (fs-read-file path))
+                (raised nil))
+            (handler-case
+                (lisp-edit-form :file-path path
+                                :form-type "defun"
+                                :form-name "target"
+                                :operation "replace"
+                                :content "(defun target () :new)"
+                                :dry-run t
+                                :guard stale-guard)
+              (edit-guard-conflict-error () (setf raised t)))
+            (ok raised)
+            (ok (string= before (fs-read-file path))))
+          (let* ((fresh-guard (%edit-guard-for path "defun" "target"))
+                 (result (lisp-edit-form :file-path path
+                                         :form-type "defun"
+                                         :form-name "target"
+                                         :operation "replace"
+                                         :content "(defun target () :new)"
+                                         :dry-run t
+                                         :guard fresh-guard))
+                 (before-dry-run (fs-read-file path)))
+            (ok (hash-table-p result))
+            (ok (gethash "would_change" result))
+            (ok (string= before-dry-run (fs-read-file path))))))))
+  (testing "omitting guard keeps the pre-guard behavior"
+    (with-temp-file "tests/tmp/edit-form-no-guard.lisp"
+        "(defun target () :old)\n"
+      (lambda (path)
+        (lisp-edit-form :file-path path
+                        :form-type "defun"
+                        :form-name "target"
+                        :operation "replace"
+                        :content "(defun target () :new)"
+                        :guard nil)
+        (ok (search ":new" (fs-read-file path)))))))
+
+(deftest lisp-edit-form-guard-respects-the-read-limit
+  (testing "a guarded edit over the read limit is refused with the read-limit message"
+    (with-temp-file "tests/tmp/edit-form-guard-over-limit.lisp"
+        (%sized-lisp-source (+ *fs-read-max-bytes* 100))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (fs-read-file path))
+              (kind nil)
+              (message nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :new)"
+                              :guard guard)
+            (edit-guard-conflict-error () (setf kind :conflict))
+            (error (e) (setf kind :plain message (princ-to-string e))))
+          (ok (eq kind :plain))
+          (ok (and message (search "exceeds the read limit" message)))
+          (ok (string= before (fs-read-file path)))))))
+  (testing "a guarded edit just under the read limit still works"
+    (with-temp-file "tests/tmp/edit-form-guard-under-limit.lisp"
+        (%sized-lisp-source (1- *fs-read-max-bytes*))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :new)"
+                          :guard guard)
+          (ok (search ":new" (fs-read-file path))))))))
+
+(deftest lisp-edit-form-guard-refuses-a-file-that-is-not-valid-utf-8
+  (testing "an invalid byte outside the edited form is refused, never rewritten"
+    (with-octet-file "tests/tmp/edit-form-guard-invalid-utf8.lisp"
+        (octets (format nil "(defun target () :old)~%~%;; caf") #(233) (format nil "~%"))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target"))
+              (before (file-octets path))
+              (kind nil)
+              (message nil))
+          (handler-case
+              (lisp-edit-form :file-path path
+                              :form-type "defun"
+                              :form-name "target"
+                              :operation "replace"
+                              :content "(defun target () :new)"
+                              :guard guard)
+            (edit-guard-conflict-error () (setf kind :conflict))
+            (error (e) (setf kind :plain message (princ-to-string e))))
+          (ok (eq kind :plain) "a plain refusal: an undecodable file is not a guard conflict")
+          (ok (and message (search "UTF-8" message)) message)
+          (ok (equalp before (file-octets path))
+              "every byte is intact, the invalid one included")))))
+  (testing "a valid UTF-8 file with multibyte characters still edits"
+    (with-octet-file "tests/tmp/edit-form-guard-valid-utf8.lisp"
+        (octets (format nil "(defun target () :old)~%~%;; caf~C~%" (code-char 233)))
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "target")))
+          (lisp-edit-form :file-path path
+                          :form-type "defun"
+                          :form-name "target"
+                          :operation "replace"
+                          :content "(defun target () :new)"
+                          :guard guard)
+          (let ((after (fs-read-file path)))
+            (ok (search ":new" after))
+            (ok (search (format nil "caf~C" (code-char 233)) after)
+                "the multibyte comment came through unharmed")))))))
+
+(defparameter *parallel-wait-seconds* 30
+  "Seconds RUN-IN-PARALLEL waits at the barrier and for each thread to finish.
+Long enough that a loaded machine never trips it, short enough that a deadlock
+regression fails the suite instead of hanging it.")
+
+(defun run-in-parallel (thunk-a thunk-b)
+  "Run THUNK-A and THUNK-B in two threads released together and return their
+two primary values as a list.
+
+The release is a two-party semaphore barrier -- each thread signals its own
+semaphore and then waits for the other's -- so neither thunk starts until both
+threads are running. No SLEEP and no timing assumption: the barrier is the
+synchronisation.
+
+A thunk that fails contributes the SERIOUS-CONDITION it signalled, not only an
+ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
+Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
+this function waits on that instead of blocking in JOIN-THREAD, so a thread
+still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
+and is then destroyed and joined, so a deadlock regression fails the calling
+test rather than hanging the suite, and no thread outlives this call. Callers
+must treat :DID-NOT-FINISH as a failure."
+  (let ((a-ready (make-semaphore))
+        (b-ready (make-semaphore))
+        (finished (make-semaphore))
+        (results (make-array 2 :initial-element :did-not-finish)))
+    (flet ((runner (index mine theirs thunk)
+             (lambda ()
+               (unwind-protect
+                    (progn
+                      (signal-semaphore mine)
+                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                      (setf (aref results index)
+                            (handler-case (funcall thunk)
+                              (serious-condition (c) c))))
+                 (signal-semaphore finished)))))
+      (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
+                                        :name "cl-mcp-edit-lock-test-a")
+                           (make-thread (runner 1 b-ready a-ready thunk-b)
+                                        :name "cl-mcp-edit-lock-test-b"))))
+        (let ((finished-p
+                (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                     (wait-on-semaphore finished :timeout *parallel-wait-seconds*))))
+          ;; Reap every thread before returning, whichever way the wait ended:
+          ;; a thread still running would keep writing files into the rest of
+          ;; the suite.  One that timed out is destroyed first, which unwinds
+          ;; it and releases any lock it holds, and JOIN-THREAD on a destroyed
+          ;; thread signals, so the join is guarded.
+          (dolist (thread threads)
+            (unless finished-p
+              (when (thread-alive-p thread)
+                (ignore-errors (destroy-thread thread))))
+            (ignore-errors (join-thread thread))))))
+    (coerce results 'list)))
+
+(defun %concurrent-guarded-edit-verdict (rounds)
+  "Run ROUNDS rounds of two threads editing one form of one file with the SAME
+edit_guard and different replacement text, and return NIL when every round
+behaved. A non-NIL return describes the first round that did not, and the loop
+stops there, so a round that deadlocks costs one RUN-IN-PARALLEL timeout
+rather than ROUNDS of them.
+
+Expected in every round: exactly one call returns, the other signals
+EDIT-GUARD-CONFLICT-ERROR because the first already rewrote the file out from
+under its guard, and the file holds the winner's text alone and still parses.
+
+Without the per-file lock held across read -> guard -> write, both calls can
+read the same original, both find the guard valid, and both write -- the
+loser's text disappearing with no conflict reported anywhere."
+  (let ((verdict nil))
+    (dotimes (round rounds verdict)
+      (when verdict (return verdict))
+      (with-temp-file "tests/tmp/edit-form-lock-concurrent.lisp"
+          (format nil "(defun target () :old)~%")
+        (lambda (path)
+          (let* ((guard (%edit-guard-for path "defun" "target"))
+                 (results (run-in-parallel
+                           (lambda ()
+                             (lisp-edit-form :file-path path :form-type "defun"
+                                             :form-name "target" :operation "replace"
+                                             :content "(defun target () :from-a)"
+                                             :guard guard))
+                           (lambda ()
+                             (lisp-edit-form :file-path path :form-type "defun"
+                                             :form-name "target" :operation "replace"
+                                             :content "(defun target () :from-b)"
+                                             :guard guard))))
+                 (conflicts (count-if (lambda (r)
+                                        (typep r 'edit-guard-conflict-error))
+                                      results))
+                 (others (remove-if-not
+                          (lambda (r)
+                            (and (typep r 'serious-condition)
+                                 (not (typep r 'edit-guard-conflict-error))))
+                          results))
+                 (after (fs-read-file path))
+                 (has-a (search ":from-a" after))
+                 (has-b (search ":from-b" after)))
+            (cond ((member :did-not-finish results)
+                   (setf verdict (list round :did-not-finish)))
+                  (others
+                   (setf verdict (list round :unexpected-error
+                                       (princ-to-string (first others)))))
+                  ((/= conflicts 1)
+                   (setf verdict (list round :conflicts conflicts after)))
+                  ((not (or has-a has-b))
+                   (setf verdict (list round :no-winner after)))
+                  ((and has-a has-b)
+                   (setf verdict (list round :both-written after)))
+                  ((not (eql 1 (ignore-errors
+                                (length (parse-top-level-forms after)))))
+                   (setf verdict (list round :does-not-parse after))))))))))
+
+(deftest lisp-edit-form-concurrent-guarded-edits-let-exactly-one-win
+  (testing "two edits sharing one guard: one writes, the other gets the conflict"
+    (let ((verdict (%concurrent-guarded-edit-verdict 15)))
+      (ok (null verdict)
+          (if verdict
+              (format nil "round ~S: ~A" (first verdict) (rest verdict))
+              "every round: one winner, one edit_guard conflict, a file that parses")))))

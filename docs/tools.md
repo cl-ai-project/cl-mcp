@@ -59,6 +59,7 @@ Output fields:
   - Structures: `class` name, `slots` array
   - Functions: `name`, `lambda_list` (SBCL only)
 - `meta`: Contains `truncated` flag, element counts, etc.
+- `hint` (string, only when the object is the class its symbol names or a named generic function): points at `clos-describe`, which describes the class or generic function itself; `inspect-object` shows its internal representation. The text shows it as `Hint:`
 
 Nested objects are returned as `object-ref` with their own `id` for further inspection.
 Circular references are detected and marked as `circular-ref`.
@@ -135,6 +136,15 @@ file is still refused. The intended recovery loop is `lisp-check-parens` →
 project root, and the guidance the tools print gives it in that form. The
 plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
 in its error data so a client can discover the opt-in.
+
+Concurrent cl-mcp calls: like `lisp-edit-form` and `lisp-patch-form`, a write holds one
+per-file lock for its whole decide-then-write span, so a concurrent `lisp-edit-form` or
+`lisp-patch-form` on the same file cannot land between this tool's overwrite decision and
+its write. Those three parent-side tools are all the lock covers: a write made by the worker-side
+tools (evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no
+lock and happens in a different process, and an external editor — and equally a second cl-mcp
+server over the same checkout — is not coordinated. The lock is neither a transaction nor a
+crash-safety mechanism.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -312,6 +322,20 @@ Input:
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
+- `guard` (object, optional): an edit_guard object (design doc
+  `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
+  form an earlier read observed — `clos-describe`'s own `edit_guard` field, on a `matched`
+  entry, is one. See "Edit guard" below.
+
+Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
+ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
+`(defmethod stream-write-char ((s sink) character) ...)`. A `form_name` equal to one method's whole
+signature picks that method over others it only abbreviates: `"area ((s circle))"` picks the
+primary method, not `area :around ((s circle))`. Same-name methods whose specializers differ only
+in package (`((w a:widget))` and `((w b:widget))`) match the same `form_name`; the
+`Multiple matches` error lists them, and a `[N]` suffix (`"render ((w widget))[1]"`, 0-based)
+picks one. Other form types compare `form_name` as written, so a string name such as
+`"/users/:id"` keeps its colon and spaces.
 
 Operations:
 - **replace**: Replace the entire matched form with `content`
@@ -353,6 +377,70 @@ Dry-run output (when `dry_run` is true):
 - `parinfer_warning` (string, optional): auto-repair warning when closing delimiters are added
 - `content`: human-readable summary
 
+**Edit guard.** Without `guard`, `lisp-edit-form` matches `form_type`/`form_name` against
+whatever is on disk right now — there is no guarantee that form is the same one an earlier
+read (a `clos-describe` call, say) observed; something else may have replaced, moved or
+deleted it since. Passing `guard` closes that gap: `replace`, `insert_before`, `insert_after`,
+`delete` and `dry_run` all run the same six checks, in order, **before writing anything**:
+
+1. `guard.version` is `1` (the only version this tool understands).
+2. `guard.abs_path` names the same file `file_path` resolves to.
+3. `guard.file_digest` matches an MD5 digest of the file's current bytes.
+4. `guard.form_start`/`guard.form_end` (0-based characters, end exclusive) are a valid range
+   in that same reading of the file.
+5. The form `form_type`/`form_name` matches today has exactly that range — not a different
+   definition that happens to share the name.
+6. When present, `guard.form_digest` matches an MD5 digest of that range's text.
+
+The file is read once for these checks, and the very same bytes are what gets edited — never a
+second, possibly different, read. The first check that fails stops everything: **nothing is
+written**, not even under `dry_run`, and the file is byte-for-byte unchanged. The failure is a
+tool error whose JSON also carries `conflict`: `{"reason": "<one sentence>", "expected": ...,
+"actual": ...}`. There is no fallback to a plain name match and no adopting the new digest to
+continue — re-run whatever produced `guard` (a fresh `clos-describe`, for instance) and retry
+with the new value. Calling without `guard` is unaffected and keeps working as before; it is
+just not protected against this class of surprise.
+
+Checks 1-4 run before the file is parsed; checks 5-6 run once `form_type`/`form_name` has
+matched a form. That split is what a changed file gets: once `guard.file_digest` no longer
+matches, the call reports the `conflict` even when the lookup could not have finished anyway —
+the observed form renamed or deleted, its name now matching several forms, or the file no longer
+parsing at all. The reason names the `file_digest` mismatch, which is the change to look at
+first, rather than the `not found`, `Multiple matches` or unparseable-file error the lookup would
+otherwise have raised. When the file is *unchanged*, none of those is a guard problem: a
+`form_type`/`form_name` that names nothing still gets the ordinary `Form <type> <name> not found
+in <path>` error, and an ambiguous one still gets `Multiple matches ... Specify an index:`, so a
+guard never turns a caller's own mistake into a `conflict`. A path the read policy refuses, a
+file over the read limit and a file that is not valid UTF-8 likewise stay plain errors. So
+does a file deleted, or otherwise made unreadable, after `guard` was issued: the snapshot
+read that every check needs fails before any digest exists to compare against, so there is
+nothing to build a `conflict` payload from, and the call gets the plain `Cannot read <path>
+to verify guard: <reason>` error instead.
+
+What this does *not* protect against: `guard` is a precondition, not an access token or a
+lock — the existing path validation and write limits still apply unchanged (a guarded call
+reaches no file, and writes no file, that an unguarded call could not). Reading for a guarded
+call is capped the same way an ordinary `lisp-edit-form` read is: it reads the whole file in one
+pass, so the digest it checks and the text it edits always agree, and refuses — never
+truncates — a file at or over the same read limit an unguarded call would refuse too; a guard
+never lets this tool read more than an unguarded call could. A file that is not valid UTF-8 is
+refused the same way, with a plain error rather than a `conflict`: its undecodable bytes would
+be replaced by `?` on the way back to disk, and an unguarded call refuses it too (its decoder
+signals). This is not compare-and-swap.
+Between the check above and the write, no *other write by these three tools* can slip in:
+`lisp-edit-form`, `lisp-patch-form` and `fs-write-file` take one per-file lock, and
+`lisp-edit-form` holds it from before it reads the file until after it writes, so read → check →
+build → write is one critical section. A second concurrent edit of the same file therefore runs
+after this one finishes, reads what it wrote, and — with the same `guard` — gets a `conflict`
+instead of silently overwriting it. The lock lives in the parent process's own memory and only
+those three tools take it, so it orders **nothing else**: a write made by the worker-side tools
+(evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no lock and
+happens in a different process, and an external editor — and equally a *second cl-mcp server*
+running over the same checkout — is not coordinated either; those windows are not closed. What
+*is* caught: any change after `guard` was built, reusing the same `guard` for a second edit after
+the first one already succeeded, and a change anywhere else in the file (an edited `in-package`,
+say) even when the target form's own text is untouched.
+
 ## `lisp-patch-form`
 Scoped text replacement within a matched top-level Lisp form. Finds `old_text` (exact,
 whitespace-sensitive match) within the form and replaces it with `new_text`. Most
@@ -383,6 +471,25 @@ Input:
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
 
+`form_name` matches a `defmethod` as in `lisp-edit-form`: package prefixes and line breaks in it
+are ignored, the method whose whole signature equals `form_name` is preferred over one it
+abbreviates, and same-name methods from different packages need a `[N]` suffix.
+
+No `guard`: `lisp-patch-form` takes no guard argument, so it always patches whatever
+`form_type`/`form_name` match on disk right now, with no check that it is the form an earlier
+read observed. An edit built from a `clos-describe` result should therefore go through
+`lisp-edit-form` with that entry's `edit_guard` passed as `guard` — that is the only path where
+a file or form changed since the observation stops the write.
+
+Concurrent cl-mcp calls: like `lisp-edit-form`, a patch holds one per-file lock from before it
+reads the file until after it writes, so two patches to two different forms of one file both
+land instead of the second silently dropping the first. That lock covers three parent-side tools
+and no more — this one, `lisp-edit-form` and `fs-write-file`. A write made by the worker-side
+tools (evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no
+lock and happens in a different process, and an external editor — and equally a second cl-mcp
+server over the same checkout — is not coordinated; and, since there is no `guard` here, a change
+made between your read and this patch is neither detected nor reported.
+
 Output:
 - `path`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
@@ -411,7 +518,8 @@ Input:
 
 Output:
 - `path` (relative when inside project, absolute otherwise)
-- `line` (integer or null if unknown)
+- `line` (integer or null if unknown): classes, conditions, structures and methods get one too,
+  the line of the top-level form defining them
 
 ## `code-describe`
 Return symbol metadata (name, type, arglist, documentation).
@@ -421,9 +529,12 @@ Input:
 - `package` (string, optional): must exist when `symbol` is unqualified
 
 Output:
-- `type` ("function" | "macro" | "variable" | "unbound")
-- `arglist` (string)
+- `type` (`function`, `generic-function`, `macro`, `variable`, `class`, `condition`, `structure`)
+- `arglist` (string; for a class, its direct slot names)
 - `documentation` (string|null)
+- `path`, `line`: where it is defined; a class, condition or structure gets its line too
+
+The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
 
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside
@@ -458,6 +569,157 @@ name is flagged in `shadowed_by`; other lexical bindings are not. The name posit
 Only files `fs-read-file` may read are scanned (under the project root or a registered ASDF
 system's source directory, symlinks resolved): a file the root reaches through a symlink leading
 elsewhere is not read, and a note counts such files without naming them.
+
+## `clos-describe`
+Describe a CLOS class or generic function from the running image — the structure a source
+search cannot see: a generic function's methods with their qualifiers, specializers and
+source lines, and a class's superclasses, subclasses, precedence list, direct and effective
+slots, default initargs and specialized methods.
+
+Input:
+- `symbol` (string, required): `pkg:name`, `pkg::name` or `name`; a single colon also finds internal symbols
+- `package` (string, optional): package used when `symbol` is unqualified
+- `limit` (integer, default `50`): most methods listed per generic function and per class; `method_count` always gives the total
+
+Output (the content text carries everything that matters; names in it drop the symbol's own package and `COMMON-LISP:`):
+- `symbol_status`: `found`, `not_found` or `package_not_found`; nothing is interned either way
+- `resolved_symbol`, `symbol_kind`, `lookup_package`, `lookup_name`, `limit`, `notes`
+- `generic_functions` (array, up to 2): the function `symbol` names and its `(setf symbol)` function, when generic
+  - `name`, `lambda_list`, `documentation`, `method_combination` (`STANDARD`, `+ :MOST-SPECIFIC-FIRST`, ...)
+  - `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_guard`, `note`: the `defgeneric`; `path` is null when no `defgeneric` created the generic function (a `defmethod` or a slot accessor did)
+  - `method_count`, `truncated`, `methods`
+- `class` (object or null):
+  - `name`, `metaclass`, `documentation`, `finalized`, `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_guard`, `note`
+  - `direct_superclasses`, `direct_subclasses`, `precedence_list` (null when a superclass is undefined), `undefined_superclasses`
+  - `direct_slots`, `effective_slots` (null without a precedence list): `name`, `from` (effective slots: the most specific class defining it), `initargs`, `initform` (the code, never evaluated; null when there is none), `type`, `allocation` (`instance`, `class`), `readers`, `writers`, `documentation`
+  - `default_initargs`: `initarg`, `form`, `from`
+  - `method_count`, `truncated`, `methods`, `omitted_classes`: the methods specialized on the class and its superclasses, except superclasses in `COMMON-LISP` or an `SB-` package (the standard protocol), which `omitted_classes` names
+- Method objects: `generic_function`, `qualifiers`, `specializers` (`PKG::CLASS`, `COMMON-LISP:T`, `(EQL :KEY)`), `kind` (`method`, `reader`, `writer`), `slot` (accessors), `via` (class methods: the class specialized), `path`, `line`, `stale`, `identity`, `source_match`, `source_match_reason`, `form_type`, `form_name`, `edit_unit`, `edit_guard`, `note`
+
+**Observation vs. edit information.** Every definition's `path`/`line`/`stale`/`identity` come
+straight from the running image — SBCL's own record of where each generic function, class or
+method was compiled from, plus a structured `identity` (its name, qualifiers, specializers,
+and — for accessors — class/slot/access, all as package+name pairs, never a display string).
+That is *observation*: what the image believes about itself, always present when the image
+records a source location at all, regardless of whether the source file still agrees.
+
+`form_type` / `form_name` are *edit information*: they are handed out only once the source file
+has been independently re-read and its form at that location confirmed to describe the very
+same definition the image reported — and, further, only once `lisp-edit-form`'s own locator
+resolves that `form_type`/`form_name` back to that exact form. Confirming the same definition's
+*identity* is not the same as confirming the loaded code matches the source text byte for byte;
+this tool does not attempt the latter. `source_match` names which of three states this
+confirmation reached, and `source_match_reason` is an English sentence for the two states that
+are not "matched" (null when it is):
+
+- `matched`: the source form at the recorded location describes the same definition, and
+  `lisp-edit-form` resolves `form_type`/`form_name` to that same form — the only state that
+  carries `form_type`/`form_name` (and, for a container, `edit_unit`; see below) and an
+  `edit_guard` (see "Edit guard" below). Every other state sends `form_type` and `form_name` as
+  `null`, and omits `edit_unit` and `edit_guard` entirely, rather than a stale or unverifiable
+  pair.
+- `mismatched`: the source form there is a different definition (same generic function name but
+  different specializers, a class of the same name but different superclass, and so on) — for
+  example, a method whose `(eql :old)` specializer was edited to `(eql :new)` and reloaded:
+  the old method survives in the image (redefinition never removes a differently-specialized
+  method), so `clos-describe` reports it too, but that entry gets no edit information.
+- `unverified`: not enough could be confirmed either way — an unsupported or unparseable form,
+  a name or package that does not resolve in this image, an ambiguous match (more than one
+  candidate at the line, or more than one of a `defgeneric`'s inline methods matching), a file
+  that could not be read, or a file whose modification time is newer than what the image
+  recorded (`stale`: true) — staleness never lets a would-be `matched` verdict stand, since the
+  form the image last saw and the form on disk now may no longer be the same one.
+
+When no form starts on the recorded line at all, `note` says why (the file changed since it was
+loaded, or does not parse); that case is `unverified` too, with its own `source_match_reason`.
+The content text mirrors this exactly: a `matched` entry's line ends with
+`(form_type form_name)`, everything else ends with `[state: reason]` — the text never suggests
+an edit the JSON does not back up.
+
+**Specializer matching**, including `(eql ...)`, compares the *identity* the image reports
+against the *unevaluated source text* at that location — never against a printed
+representation, and never by evaluating the source form again. Supported `(eql ...)` values:
+a keyword, an integer (including a bignum, carried as decimal text so it never becomes a
+JSON float), a ratio, a character (case-sensitive), `t` and `nil` (tagged as a two-letter
+string, `"T"` or `"NIL"`, so `nil`-the-value is never confused with a missing field), and a
+symbol quoted with `'` or a confirmed `(quote ...)`. A variable reference, a function call, a
+string, a list or array, an uninterned symbol, `#.`, a float or a complex number, or anything
+whose printed form was truncated, is `unverified` — there is no way to confirm it without
+evaluating source, which this tool never does. A quoted keyword, `t` or `nil` — `(eql ':ready)`,
+`(eql 't)`, `(eql 'nil)` — is read through its quote first and then compared as the same datum as
+the unquoted spelling, so it matches the method it names; when the quote cannot be confirmed as
+`CL:QUOTE`, or the quoted token names a package this image does not have, the entry is
+`unverified` rather than `mismatched`.
+
+**Accessor matching.** A slot accessor is confirmed against the slot option that actually
+defines it, `(setf name)` included. `:reader x` and `:writer x` each define the plain function
+`x`; `:writer (setf x)` defines `(setf x)`; `:accessor x` defines both, a plain `x` reader and a
+`(setf x)` writer. So `:accessor x` and `:writer x` are not interchangeable: a live `(setf x)`
+writer whose slot option now reads `:writer x` is `mismatched`, not `matched`, and so is a live
+plain `x` writer whose option now reads `:accessor x`. A `:reader` or `:accessor` written with
+anything but a bare symbol is not valid Common Lisp; rather than guess what it meant, that option
+confirms nothing, so an accessor that depends on it is `unverified` rather than `matched`. A
+hand-written method that overrides a generated accessor — a `defmethod` replacing what a `:reader`
+or `:accessor` option created — is confirmed against that `defmethod`, not against the class form:
+on an ordinary class such a method is not reported as an accessor at all, and on a condition, whose
+readers look the same to the image either way, the source form decides (when the class form and the
+overriding `defmethod` both start on the same line and both match, the entry is `unverified` for
+ambiguity rather than a guess between them).
+
+**Container edit units.** A method identified as a `defgeneric`'s inline `(:method ...)` option,
+or a class's slot accessor (`:reader`/`:writer`/`:accessor`), is not itself a top-level form —
+editing it means editing the `defgeneric` or the `defclass`/`define-condition` that contains it.
+When that applies, a `matched` method carries `edit_unit` (`"defgeneric"`, `"defclass"` or
+`"define-condition"`) alongside a `form_type`/`form_name` that names the *container*, not the
+method by itself; `lisp-edit-form` on that form_type/form_name replaces the whole container, so
+edit it with that in mind rather than expecting a single method's text back.
+
+**Edit guard.** A `matched` entry's `edit_guard` is the same object `lisp-edit-form`'s `guard`
+argument accepts (see that tool's "Edit guard" section for the six checks it runs): `version`,
+`path` (display only; verification runs on `abs_path`), `abs_path`, `file_digest`, `form_start`,
+`form_end` and `form_digest` — all computed from the exact same read and CST span that produced
+this entry's `form_type`/`form_name`, never a second, possibly different, read. Pass it straight
+through as `guard` on the `lisp-edit-form` call `form_type`/`form_name` heads toward; recommended
+for every edit built from a `clos-describe` result, not just when a race seems likely. Doing so
+catches a change to the target form, or anywhere else in the file, made after this
+`clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
+the first one already consumed it. Only cl-mcp's three parent-side write tools — `fs-write-file`,
+`lisp-edit-form` and `lisp-patch-form` — are serialised against each other per file, so none of
+them can land between `lisp-edit-form`'s own check and its write; the second one runs after the
+first and sees the changed file. Nothing else is ordered: a write made by the worker-side tools
+(evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no lock and
+happens in a different process, and neither a second cl-mcp server over the same checkout nor an
+editor outside cl-mcp is coordinated. `edit_guard` remains a precondition, not a lock or an
+access token. On a conflict, call `clos-describe` again for a fresh
+`edit_guard` rather than retrying without one or falling back to a plain
+`form_type`/`form_name` call against possibly-changed source. `edit_guard` is present
+exactly when `form_type`/`form_name` carry values: an entry with no edit information (both of
+them `null`) never carries one.
+
+Order: a generic function's methods run `:around`, `:before`, primary, `:after` for the standard
+method combination, project files before other files; a class's methods follow its precedence
+list, then the generic function's name.
+
+Reads only: a class is never finalized — an unfinalized class's precedence list is computed and
+its effective slots merged from the direct slots the standard way, with a note — no initform is
+evaluated, and nothing is interned.
+
+Cost: confirming a definition means reading and parsing the file it was compiled from, so one
+call reads every distinct file its answer names — once each, whole — and its cost scales with
+that number of files, not with the number of definitions. A file the CST reader cannot read
+(`#.` with `*read-eval*` off, a custom reader macro) yields no candidates at all, so every entry
+in it comes back `unverified` with no edit information, even when the definitions themselves are
+untouched.
+
+Limits: structure accessors are not MOP readers, so a `defstruct` slot lists none, and every
+structure slot shows an initform (`NIL` when none was written). A metaclass that customizes
+`compute-slots` may finalize with other effective slots than an unfinalized class shows. Lines come
+from SBCL's record of each file's top-level forms, or from reading the file once that record has
+been garbage collected with the file's code; a file using a custom reader macro whose record is
+gone gets no line, and without the record `stale` is not known.
+
+Use `inspect-object` for one instance's slot values, `code-describe` for a plain function, macro or
+variable, and `code-find-references` for who calls a generic function.
 
 ## `clhs-lookup`
 Look up a symbol or section in the Common Lisp HyperSpec (ANSI standard documentation).

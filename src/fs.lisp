@@ -6,7 +6,11 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:*project-root-lock*)
-  (:import-from #:bordeaux-threads #:with-lock-held)
+  (:import-from #:bordeaux-threads
+                #:with-lock-held
+                #:make-lock
+                #:make-recursive-lock
+                #:with-recursive-lock-held)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content #:rpc-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -14,6 +18,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
                 #:allowed-read-path
+                #:canonical-path
                 #:ensure-write-path
                 #:broad-root-p)
   (:import-from #:cl-mcp/src/utils/system
@@ -41,9 +46,12 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis)
   (:export #:*lisp-file-unparseable-hook*
+           #:*fs-read-max-bytes*
+           #:with-file-lock
            #:fs-resolve-read-path
            #:fs-read-file
            #:fs-read-source-text
+           #:fs-read-source-octets
            #:fs-window-start
            #:fs-write-file
            #:fs-list-directory
@@ -99,6 +107,18 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
                           (and (> effective capped) remaining)
                           (and (null limit) remaining))))
       (values text truncated raw-len remaining))))
+
+(defun %read-file-octets (pn)
+  "Read the whole file PN as a fresh vector of (UNSIGNED-BYTE 8).
+
+The stream is opened with an octet element type, so the result is the file's
+exact bytes: nothing is decoded and no read cap applies.  FS-READ-SOURCE-OCTETS
+is the caller-facing entry; this helper does no policy check of its own."
+  (with-open-file (in pn :direction :input :element-type '(unsigned-byte 8))
+    (let* ((size (or (file-length in) 0))
+           (buffer (make-array size :element-type '(unsigned-byte 8)))
+           (count (read-sequence buffer in)))
+      (if (= count size) buffer (subseq buffer 0 count)))))
 
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
@@ -156,6 +176,28 @@ opened or read signals as well."
                  "path" (namestring pn)
                  "fd" (fd-count)))))
 
+(defun fs-read-source-octets (path)
+  "Return the whole file at PATH as a fresh vector of (UNSIGNED-BYTE 8).
+
+The octet counterpart of FS-READ-SOURCE-TEXT, for a caller that needs the
+file's exact bytes rather than decoded text: CL-MCP/SRC/SOURCE-SNAPSHOT digests
+them for an edit guard, and a digest taken over re-encoded text would not
+describe the bytes on disk.  Like FS-READ-SOURCE-TEXT the whole file is read
+(*FS-READ-MAX-BYTES* caps FS-READ-FILE only) under FS-READ-FILE's read policy:
+an error is signalled when ALLOWED-READ-PATH does not permit PATH, and the file
+is then never opened.  A file that cannot be opened or read signals as well."
+  (let ((pn (allowed-read-path path)))
+    (unless pn
+      (error "Read not permitted for path ~A" path))
+    (log-event :debug "fs.read-source-octets.open"
+               "path" (namestring pn)
+               "fd" (fd-count))
+    (unwind-protect
+         (%read-file-octets pn)
+      (log-event :debug "fs.read-source-octets.close"
+                 "path" (namestring pn)
+                 "fd" (fd-count)))))
+
 (defun fs-window-start (path offset)
   "Return two values for the window of PATH that FS-READ-FILE opens at OFFSET:
 the number of newlines before the window and the number of characters between
@@ -188,13 +230,168 @@ Returns (VALUES 0 0) for a NIL or zero OFFSET."
                          (incf col)))
             (values lines col))))))
 
+(defvar *file-lock-table* (make-hash-table :test #'equal)
+  "Maps a file's lock key (FILE-LOCK-KEY) to the recursive lock that serialises
+cl-mcp's own writes to that file. Read and written only under
+*FILE-LOCK-TABLE-LOCK*.
+
+Entries are never removed. An entry is one small lock object, and a key is one
+distinct path this process has been asked to write: the three callers
+(FS-WRITE-FILE, LISP-EDIT-FORM, LISP-PATCH-FORM) each resolve their argument to
+a path under the project root before taking the lock. The bound is therefore
+the number of distinct paths written over this image's lifetime, which is not
+the same as the number of files the project has: PROJECT-SCAFFOLD's
+%WRITE-FILES-TO-TEMP writes every generated file through FS-WRITE-FILE into a
+fresh .tmp-project-scaffold-<random>/ directory, so each scaffold call leaves
+one key per file behind permanently, keyed on a path renamed away moments
+later. Reclaiming an entry would also have to prove that no thread is about to
+take the lock being dropped, and getting that wrong hands two threads two
+different locks for one file, which is exactly the bug the table exists to
+prevent.")
+
+(defvar *file-lock-table-lock* (make-lock "cl-mcp-file-lock-table")
+  "Guards *FILE-LOCK-TABLE*. Held only around the table lookup and insert in
+FILE-LOCK, never while a file is read or written.")
+
+(defun file-lock-key (path)
+  "Return the string that identifies PATH in *FILE-LOCK-TABLE*.
+
+PATH is made absolute against *PROJECT-ROOT* with CANONICAL-PATH and then
+resolved with TRUENAME -- the same two steps ALLOWED-READ-PATH and
+ENSURE-WRITE-PATH already take, and therefore the same resolution
+%NORMALIZE-PATHS gets for an edit. Two spellings of the same EXISTING file
+(relative and absolute, through a symlink, or with a .. component) collapse to
+one key and so take one lock.
+
+A file that does not exist yet has no TRUENAME and keys on its unresolved
+absolute namestring instead, so two acquisitions for one path can key
+differently: once the file exists every caller resolves it the same way, but
+a caller that took the unresolved key before it existed holds a different lock
+from one arriving after. That is what WITH-FILE-LOCK's nesting note means by
+the outer and inner keys not always agreeing; it costs mutual exclusion over
+that one span and cannot deadlock.
+
+Signals when *PROJECT-ROOT* is unset, as every write path already does."
+  (let* ((abs (canonical-path path))
+         (resolved (or (handler-case (truename abs) (file-error () nil)) abs)))
+    (namestring resolved)))
+
+(defun file-lock (path)
+  "Return the recursive lock that serialises cl-mcp's writes to PATH, creating
+it on first use. The lock is per file, keyed by FILE-LOCK-KEY.
+
+Internal: the symbol is not exported, and mallet forbids the :: that would let
+production code in another package name it, so WITH-FILE-LOCK -- which expands
+into a call to this -- is the entry point everywhere outside this file. Only
+CL-MCP/TESTS/FS-TEST reaches it directly, through an :IMPORT-FROM that needs no
+export, to check the keying."
+  (let ((key (file-lock-key path)))
+    (with-lock-held (*file-lock-table-lock*)
+      (or (gethash key *file-lock-table*)
+          (setf (gethash key *file-lock-table*)
+                (make-recursive-lock key))))))
+
+(defmacro with-file-lock ((path) &body body)
+  "Evaluate BODY holding the per-file lock for PATH, so that cl-mcp's own
+read-verify-write sequences on one file cannot interleave and silently lose
+each other's changes. PATH is evaluated once; every spelling of the same
+existing file takes the same lock (FILE-LOCK-KEY).
+
+The lock is recursive, so an outer holder nests with an inner one that keys
+the same way: LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read
+the file until after they write it, and FS-WRITE-FILE takes it again
+underneath. The two keys agree for every file that already exists. For a file
+that does not (FILE-LOCK-KEY keys it on its unresolved absolute path), they
+CAN differ -- if something outside these three tools creates the file between
+the outer and the inner acquisition, TRUENAME then resolves and the inner one
+takes a different lock, leaving the inner span outside the outer one's mutual
+exclusion. That loses serialisation for that span, not safety: these locks are
+only ever taken outer then inner, so no opposing order exists and nesting
+cannot deadlock on it.
+
+DEADLOCK DISCIPLINE -- while this lock is held, take no other cl-mcp lock
+except CL-MCP/SRC/LOG's *LOG-LOCK*, and *FILE-LOCK-TABLE-LOCK* itself through
+a nested WITH-FILE-LOCK's own call to FILE-LOCK (as FS-WRITE-FILE's does
+underneath LISP-EDIT-FORM's, above): FILE-LOCK holds *FILE-LOCK-TABLE-LOCK*
+only for one gethash/setf and always releases it before
+WITH-RECURSIVE-LOCK-HELD can block, so it is never the far side of a wait on
+a per-file lock and nesting cannot deadlock on it. Also read *PROJECT-ROOT*
+rather than setting it, and never make a worker RPC
+(CL-MCP/SRC/PROXY:PROXY-TO-WORKER) or any other call that blocks on another
+process or on a reply. The three tools that hold it today run inline in the
+parent and call no worker.
+
+What it does NOT provide: the lock lives in this image and only the three
+tools above take it, so those three writers are all it orders. A write made
+from the worker process -- evaluation under REPL-EVAL, and whatever RUN-TESTS
+and LOAD-SYSTEM write -- takes no lock at all and is not in this image anyway,
+and a second cl-mcp server over the same checkout is coordinated no more than
+an external editor is: its writes take their own, unrelated lock table. Within
+this image, PROJECT-SCAFFOLD renames a whole prepared subtree into place
+without taking these locks, so it can move a directory out from under a holder.
+Nor is the lock a transaction or a crash-safety mechanism."
+  (let ((lock (gensym "FILE-LOCK")))
+    `(let ((,lock (file-lock ,path)))
+       (with-recursive-lock-held (,lock)
+         ,@body))))
+
+(defvar *temp-name-serial* 0
+  "Counter behind %NEXT-TEMP-SERIAL. Only that function reads or writes it,
+and only under *TEMP-NAME-LOCK*.")
+
+(defvar *temp-name-lock* (make-lock "cl-mcp-temp-name")
+  "Guards *TEMP-NAME-SERIAL*. Independent of *FILE-LOCK-TABLE-LOCK* and of any
+per-file lock, and held for one INCF only.")
+
+(defun %next-temp-serial ()
+  "Return a fresh integer, distinct for every call in this process.
+Used to make a temp file name unique per write."
+  (with-lock-held (*temp-name-lock*)
+    (incf *temp-name-serial*)))
+
+(defun %temp-pathname-for (pn)
+  "Return the pathname %WRITE-STRING-TO-FILE writes before renaming it onto PN.
+
+The name is \".<name>.<type>.<pid>.<serial>\" with the type \"tmp\", so it ends
+in .tmp rather than in PN's own extension: a leftover temp beside a .lisp file
+is not itself a .lisp file, and the tools that scan Lisp sources by extension
+(clgrep-search, code-find-references' source scan) skip it. The leading dot
+hides it from directory listings as the old fixed name did, and it stays in
+PN's own directory so the rename remains a same-filesystem rename.
+
+The process id and the per-process serial make the name unique to one call, so
+two writers -- two threads, or two cl-mcp processes over the same checkout --
+can never share one temp file, interleave their content into it, or delete one
+out from under the other's RENAME-FILE.
+
+What a crash leaves behind: only the call that created a temp ever deletes it,
+so a process killed between the open and the rename leaves that one file on
+disk, and nothing later cleans it up. It is inert -- a hidden .tmp file that no
+cl-mcp tool reads -- but it does accumulate one file per hard crash, and each
+has a different name, so they are removed by hand (or by the build's own
+cleanup), not overwritten by the next write."
+  (let ((name (pathname-name pn))
+        (type (pathname-type pn)))
+    (make-pathname :name (format nil ".~A~@[.~A~].~D.~D"
+                                 (if (stringp name) name "file")
+                                 (and (stringp type) type)
+                                 (sb-posix:getpid)
+                                 (%next-temp-serial))
+                   :type "tmp"
+                   :defaults pn)))
+
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
-On failure the original file is preserved."
+On failure the original file is preserved.
+
+The temp file is unique to this call (%TEMP-PATHNAME-FOR) and the cleanup
+deletes only that file, so concurrent writers in the same directory cannot
+corrupt or delete each other's temp. The rename makes each write all-or-
+nothing on its own; it does not order two writes. A caller that must not lose
+another writer's change takes CL-MCP/SRC/FS:WITH-FILE-LOCK around its whole
+read-modify-write, as FS-WRITE-FILE does."
   (ensure-directories-exist pn)
-  (let ((tmp (make-pathname :name (format nil ".~A.tmp" (pathname-name pn))
-                            :type (pathname-type pn)
-                            :defaults pn)))
+  (let ((tmp (%temp-pathname-for pn)))
     (unwind-protect
          (progn
            (with-open-file (out tmp
@@ -206,23 +403,31 @@ On failure the original file is preserved."
              (finish-output out))
            (rename-file tmp pn)
            t)
-      ;; Clean up temp file on failure
+      ;; Clean up this call's temp file on failure
       (when (probe-file tmp)
         (handler-case (delete-file tmp) (file-error () nil))))))
 
 (defun fs-write-file (path content)
   "Write CONTENT to PATH relative to project root.
-Returns T on success."
+Returns T on success.
+
+The write is serialised against cl-mcp's other writes to the same file by
+WITH-FILE-LOCK. A caller that already holds that lock over a wider span --
+LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file --
+nests here, since the lock is recursive. Only this process's writes are
+ordered: a second cl-mcp server over the same checkout, or an external editor,
+is not coordinated by it."
   (let ((pn (ensure-write-path path)))
-    (log-event :debug "fs.write.open"
-               "path" (namestring pn)
-               "bytes" (length content)
-               "fd" (fd-count))
-    (unwind-protect
-         (%write-string-to-file pn content)
-      (log-event :debug "fs.write.close"
+    (with-file-lock (pn)
+      (log-event :debug "fs.write.open"
                  "path" (namestring pn)
-                 "fd" (fd-count)))))
+                 "bytes" (length content)
+                 "fd" (fd-count))
+      (unwind-protect
+           (%write-string-to-file pn content)
+        (log-event :debug "fs.write.close"
+                   "path" (namestring pn)
+                   "fd" (fd-count))))))
 
 (defun %lisp-source-pathname-p (pn)
   "Return T when PN has a Common Lisp source extension."
@@ -542,19 +747,26 @@ to it needs allow_unparseable_overwrite=true."
 reader syntax; otherwise use lisp-edit-form with the readtable parameter. Never
 overrides the guard for a file that parses."))
   :body
-  (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
-      (progn
-        (fs-write-file path content)
-        (let* ((warning (%post-write-parse-warning (ensure-write-path path) path content))
-               (payload (make-ht "success" t
-                                 "content" (text-content
-                                            (format nil "Wrote ~A (~D chars)~@[~%~A~]"
-                                                    path (length content) warning))
-                                 "path" path
-                                 "bytes" (length content))))
-          (when warning
-            (setf (gethash "unparseable" payload) t))
-          (result id payload)))))
+  ;; The overwrite decision reads and parses the file, and the post-write check
+  ;; parses it again, so all three steps run under one WITH-FILE-LOCK: without
+  ;; it a concurrent lisp-edit-form could land between the decision and the
+  ;; write, making the verdict (the allow_unparseable_overwrite judgement
+  ;; included) describe bytes this write then destroys. The key is the one
+  ;; FS-WRITE-FILE itself computes, so its own acquisition nests here.
+  (with-file-lock ((ensure-write-path path))
+    (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
+        (progn
+          (fs-write-file path content)
+          (let* ((warning (%post-write-parse-warning (ensure-write-path path) path content))
+                 (payload (make-ht "success" t
+                                   "content" (text-content
+                                              (format nil "Wrote ~A (~D chars)~@[~%~A~]"
+                                                      path (length content) warning))
+                                   "path" path
+                                   "bytes" (length content))))
+            (when warning
+              (setf (gethash "unparseable" payload) t))
+            (result id payload))))))
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.
