@@ -423,6 +423,30 @@
               (stringp (gethash "reason" failure)))
           "reason should be nil or a string"))))
 
+(deftest failure-detail-prints-form-and-values-as-source
+  (testing "a string value stays distinguishable from a number printing the same"
+    ;; PRINC-TO-STRING stood here once and reported the failing (equal "6" 6)
+    ;; as the visibly true (EQUAL 6 6), with "6" and 6 as the same Got: entry.
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t"
+                   :form '(equal "6" 6)
+                   :values (list "6" 6))))
+      (ok (search "\"6\"" (gethash "form" detail))
+          "the string literal keeps its quotes in the form")
+      (ok (equal '("\"6\"" "6") (coerce (gethash "values" detail) 'list))
+          "and the two values no longer print as one and the same")))
+  (testing "a keyword keeps its colon"
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t"
+                   :form '(make-instance 'rect :width 2))))
+      (ok (search ":WIDTH" (gethash "form" detail))
+          "an initarg printed without its colon is not readable-back code")))
+  (testing "a form its caller already rendered is passed through"
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t" :form "(already rendered)")))
+      (ok (equal "(already rendered)" (gethash "form" detail))
+          "so a pre-rendered form is not quoted a second time"))))
+
 (deftest run-tests-handles-direct-assertion-failures
   (testing "run-tests handles failures from direct assertions without (testing ...) wrapper"
     (let* ((result (run-tests "cl-mcp/tests/test-runner-test-direct-assertion"))

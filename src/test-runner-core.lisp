@@ -227,18 +227,40 @@ Order of evidence:
       (setf (gethash "passed_tests" ht) (coerce passed-tests 'vector)))
     ht))
 
+(defun %source-text (object)
+  "Return OBJECT printed the way source is written: escapes on, so a string
+keeps its quotes and a keyword its colon, and *PRINT-READABLY* off, so an
+object with no readable representation still prints as #<...> instead of
+signaling PRINT-NOT-READABLE.
+
+PRINC-TO-STRING stood here once, and it made failure reports contradict their
+own verdict: with escapes off it printed the string \"6\" and the number 6 as
+the same token and dropped the colon from every keyword, so a failing
+(equal \"6\" 6) was reported as the visibly true (EQUAL 6 6), under a ✗ FAIL,
+beside a MAKE-INSTANCE call whose initargs had lost their colons."
+  (let ((*print-readably* nil))
+    (prin1-to-string object)))
+
 (defun make-failure-detail (&key test-name description form values reason source)
-  "Create a failure detail hash table."
+  "Create a failure detail hash table.
+
+FORM and VALUES are rendered with %SOURCE-TEXT, so the report shows them as
+they are written in source.  FORM is passed through unchanged when it is
+already a string, for a caller that has rendered it itself; VALUES never is,
+because a value that is a string has to be distinguishable from a symbol or a
+number printing the same characters -- that is exactly what a failed
+comparison turns on."
   (let ((ht (make-ht "test_name" (if (stringp test-name)
                                      test-name
                                      (princ-to-string test-name)))))
     (when description
       (setf (gethash "description" ht) description))
     (when form
-      (setf (gethash "form" ht) (princ-to-string form)))
+      (setf (gethash "form" ht)
+            (if (stringp form) form (%source-text form))))
     (when values
       (setf (gethash "values" ht)
-            (coerce (mapcar #'princ-to-string values) 'vector)))
+            (coerce (mapcar #'%source-text values) 'vector)))
     (when reason
       (setf (gethash "reason" ht)
             (if (stringp reason)
@@ -1273,7 +1295,10 @@ was being asserted, and leaving it out reduced the report to a bare test name."
                            :description (and (stringp description)
                                              (plusp (length description))
                                              description)
-                           :form (and test-expr (princ-to-string test-expr))
+                           ;; Handed over unrendered: MAKE-FAILURE-DETAIL
+                           ;; prints it with escapes on, which PRINC-TO-STRING
+                           ;; here would have already thrown away.
+                           :form test-expr
                            :reason
                            (%collapse-blank-lines
                             (or (and (stringp reason) reason)
