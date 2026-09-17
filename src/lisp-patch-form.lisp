@@ -279,7 +279,9 @@ CL-MCP/SRC/FS:WITH-FILE-LOCK for the target file, so cl-mcp's own concurrent
 edits of one file are serialised: two patches to two different forms of one
 file both survive, instead of the second overwriting the first from a stale
 copy. A DRY-RUN call takes the same lock -- it reads the file -- but writes
-nothing. A writer outside cl-mcp is not coordinated by it.
+nothing. The lock lives in this image, so only ONE cl-mcp process's calls are
+ordered: an external editor, and equally a second cl-mcp server over the same
+checkout, is not coordinated by it.
 
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing the file.

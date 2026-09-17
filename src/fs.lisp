@@ -47,8 +47,6 @@
                 #:format-delimiter-diagnosis)
   (:export #:*lisp-file-unparseable-hook*
            #:*fs-read-max-bytes*
-           #:file-lock-key
-           #:file-lock
            #:with-file-lock
            #:fs-resolve-read-path
            #:fs-read-file
@@ -299,8 +297,10 @@ than setting it, and never make a worker RPC (CL-MCP/SRC/PROXY:PROXY-TO-WORKER)
 or any other call that blocks on another process or on a reply. The three
 tools that hold it today run inline in the parent and call no worker.
 
-What it does NOT provide: it serialises cl-mcp's own writes only. A writer
-outside cl-mcp is not coordinated, and the lock is neither a transaction nor a
+What it does NOT provide: the lock lives in this image, so it serialises the
+writes of ONE cl-mcp process only. A second cl-mcp server over the same
+checkout is coordinated no more than an external editor is -- its writes take
+their own, unrelated lock table. Nor is the lock a transaction or a
 crash-safety mechanism."
   (let ((lock (gensym "FILE-LOCK")))
     `(let ((,lock (file-lock ,path)))
@@ -324,18 +324,33 @@ Used to make a temp file name unique per write."
 (defun %temp-pathname-for (pn)
   "Return the pathname %WRITE-STRING-TO-FILE writes before renaming it onto PN.
 
-The name carries the process id and a per-process serial, so it is unique to
-one call: two writers -- two threads, or two cl-mcp processes over the same
-checkout -- can never share one temp file, interleave their content into it,
-or delete one out from under the other's RENAME-FILE. It stays in PN's own
-directory so the rename remains a same-filesystem rename, and it keeps the
-leading dot of the old fixed name so directory listings still hide it."
-  (make-pathname :name (format nil ".~A.~D.~D.tmp"
-                               (or (pathname-name pn) "file")
-                               (sb-posix:getpid)
-                               (%next-temp-serial))
-                 :type (pathname-type pn)
-                 :defaults pn))
+The name is \".<name>.<type>.<pid>.<serial>\" with the type \"tmp\", so it ends
+in .tmp rather than in PN's own extension: a leftover temp beside a .lisp file
+is not itself a .lisp file, and the tools that scan Lisp sources by extension
+(clgrep-search, code-find-references' source scan) skip it. The leading dot
+hides it from directory listings as the old fixed name did, and it stays in
+PN's own directory so the rename remains a same-filesystem rename.
+
+The process id and the per-process serial make the name unique to one call, so
+two writers -- two threads, or two cl-mcp processes over the same checkout --
+can never share one temp file, interleave their content into it, or delete one
+out from under the other's RENAME-FILE.
+
+What a crash leaves behind: only the call that created a temp ever deletes it,
+so a process killed between the open and the rename leaves that one file on
+disk, and nothing later cleans it up. It is inert -- a hidden .tmp file that no
+cl-mcp tool reads -- but it does accumulate one file per hard crash, and each
+has a different name, so they are removed by hand (or by the build's own
+cleanup), not overwritten by the next write."
+  (let ((name (pathname-name pn))
+        (type (pathname-type pn)))
+    (make-pathname :name (format nil ".~A~@[.~A~].~D.~D"
+                                 (if (stringp name) name "file")
+                                 (and (stringp type) type)
+                                 (sb-posix:getpid)
+                                 (%next-temp-serial))
+                   :type "tmp"
+                   :defaults pn)))
 
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
@@ -371,8 +386,9 @@ Returns T on success.
 The write is serialised against cl-mcp's other writes to the same file by
 WITH-FILE-LOCK. A caller that already holds that lock over a wider span --
 LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file --
-nests here, since the lock is recursive. Writers outside cl-mcp are not
-coordinated by it."
+nests here, since the lock is recursive. Only this process's writes are
+ordered: a second cl-mcp server over the same checkout, or an external editor,
+is not coordinated by it."
   (let ((pn (ensure-write-path path)))
     (with-file-lock (pn)
       (log-event :debug "fs.write.open"
@@ -703,19 +719,26 @@ to it needs allow_unparseable_overwrite=true."
 reader syntax; otherwise use lisp-edit-form with the readtable parameter. Never
 overrides the guard for a file that parses."))
   :body
-  (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
-      (progn
-        (fs-write-file path content)
-        (let* ((warning (%post-write-parse-warning (ensure-write-path path) path content))
-               (payload (make-ht "success" t
-                                 "content" (text-content
-                                            (format nil "Wrote ~A (~D chars)~@[~%~A~]"
-                                                    path (length content) warning))
-                                 "path" path
-                                 "bytes" (length content))))
-          (when warning
-            (setf (gethash "unparseable" payload) t))
-          (result id payload)))))
+  ;; The overwrite decision reads and parses the file, and the post-write check
+  ;; parses it again, so all three steps run under one WITH-FILE-LOCK: without
+  ;; it a concurrent lisp-edit-form could land between the decision and the
+  ;; write, making the verdict (the allow_unparseable_overwrite judgement
+  ;; included) describe bytes this write then destroys. The key is the one
+  ;; FS-WRITE-FILE itself computes, so its own acquisition nests here.
+  (with-file-lock ((ensure-write-path path))
+    (or (%existing-lisp-overwrite-error id path allow-unparseable-overwrite)
+        (progn
+          (fs-write-file path content)
+          (let* ((warning (%post-write-parse-warning (ensure-write-path path) path content))
+                 (payload (make-ht "success" t
+                                   "content" (text-content
+                                              (format nil "Wrote ~A (~D chars)~@[~%~A~]"
+                                                      path (length content) warning))
+                                   "path" path
+                                   "bytes" (length content))))
+            (when warning
+              (setf (gethash "unparseable" payload) t))
+            (result id payload))))))
 
 (define-tool "fs-list-directory"
   :description "List entries in a directory, filtering hidden and build artifacts.

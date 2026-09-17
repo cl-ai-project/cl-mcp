@@ -19,6 +19,11 @@
   ;; here and neither behaviour can be observed.
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%file-unparseable-by-edit-tools-p)
+  ;; The fs-write-file tool's overwrite decision, its write and its post-write
+  ;; check must exclude a concurrent structural edit of the same file, so the
+  ;; tests below drive a real lisp-edit-form against it.
+  (:import-from #:cl-mcp/src/lisp-edit-form
+                #:lisp-edit-form)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-read-source-text
@@ -632,32 +637,48 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
               "no promise the overwrite guard cannot keep")
           (ok (eq t (gethash "unparseable" payload))))))))
 
+(defparameter *parallel-wait-seconds* 30
+  "Seconds RUN-IN-PARALLEL waits at the barrier and for each thread to finish.
+Long enough that a loaded machine never trips it, short enough that a deadlock
+regression fails the suite instead of hanging it.")
+
 (defun run-in-parallel (thunk-a thunk-b)
   "Run THUNK-A and THUNK-B in two threads released together and return their
-two primary values as a list, a signalled condition standing in for the value
-of a thunk that failed.
+two primary values as a list.
 
 The release is a two-party semaphore barrier -- each thread signals its own
 semaphore and then waits for the other's -- so neither thunk starts until both
 threads are running. No SLEEP and no timing assumption: the barrier is the
-synchronisation, and the WAIT-ON-SEMAPHORE timeout only keeps a broken run
-from hanging the suite."
+synchronisation.
+
+A thunk that fails contributes the SERIOUS-CONDITION it signalled, not only an
+ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
+Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
+this function waits on that instead of blocking in JOIN-THREAD, so a thread
+still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
+and this returns: a deadlock regression fails the calling test rather than
+hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
   (let ((a-ready (make-semaphore))
         (b-ready (make-semaphore))
-        (results (make-array 2 :initial-element nil)))
+        (finished (make-semaphore))
+        (results (make-array 2 :initial-element :did-not-finish)))
     (flet ((runner (index mine theirs thunk)
              (lambda ()
-               (signal-semaphore mine)
-               (wait-on-semaphore theirs :timeout 30)
-               (setf (aref results index)
-                     (handler-case (funcall thunk)
-                       (error (e) e))))))
-      (let ((thread-a (make-thread (runner 0 a-ready b-ready thunk-a)
-                                   :name "cl-mcp-file-lock-test-a"))
-            (thread-b (make-thread (runner 1 b-ready a-ready thunk-b)
-                                   :name "cl-mcp-file-lock-test-b")))
-        (join-thread thread-a)
-        (join-thread thread-b)))
+               (unwind-protect
+                    (progn
+                      (signal-semaphore mine)
+                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                      (setf (aref results index)
+                            (handler-case (funcall thunk)
+                              (serious-condition (c) c))))
+                 (signal-semaphore finished)))))
+      (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
+                                        :name "cl-mcp-file-lock-test-a")
+                           (make-thread (runner 1 b-ready a-ready thunk-b)
+                                        :name "cl-mcp-file-lock-test-b"))))
+        (when (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                   (wait-on-semaphore finished :timeout *parallel-wait-seconds*))
+          (mapc #'join-thread threads))))
     (coerce results 'list)))
 
 (deftest file-lock-key-collapses-spellings-of-one-file
@@ -694,7 +715,20 @@ from hanging the suite."
     (with-test-project-root
       (let ((key (file-lock-key "tests/tmp/fs-lock-no-such-file.lisp")))
         (ok (search "tests/tmp/fs-lock-no-such-file.lisp" key)
-            "the key is still absolute and still names the file")))))
+            "the key is still absolute and still names the file"))))
+  (testing "the fs-write-file tool's outer key is the one the function computes"
+    ;; The tool locks on (ensure-write-path path) and fs-write-file locks on it
+    ;; again underneath; the recursive lock only nests if both spellings key the
+    ;; same, for a file that exists and for one about to be created.
+    (with-test-project-root
+      (let ((existing "src/fs.lisp")
+            (absent "tests/tmp/fs-lock-key-absent.lisp"))
+        (ok (string= (file-lock-key (cl-mcp/src/utils/paths:ensure-write-path existing))
+                     (file-lock-key existing))
+            "an existing file: the outer and inner keys agree")
+        (ok (string= (file-lock-key (cl-mcp/src/utils/paths:ensure-write-path absent))
+                     (file-lock-key absent))
+            "and so do they for a path that does not exist yet")))))
 
 (deftest fs-write-file-uses-a-temp-name-unique-to-the-call
   (testing "no two writes of one file can share, interleave or delete one temp"
@@ -712,7 +746,9 @@ from hanging the suite."
                    temps)
             "each temp stays in the target's own directory, so the rename is atomic")
         (ok (every (lambda (n) (search "/.fs-lock-temp-name." n)) names)
-            "and each keeps the leading dot that hides it from listings")))))
+            "and each keeps the leading dot that hides it from listings")
+        (ok (every (lambda (p) (string= "tmp" (pathname-type p))) temps)
+            "the extension is tmp, not the target's, so a leftover is not source")))))
 
 (deftest fs-write-file-serialises-concurrent-writes-of-one-file
   (testing "two threads writing one file leave exactly one of the two, and no temp"
@@ -729,8 +765,14 @@ from hanging the suite."
         (ensure-directories-exist abs)
         (unwind-protect
              (dotimes (round 10)
-               (run-in-parallel (lambda () (fs-write-file relative content-a))
-                                (lambda () (fs-write-file relative content-b)))
+               (when bad-round (return))
+               (let ((outcomes
+                       (run-in-parallel
+                        (lambda () (fs-write-file relative content-a))
+                        (lambda () (fs-write-file relative content-b)))))
+                 (when (member :did-not-finish outcomes)
+                   (setf bad-round (list round :did-not-finish))
+                   (return)))
                (let ((after (fs-read-file (native-namestring abs)))
                      (files (uiop:directory-files dir)))
                  (unless (or (string= after content-a) (string= after content-b))
@@ -746,3 +788,123 @@ from hanging the suite."
             (if bad-round
                 (format nil "round ~S is not one writer's content alone" bad-round)
                 "every round left one writer's content whole, with no temp behind"))))))
+
+(deftest fs-write-file-tool-decides-and-writes-under-one-lock
+  (testing "two threads creating one new .lisp file: one creates, one is refused"
+    ;; The overwrite guard allows a write to a .lisp path that does not exist
+    ;; yet. Read outside the lock, that verdict is stale the moment the other
+    ;; thread creates the file, and the loser's whole-file write lands on an
+    ;; existing Lisp source -- exactly what the guard exists to prevent.
+    (with-test-project-root
+      (let* ((relative "tests/tmp/fs-lock-create.lisp")
+             (abs (merge-pathnames* relative cl-mcp/src/project-root:*project-root*))
+             (bad nil))
+        (ensure-directories-exist abs)
+        (unwind-protect
+             (dotimes (round 15)
+               (when bad (return))
+               (ignore-errors (delete-file abs))
+               (let* ((outcomes
+                        (run-in-parallel
+                         (lambda ()
+                           (multiple-value-list
+                            (%call-fs-write relative "(defun a () 1)")))
+                         (lambda ()
+                           (multiple-value-list
+                            (%call-fs-write relative "(defun b () 2)")))))
+                      (wrote (count-if
+                              (lambda (o) (and (consp o)
+                                               (hash-table-p (second o))
+                                               (eq t (gethash "success" (second o)))))
+                              outcomes))
+                      (refusals (remove-if-not
+                                 (lambda (o) (and (consp o) (hash-table-p (third o))))
+                                 outcomes)))
+                 (cond ((member :did-not-finish outcomes)
+                        (setf bad (list round :did-not-finish)))
+                       ((/= wrote 1)
+                        (setf bad (list round :writers wrote)))
+                       ((/= (length refusals) 1)
+                        (setf bad (list round :refusals (length refusals))))
+                       ((not (equal "existing_lisp_overwrite_forbidden"
+                                    (gethash "code"
+                                             (gethash "data"
+                                                      (third (first refusals))))))
+                        (setf bad (list round :wrong-refusal))))))
+          (ignore-errors (delete-file abs)))
+        (ok (null bad)
+            (if bad
+                (format nil "round ~S: the create decision was not made under the write's lock"
+                        bad)
+                "exactly one creates; the other is refused as an existing .lisp overwrite"))))))
+
+(defparameter *overwrite-gate-seconds* 2
+  "How long the overwrite-guard hook in the test below holds the decision open
+for the other thread. With the lock in place that thread cannot run, so this
+bound is what ends the wait; without it the thread signals long before.")
+
+(deftest fs-write-file-tool-excludes-a-concurrent-lisp-edit-form
+  (testing "a structural edit cannot land between the overwrite check and the write"
+    (with-test-project-root
+      (let* ((relative "tests/tmp/fs-lock-overwrite-race.lisp")
+             (abs (merge-pathnames* relative cl-mcp/src/project-root:*project-root*))
+             (path (native-namestring abs))
+             (checked (make-semaphore))
+             (edited (make-semaphore))
+             (overwrite (format nil "(defun gamma () :gamma)~%")))
+        (ensure-directories-exist abs)
+        (fs-write-file relative
+                       (format nil "(defun alpha () :alpha-old)~%~%(defun beta () :beta-old)~%"))
+        (unwind-protect
+             (let* ((outcomes
+                      (run-in-parallel
+                       (lambda ()
+                         ;; The hook IS the overwrite guard's verdict, and it is
+                         ;; handed the exact text the decision is made from. It
+                         ;; publishes "the check has read the file", gives the
+                         ;; other thread its chance, and only then answers from
+                         ;; that text -- so the decision provably predates
+                         ;; whatever the edit did. Bound inside the thread: a
+                         ;; binding made in the parent would not be visible here.
+                         (let* ((fired nil)
+                                (cl-mcp/src/fs:*lisp-file-unparseable-hook*
+                                  (lambda (pn text)
+                                    (declare (ignore pn))
+                                    (unless fired
+                                      (setf fired t)
+                                      (signal-semaphore checked)
+                                      (wait-on-semaphore edited
+                                                         :timeout *overwrite-gate-seconds*))
+                                    (and (search ":alpha-old" text) t))))
+                           (multiple-value-list
+                            (%call-fs-write relative overwrite :allow t))))
+                       (lambda ()
+                         (wait-on-semaphore checked :timeout *parallel-wait-seconds*)
+                         (unwind-protect
+                              (handler-case
+                                  (progn
+                                    (lisp-edit-form
+                                     :file-path path :form-type "defun"
+                                     :form-name "alpha" :operation "replace"
+                                     :content "(defun alpha () :alpha-new)")
+                                    :edited)
+                                (error () :refused))
+                           (signal-semaphore edited)))))
+                    (write-outcome (first outcomes))
+                    (wrote (and (consp write-outcome)
+                                (hash-table-p (second write-outcome))
+                                (eq t (gethash "success" (second write-outcome)))))
+                    (edit-won (eq (second outcomes) :edited))
+                    (after (fs-read-file path)))
+               (ok (not (member :did-not-finish outcomes))
+                   "both threads finished")
+               (ok (not (and wrote edit-won))
+                   "a whole-file overwrite never lands on top of a successful edit")
+               (ok (or wrote edit-won)
+                   "and one of the two did happen, so the check is not vacuous")
+               (if wrote
+                   (ok (string= after overwrite)
+                       "the overwrite won, so the file is exactly what it wrote")
+                   (ok (search ":alpha-new" after)
+                       "the edit won, so the overwrite was refused on the changed file")))
+          (ignore-errors (delete-file abs)))))))

@@ -2781,38 +2781,56 @@ under a guard fell under, instead of only that some error was signalled."
             (ok (search (format nil "caf~C" (code-char 233)) after)
                 "the multibyte comment came through unharmed")))))))
 
+(defparameter *parallel-wait-seconds* 30
+  "Seconds RUN-IN-PARALLEL waits at the barrier and for each thread to finish.
+Long enough that a loaded machine never trips it, short enough that a deadlock
+regression fails the suite instead of hanging it.")
+
 (defun run-in-parallel (thunk-a thunk-b)
   "Run THUNK-A and THUNK-B in two threads released together and return their
-two primary values as a list, a signalled condition standing in for the value
-of a thunk that failed.
+two primary values as a list.
 
 The release is a two-party semaphore barrier -- each thread signals its own
 semaphore and then waits for the other's -- so neither thunk starts until both
 threads are running. No SLEEP and no timing assumption: the barrier is the
-synchronisation, and the WAIT-ON-SEMAPHORE timeout only keeps a broken run
-from hanging the suite."
+synchronisation.
+
+A thunk that fails contributes the SERIOUS-CONDITION it signalled, not only an
+ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
+Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
+this function waits on that instead of blocking in JOIN-THREAD, so a thread
+still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
+and this returns: a deadlock regression fails the calling test rather than
+hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
   (let ((a-ready (make-semaphore))
         (b-ready (make-semaphore))
-        (results (make-array 2 :initial-element nil)))
+        (finished (make-semaphore))
+        (results (make-array 2 :initial-element :did-not-finish)))
     (flet ((runner (index mine theirs thunk)
              (lambda ()
-               (signal-semaphore mine)
-               (wait-on-semaphore theirs :timeout 30)
-               (setf (aref results index)
-                     (handler-case (funcall thunk)
-                       (error (e) e))))))
-      (let ((thread-a (make-thread (runner 0 a-ready b-ready thunk-a)
-                                   :name "cl-mcp-edit-lock-test-a"))
-            (thread-b (make-thread (runner 1 b-ready a-ready thunk-b)
-                                   :name "cl-mcp-edit-lock-test-b")))
-        (join-thread thread-a)
-        (join-thread thread-b)))
+               (unwind-protect
+                    (progn
+                      (signal-semaphore mine)
+                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                      (setf (aref results index)
+                            (handler-case (funcall thunk)
+                              (serious-condition (c) c))))
+                 (signal-semaphore finished)))))
+      (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
+                                        :name "cl-mcp-edit-lock-test-a")
+                           (make-thread (runner 1 b-ready a-ready thunk-b)
+                                        :name "cl-mcp-edit-lock-test-b"))))
+        (when (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                   (wait-on-semaphore finished :timeout *parallel-wait-seconds*))
+          (mapc #'join-thread threads))))
     (coerce results 'list)))
 
 (defun %concurrent-guarded-edit-verdict (rounds)
   "Run ROUNDS rounds of two threads editing one form of one file with the SAME
 edit_guard and different replacement text, and return NIL when every round
-behaved. A non-NIL return describes the first round that did not.
+behaved. A non-NIL return describes the first round that did not, and the loop
+stops there, so a round that deadlocks costs one RUN-IN-PARALLEL timeout
+rather than ROUNDS of them.
 
 Expected in every round: exactly one call returns, the other signals
 EDIT-GUARD-CONFLICT-ERROR because the first already rewrote the file out from
@@ -2823,6 +2841,7 @@ read the same original, both find the guard valid, and both write -- the
 loser's text disappearing with no conflict reported anywhere."
   (let ((verdict nil))
     (dotimes (round rounds verdict)
+      (when verdict (return verdict))
       (with-temp-file "tests/tmp/edit-form-lock-concurrent.lisp"
           (format nil "(defun target () :old)~%")
         (lambda (path)
@@ -2841,25 +2860,28 @@ loser's text disappearing with no conflict reported anywhere."
                  (conflicts (count-if (lambda (r)
                                         (typep r 'edit-guard-conflict-error))
                                       results))
-                 (others (remove-if-not (lambda (r)
-                                          (and (typep r 'error)
-                                               (not (typep r 'edit-guard-conflict-error))))
-                                        results))
+                 (others (remove-if-not
+                          (lambda (r)
+                            (and (typep r 'serious-condition)
+                                 (not (typep r 'edit-guard-conflict-error))))
+                          results))
                  (after (fs-read-file path))
                  (has-a (search ":from-a" after))
                  (has-b (search ":from-b" after)))
-            (cond (others
-                   (setf verdict (or verdict (list round :unexpected-error
-                                                   (princ-to-string (first others))))))
+            (cond ((member :did-not-finish results)
+                   (setf verdict (list round :did-not-finish)))
+                  (others
+                   (setf verdict (list round :unexpected-error
+                                       (princ-to-string (first others)))))
                   ((/= conflicts 1)
-                   (setf verdict (or verdict (list round :conflicts conflicts after))))
+                   (setf verdict (list round :conflicts conflicts after)))
                   ((not (or has-a has-b))
-                   (setf verdict (or verdict (list round :no-winner after))))
+                   (setf verdict (list round :no-winner after)))
                   ((and has-a has-b)
-                   (setf verdict (or verdict (list round :both-written after))))
+                   (setf verdict (list round :both-written after)))
                   ((not (eql 1 (ignore-errors
                                 (length (parse-top-level-forms after)))))
-                   (setf verdict (or verdict (list round :does-not-parse after)))))))))))
+                   (setf verdict (list round :does-not-parse after))))))))))
 
 (deftest lisp-edit-form-concurrent-guarded-edits-let-exactly-one-win
   (testing "two edits sharing one guard: one writes, the other gets the conflict"

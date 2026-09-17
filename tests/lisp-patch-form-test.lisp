@@ -1211,32 +1211,48 @@ running as root), THUNK is skipped instead."
             (ok (search "Next top-level form probably begins at line 4" text))
             (ok (search "Run lisp-check-parens with path=" text))))))))
 
+(defparameter *parallel-wait-seconds* 30
+  "Seconds RUN-IN-PARALLEL waits at the barrier and for each thread to finish.
+Long enough that a loaded machine never trips it, short enough that a deadlock
+regression fails the suite instead of hanging it.")
+
 (defun run-in-parallel (thunk-a thunk-b)
   "Run THUNK-A and THUNK-B in two threads released together and return their
-two primary values as a list, a signalled condition standing in for the value
-of a thunk that failed.
+two primary values as a list.
 
 The release is a two-party semaphore barrier -- each thread signals its own
 semaphore and then waits for the other's -- so neither thunk starts until both
 threads are running. No SLEEP and no timing assumption: the barrier is the
-synchronisation, and the WAIT-ON-SEMAPHORE timeout only keeps a broken run
-from hanging the suite."
+synchronisation.
+
+A thunk that fails contributes the SERIOUS-CONDITION it signalled, not only an
+ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
+Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
+this function waits on that instead of blocking in JOIN-THREAD, so a thread
+still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
+and this returns: a deadlock regression fails the calling test rather than
+hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
   (let ((a-ready (make-semaphore))
         (b-ready (make-semaphore))
-        (results (make-array 2 :initial-element nil)))
+        (finished (make-semaphore))
+        (results (make-array 2 :initial-element :did-not-finish)))
     (flet ((runner (index mine theirs thunk)
              (lambda ()
-               (signal-semaphore mine)
-               (wait-on-semaphore theirs :timeout 30)
-               (setf (aref results index)
-                     (handler-case (funcall thunk)
-                       (error (e) e))))))
-      (let ((thread-a (make-thread (runner 0 a-ready b-ready thunk-a)
-                                   :name "cl-mcp-patch-lock-test-a"))
-            (thread-b (make-thread (runner 1 b-ready a-ready thunk-b)
-                                   :name "cl-mcp-patch-lock-test-b")))
-        (join-thread thread-a)
-        (join-thread thread-b)))
+               (unwind-protect
+                    (progn
+                      (signal-semaphore mine)
+                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                      (setf (aref results index)
+                            (handler-case (funcall thunk)
+                              (serious-condition (c) c))))
+                 (signal-semaphore finished)))))
+      (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
+                                        :name "cl-mcp-patch-lock-test-a")
+                           (make-thread (runner 1 b-ready a-ready thunk-b)
+                                        :name "cl-mcp-patch-lock-test-b"))))
+        (when (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                   (wait-on-semaphore finished :timeout *parallel-wait-seconds*))
+          (mapc #'join-thread threads))))
     (coerce results 'list)))
 
 (defun %concurrent-patch-verdict (path-for-alpha path-for-beta rounds)
@@ -1247,43 +1263,46 @@ PATH-FOR-ALPHA and PATH-FOR-BETA are two designators for the SAME file (the
 caller varies the spelling to show the lock keys on the file, not on the
 string). Each round rewrites the fixture, releases the two threads together
 (RUN-IN-PARALLEL) and then checks the file. A non-NIL return is a list
-describing the first round that failed, so the caller can report it.
+describing the first round that failed, and the loop stops there, so a round
+that deadlocks costs one RUN-IN-PARALLEL timeout rather than ROUNDS of them.
 
 Without the per-file lock in lisp-patch-form both threads read the same
 original text and the later write silently drops the earlier one: this is the
 direct lost-update regression."
   (let ((verdict nil))
     (dotimes (round rounds verdict)
+      (when verdict (return verdict))
       (with-temp-file "tests/tmp/patch-lock-concurrent.lisp"
           (format nil "(defun alpha () :alpha-old)~%~%(defun beta () :beta-old)~%")
         (lambda (abs)
           (declare (ignore abs))
-          (let ((errors (remove-if-not
-                         (lambda (r) (typep r 'error))
-                         (run-in-parallel
-                          (lambda ()
-                            (lisp-patch-form :file-path path-for-alpha
-                                             :form-type "defun" :form-name "alpha"
-                                             :old-text ":alpha-old"
-                                             :new-text ":alpha-new"))
-                          (lambda ()
-                            (lisp-patch-form :file-path path-for-beta
-                                             :form-type "defun" :form-name "beta"
-                                             :old-text ":beta-old"
-                                             :new-text ":beta-new"))))))
-            (let ((after (fs-read-file (project-path
-                                        "tests/tmp/patch-lock-concurrent.lisp"))))
-              (cond (errors
-                     (setf verdict (or verdict
-                                       (list round :error
-                                             (princ-to-string (first errors))))))
-                    ((not (and (search ":alpha-new" after)
-                               (search ":beta-new" after)))
-                     (setf verdict (or verdict (list round :lost-update after))))
-                    ((not (eql 2 (ignore-errors
-                                  (length (parse-top-level-forms after)))))
-                     (setf verdict (or verdict
-                                       (list round :does-not-parse after))))))))))))
+          (let* ((outcomes
+                  (run-in-parallel
+                   (lambda ()
+                     (lisp-patch-form :file-path path-for-alpha
+                                      :form-type "defun" :form-name "alpha"
+                                      :old-text ":alpha-old"
+                                      :new-text ":alpha-new"))
+                   (lambda ()
+                     (lisp-patch-form :file-path path-for-beta
+                                      :form-type "defun" :form-name "beta"
+                                      :old-text ":beta-old"
+                                      :new-text ":beta-new"))))
+                 (failures (remove-if-not (lambda (r) (typep r 'serious-condition))
+                                          outcomes))
+                 (after (fs-read-file (project-path
+                                       "tests/tmp/patch-lock-concurrent.lisp"))))
+            (cond ((member :did-not-finish outcomes)
+                   (setf verdict (list round :did-not-finish)))
+                  (failures
+                   (setf verdict (list round :error
+                                       (princ-to-string (first failures)))))
+                  ((not (and (search ":alpha-new" after)
+                             (search ":beta-new" after)))
+                   (setf verdict (list round :lost-update after)))
+                  ((not (eql 2 (ignore-errors
+                                (length (parse-top-level-forms after)))))
+                   (setf verdict (list round :does-not-parse after))))))))))
 
 (deftest lisp-patch-form-concurrent-patches-keep-both-changes
   (testing "two threads patching two forms of one file both land"

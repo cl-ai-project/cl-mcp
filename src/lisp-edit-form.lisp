@@ -534,8 +534,10 @@ edits of one file are serialised: a second edit reads what the first wrote
 instead of overwriting it from a stale copy. A DRY-RUN call takes the same
 lock -- it reads the file, and excluding it would let it report a preview of a
 file another thread is halfway through replacing -- but of course writes
-nothing. A writer outside cl-mcp is still not coordinated; GUARD remains the
-only check against one, and it is a precondition, not a lock.
+nothing. The lock lives in this image, so only ONE cl-mcp process's calls are
+ordered: an external editor, and equally a second cl-mcp server over the same
+checkout, is not coordinated. GUARD remains the only check against one, and it
+is a precondition, not a lock.
 
 For non-delete operations without DRY-RUN, returns six values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
