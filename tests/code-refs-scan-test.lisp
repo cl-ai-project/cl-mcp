@@ -552,7 +552,11 @@ an option value this scanner refuses to guess at -- stays NIL."
                               (mapcar (lambda (s) (getf s :kind)) specializers))
                        "widget, T (an unspecialized parameter) and the EQL mode")
                    (ok (equal "fx:widget" (getf (first specializers) :token)))
+                   (ok (equal "CL-USER" (getf (first specializers) :in-package))
+                       "a specializer the source spells out keeps the file's own package")
                    (ok (equal "T" (getf (second specializers) :token)))
+                   (ok (equal "COMMON-LISP" (getf (second specializers) :in-package))
+                       "the synthesized T names COMMON-LISP:T, never the file package's T")
                    (ok (equal :keyword (getf (getf (third specializers) :datum) :kind)))
                    (ok (equal "FAST" (getf (getf (third specializers) :datum) :name))))))
              (testing "a (setf x) name"
@@ -686,7 +690,11 @@ an option value this scanner refuses to guess at -- stays NIL."
                           (getf (second specializers) :datum)))
                (ok (equal :class (getf (third specializers) :kind)))
                (ok (equal "T" (getf (third specializers) :token))
-                   "an unspecialized parameter synthesizes the literal T")))
+                   "an unspecialized parameter synthesizes the literal T")
+               (ok (equal "CL-USER" (getf (first specializers) :in-package))
+                   "an explicit specializer resolves in the package the file was read in")
+               (ok (equal "COMMON-LISP" (getf (third specializers) :in-package))
+                   "the synthesized T resolves in COMMON-LISP instead")))
         (ignore-errors (delete-file path))))))
 
 (deftest top-level-forms-at-describes-defgeneric-methods-and-defclass-slots

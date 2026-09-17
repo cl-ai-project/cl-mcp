@@ -35,6 +35,15 @@
 (defpackage #:cl-mcp-verify-escape-test
   (:use #:cl))
 
+(defpackage #:cl-mcp-verify-use-none-test
+  (:use)
+  (:export #:plain))
+
+(defpackage #:cl-mcp-verify-shadow-t-test
+  (:use #:cl)
+  (:shadow #:t)
+  (:export #:shaded))
+
 (defvar *verify-core-side-effect-counter* 0)
 
 ;;; ---------------------------------------------------------------------------
@@ -555,6 +564,53 @@ tests/fixtures/clos-identity-fixture.lisp on which NEEDLE starts."
            (candidates (%candidates-at path 2)))
       (unwind-protect
            (ok (equal "unverified" (%verify1 "s1" identity candidates)))
+        (ignore-errors (delete-file path))))))
+
+(deftest verify-entries-matches-an-implicit-t-where-the-package-has-no-t
+  (testing "an unspecialized parameter is COMMON-LISP:T, not the file package's T"
+    ;; CL-MCP-VERIFY-USE-NONE-TEST is defined with (:USE), so FIND-SYMBOL "T"
+    ;; there knows nothing at all.  A synthesized specializer resolved in the
+    ;; file's own package would report this untouched method UNVERIFIED.
+    (let ((path (%write-tmp
+                 "verify-core-implicit-t-use-none.lisp"
+                 (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-verify-use-none-test)"
+                               "(cl:defgeneric plain (a b))"
+                               "(cl:defmethod plain ((a cl:string) b) b)")))))
+      (unwind-protect
+           (progn
+             (%compile-and-load path)
+             (let ((identity (%identity
+                              (first (%methods
+                                      (first (%gfs (%report
+                                                    "cl-mcp-verify-use-none-test:plain")))))))
+                   (candidates (%candidates-at path 3)))
+               (ok identity)
+               (ok (equal "matched" (%verify1 "t1" identity candidates)))))
+        (ignore-errors (delete-file path))))))
+
+(deftest verify-entries-matches-an-implicit-t-where-the-package-shadows-t
+  (testing "an unspecialized parameter is COMMON-LISP:T even where T is shadowed"
+    ;; CL-MCP-VERIFY-SHADOW-T-TEST shadows T, so FIND-SYMBOL "T" there answers
+    ;; with a different symbol.  A synthesized specializer resolved in the
+    ;; file's own package would call this untouched method MISMATCHED -- a
+    ;; claim of certainty the three-valued contract forbids.
+    (let ((path (%write-tmp
+                 "verify-core-implicit-t-shadowed.lisp"
+                 (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-verify-shadow-t-test)"
+                               "(defgeneric shaded (a b))"
+                               "(defmethod shaded ((a string) b) b)")))))
+      (unwind-protect
+           (progn
+             (%compile-and-load path)
+             (let ((identity (%identity
+                              (first (%methods
+                                      (first (%gfs (%report
+                                                    "cl-mcp-verify-shadow-t-test:shaded")))))))
+                   (candidates (%candidates-at path 3)))
+               (ok identity)
+               (ok (equal "matched" (%verify1 "t2" identity candidates)))))
         (ignore-errors (delete-file path))))))
 
 ;;; ---------------------------------------------------------------------------

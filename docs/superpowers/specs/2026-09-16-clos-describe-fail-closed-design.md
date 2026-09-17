@@ -101,6 +101,13 @@ source_signature:
 `token` は CST ノードの範囲から取ったソースの文字列そのもの。`in_package` はその位置で有効な
 `in-package` のパッケージ名（無ければ null）。
 
+例外は特化子を書いていない必須パラメータで、引用すべきソーストークンが無いため
+`{kind: "class", token: "T", in_package: "COMMON-LISP"}` を合成する。これが指すのは常に標準クラス
+`COMMON-LISP:T` であって、ファイル自身のパッケージが `T` をどう見ているか（`(:use)` で
+`COMMON-LISP` を継承していない、あるいは `(:shadow #:t)` している）には依存しない。ファイルの
+パッケージで解決すると、手を加えていないメソッドが `unverified`、`T` を shadow しているパッケージ
+では `mismatched` になってしまう。
+
 **worker 側の解決**: `code-refs-core:parse-symbol-text` でトークンを分解し、`find-package` と
 `find-symbol` だけで解決する（`intern` しない）。解決したシンボルと、`identity` の
 `(find-symbol name package)` が `eq` かどうかで判定する。

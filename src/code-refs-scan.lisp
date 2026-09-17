@@ -740,14 +740,22 @@ conversion happens in a later task.  Anything else is UNVERIFIABLE."
 (defun %source-specializer (param text in-package)
   "Return PARAM, one required parameter of a method's lambda list, as its
 specializer identity: {:KIND :CLASS :TOKEN .. :IN-PACKAGE ..} for a class
-name or an unspecialized parameter -- synthesized as the literal token \"T\",
-safe because COMMON-LISP:T is inherited into every package -- {:KIND :EQL
-:DATUM ..} for (EQL datum), or {:KIND :UNVERIFIABLE :REASON ..} for any
-other shape this cannot describe."
+name or an unspecialized parameter, {:KIND :EQL :DATUM ..} for (EQL datum),
+or {:KIND :UNVERIFIABLE :REASON ..} for any other shape this cannot
+describe.
+
+An unspecialized parameter has no token in the source to quote, so its
+specializer is synthesized as \"T\" in COMMON-LISP rather than in IN-PACKAGE:
+what it names is the standard class COMMON-LISP:T, whatever the file's own
+package makes of the name T -- a package defined with (:USE) has no T at
+all, and one that shadows T has a different one, so resolving the synthesized
+token there would report an untouched method as UNVERIFIED or, worse,
+MISMATCHED.  A specializer the source does spell out keeps IN-PACKAGE, since
+it has to resolve exactly as written."
   (let* ((param (%unwrap param))
          (value (cst-node-value param)))
     (cond
-      ((symbolp value) (list :kind :class :token "T" :in-package in-package))
+      ((symbolp value) (list :kind :class :token "T" :in-package "COMMON-LISP"))
       ((and (consp value) (consp (rest value)) (null (cddr value)))
        (let* ((children (%expr-children param))
               (specializer (%unwrap (second children)))
