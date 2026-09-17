@@ -9,7 +9,7 @@
 ;;;; and clos-response-builders-test.lisp use) cannot reproduce, because
 ;;;; those tests never recompile a form out from under a live method object.
 ;;;;
-;;;; Two deftests:
+;;;; Five deftests:
 ;;;; - CLOS-DESCRIBE-FAILS-CLOSED-AGAINST-A-RELOADED-IMAGE covers spec 3.5's
 ;;;;   round trip for five kinds of stale definition (EQL specializer,
 ;;;;   class specializer, a deleted method, a DEFGENERIC inline method, an
@@ -23,6 +23,15 @@
 ;;;;   method and a SETF generic function's boolean flag -- the values the
 ;;;;   project's own memory notes a JSON round trip can render differently
 ;;;;   (YASON:FALSE in-process vs. plain NIL once decoded from the wire).
+;;;; - CLOS-DESCRIBE-HANDS-OUT-AN-EDIT-GUARD-LISP-EDIT-FORM-ACCEPTS-AND-LATER-REFUSES
+;;;;   walks a guard through LISP-EDIT-FORM once, then reuses it after the
+;;;;   file changed and requires the structured conflict.
+;;;; - CLOS-DESCRIBE-DOES-NOT-CONFIRM-AN-ACCESSOR-AGAINST-A-WRITER-ONLY-SLOT
+;;;;   rewrites :ACCESSOR to :WRITER under an unchanged file-write-date and
+;;;;   requires the entry not to come back MATCHED.
+;;;; - CLOS-DESCRIBE-MATCHES-A-QUOTED-EQL-KEYWORD-OVER-THE-WORKER-RPC loads the
+;;;;   fixture only in the worker, so a (EQL ':READY) method can only be
+;;;;   confirmed from data that crossed the wire.
 
 (defpackage #:cl-mcp/tests/clos-describe-integration-test
   (:use #:cl)

@@ -326,8 +326,10 @@ tools above take it, so those three writers are all it orders. A write made
 from the worker process -- evaluation under REPL-EVAL, and whatever RUN-TESTS
 and LOAD-SYSTEM write -- takes no lock at all and is not in this image anyway,
 and a second cl-mcp server over the same checkout is coordinated no more than
-an external editor is: its writes take their own, unrelated lock table. Nor is
-the lock a transaction or a crash-safety mechanism."
+an external editor is: its writes take their own, unrelated lock table. Within
+this image, PROJECT-SCAFFOLD renames a whole prepared subtree into place
+without taking these locks, so it can move a directory out from under a holder.
+Nor is the lock a transaction or a crash-safety mechanism."
   (let ((lock (gensym "FILE-LOCK")))
     `(let ((,lock (file-lock ,path)))
        (with-recursive-lock-held (,lock)
