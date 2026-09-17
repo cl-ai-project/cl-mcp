@@ -137,6 +137,13 @@ project root, and the guidance the tools print gives it in that form. The
 plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
 in its error data so a client can discover the opt-in.
 
+Concurrent cl-mcp calls: like `lisp-edit-form` and `lisp-patch-form`, a write holds one
+per-file lock for its whole decide-then-write span, so a concurrent `lisp-edit-form` or
+`lisp-patch-form` on the same file cannot land between this tool's overwrite decision and
+its write. This serialises the writes of one cl-mcp process only: an external editor — and
+equally a second cl-mcp server over the same checkout — is not coordinated. The lock is
+neither a transaction nor a crash-safety mechanism.
+
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
 
@@ -402,7 +409,11 @@ otherwise have raised. When the file is *unchanged*, none of those is a guard pr
 `form_type`/`form_name` that names nothing still gets the ordinary `Form <type> <name> not found
 in <path>` error, and an ambiguous one still gets `Multiple matches ... Specify an index:`, so a
 guard never turns a caller's own mistake into a `conflict`. A path the read policy refuses, a
-file over the read limit and a file that is not valid UTF-8 likewise stay plain errors.
+file over the read limit and a file that is not valid UTF-8 likewise stay plain errors. So
+does a file deleted, or otherwise made unreadable, after `guard` was issued: the snapshot
+read that every check needs fails before any digest exists to compare against, so there is
+nothing to build a `conflict` payload from, and the call gets the plain `Cannot read <path>
+to verify guard: <reason>` error instead.
 
 What this does *not* protect against: `guard` is a precondition, not an access token or a
 lock — the existing path validation and write limits still apply unchanged (a guarded call

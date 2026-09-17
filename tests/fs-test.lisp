@@ -13,6 +13,11 @@
                 #:signal-semaphore
                 #:wait-on-semaphore)
   (:import-from #:asdf #:system-source-directory)
+  ;; FILE-LOCK-KEY-COLLAPSES-SPELLINGS-OF-ONE-FILE calls ENSURE-WRITE-PATH
+  ;; directly (package-qualified below only reached this file transitively,
+  ;; through CL-MCP/SRC/FS), so it is imported explicitly like every other
+  ;; symbol this file uses.
+  (:import-from #:cl-mcp/src/utils/paths #:ensure-write-path)
   ;; Named so ASDF loads it: fs-write-file's post-write warning and its
   ;; overwrite guard both follow *lisp-file-unparseable-hook*, which this
   ;; system installs at load time.  Without the dependency the hook is NIL
@@ -723,10 +728,10 @@ hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
     (with-test-project-root
       (let ((existing "src/fs.lisp")
             (absent "tests/tmp/fs-lock-key-absent.lisp"))
-        (ok (string= (file-lock-key (cl-mcp/src/utils/paths:ensure-write-path existing))
+        (ok (string= (file-lock-key (ensure-write-path existing))
                      (file-lock-key existing))
             "an existing file: the outer and inner keys agree")
-        (ok (string= (file-lock-key (cl-mcp/src/utils/paths:ensure-write-path absent))
+        (ok (string= (file-lock-key (ensure-write-path absent))
                      (file-lock-key absent))
             "and so do they for a path that does not exist yet")))))
 
@@ -838,10 +843,18 @@ hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
                         bad)
                 "exactly one creates; the other is refused as an existing .lisp overwrite"))))))
 
-(defparameter *overwrite-gate-seconds* 2
-  "How long the overwrite-guard hook in the test below holds the decision open
-for the other thread. With the lock in place that thread cannot run, so this
-bound is what ends the wait; without it the thread signals long before.")
+(defparameter *overwrite-gate-seconds* 0.3
+  "Per-round bound on how long the overwrite-guard hook below holds the
+decision open for the concurrent edit thread. On the code path under test
+(FS-WRITE-FILE's tool body: decide, then write, under one lock) this ALWAYS
+times out -- the edit thread is blocked on that very lock and cannot signal
+back until the decide-and-write span finishes and releases it, so hitting
+this bound is expected on every round and proves nothing by itself; only the
+file left on disk, and which side reports success, is evidence. Without the
+lock the edit is not blocked and normally finishes and signals back well
+inside this bound, but a slow or loaded machine could still make one round
+miss it by scheduling luck alone -- which is why no single round is trusted;
+see the dotimes below.")
 
 (deftest fs-write-file-tool-excludes-a-concurrent-lisp-edit-form
   (testing "a structural edit cannot land between the overwrite check and the write"
@@ -849,62 +862,92 @@ bound is what ends the wait; without it the thread signals long before.")
       (let* ((relative "tests/tmp/fs-lock-overwrite-race.lisp")
              (abs (merge-pathnames* relative cl-mcp/src/project-root:*project-root*))
              (path (native-namestring abs))
-             (checked (make-semaphore))
-             (edited (make-semaphore))
-             (overwrite (format nil "(defun gamma () :gamma)~%")))
+             (original (format nil "(defun alpha () :alpha-old)~%~%(defun beta () :beta-old)~%"))
+             (overwrite (format nil "(defun gamma () :gamma)~%"))
+             (bad nil))
         (ensure-directories-exist abs)
-        (fs-write-file relative
-                       (format nil "(defun alpha () :alpha-old)~%~%(defun beta () :beta-old)~%"))
         (unwind-protect
-             (let* ((outcomes
-                      (run-in-parallel
-                       (lambda ()
-                         ;; The hook IS the overwrite guard's verdict, and it is
-                         ;; handed the exact text the decision is made from. It
-                         ;; publishes "the check has read the file", gives the
-                         ;; other thread its chance, and only then answers from
-                         ;; that text -- so the decision provably predates
-                         ;; whatever the edit did. Bound inside the thread: a
-                         ;; binding made in the parent would not be visible here.
-                         (let* ((fired nil)
-                                (cl-mcp/src/fs:*lisp-file-unparseable-hook*
-                                  (lambda (pn text)
-                                    (declare (ignore pn))
-                                    (unless fired
-                                      (setf fired t)
-                                      (signal-semaphore checked)
-                                      (wait-on-semaphore edited
-                                                         :timeout *overwrite-gate-seconds*))
-                                    (and (search ":alpha-old" text) t))))
-                           (multiple-value-list
-                            (%call-fs-write relative overwrite :allow t))))
-                       (lambda ()
-                         (wait-on-semaphore checked :timeout *parallel-wait-seconds*)
-                         (unwind-protect
-                              (handler-case
-                                  (progn
-                                    (lisp-edit-form
-                                     :file-path path :form-type "defun"
-                                     :form-name "alpha" :operation "replace"
-                                     :content "(defun alpha () :alpha-new)")
-                                    :edited)
-                                (error () :refused))
-                           (signal-semaphore edited)))))
-                    (write-outcome (first outcomes))
-                    (wrote (and (consp write-outcome)
-                                (hash-table-p (second write-outcome))
-                                (eq t (gethash "success" (second write-outcome)))))
-                    (edit-won (eq (second outcomes) :edited))
-                    (after (fs-read-file path)))
-               (ok (not (member :did-not-finish outcomes))
-                   "both threads finished")
-               (ok (not (and wrote edit-won))
-                   "a whole-file overwrite never lands on top of a successful edit")
-               (ok (or wrote edit-won)
-                   "and one of the two did happen, so the check is not vacuous")
-               (if wrote
-                   (ok (string= after overwrite)
-                       "the overwrite won, so the file is exactly what it wrote")
-                   (ok (search ":alpha-new" after)
-                       "the edit won, so the overwrite was refused on the changed file")))
-          (ignore-errors (delete-file abs)))))))
+             ;; A single round's final state does not prove the lock works: on
+             ;; a slow or loaded machine an unlocked edit could lose the race
+             ;; by scheduling luck alone, inside the very window a working
+             ;; lock also spends waiting out *OVERWRITE-GATE-SECONDS* every
+             ;; time (see its docstring). Repeating the race from a freshly
+             ;; written file is what makes a broken lock fail this test: a
+             ;; broken lock only has to win once across all the rounds to be
+             ;; caught, so it is the odds of every round happening to look
+             ;; correct by chance that vanish, not the odds of any one round
+             ;; doing so.
+             (dotimes (round 15)
+               (when bad (return))
+               (fs-write-file relative original)
+               (let* ((checked (make-semaphore))
+                      (edited (make-semaphore))
+                      (fired nil)
+                      (outcomes
+                        (run-in-parallel
+                         (lambda ()
+                           ;; The hook IS the overwrite guard's verdict, and it is
+                           ;; handed the exact text the decision is made from. It
+                           ;; publishes "the check has read the file", gives the
+                           ;; other thread its chance, and only then answers from
+                           ;; that text -- so the decision provably predates
+                           ;; whatever the edit did. Bound inside the thread: a
+                           ;; binding made in the parent would not be visible here.
+                           (let ((cl-mcp/src/fs:*lisp-file-unparseable-hook*
+                                   (lambda (pn text)
+                                     (declare (ignore pn))
+                                     (unless fired
+                                       (setf fired t)
+                                       (signal-semaphore checked)
+                                       (wait-on-semaphore edited
+                                                          :timeout *overwrite-gate-seconds*))
+                                     (and (search ":alpha-old" text) t))))
+                             (multiple-value-list
+                              (%call-fs-write relative overwrite :allow t))))
+                         (lambda ()
+                           ;; Unlike the hook's wait above, a timeout HERE is never
+                           ;; expected on either path: CHECKED is the hook's very
+                           ;; first act, so a miss within *PARALLEL-WAIT-SECONDS*
+                           ;; means the hook was never reached at all -- a broken
+                           ;; race setup, not evidence about the lock -- and is
+                           ;; reported as its own failure below rather than let
+                           ;; through as a silent, unsynchronised attempt.
+                           (if (wait-on-semaphore checked :timeout *parallel-wait-seconds*)
+                               (unwind-protect
+                                    (handler-case
+                                        (progn
+                                          (lisp-edit-form
+                                           :file-path path :form-type "defun"
+                                           :form-name "alpha" :operation "replace"
+                                           :content "(defun alpha () :alpha-new)")
+                                          :edited)
+                                      (error () :refused))
+                                 (signal-semaphore edited))
+                               :checked-timeout))))
+                      (write-outcome (first outcomes))
+                      (wrote (and (consp write-outcome)
+                                  (hash-table-p (second write-outcome))
+                                  (eq t (gethash "success" (second write-outcome)))))
+                      (edit-won (eq (second outcomes) :edited))
+                      (after (fs-read-file path)))
+                 (cond
+                   ((member :did-not-finish outcomes)
+                    (setf bad (list round :did-not-finish outcomes)))
+                   ((eq (second outcomes) :checked-timeout)
+                    (setf bad (list round :checked-never-signalled)))
+                   ((and wrote edit-won)
+                    (setf bad (list round :both-succeeded
+                                    "overwrite landed on top of a successful edit")))
+                   ((not (or wrote edit-won))
+                    (setf bad (list round :neither-succeeded outcomes)))
+                   (wrote
+                    (unless (string= after overwrite)
+                      (setf bad (list round :overwrite-but-wrong-content after))))
+                   (t
+                    (unless (search ":alpha-new" after)
+                      (setf bad (list round :edit-but-wrong-content after)))))))
+          (ignore-errors (delete-file abs)))
+        (ok (null bad)
+            (if bad
+                (format nil "round ~S: ~S" (first bad) (rest bad))
+                "every round left exactly one side's decision on disk, and the file agrees"))))))

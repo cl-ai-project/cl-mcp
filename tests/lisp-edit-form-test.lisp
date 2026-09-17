@@ -2533,6 +2533,8 @@ under a guard fell under, instead of only that some error was signalled."
           (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
             (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
             (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
             (ok (string= before (fs-read-file path))))))))
   (testing "a second definition of the same name added afterwards is a conflict, not ambiguity"
     (with-temp-file "tests/tmp/edit-form-guard-became-ambiguous.lisp"
@@ -2546,8 +2548,10 @@ under a guard fell under, instead of only that some error was signalled."
           (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
             (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
             (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
             (ok (string= before (fs-read-file path))))))))
-  (testing "a file made unparseable after the guard was issued is a conflict, and nothing is written"
+  (testing "a file made unparseable after the guard is a conflict, and nothing is written"
     (with-temp-file "tests/tmp/edit-form-guard-became-unparseable.lisp"
         "(defun target () :old)\n"
       (lambda (path)
@@ -2559,6 +2563,8 @@ under a guard fell under, instead of only that some error was signalled."
           (multiple-value-bind (kind payload) (%guarded-edit-outcome path "target" guard)
             (ok (eq kind :conflict) (format nil "~A: ~A" kind payload))
             (ok (search "file_digest" (%conflict-field payload :reason)))
+            (ok (equal (gethash "file_digest" guard) (%conflict-field payload :expected)))
+            (ok (not (equal (%conflict-field payload :expected) (%conflict-field payload :actual))))
             (ok (string= before (fs-read-file path))))))))
   (testing "an unchanged file still gives the plain \"not found\" error, never a conflict"
     (with-temp-file "tests/tmp/edit-form-guard-unchanged-not-found.lisp"

@@ -291,11 +291,17 @@ LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file
 until after they write it, and FS-WRITE-FILE takes the same lock again
 underneath.
 
-DEADLOCK DISCIPLINE -- this lock is a LEAF. While it is held, take no other
-cl-mcp lock except CL-MCP/SRC/LOG's *LOG-LOCK*, read *PROJECT-ROOT* rather
-than setting it, and never make a worker RPC (CL-MCP/SRC/PROXY:PROXY-TO-WORKER)
-or any other call that blocks on another process or on a reply. The three
-tools that hold it today run inline in the parent and call no worker.
+DEADLOCK DISCIPLINE -- while this lock is held, take no other cl-mcp lock
+except CL-MCP/SRC/LOG's *LOG-LOCK*, and *FILE-LOCK-TABLE-LOCK* itself through
+a nested WITH-FILE-LOCK's own call to FILE-LOCK (as FS-WRITE-FILE's does
+underneath LISP-EDIT-FORM's, above): FILE-LOCK holds *FILE-LOCK-TABLE-LOCK*
+only for one gethash/setf and always releases it before
+WITH-RECURSIVE-LOCK-HELD can block, so it is never the far side of a wait on
+a per-file lock and nesting cannot deadlock on it. Also read *PROJECT-ROOT*
+rather than setting it, and never make a worker RPC
+(CL-MCP/SRC/PROXY:PROXY-TO-WORKER) or any other call that blocks on another
+process or on a reply. The three tools that hold it today run inline in the
+parent and call no worker.
 
 What it does NOT provide: the lock lives in this image, so it serialises the
 writes of ONE cl-mcp process only. A second cl-mcp server over the same

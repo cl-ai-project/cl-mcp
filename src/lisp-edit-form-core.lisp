@@ -660,10 +660,11 @@ matches the file or form it was observed on (design doc section 4.2), on the
 verdict of %CHECK-EDIT-GUARD-PRE-PARSE before the parse (checks 1-4) or of
 CHECK-EDIT-GUARD once the target is matched (all six). CONFLICT (reader
 EDIT-GUARD-CONFLICT) is a plist (:REASON string :EXPECTED string :ACTUAL
-string) naming the first of the six checks that failed. Always signaled before %LOCATE-TARGET-FORM returns a value, so
-its caller -- LISP-EDIT-FORM in src/lisp-edit-form.lisp -- never sees, and so
-never writes, content that disagrees with GUARD: no name-only fallback, no
-adopting the new digest and continuing."))
+string) naming the first of the six checks that failed. Always signaled
+before %LOCATE-TARGET-FORM returns a value, so its caller -- LISP-EDIT-FORM
+in src/lisp-edit-form.lisp -- never sees, and so never writes, content that
+disagrees with GUARD: no name-only fallback, no adopting the new digest and
+continuing."))
 
 (defun %guard-field (guard name)
   "Return GUARD's NAME field, or NIL when GUARD is not a hash-table or carries
