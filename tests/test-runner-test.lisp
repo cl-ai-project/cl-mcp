@@ -441,11 +441,28 @@
                    :form '(make-instance 'rect :width 2))))
       (ok (search ":WIDTH" (gethash "form" detail))
           "an initarg printed without its colon is not readable-back code")))
-  (testing "a form its caller already rendered is passed through"
+  (testing "a form that is itself a string still keeps its quotes"
+    ;; Rove records the quoted form a user wrote, so (ng "truthy") records the
+    ;; string itself.  Passing a string through as already-rendered text would
+    ;; print it as the bare, symbol-looking truthy -- the very confusion this
+    ;; function exists to avoid.
     (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
-                   :test-name "t" :form "(already rendered)")))
-      (ok (equal "(already rendered)" (gethash "form" detail))
-          "so a pre-rendered form is not quoted a second time"))))
+                   :test-name "t" :form "truthy")))
+      (ok (equal "\"truthy\"" (gethash "form" detail))))))
+
+(deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
+  (testing "a real Rove failure whose form is a bare string reports it quoted"
+    ;; The whole path, not just MAKE-FAILURE-DETAIL: Rove's ASSERTION-FORM
+    ;; hands back the quoted form a user wrote, which for (ng "truthy") is the
+    ;; string itself.
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-string-form"))
+           (failures (gethash "failed_tests" result))
+           (failure (and (plusp (length failures)) (aref failures 0))))
+      (ok (plusp (gethash "failed" result)) "the helper test does fail")
+      (ok failure "and the failure is reported with details")
+      (when failure
+        (ok (equal "\"truthy\"" (gethash "form" failure))
+            "the form is the quoted string, not a bare truthy")))))
 
 (deftest run-tests-handles-direct-assertion-failures
   (testing "run-tests handles failures from direct assertions without (testing ...) wrapper"

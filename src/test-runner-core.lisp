@@ -244,20 +244,24 @@ beside a MAKE-INSTANCE call whose initargs had lost their colons."
 (defun make-failure-detail (&key test-name description form values reason source)
   "Create a failure detail hash table.
 
-FORM and VALUES are rendered with %SOURCE-TEXT, so the report shows them as
-they are written in source.  FORM is passed through unchanged when it is
-already a string, for a caller that has rendered it itself; VALUES never is,
-because a value that is a string has to be distinguishable from a symbol or a
-number printing the same characters -- that is exactly what a failed
-comparison turns on."
+FORM and VALUES are the assertion's own Lisp objects, never text a caller
+rendered first, and both are printed here with %SOURCE-TEXT so the report
+shows them as they are written in source.
+
+FORM in particular is not special-cased on being a string.  Rove records the
+quoted form a user wrote, so `(ng \"truthy\")' -- which fails, a string being
+true -- records the string \"truthy\" itself, and passing a string straight
+through as already-rendered text would print it as the bare symbol-looking
+`truthy'.  That is the very confusion between a string and a symbol printing
+the same characters that this function exists to avoid, and a failed
+comparison is exactly where it matters."
   (let ((ht (make-ht "test_name" (if (stringp test-name)
                                      test-name
                                      (princ-to-string test-name)))))
     (when description
       (setf (gethash "description" ht) description))
     (when form
-      (setf (gethash "form" ht)
-            (if (stringp form) form (%source-text form))))
+      (setf (gethash "form" ht) (%source-text form)))
     (when values
       (setf (gethash "values" ht)
             (coerce (mapcar #'%source-text values) 'vector)))
