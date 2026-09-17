@@ -685,16 +685,60 @@ it: a decimal version, two decimal offsets and two digests, each of which is
 an algorithm name, a colon and hex digits.  Only abs_path can, which is why
 the token carries it last and unsplit.")
 
+(defun %encode-guard-path (path)
+  "Return PATH with every character that would break a one-line token
+percent-encoded: the separator, the percent sign that introduces an escape,
+and every control character.
+
+A path is the one field a caller does not choose, and on this platform it may
+hold anything but a null byte.  A newline in it would put a line break inside
+the printed [guard: ...] token, so a client copying the line it can see would
+get half a guard and no way to tell -- the token is offered as something to
+copy off one line, and this is what makes that true of every path."
+  (with-output-to-string (out)
+    (loop for ch across path
+          for code = (char-code ch)
+          do (if (or (char= ch #\%)
+                     (char= ch +edit-guard-token-separator+)
+                     (< code 32)
+                     (= code 127))
+                 (format out "%~2,'0X" code)
+                 (write-char ch out)))))
+
+(defun %decode-guard-path (text)
+  "Return TEXT with the %XX escapes %ENCODE-GUARD-PATH wrote read back.
+
+Returns NIL when an escape is truncated or is not two hexadecimal digits, so
+a token damaged in transit is refused outright rather than decoded into some
+other path that might still name a real file."
+  (let ((out (make-string-output-stream))
+        (i 0)
+        (n (length text)))
+    (loop while (< i n)
+          do (let ((ch (char text i)))
+               (if (char= ch #\%)
+                   (let ((hi (and (< (+ i 1) n) (digit-char-p (char text (+ i 1)) 16)))
+                         (lo (and (< (+ i 2) n) (digit-char-p (char text (+ i 2)) 16))))
+                     (unless (and hi lo)
+                       (return-from %decode-guard-path nil))
+                     (write-char (code-char (+ (* 16 hi) lo)) out)
+                     (incf i 3))
+                   (progn (write-char ch out)
+                          (incf i)))))
+    (get-output-stream-string out)))
+
 (defun format-edit-guard-token (guard)
   "Return GUARD, an edit_guard JSON object, as the one-line token clos-describe
 prints in its content text and PARSE-EDIT-GUARD-TOKEN reads back:
 
   version|file_digest|form_start|form_end|form_digest|abs_path
 
-separated by +EDIT-GUARD-TOKEN-SEPARATOR+, abs_path last so a path holding the
-separator survives the round trip.  These are exactly the six fields
-CHECK-EDIT-GUARD reads; GUARD's path field is left out because no check reads
-it, and it would repeat abs_path's bulk on every line.
+separated by +EDIT-GUARD-TOKEN-SEPARATOR+, with abs_path percent-encoded by
+%ENCODE-GUARD-PATH so that neither the separator nor a line break can occur
+inside it, and last so that even an unencoded separator would not shear the
+token.  These are exactly the six fields CHECK-EDIT-GUARD reads; GUARD's path
+field is left out because no check reads it, and it would repeat abs_path's
+bulk on every line.
 
 Returns NIL when GUARD is not a hash-table or lacks any of the six, so a
 partial token -- one CHECK-EDIT-GUARD would refuse over a field its holder
@@ -714,12 +758,17 @@ documented in docs/tools.md unreachable from such a client."
                (stringp form-digest) (plusp (length form-digest))
                (stringp abs-path) (plusp (length abs-path)))
       (with-output-to-string (out)
-        (loop for field in (list version file-digest form-start form-end
-                                 form-digest abs-path)
-              for firstp = t then nil
-              do (unless firstp
-                   (write-char +edit-guard-token-separator+ out))
-                 (princ field out))))))
+        (flet ((sep () (write-char +edit-guard-token-separator+ out)))
+          ;; ~D rather than PRINC: it binds *PRINT-BASE* to 10 and
+          ;; *PRINT-RADIX* to false, so an offset comes out as the decimal
+          ;; PARSE-EDIT-GUARD-TOKEN reads back whatever printer control
+          ;; variables happen to be bound around this call.
+          (format out "~D" version) (sep)
+          (write-string file-digest out) (sep)
+          (format out "~D" form-start) (sep)
+          (format out "~D" form-end) (sep)
+          (write-string form-digest out) (sep)
+          (write-string (%encode-guard-path abs-path) out))))))
 
 (defun %split-edit-guard-token (token)
   "Return TOKEN's six fields as a list of strings, or NIL when it holds fewer.
@@ -759,11 +808,12 @@ outcome a caller that passed a guard must never get."
         (or fields '())
       (let ((version-value (and version (%parse-guard-offset version)))
             (start-value (and form-start (%parse-guard-offset form-start)))
-            (end-value (and form-end (%parse-guard-offset form-end))))
+            (end-value (and form-end (%parse-guard-offset form-end)))
+            (path-value (and abs-path (%decode-guard-path abs-path))))
         (unless (and version-value start-value end-value
                      (plusp (length file-digest))
                      (plusp (length form-digest))
-                     (plusp (length abs-path)))
+                     (plusp (length path-value)))
           (error 'edit-guard-conflict-error
                  :conflict
                  (%guard-conflict
@@ -778,7 +828,7 @@ outcome a caller that passed a guard must never get."
                 (gethash "form_start" guard) start-value
                 (gethash "form_end" guard) end-value
                 (gethash "form_digest" guard) form-digest
-                (gethash "abs_path" guard) abs-path)
+                (gethash "abs_path" guard) path-value)
           guard)))))
 
 (defun normalize-edit-guard (guard)

@@ -1842,6 +1842,64 @@
                    "and nothing was written while the two disagreed"))
           (ignore-errors (delete-file abs-path)))))))
 
+(deftest tools-call-lisp-edit-form-guard-present-but-unusable
+  (testing "a guard key sent with an unusable value is refused, not ignored"
+    ;; YASON decodes both null and false to NIL, which EXTRACT-ARG cannot tell
+    ;; from a key that was never sent: it skips the type check and the call
+    ;; would go through unguarded -- the one outcome a caller who asked for a
+    ;; guard must never get.  %RESOLVE-GUARD-ARGUMENT decides on the key being
+    ;; present, so each of these is an argument error with nothing written.
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-guard-unusable-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (unwind-protect
+             (dolist (spec '(("guard_token" . "null")
+                             ("guard_token" . "false")
+                             ("guard_token" . "[]")
+                             ("guard_token" . "\"\"")
+                             ("guard" . "null")
+                             ("guard" . "false")
+                             ("guard" . "\"not-an-object\"")))
+               (with-open-file (out abs-path :direction :output :if-exists :supersede)
+                 (write-string "(defun target () :old)" out))
+               (let* ((label (format nil "~A: ~A" (car spec) (cdr spec)))
+                      (req (format nil
+                                   (concatenate
+                                    'string
+                                    "{\"jsonrpc\":\"2.0\",\"id\":9104,\"method\":\"tools/call\","
+                                    "\"params\":{\"name\":\"lisp-edit-form\","
+                                    "\"arguments\":{\"file_path\":\"~A\","
+                                    "\"form_type\":\"defun\",\"form_name\":\"target\","
+                                    "\"operation\":\"replace\","
+                                    "\"content\":\"(defun target () :new)\","
+                                    "\"~A\":~A}}}")
+                                   tmp-path (car spec) (cdr spec)))
+                      (obj (parse (%pjl req))))
+                 (ok (%tool-call-failed-p obj) label)
+                 (ok (not (search ":new" (uiop:read-file-string abs-path)))
+                     (format nil "~A wrote nothing" label))))
+          (ignore-errors (delete-file abs-path))))))
+  (testing "omitting both keys still edits without a guard, as before"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-no-guard-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string "(defun target () :old)" out))
+        (unwind-protect
+             (let* ((req (concatenate
+                          'string
+                          "{\"jsonrpc\":\"2.0\",\"id\":9105,\"method\":\"tools/call\","
+                          "\"params\":{\"name\":\"lisp-edit-form\","
+                          "\"arguments\":{\"file_path\":\"" tmp-path "\","
+                          "\"form_type\":\"defun\",\"form_name\":\"target\","
+                          "\"operation\":\"replace\","
+                          "\"content\":\"(defun target () :new)\"}}}"))
+                    (obj (parse (%pjl req))))
+               (ok (not (%tool-call-failed-p obj)))
+               (ok (search ":new" (uiop:read-file-string abs-path))
+                   "an unguarded edit is not what the presence check broke"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-lisp-check-parens-reader-error
   (testing "lisp-check-parens detects reader error when parens are balanced"
     ;; #. triggers a reader-error when *read-eval* is nil.

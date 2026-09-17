@@ -300,6 +300,17 @@ so arrays are lists and false is NIL."
       (ok (stringp token) "a matched entry's guard prints a token")
       (ok (search (format nil "[guard: ~A]" token) text)
           "and that exact token stands in the text beside its definition")
+      ;; Taken out of the rendered text the way a client reading only
+      ;; content[].text has to take it: one line, between the marker and the
+      ;; closing bracket.  A formatter-to-parser round trip alone would not
+      ;; notice a token that had been split across two lines on the way out.
+      (let* ((line (find-if (lambda (l) (search "[guard: " l))
+                            (uiop:split-string text :separator '(#\Newline))))
+             (from (+ (search "[guard: " line) (length "[guard: ")))
+             (scraped (subseq line from (position #\] line :start from))))
+        (ok (equal token scraped) "the whole token fits on the line it is printed on")
+        (ok (hash-table-p (parse-edit-guard-token scraped))
+            "and what a client can scrape off that line reads back as a guard"))
       (let ((parsed (parse-edit-guard-token token)))
         (ok (every (lambda (field)
                      (equal (gethash field guard) (gethash field parsed)))

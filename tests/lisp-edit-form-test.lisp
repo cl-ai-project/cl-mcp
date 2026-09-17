@@ -2523,17 +2523,51 @@ under a guard fell under, instead of only that some error was signalled."
                           "form_digest" "abs_path"))
            (ok (equal (gethash field guard) (gethash field parsed))
                (format nil "~A survives the round trip" field)))))))
-  (testing "an abs_path holding the separator comes back whole"
-    ;; Only abs_path can contain it, which is why the token carries it last
-    ;; and unsplit; a path with a vertical bar must not shear the token.
-    (let* ((guard (make-ht "version" 1
-                           "file_digest" "md5:aa"
-                           "form_start" 1
-                           "form_end" 2
-                           "form_digest" "md5:bb"
-                           "abs_path" "/tmp/od|d/name.lisp"))
-           (parsed (parse-edit-guard-token (format-edit-guard-token guard))))
-      (ok (equal "/tmp/od|d/name.lisp" (gethash "abs_path" parsed)))))
+  (testing "an awkward abs_path stays on one line and comes back whole"
+    ;; The token is offered as something to copy off a single printed line, so
+    ;; a path holding the separator, a newline or a percent sign must not put
+    ;; any of those into the token itself: a client copying the line it can
+    ;; see would otherwise get half a guard, with nothing to say so.
+    (dolist (path (list "/tmp/od|d/name.lisp"
+                        (format nil "/tmp/two~%lines.lisp")
+                        "/tmp/100%/name.lisp"
+                        (format nil "/tmp/tab~Cand%7Cliteral.lisp" #\Tab)))
+      (let* ((guard (make-ht "version" 1
+                             "file_digest" "md5:aa"
+                             "form_start" 1
+                             "form_end" 2
+                             "form_digest" "md5:bb"
+                             "abs_path" path))
+             (token (format-edit-guard-token guard))
+             (parsed (parse-edit-guard-token token)))
+        (ok (= 5 (count #\| token))
+            (format nil "~S encodes the separator away, leaving the five real ones"
+                    path))
+        (ok (not (find #\Newline token)) "the token is one line")
+        (ok (equal path (gethash "abs_path" parsed))
+            (format nil "~S survives the round trip" path)))))
+  (testing "a token whose escape is damaged is refused"
+    (ok (handler-case
+            (progn (parse-edit-guard-token "1|md5:aa|1|2|md5:bb|/tmp/a%2") nil)
+          (edit-guard-conflict-error () t))
+        "a truncated %XX must not decode into some other real path")
+    (ok (handler-case
+            (progn (parse-edit-guard-token "1|md5:aa|1|2|md5:bb|/tmp/a%ZZb") nil)
+          (edit-guard-conflict-error () t))))
+  (testing "offsets are written in decimal whatever the printer is set to"
+    ;; PRINC would honour *print-base*; the parser reads decimal either way.
+    (let ((guard (make-ht "version" 1
+                          "file_digest" "md5:aa"
+                          "form_start" 26
+                          "form_end" 255
+                          "form_digest" "md5:bb"
+                          "abs_path" "/tmp/a.lisp")))
+      (let ((token (let ((*print-base* 16) (*print-radix* t))
+                     (format-edit-guard-token guard))))
+        (ok (search "|26|255|" token) "26 and 255, not 1A and FF")
+        (let ((parsed (parse-edit-guard-token token)))
+          (ok (eql 26 (gethash "form_start" parsed)))
+          (ok (eql 255 (gethash "form_end" parsed)))))))
   (testing "a guard missing a field prints no token at all"
     (ok (null (format-edit-guard-token
                (make-ht "version" 1 "form_start" 1 "form_end" 2

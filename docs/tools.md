@@ -328,13 +328,18 @@ Input:
   entry, is one. See "Edit guard" below.
 - `guard_token` (string, optional): the same guard in the compact one-line form `clos-describe`
   prints beside a matched definition as `[guard: ...]`:
-  `version|file_digest|form_start|form_end|form_digest|abs_path`. Copy it verbatim; it is read
-  back into the object above and runs the identical six checks. This is the form to use when
-  working from `clos-describe`'s content text, which is where the token appears — the
-  `edit_guard` object itself is a sibling JSON field many clients never render. Passing both
-  `guard` and `guard_token` is an error, rather than one silently winning. A token that cannot
-  be read is a guard conflict, not a missing guard: the edit is refused, never downgraded to an
-  unguarded one.
+  `version|file_digest|form_start|form_end|form_digest|abs_path`, with `abs_path`
+  percent-encoded so neither the separator nor a line break can appear inside it. Copy it
+  verbatim; it is read back into the object above and runs the identical six checks. This is the
+  form to use when working from `clos-describe`'s content text, which is where the token appears
+  — the `edit_guard` object itself is a sibling JSON field many clients never render.
+
+  Both guard arguments are judged on the key being **present**, not on its value being useful.
+  Sending `guard` and `guard_token` together is an error rather than one silently winning, and
+  sending either as `null`, `false` or any other value of the wrong shape is an argument error —
+  not a silent fall-back to an unguarded edit. Omit the argument entirely to edit without a
+  guard. A token that is present but cannot be read is likewise a guard *conflict*, not a
+  missing guard: the edit is refused, never downgraded.
 
 Matching a `defmethod`: package prefixes (`pkg:`, `pkg::`) and line breaks in `form_name` are
 ignored, so `"sb-gray:stream-write-char ((s my-pkg::sink)\n    character)"` matches
@@ -702,11 +707,13 @@ definition, after `form_type`/`form_name` and any `edit_unit`, as a compact one-
 AREA (RECTANGLE)  src/shapes.lisp:70 (defmethod area ((s rectangle)))  [guard: 1|md5:fee09e…|2193|2262|md5:9cbd88…|/abs/path/shapes.lisp]
 ```
 
-The fields are `version|file_digest|form_start|form_end|form_digest|abs_path`, in that order,
-with `abs_path` last and unsplit so a path containing `|` survives. `path` is left out; no check
-reads it. Copy the token verbatim into `lisp-edit-form`'s `guard_token` — it is read back into
-the object above and checked identically. An entry that is not `matched` prints no token,
-because it carries no `edit_guard` to print. Doing so
+The fields are `version|file_digest|form_start|form_end|form_digest|abs_path`, in that order.
+`abs_path` is percent-encoded (`%`, `|` and every control character, including a newline) and
+comes last, so the token is always one line with exactly five separators however odd the path
+is — which is what makes "copy it off the line you can see" true rather than usually true.
+`path` is left out; no check reads it. Copy the token verbatim into `lisp-edit-form`'s
+`guard_token` — it is read back into the object above and checked identically. An entry that is
+not `matched` prints no token, because it carries no `edit_guard` to print. Doing so
 catches a change to the target form, or anywhere else in the file, made after this
 `clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
 the first one already consumed it. Only cl-mcp's three parent-side write tools — `fs-write-file`,
