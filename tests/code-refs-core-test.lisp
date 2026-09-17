@@ -87,7 +87,15 @@
       ;; |A|B| is a reader error in SBCL: the third | opens a quote nothing
       ;; closes.  It must stay a problem, so callers keep failing closed.
       (ok (stringp (nth-value 2 (parse-symbol-text "|A|B|"))))
-      (ok (null (nth-value 0 (parse-symbol-text "|A|B|")))))))
+      (ok (null (nth-value 0 (parse-symbol-text "|A|B|"))))))
+  (testing "an escaped or quoted colon does not separate a package"
+    ;; The escape clause now runs before the package separator, so these pin
+    ;; that precedence: each is one symbol name, not a qualified reference.
+    (flet ((parts (text) (multiple-value-list (parse-symbol-text text))))
+      (ok (equal '(":" nil nil) (parts "\\:")))
+      (ok (equal '(":" nil nil) (parts "|:|")))
+      (ok (equal '("A:B" nil nil) (parts "|A:B|")))
+      (ok (equal '("a::b" nil nil) (parts "|a::b|"))))))
 
 (deftest parse-target-designator-signals-validation-errors
   (testing "keywords and malformed text are argument errors"

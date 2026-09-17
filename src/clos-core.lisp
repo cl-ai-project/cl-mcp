@@ -202,11 +202,16 @@ METHOD's generic function.
 The CONDITION restriction is what this fallback exists for and all it is for.
 SBCL never makes a DEFINE-CONDITION slot reader or writer a
 STANDARD-ACCESSOR-METHOD, so a genuine condition accessor can only be
-recognised this way; on an ordinary class a genuine accessor always arrives as
-a STANDARD-ACCESSOR-METHOD and never reaches here.  Anything that does reach
-here on an ordinary class is therefore a hand-written DEFMETHOD merely sharing
-the accessor's generic function and specializer -- typically one that replaced
-the generated reader -- and is reported as the plain method it is.  On a
+recognised this way; on an ordinary class a genuine accessor arrives as a
+STANDARD-ACCESSOR-METHOD and never reaches here, for every metaclass checked
+(STANDARD-CLASS, a subclass of it, FUNCALLABLE-STANDARD-CLASS, STRUCTURE-CLASS,
+and an inherited slot).  Anything that does reach here on an ordinary class is
+therefore a hand-written DEFMETHOD merely sharing the accessor's generic
+function and specializer -- typically one that replaced the generated reader --
+and is reported as the plain method it is.  A metaclass that specializes
+SB-MOP:READER-METHOD-CLASS away from STANDARD-ACCESSOR-METHOD would also land
+here; its accessor is then treated as a plain method, which costs the entry its
+DEFCLASS edit target but never confirms a wrong one.  On a
 condition the two stay indistinguishable from the image alone, so this still
 fills in the accessor fields there and CL-MCP/SRC/CLOS-VERIFY-CORE settles
 which of the two it was from the source form.
