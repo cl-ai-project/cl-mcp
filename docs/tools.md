@@ -708,9 +708,10 @@ AREA (RECTANGLE)  src/shapes.lisp:70 (defmethod area ((s rectangle)))  [guard: 1
 ```
 
 The fields are `version|file_digest|form_start|form_end|form_digest|abs_path`, in that order.
-`abs_path` is percent-encoded (`%`, `|` and every control character, including a newline) and
-comes last, so the token is always one line with exactly five separators however odd the path
-is — which is what makes "copy it off the line you can see" true rather than usually true.
+`abs_path` is percent-encoded (`%`, `|`, `[`, `]` and every control character, including a
+newline) and comes last, so the token is always one line, with exactly five separators and no
+`]` before the one that closes `[guard: ...]`, however odd the path is — which is what makes
+"copy the text between `[guard: ` and the next `]`" true rather than usually true.
 `path` is left out; no check reads it. Copy the token verbatim into `lisp-edit-form`'s
 `guard_token` — it is read back into the object above and checked identically. An entry that is
 not `matched` prints no token, because it carries no `edit_guard` to print. Doing so

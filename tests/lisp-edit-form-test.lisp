@@ -2531,6 +2531,7 @@ under a guard fell under, instead of only that some error was signalled."
     (dolist (path (list "/tmp/od|d/name.lisp"
                         (format nil "/tmp/two~%lines.lisp")
                         "/tmp/100%/name.lisp"
+                        "/tmp/demo[old]/name.lisp"
                         (format nil "/tmp/tab~Cand%7Cliteral.lisp" #\Tab)))
       (let* ((guard (make-ht "version" 1
                              "file_digest" "md5:aa"
@@ -2544,6 +2545,8 @@ under a guard fell under, instead of only that some error was signalled."
             (format nil "~S encodes the separator away, leaving the five real ones"
                     path))
         (ok (not (find #\Newline token)) "the token is one line")
+        (ok (not (find #\] token))
+            "and holds no ], which would end the printed [guard: ...] early")
         (ok (equal path (gethash "abs_path" parsed))
             (format nil "~S survives the round trip" path)))))
   (testing "a token whose escape is damaged is refused"

@@ -685,21 +685,35 @@ it: a decimal version, two decimal offsets and two digests, each of which is
 an algorithm name, a colon and hex digits.  Only abs_path can, which is why
 the token carries it last and unsplit.")
 
+(defparameter *edit-guard-path-escaped-characters* '(#\% #\[ #\])
+  "Characters %ENCODE-GUARD-PATH escapes besides the separator and the control
+characters.
+
+#\\% introduces an escape, so it has to escape itself.  #\\[ and #\\] are the
+brackets clos-describe prints the token inside -- [guard: TOKEN] -- and a
+reader that takes the text between that marker and the first ] is reading it
+the only way the printed line allows.  A ] in the path would end the token
+early for such a reader, so it is escaped here even though the parser itself
+would not have minded it.")
+
 (defun %encode-guard-path (path)
   "Return PATH with every character that would break a one-line token
-percent-encoded: the separator, the percent sign that introduces an escape,
-and every control character.
+percent-encoded: the separator, the characters of
+*EDIT-GUARD-PATH-ESCAPED-CHARACTERS*, and every control character.
 
 A path is the one field a caller does not choose, and on this platform it may
-hold anything but a null byte.  A newline in it would put a line break inside
-the printed [guard: ...] token, so a client copying the line it can see would
-get half a guard and no way to tell -- the token is offered as something to
-copy off one line, and this is what makes that true of every path."
+hold anything but a null byte.  Two characters in it used to reach the printed
+token intact and break the one thing the token is for.  A newline put a line
+break inside [guard: ...], so a client copying the line it could see got half
+a guard.  A ] ended the token early for a client reading to the first one, so
+what it took away named a path that was never there -- refused by the guard
+checks, correctly, but refusing an edit whose guard had been observed
+perfectly well."
   (with-output-to-string (out)
     (loop for ch across path
           for code = (char-code ch)
-          do (if (or (char= ch #\%)
-                     (char= ch +edit-guard-token-separator+)
+          do (if (or (char= ch +edit-guard-token-separator+)
+                     (member ch *edit-guard-path-escaped-characters*)
                      (< code 32)
                      (= code 127))
                  (format out "%~2,'0X" code)
@@ -734,9 +748,9 @@ prints in its content text and PARSE-EDIT-GUARD-TOKEN reads back:
   version|file_digest|form_start|form_end|form_digest|abs_path
 
 separated by +EDIT-GUARD-TOKEN-SEPARATOR+, with abs_path percent-encoded by
-%ENCODE-GUARD-PATH so that neither the separator nor a line break can occur
-inside it, and last so that even an unencoded separator would not shear the
-token.  These are exactly the six fields CHECK-EDIT-GUARD reads; GUARD's path
+%ENCODE-GUARD-PATH so that neither the separator, nor a line break, nor the
+bracket that closes the printed [guard: ...] can occur inside it, and last so
+that even an unencoded separator would not shear the token.  These are exactly the six fields CHECK-EDIT-GUARD reads; GUARD's path
 field is left out because no check reads it, and it would repeat abs_path's
 bulk on every line.
 

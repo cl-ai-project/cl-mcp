@@ -318,6 +318,48 @@ so arrays are lists and false is NIL."
                      "form_digest" "abs_path"))
             "reading the token back yields the fields the six checks read")))))
 
+(deftest clos-describe-guard-token-survives-being-scraped-off-its-line
+  (testing "an awkward path does not shear the token off the line it is printed on"
+    ;; The token is printed inside [guard: ...], so a client can only take it
+    ;; as the text between that marker and the first ] on the line -- which is
+    ;; how the test above, and the docs, say to take it.  A ] in the path
+    ;; would end it early and hand back a guard naming a path that was never
+    ;; there: refused by the checks, correctly, but refusing an edit whose
+    ;; guard had been observed perfectly well.  A newline would split the line
+    ;; outright.  Neither reaches the token, so both are tested here through
+    ;; the rendering, not just through the formatter.
+    (dolist (path (list "/work/demo[old]/src/shapes.lisp"
+                        "/work/a|b/c.lisp"
+                        "/work/100%/c.lisp"
+                        (format nil "/work/two~%lines.lisp")))
+      (let* ((guard (make-ht "version" 1
+                             "path" "src/shapes.lisp"
+                             "abs_path" path
+                             "file_digest" "md5:aaaabbbbccccddddeeeeffff00001111"
+                             "form_start" 10
+                             "form_end" 50
+                             "form_digest" "md5:11110000ffffeeeeddddccccbbbbaaaa"))
+             (entry (make-ht "path" "src/shapes.lisp"
+                             "line" 7
+                             "source_match" "matched"
+                             "form_type" "defmethod"
+                             "form_name" "area ((s rectangle))"
+                             "edit_guard" guard))
+             (token (format-edit-guard-token guard))
+             (line (cl-mcp/src/tools/clos-response-builders::%location-text entry))
+             (from (+ (search "[guard: " line) (length "[guard: ")))
+             (scraped (subseq line from (position #\] line :start from))))
+        (ok (not (find #\Newline line))
+            (format nil "~S leaves the entry on one line" path))
+        (ok (equal token scraped)
+            (format nil "~S: reading to the first ] gets the whole token" path))
+        (let ((parsed (parse-edit-guard-token scraped)))
+          (ok (equal path (gethash "abs_path" parsed))
+              (format nil "~S survives text -> scrape -> parse" path))
+          (dolist (field '("version" "file_digest" "form_start" "form_end" "form_digest"))
+            (ok (equal (gethash field guard) (gethash field parsed))
+                (format nil "~A survives for ~S" field path))))))))
+
 (deftest annotate-report-forms-reads-each-file-once
   (testing "one snapshot per file feeds the scan, the round trip and the guard"
     (%load-fixture)
