@@ -658,7 +658,13 @@ defines it, `(setf name)` included. `:reader x` and `:writer x` each define the 
 writer whose slot option now reads `:writer x` is `mismatched`, not `matched`, and so is a live
 plain `x` writer whose option now reads `:accessor x`. A `:reader` or `:accessor` written with
 anything but a bare symbol is not valid Common Lisp; rather than guess what it meant, that option
-confirms nothing, so an accessor that depends on it is `unverified` rather than `matched`.
+confirms nothing, so an accessor that depends on it is `unverified` rather than `matched`. A
+hand-written method that overrides a generated accessor — a `defmethod` replacing what a `:reader`
+or `:accessor` option created — is confirmed against that `defmethod`, not against the class form:
+on an ordinary class such a method is not reported as an accessor at all, and on a condition, whose
+readers look the same to the image either way, the source form decides (when the class form and the
+overriding `defmethod` both start on the same line and both match, the entry is `unverified` for
+ambiguity rather than a guess between them).
 
 **Container edit units.** A method identified as a `defgeneric`'s inline `(:method ...)` option,
 or a class's slot accessor (`:reader`/`:writer`/`:accessor`), is not itself a top-level form —

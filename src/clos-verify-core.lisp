@@ -463,14 +463,25 @@ IDENTITY's generic function, SETF flag and all (spec 3.4)."
             (t (values :mismatched "no slot in this definition matches")))))))
 
 (defun %verify-accessor-candidate (identity candidate)
-  "Judge CANDIDATE against an accessor method IDENTITY (spec 3.4): CANDIDATE
-must be a verified DEFCLASS or DEFINE-CONDITION whose name matches
-IDENTITY's class and whose slots include one matching name, access and
-generic function."
+  "Judge CANDIDATE against an accessor method IDENTITY (spec 3.4).  A verified
+DEFCLASS or DEFINE-CONDITION is judged as the slot option that would define
+the accessor: its name must match IDENTITY's class and its slots must include
+one matching name, access and generic function.
+
+Any other candidate form is judged as a plain method instead
+(%VERIFY-METHOD-CANDIDATE), not rejected as an unsupported form.  An
+accessor-shaped identity is not proof that a slot option defines the live
+method: a hand-written DEFMETHOD that replaced a generated CONDITION reader is
+indistinguishable from that reader in the image (CL-MCP/SRC/CLOS-CORE's
+%CONDITION-ACCESSOR-SLOT), and only the source form tells the two apart.  Such
+a method therefore confirms against its own DEFMETHOD -- or a DEFGENERIC whose
+inline (:method ...) defines it -- and gets that form as its edit target.  A
+DEFSTRUCT or an unrecognised container still falls through to
+%VERIFY-METHOD-CANDIDATE's own :UNVERIFIED verdict, as before."
   (if (member (%verified-container-kind candidate) '(:defclass :define-condition))
       (%combine (list (%mv-cons (%compare-name (%get candidate "name") (%get identity "class")))
                       (%mv-cons (%compare-accessor-slot candidate identity))))
-      (values :unverified "unsupported or shadowed definition form")))
+      (%verify-method-candidate identity candidate)))
 
 (defun %accessor-identity-p (identity)
   "True when IDENTITY, a method identity, describes a standard accessor:

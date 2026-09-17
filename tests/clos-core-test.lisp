@@ -499,10 +499,12 @@ neither can be picked without a guess -- class/slot/access stay nil, fail-closed
       (ok (null (gethash "class" identity))))))
 
 (deftest identity-does-not-treat-a-qualified-method-as-an-accessor
-  (testing "a :before method sharing WIDGET-SIZE's generic function and sole specializer
-with the real accessor is not mistaken for it: kind stays \"method\", class/slot/access
-stay nil; the plain accessor still gets them"
-    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:widget-size"))))
+  (testing "a :before method sharing GUARDED-ERROR-CODE's generic function and sole
+specializer with the genuine condition reader is not mistaken for it: kind stays
+\"method\", class/slot/access stay nil; the reader still gets them.  A condition is
+the only place the qualifier guard decides anything, because a condition reader is
+the only accessor that reaches the fallback at all"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:guarded-error-code"))))
            (methods (%methods gf))
            (before-method
              (find-if (lambda (m) (equal '(":BEFORE") (%strings m "qualifiers"))) methods))
@@ -519,6 +521,66 @@ stay nil; the plain accessor still gets them"
       (ok (equal "reader" (gethash "kind" reader-method)))
       (ok (equal "reader" (gethash "access" reader-identity)))
       (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "slot" reader-identity))))
-      (ok (equal "SIZE" (gethash "name" (gethash "slot" reader-identity))))
+      (ok (equal "CODE" (gethash "name" (gethash "slot" reader-identity))))
       (ok (equal "CL-MCP-CLOS-FIXTURE" (gethash "package" (gethash "class" reader-identity))))
+      (ok (equal "GUARDED-ERROR" (gethash "name" (gethash "class" reader-identity))))))
+  (testing "on an ordinary class the same :before method is a plain method too, and
+WIDGET-SIZE's genuine accessor -- a real STANDARD-READER-METHOD -- still carries
+class, slot and access"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:widget-size"))))
+           (methods (%methods gf))
+           (before-identity
+             (%identity (find-if (lambda (m) (equal '(":BEFORE") (%strings m "qualifiers")))
+                                 methods)))
+           (reader-method (find-if (lambda (m) (null (%strings m "qualifiers"))) methods))
+           (reader-identity (%identity reader-method)))
+      (ok (null (gethash "access" before-identity)))
+      (ok (null (gethash "slot" before-identity)))
+      (ok (null (gethash "class" before-identity)))
+      (ok (equal "reader" (gethash "kind" reader-method)))
+      (ok (equal "reader" (gethash "access" reader-identity)))
+      (ok (equal "SIZE" (gethash "name" (gethash "slot" reader-identity))))
       (ok (equal "WIDGET" (gethash "name" (gethash "class" reader-identity)))))))
+
+(deftest identity-treats-an-overridden-ordinary-accessor-as-a-plain-method
+  (testing "GADGET-SIZE's generated reader was replaced by a hand-written DEFMETHOD:
+the sole live method is a plain STANDARD-METHOD, and on an ordinary class that is
+proof it is not an accessor, so class/slot/access stay nil and the entry points at
+the DEFMETHOD's own line"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:gadget-size"))))
+           (methods (%methods gf))
+           (identity (%identity (first methods))))
+      (ok (= 1 (length methods)) "the override replaced the generated reader")
+      (ok (equal "method" (gethash "kind" (first methods))))
+      (ok (null (gethash "access" identity)))
+      (ok (null (gethash "slot" identity)))
+      (ok (null (gethash "class" identity)))
+      (ok (eql (%line "(defmethod gadget-size") (gethash "line" (first methods)))))))
+
+(deftest identity-still-fills-an-overridden-condition-readers-accessor-fields
+  (testing "OVERRIDE-ERROR-CODE's generated reader was replaced the same way, but a
+genuine condition reader is a plain STANDARD-METHOD too, so the image cannot tell
+the two apart: the identity keeps class/slot/access -- source matching settles which
+it was -- while the entry's line is the DEFMETHOD's own"
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:override-error-code"))))
+           (methods (%methods gf))
+           (identity (%identity (first methods))))
+      (ok (= 1 (length methods)))
+      (ok (equal "reader" (gethash "access" identity)))
+      (ok (equal "CODE" (gethash "name" (gethash "slot" identity))))
+      (ok (equal "OVERRIDE-ERROR" (gethash "name" (gethash "class" identity))))
+      (ok (eql (%line "(defmethod override-error-code")
+               (gethash "line" (first methods)))))))
+
+(deftest identity-treats-an-overridden-writer-as-a-plain-method
+  (testing "a hand-written (SETF BOX-W) method has two specializers, so the accessor
+fallback's one-specializer guard rejects it on any class; BOX-W's untouched reader
+half is still a genuine accessor"
+    (let* ((gfs (%gfs (%report "cl-mcp-clos-fixture:box-w")))
+           (reader-identity (%identity (first (%methods (first gfs)))))
+           (writer-identity (%identity (first (%methods (second gfs))))))
+      (ok (equal "reader" (gethash "access" reader-identity)))
+      (ok (equal "W" (gethash "name" (gethash "slot" reader-identity))))
+      (ok (null (gethash "access" writer-identity)))
+      (ok (null (gethash "slot" writer-identity)))
+      (ok (null (gethash "class" writer-identity))))))

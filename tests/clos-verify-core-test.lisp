@@ -722,6 +722,119 @@ a plain method, never verified against the class's own DEFCLASS form"
           "confirms this identity still looks like an accessor apart from the qualifier")
       (ok (equal "unverified" (%verify1 "qa1" qualified-identity candidates))))))
 
+(deftest verify-entries-confirms-a-condition-reader-override-against-its-own-defmethod
+  (testing "a hand-written DEFMETHOD that replaced OVERRIDE-ERROR's generated reader is
+indistinguishable from that reader in the image, so its identity is accessor-shaped;
+its own DEFMETHOD still confirms it, because an accessor-shaped identity whose
+candidate is not a class form is judged as the plain method it may well be"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:override-error-code"))))
+           (identity (%identity (first (%methods gf))))
+           (path (namestring (truename *clos-fixture*)))
+           (candidates (%candidates-for path "(defmethod override-error-code"))
+           (results (%verify (vector (%entry "ov1" identity candidates)))))
+      (ok (equal "reader" (gethash "access" identity))
+          "the image really does report this override as an accessor")
+      (ok (equal "matched" (gethash "status" (first results))))
+      (ok (null (gethash "reason" (first results))))
+      (ok (= 0 (gethash "candidate_index" (first results))))))
+  (testing "the DEFINE-CONDITION's own slot option confirms the same identity too --
+the image cannot tell the generated reader from its replacement, which is exactly why
+a layout putting both forms on one line has to come back ambiguous below"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:override-error-code"))))
+           (identity (%identity (first (%methods gf))))
+           (path (namestring (truename *clos-fixture*))))
+      (ok (equal "matched"
+                 (%verify1 "ov2" identity
+                           (%candidates-for path "(define-condition override-error"))))))
+  (testing "a genuine condition reader -- GUARDED-ERROR-CODE, never overridden -- still
+confirms against its DEFINE-CONDITION, the case the accessor fallback exists for"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:guarded-error-code"))))
+           (reader (find-if (lambda (m) (equal "reader" (gethash "kind" m))) (%methods gf)))
+           (identity (%identity reader))
+           (path (namestring (truename *clos-fixture*))))
+      (ok reader)
+      (ok (equal "matched"
+                 (%verify1 "ov3" identity
+                           (%candidates-for path "(define-condition guarded-error")))))))
+
+(deftest verify-entries-judges-an-overridden-ordinary-accessor-as-a-plain-method
+  (testing "GADGET-SIZE's override is a plain method identity, so it confirms against
+its own DEFMETHOD"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:gadget-size"))))
+           (identity (%identity (first (%methods gf))))
+           (path (namestring (truename *clos-fixture*))))
+      (ok (null (gethash "access" identity)) "not accessor-shaped after the class fix")
+      (ok (equal "matched"
+                 (%verify1 "gs1" identity (%candidates-for path "(defmethod gadget-size"))))
+      (testing "and never against the DEFCLASS whose :reader option it replaced"
+        (ok (equal "unverified"
+                   (%verify1 "gs2" identity (%candidates-for path "(defclass gadget")))))))
+  (testing "a hand-written (SETF BOX-W) writer is a plain method identity as well, and
+confirms against its own DEFMETHOD rather than BOX's slot option"
+    (%load-clos-fixture)
+    (let* ((gfs (%gfs (%report "cl-mcp-clos-fixture:box-w")))
+           (identity (%identity (first (%methods (second gfs)))))
+           (path (namestring (truename *clos-fixture*))))
+      (ok (null (gethash "access" identity)))
+      (ok (equal "matched"
+                 (%verify1 "bw1" identity (%candidates-for path "(defmethod (setf box-w)"))))
+      (ok (equal "unverified"
+                 (%verify1 "bw2" identity (%candidates-for path "(defclass box")))))))
+
+(deftest verify-entries-never-confirms-an-override-against-a-same-line-class-form
+  (testing "a class form and the DEFMETHOD overriding its reader starting on ONE source
+line: the ordinary class hands both forms to the judgment, and only the DEFMETHOD
+matches, so the entry is MATCHED against the DEFMETHOD -- the right edit target -- and
+never against the DEFCLASS, which used to win by being the line's first form"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:gadget-size"))))
+           (identity (%identity (first (%methods gf))))
+           (path (%write-tmp
+                  "verify-core-same-line-ordinary.lisp"
+                  (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-clos-fixture)"
+                               (concatenate 'string
+                                "(defclass gadget () "
+                                "((size :initarg :size :reader gadget-size))) "
+                                "(defmethod gadget-size ((g gadget)) 0)")))))
+           (candidates (%candidates-at path 2)))
+      (unwind-protect
+           (let* ((results (%verify (vector (%entry "sl1" identity candidates))))
+                  (index (gethash "candidate_index" (first results))))
+             (ok (= 2 (length candidates)) "both forms on the line are candidates")
+             (ok (equal "matched" (gethash "status" (first results))))
+             (ok (integerp index))
+             (ok (equal "defmethod" (gethash "kind" (elt candidates index)))
+                 "the DEFMETHOD is the matching candidate, not the DEFCLASS"))
+        (ignore-errors (delete-file path)))))
+  (testing "on a CONDITION both forms match -- the slot option really does declare the
+reader, and the override is indistinguishable from it in the image -- so %VERIFY-ENTRY's
+tail rule (spec 3.4: two or more matching candidates is ambiguous) makes the entry
+UNVERIFIED rather than picking one, and no edit information is handed out"
+    (%load-clos-fixture)
+    (let* ((gf (first (%gfs (%report "cl-mcp-clos-fixture:override-error-code"))))
+           (identity (%identity (first (%methods gf))))
+           (path (%write-tmp
+                  "verify-core-same-line-condition.lisp"
+                  (format nil "~{~A~%~}"
+                         (list "(in-package #:cl-mcp-clos-fixture)"
+                               (concatenate 'string
+                                "(define-condition override-error (error) "
+                                "((code :initarg :code :reader override-error-code))) "
+                                "(defmethod override-error-code ((e override-error)) 0)")))))
+           (candidates (%candidates-at path 2)))
+      (unwind-protect
+           (let ((result (first (%verify (vector (%entry "sl2" identity candidates))))))
+             (ok (= 2 (length candidates)))
+             (ok (equal "unverified" (gethash "status" result)))
+             (ok (equal "ambiguous: more than one candidate matches" (gethash "reason" result)))
+             (ok (null (gethash "candidate_index" result))))
+        (ignore-errors (delete-file path))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; defstruct
 ;;; ---------------------------------------------------------------------------

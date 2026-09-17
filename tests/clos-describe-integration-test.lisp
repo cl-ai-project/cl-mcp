@@ -9,7 +9,7 @@
 ;;;; and clos-response-builders-test.lisp use) cannot reproduce, because
 ;;;; those tests never recompile a form out from under a live method object.
 ;;;;
-;;;; Five deftests:
+;;;; Six deftests:
 ;;;; - CLOS-DESCRIBE-FAILS-CLOSED-AGAINST-A-RELOADED-IMAGE covers spec 3.5's
 ;;;;   round trip for five kinds of stale definition (EQL specializer,
 ;;;;   class specializer, a deleted method, a DEFGENERIC inline method, an
@@ -32,6 +32,11 @@
 ;;;; - CLOS-DESCRIBE-MATCHES-A-QUOTED-EQL-KEYWORD-OVER-THE-WORKER-RPC loads the
 ;;;;   fixture only in the worker, so a (EQL ':READY) method can only be
 ;;;;   confirmed from data that crossed the wire.
+;;;; - CLOS-DESCRIBE-POINTS-A-CONDITION-READER-OVERRIDE-AT-ITS-OWN-DEFMETHOD
+;;;;   loads a condition whose generated reader a hand-written DEFMETHOD
+;;;;   replaced -- indistinguishable from a genuine reader in the image -- and
+;;;;   requires the edit target to be that DEFMETHOD, while the untouched
+;;;;   reader beside it still resolves to the DEFINE-CONDITION.
 
 (defpackage #:cl-mcp/tests/clos-describe-integration-test
   (:use #:cl)
@@ -838,3 +843,74 @@ file from disk rather than from any image.")
                                           (or (gethash "form_name" method) "")))
                        "and that form_name names this method"))))))
       (%delete-fixture *quoted-eql-fixture-path*))))
+
+;;; ---------------------------------------------------------------------------
+;;; Deftest 6: a hand-written method overriding a generated condition reader
+;;; ---------------------------------------------------------------------------
+
+(defparameter *reader-override-fixture-path*
+  (asdf/system:system-relative-pathname
+   :cl-mcp "tests/tmp/clos-describe-reader-override-fixture.lisp")
+  "A fifth scratch file: a DEFINE-CONDITION with two readers, one of them
+replaced by a hand-written DEFMETHOD.  SBCL leaves a single method on that
+generic function and it is a plain STANDARD-METHOD -- precisely what a
+genuine condition reader is, since SBCL never makes a DEFINE-CONDITION
+reader a STANDARD-ACCESSOR-METHOD -- so nothing in the image says which of
+the two definitions the live method came from, and only the source forms on
+disk can settle it.")
+
+(defparameter *reader-override-fixture-text*
+  "
+;;;; Written by cl-mcp/tests/clos-describe-integration-test; deleted after.
+
+(defpackage #:cl-mcp-clos-reader-override-fixture
+  (:use #:cl)
+  (:export #:probe-failed #:probe-code #:probe-tag))
+
+(in-package #:cl-mcp-clos-reader-override-fixture)
+
+(define-condition probe-failed (error)
+  ((code :initarg :code :reader probe-code)
+   (tag :initarg :tag :reader probe-tag)))
+
+;; Replaces the generated PROBE-CODE reader above; PROBE-TAG is left alone,
+;; so this one file holds both definitions the report has to tell apart.
+(defmethod probe-code ((e probe-failed))
+  (max 0 (slot-value e 'code)))
+"
+  "Compiled and loaded once, never edited: this test is about telling two
+kinds of definition apart in an unchanged file, not about a stale image.")
+
+(deftest clos-describe-points-a-condition-reader-override-at-its-own-defmethod
+  (unwind-protect
+       (progn
+         (%write-text *reader-override-fixture-path* *reader-override-fixture-text*)
+         (%compile-and-load-path *reader-override-fixture-path*)
+         (let ((*project-root* (system-source-directory :cl-mcp)))
+           (testing "the overriding DEFMETHOD is the edit target, not the DEFINE-CONDITION
+whose :reader option it replaced"
+             (let* ((report (%annotated-report
+                              "cl-mcp-clos-reader-override-fixture:probe-code"))
+                    (methods (%methods (first (%gfs report))))
+                    (method (first methods)))
+               (ok (= 1 (length methods)) "the override replaced the generated reader")
+               (ok (equal "reader" (gethash "access" (gethash "identity" method)))
+                   "the image still reports it as an accessor; only the source decides")
+               (ok (equal "matched" (gethash "source_match" method)))
+               (ok (null (gethash "source_match_reason" method)))
+               (ok (equal "defmethod" (gethash "form_type" method)))
+               (ok (search "probe-code"
+                           (string-downcase (or (gethash "form_name" method) "")))
+                   "and the form_name names this method, not the condition")
+               (ok (null (gethash "edit_unit" method))
+                   "a DEFMETHOD is its own edit unit, so editing it changes nothing else")
+               (ok (gethash "edit_guard" method) "a matched entry hands out a guard")))
+           (testing "the untouched reader beside it still resolves to the DEFINE-CONDITION"
+             (let* ((report (%annotated-report
+                              "cl-mcp-clos-reader-override-fixture:probe-tag"))
+                    (method (first (%methods (first (%gfs report))))))
+               (ok (equal "matched" (gethash "source_match" method)))
+               (ok (equal "define-condition" (gethash "form_type" method)))
+               (ok (equal "define-condition" (gethash "edit_unit" method))
+                   "editing there replaces the whole condition, as it always did")))))
+    (%delete-fixture *reader-override-fixture-path*)))

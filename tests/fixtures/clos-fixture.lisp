@@ -13,7 +13,9 @@
   (:use #:cl)
   (:export #:shape #:circle #:square #:area #:label #:radius #:side
            #:shape-name #:combine #:describe-shape #:probe-error
-           #:probe-error-code #:point #:pending #:widget #:widget-size))
+           #:probe-error-code #:point #:pending #:widget #:widget-size
+           #:gadget #:gadget-size #:override-error #:override-error-code
+           #:guarded-error #:guarded-error-code #:box #:box-w))
 
 (in-package #:cl-mcp-clos-fixture)
 
@@ -81,7 +83,50 @@
 
 ;; A :before method sharing WIDGET-SIZE's generic function and sole
 ;; specializer with the real accessor above, but qualified -- it must never
-;; be mistaken for that accessor (review fix, Task 10).
+;; be mistaken for that accessor (review fix, Task 10).  On an ordinary class
+;; the condition restriction alone already settles this; GUARDED-ERROR-CODE
+;; below is where the qualifier guard is the only thing deciding.
 (defmethod widget-size :before ((w widget))
   (declare (ignore w))
   nil)
+
+;; A hand-written primary method replacing GADGET's generated reader.  SBCL
+;; keeps one method on the generic function and it is a plain STANDARD-METHOD,
+;; so the image alone cannot call it an accessor -- and on an ordinary class it
+;; never is one, because a genuine accessor would be a STANDARD-READER-METHOD.
+(defclass gadget ()
+  ((size :initarg :size :reader gadget-size)))
+
+(defmethod gadget-size ((g gadget))
+  (declare (ignore g))
+  0)
+
+;; The same override on a CONDITION, where a genuine reader is also a plain
+;; STANDARD-METHOD: the image cannot tell the two apart, so the identity still
+;; carries class/slot/access and only the source form settles which it was.
+(define-condition override-error (error)
+  ((code :initarg :code :reader override-error-code)))
+
+(defmethod override-error-code ((e override-error))
+  (declare (ignore e))
+  0)
+
+;; A :before method sharing a genuine CONDITION reader's generic function and
+;; sole specializer.  This is the case the accessor fallback's qualifier guard
+;; exists for: unlike WIDGET-SIZE above, a condition reader really does reach
+;; that fallback, so only the guard keeps this qualified method out of it.
+(define-condition guarded-error (error)
+  ((code :initarg :code :reader guarded-error-code)))
+
+(defmethod guarded-error-code :before ((e guarded-error))
+  (declare (ignore e))
+  nil)
+
+;; A writer override: two specializers, so the accessor fallback's
+;; one-specializer guard rejects it whatever class it is on.  BOX-W's reader
+;; half stays a genuine STANDARD-READER-METHOD.
+(defclass box ()
+  ((w :initarg :w :accessor box-w)))
+
+(defmethod (setf box-w) (value (b box))
+  value)

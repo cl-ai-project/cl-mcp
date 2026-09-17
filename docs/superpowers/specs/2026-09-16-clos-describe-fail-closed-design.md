@@ -76,6 +76,11 @@ identity:
   slot:  {package: "PKG-A", name: "RADIUS"}                              ; accessor
   access: "reader" | "writer"                                            ; accessor
   ; class / slot / access はメソッドの identity に常に存在し、アクセサ以外では null
+  ; 通常のクラスのアクセサは MOP の standard-accessor-method として判る。
+  ; それ以外の素の standard-method をアクセサ扱いするのは特化子が CONDITION の
+  ; 部分型のときだけ（SBCL は define-condition のリーダを standard-accessor-method
+  ; にしないため）。通常のクラスで生成されたリーダを手書きの defmethod が上書きした
+  ; 場合は、アクセサではなく普通のメソッドとして報告する。
 ```
 
 パッケージ名は `package-name`（プライマリ名）、`name` は `symbol-name` をそのまま（大小文字を保つ）。
@@ -151,7 +156,7 @@ datum の 2 通りの綴りを矛盾と呼んでしまう。解決できたう�
 |---|---|---|
 | `defmethod` | 総称関数名・修飾子・特化子をすべて照合 | その `defmethod` |
 | `defgeneric` の `(:method ...)` | 内包メソッドの署名（修飾子・特化子）を照合し、一致するものが**ちょうど 1 つ**のときだけ `matched` | 外側の `defgeneric`（`form_type` は `defgeneric`。本文と JSON の `edit_unit` に明示） |
-| `defclass` / `define-condition` のアクセサ | クラス名、スロット名、`:reader` / `:writer` / `:accessor` の種類、総称関数名を照合。総称関数名は SETF フラグまで含めて同一性の一部（`:reader x` と `:writer x` は `x`、`:writer (setf x)` は `(setf x)`、`:accessor x` は `x` と `(setf x)` の両方を定義するので `:writer x` と `:accessor x` は交換可能ではない）。`:reader` / `:accessor` の値が裸のシンボルでなければ推測せず `unverified` | 外側のクラス定義（`edit_unit` に明示） |
+| `defclass` / `define-condition` のアクセサ | クラス名、スロット名、`:reader` / `:writer` / `:accessor` の種類、総称関数名を照合。総称関数名は SETF フラグまで含めて同一性の一部（`:reader x` と `:writer x` は `x`、`:writer (setf x)` は `(setf x)`、`:accessor x` は `x` と `(setf x)` の両方を定義するので `:writer x` と `:accessor x` は交換可能ではない）。`:reader` / `:accessor` の値が裸のシンボルでなければ推測せず `unverified`。アクセサ形状の識別情報でも候補フォームが `defclass` / `define-condition` でなければ通常のメソッド照合にフォールスルーする（生成されたリーダを上書きした手書きの `defmethod` は、その `defmethod` 自身で確認される） | 外側のクラス定義（`edit_unit` に明示）。`defmethod` に一致したときはその `defmethod` 自身（`edit_unit` なし） |
 | `defstruct` | クラス名のみ照合（アクセサは MOP に出ないので対象外） | その `defstruct` |
 | ユーザーマクロ、`progn`、`eval-when` などのラッパー | `unverified`（理由: unsupported container） | なし |
 

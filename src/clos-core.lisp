@@ -177,23 +177,46 @@ generated for: its last specializer -- the sole one for a reader, the second
 of two for a writer -- or NIL when that class has no proper name."
   (%proper-class-name (car (last (sb-mop:method-specializers method)))))
 
+(defun %condition-class-p (class)
+  "True when CLASS is certainly a subtype of CONDITION.  Asks the type system
+rather than CLASS's name or its metaclass, and demands SUBTYPEP's certainty
+flag, so an unfinalized or forward-referenced specializer -- or a metaclass
+whose SUBTYPEP signals -- answers NIL, fail-closed."
+  (multiple-value-bind (subtype-p certain-p)
+      (ignore-errors (subtypep class 'condition))
+    (and subtype-p certain-p t)))
+
 (defun %condition-accessor-slot (method qualifiers)
   "Return (values SLOT-NAME ACCESS OWNER) when METHOD, a plain, unqualified
-method -- SBCL never makes a DEFINE-CONDITION slot reader or writer a
-STANDARD-ACCESSOR-METHOD -- is unambiguously identifiable as one anyway:
-QUALIFIERS (METHOD's own, passed in so this need not recompute what
-%METHOD-ENTRY already has) is empty -- an accessor is never
-:BEFORE/:AFTER/:AROUND-qualified, a guarantee the STANDARD-ACCESSOR-METHOD
-branch gets for free from its type but this fallback must check directly,
-since a hand-written qualified method can otherwise share an accessor's
-generic function and sole specializer without being one -- its sole
-specializer is a proper class OWNER, and exactly one of OWNER's direct
-slots' READERS or WRITERS names METHOD's generic function.  Returns NIL
-fail-closed otherwise: any qualifier at all, more than one specializer, an
-anonymous specializer, no matching slot, or a slot matching in more than one
-role or more than one slot matching at all -- never a guess between them.
-Any MOP read that signals (a metaclass whose accessors misbehave) is caught
-the same way, degrading to NIL instead of failing the report."
+method specialized on a CONDITION class, is unambiguously identifiable as one
+of that condition's slot accessors: QUALIFIERS (METHOD's own, passed in so
+this need not recompute what %METHOD-ENTRY already has) is empty -- an
+accessor is never :BEFORE/:AFTER/:AROUND-qualified, a guarantee the
+STANDARD-ACCESSOR-METHOD branch gets for free from its type but this fallback
+must check directly, since a hand-written qualified method can otherwise share
+an accessor's generic function and sole specializer without being one -- its
+sole specializer is a proper class OWNER that is certainly a subtype of
+CONDITION, and exactly one of OWNER's direct slots' READERS or WRITERS names
+METHOD's generic function.
+
+The CONDITION restriction is what this fallback exists for and all it is for.
+SBCL never makes a DEFINE-CONDITION slot reader or writer a
+STANDARD-ACCESSOR-METHOD, so a genuine condition accessor can only be
+recognised this way; on an ordinary class a genuine accessor always arrives as
+a STANDARD-ACCESSOR-METHOD and never reaches here.  Anything that does reach
+here on an ordinary class is therefore a hand-written DEFMETHOD merely sharing
+the accessor's generic function and specializer -- typically one that replaced
+the generated reader -- and is reported as the plain method it is.  On a
+condition the two stay indistinguishable from the image alone, so this still
+fills in the accessor fields there and CL-MCP/SRC/CLOS-VERIFY-CORE settles
+which of the two it was from the source form.
+
+Returns NIL fail-closed otherwise: any qualifier at all, more than one
+specializer, an anonymous specializer, a specializer that is not certainly a
+condition, no matching slot, or a slot matching in more than one role or more
+than one slot matching at all -- never a guess between them.  Any MOP read
+that signals (a metaclass whose accessors misbehave) is caught the same way,
+degrading to NIL instead of failing the report."
   (ignore-errors
     (when (null qualifiers)
       (let ((specializers (sb-mop:method-specializers method)))
@@ -203,7 +226,7 @@ the same way, degrading to NIL instead of failing the report."
                  (gf (sb-mop:method-generic-function method))
                  (name (and gf (sb-mop:generic-function-name gf)))
                  (matches '()))
-            (when (and owner name)
+            (when (and owner name (%condition-class-p class))
               (dolist (slot (sb-mop:class-direct-slots class))
                 (when (member name (sb-mop:slot-definition-readers slot) :test #'equal)
                   (push (cons (sb-mop:slot-definition-name slot) "reader") matches))
