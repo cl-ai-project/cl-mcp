@@ -14,6 +14,7 @@
                 #:*note-stale*)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:+edit-guard-version+
+                #:format-edit-guard-token
                 #:locate-form-in-nodes)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
@@ -497,6 +498,13 @@ or [STATE: REASON] otherwise (spec 3.1), so the text never invites an edit
 the JSON does not support, and never shows a bracketed state (or its
 absence) the JSON disagrees with: ANNOTATE-REPORT-FORMS guarantees every
 located entry -- (no source) ones included -- ends with a SOURCE_MATCH.
+A matched entry that carries an EDIT_GUARD also ends with [guard: TOKEN], the
+compact one-line form of that guard (CL-MCP/SRC/LISP-EDIT-FORM-CORE:
+FORMAT-EDIT-GUARD-TOKEN), to be passed back as lisp-edit-form's guard_token.
+The guard object itself is a sibling JSON field, which a client rendering only
+content[].text never sees; without the token here, the guarded edit the tool's
+own conflict message tells the reader to make could not be made at all.
+
 ENTRY's NOTE, when present -- a live-object read failure unrelated to
 source matching -- is always appended in its own bracket."
   (let* ((path (gethash "path" entry))
@@ -509,8 +517,10 @@ source matching -- is always appended in its own bracket."
                (let* ((form-type (gethash "form_type" entry))
                       (form-name (gethash "form_name" entry))
                       (edit-unit (gethash "edit_unit" entry))
-                      (form-text (and form-type (format nil "~A~@[ ~A~]" form-type form-name))))
-                 (format nil "~A~@[ (~A)~]~@[  [edit_unit: ~A]~]" location form-text edit-unit))
+                      (form-text (and form-type (format nil "~A~@[ ~A~]" form-type form-name)))
+                      (guard (format-edit-guard-token (gethash "edit_guard" entry))))
+                 (format nil "~A~@[ (~A)~]~@[  [edit_unit: ~A]~]~@[  [guard: ~A]~]"
+                         location form-text edit-unit guard))
                (format nil "~A [~A~@[: ~A~]]" location (or match "unverified")
                        (gethash "source_match_reason" entry)))))
     (concatenate 'string body (if note (format nil "  [~A]" note) ""))))

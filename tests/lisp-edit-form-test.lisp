@@ -17,6 +17,8 @@
                 #:file-unparseable-message
                 #:make-file-unparseable-condition
                 #:check-edit-guard
+                #:format-edit-guard-token
+                #:parse-edit-guard-token
                 #:edit-guard-conflict
                 #:edit-guard-conflict-error)
   (:import-from #:cl-mcp/src/source-snapshot
@@ -2506,6 +2508,83 @@ under a guard fell under, instead of only that some error was signalled."
     (edit-guard-conflict-error (e) (values :conflict (edit-guard-conflict e)))
     (file-unparseable-error (e) (values :unparseable (princ-to-string e)))
     (error (e) (values :plain (princ-to-string e)))))
+
+(deftest edit-guard-token-round-trips-through-format-and-parse
+  (testing "the printed token carries exactly the six fields the checks read"
+    (with-temp-file
+     "tests/tmp/guard-token-round-trip.lisp"
+     (format nil "(defun target () :old)~%")
+     (lambda (path)
+       (let* ((guard (%edit-guard-for path "defun" "target"))
+              (token (format-edit-guard-token guard))
+              (parsed (parse-edit-guard-token token)))
+         (ok (stringp token) "a complete guard prints a token")
+         (dolist (field '("version" "file_digest" "form_start" "form_end"
+                          "form_digest" "abs_path"))
+           (ok (equal (gethash field guard) (gethash field parsed))
+               (format nil "~A survives the round trip" field)))))))
+  (testing "an abs_path holding the separator comes back whole"
+    ;; Only abs_path can contain it, which is why the token carries it last
+    ;; and unsplit; a path with a vertical bar must not shear the token.
+    (let* ((guard (make-ht "version" 1
+                           "file_digest" "md5:aa"
+                           "form_start" 1
+                           "form_end" 2
+                           "form_digest" "md5:bb"
+                           "abs_path" "/tmp/od|d/name.lisp"))
+           (parsed (parse-edit-guard-token (format-edit-guard-token guard))))
+      (ok (equal "/tmp/od|d/name.lisp" (gethash "abs_path" parsed)))))
+  (testing "a guard missing a field prints no token at all"
+    (ok (null (format-edit-guard-token
+               (make-ht "version" 1 "form_start" 1 "form_end" 2
+                        "abs_path" "/tmp/x.lisp")))
+        "a partial token would be refused over a field its holder never saw")
+    (ok (null (format-edit-guard-token nil)))))
+
+(deftest edit-guard-token-is-accepted-where-the-guard-object-is
+  (testing "a token stands in for the object, and a stale one is refused"
+    (with-temp-file
+     "tests/tmp/guard-token-accepted.lisp"
+     (format nil "(defun target () :old)~%")
+     (lambda (path)
+       (let ((token (format-edit-guard-token (%edit-guard-for path "defun" "target"))))
+         (ok (eq :ok (%guarded-edit-outcome path "target" token))
+             "the token is accepted exactly as the guard object is")
+         (ok (search ":new" (uiop:read-file-string path))
+             "and the edit really happened")
+         (let ((after-edit (uiop:read-file-string path)))
+           (multiple-value-bind (kind payload)
+               (%guarded-edit-outcome path "target" token)
+             (ok (eq :conflict kind) "reusing the now-stale token is refused")
+             (ok (search "file_digest" (or (%conflict-field payload :reason) ""))
+                 "on the same check the stale object fails"))
+           (ok (string= after-edit (uiop:read-file-string path))
+               "and the refused edit left the file byte-identical")))))))
+
+(deftest edit-guard-token-that-cannot-be-read-refuses-the-edit
+  (testing "a malformed token conflicts instead of quietly editing unguarded"
+    ;; Returning NIL for a token that cannot be read would turn a guarded call
+    ;; into an unguarded one -- the single outcome a caller that passed a guard
+    ;; must never get.
+    (with-temp-file
+     "tests/tmp/guard-token-malformed.lisp"
+     (format nil "(defun target () :old)~%")
+     (lambda (path)
+       (let ((before (uiop:read-file-string path)))
+         (dolist (token '(""
+                          "1|md5:aa|2|3|md5:bb"
+                          "x|md5:aa|1|2|md5:bb|/tmp/a.lisp"
+                          "1|md5:aa|1|2z|md5:bb|/tmp/a.lisp"
+                          "1||1|2|md5:bb|/tmp/a.lisp"
+                          "1|md5:aa|1|2|md5:bb|"))
+           (multiple-value-bind (kind payload)
+               (%guarded-edit-outcome path "target" token)
+             (ok (eq :conflict kind)
+                 (format nil "~S is refused as a guard conflict" token))
+             (ok (search "malformed" (or (%conflict-field payload :reason) ""))
+                 "and the reason says the token could not be read")))
+         (ok (string= before (uiop:read-file-string path))
+             "no malformed token wrote anything"))))))
 
 (deftest lisp-edit-form-guard-reports-a-conflict-when-the-lookup-fails
   (testing "the target renamed after the guard was issued is a conflict, not \"not found\""

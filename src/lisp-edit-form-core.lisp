@@ -70,6 +70,10 @@
            #:make-file-unparseable-condition
            #:signal-file-unparseable
            #:+edit-guard-version+
+           #:+edit-guard-token-separator+
+           #:format-edit-guard-token
+           #:parse-edit-guard-token
+           #:normalize-edit-guard
            #:check-edit-guard
            #:edit-guard-conflict-error
            #:edit-guard-conflict))
@@ -673,6 +677,122 @@ that reached this file straight from a caller, so every field is read through
 here rather than assuming the object has the shape it should."
   (and (hash-table-p guard) (gethash name guard)))
 
+(defconstant +edit-guard-token-separator+ #\|
+  "The character separating the fields of an edit guard token.
+
+Chosen because none of the five fields written before abs_path can contain
+it: a decimal version, two decimal offsets and two digests, each of which is
+an algorithm name, a colon and hex digits.  Only abs_path can, which is why
+the token carries it last and unsplit.")
+
+(defun format-edit-guard-token (guard)
+  "Return GUARD, an edit_guard JSON object, as the one-line token clos-describe
+prints in its content text and PARSE-EDIT-GUARD-TOKEN reads back:
+
+  version|file_digest|form_start|form_end|form_digest|abs_path
+
+separated by +EDIT-GUARD-TOKEN-SEPARATOR+, abs_path last so a path holding the
+separator survives the round trip.  These are exactly the six fields
+CHECK-EDIT-GUARD reads; GUARD's path field is left out because no check reads
+it, and it would repeat abs_path's bulk on every line.
+
+Returns NIL when GUARD is not a hash-table or lacks any of the six, so a
+partial token -- one CHECK-EDIT-GUARD would refuse over a field its holder
+never saw -- is never printed.  The reason this exists at all: the edit_guard
+object is a sibling JSON field of the tool result, and a client that renders
+only content[].text never sees it, which left the guarded-edit workflow
+documented in docs/tools.md unreachable from such a client."
+  (let ((version (%guard-field guard "version"))
+        (file-digest (%guard-field guard "file_digest"))
+        (form-start (%guard-field guard "form_start"))
+        (form-end (%guard-field guard "form_end"))
+        (form-digest (%guard-field guard "form_digest"))
+        (abs-path (%guard-field guard "abs_path")))
+    (when (and (integerp version)
+               (integerp form-start) (integerp form-end)
+               (stringp file-digest) (plusp (length file-digest))
+               (stringp form-digest) (plusp (length form-digest))
+               (stringp abs-path) (plusp (length abs-path)))
+      (with-output-to-string (out)
+        (loop for field in (list version file-digest form-start form-end
+                                 form-digest abs-path)
+              for firstp = t then nil
+              do (unless firstp
+                   (write-char +edit-guard-token-separator+ out))
+                 (princ field out))))))
+
+(defun %split-edit-guard-token (token)
+  "Return TOKEN's six fields as a list of strings, or NIL when it holds fewer.
+Only the first five separators split; the sixth field is whatever is left, so
+an abs_path containing +EDIT-GUARD-TOKEN-SEPARATOR+ comes back whole."
+  (let ((fields '())
+        (start 0))
+    (loop repeat 5
+          do (let ((sep (position +edit-guard-token-separator+ token :start start)))
+               (unless sep
+                 (return-from %split-edit-guard-token nil))
+               (push (subseq token start sep) fields)
+               (setf start (1+ sep))))
+    (nreverse (cons (subseq token start) fields))))
+
+(defun %parse-guard-offset (text)
+  "Return TEXT as a non-negative integer, or NIL unless TEXT is written as one
+in full: PARSE-INTEGER with :junk-allowed stops at the first non-digit and
+would read \"12abc\" as 12, which must not pass for an offset into a file."
+  (multiple-value-bind (value end)
+      (parse-integer text :junk-allowed t)
+    (and value (= end (length text)) (<= 0 value) value)))
+
+(defun parse-edit-guard-token (token)
+  "Return the edit_guard object TOKEN encodes: a hash-table carrying the six
+fields CHECK-EDIT-GUARD reads, built from the string FORMAT-EDIT-GUARD-TOKEN
+wrote.  No check is run here; the object goes on to the same six.
+
+Signals EDIT-GUARD-CONFLICT-ERROR when TOKEN is not one, rather than
+returning NIL.  A token a caller mistyped, truncated or copied from the wrong
+line has to refuse the edit exactly as a stale guard does: returning NIL would
+let the call continue as if no guard had been asked for, which is the one
+outcome a caller that passed a guard must never get."
+  (let ((fields (and (stringp token) (%split-edit-guard-token token))))
+    (destructuring-bind (&optional version file-digest form-start form-end
+                         form-digest abs-path)
+        (or fields '())
+      (let ((version-value (and version (%parse-guard-offset version)))
+            (start-value (and form-start (%parse-guard-offset form-start)))
+            (end-value (and form-end (%parse-guard-offset form-end))))
+        (unless (and version-value start-value end-value
+                     (plusp (length file-digest))
+                     (plusp (length form-digest))
+                     (plusp (length abs-path)))
+          (error 'edit-guard-conflict-error
+                 :conflict
+                 (%guard-conflict
+                  (concatenate 'string
+                               "guard token is malformed; copy the [guard: ...] token "
+                               "clos-describe printed, verbatim and whole")
+                  "version|file_digest|form_start|form_end|form_digest|abs_path"
+                  token)))
+        (let ((guard (make-hash-table :test #'equal)))
+          (setf (gethash "version" guard) version-value
+                (gethash "file_digest" guard) file-digest
+                (gethash "form_start" guard) start-value
+                (gethash "form_end" guard) end-value
+                (gethash "form_digest" guard) form-digest
+                (gethash "abs_path" guard) abs-path)
+          guard)))))
+
+(defun normalize-edit-guard (guard)
+  "Return GUARD as the hash-table the six checks read.
+
+A hash-table is the edit_guard JSON object itself and is returned unchanged.
+A string is the compact token clos-describe prints, and is read by
+PARSE-EDIT-GUARD-TOKEN -- which signals rather than returning NIL when it is
+malformed, so a guard that cannot be understood refuses the edit instead of
+silently becoming no guard at all.  NIL means no guard was asked for."
+  (if (stringp guard)
+      (parse-edit-guard-token guard)
+      guard))
+
 (defun %check-edit-guard-pre-parse (guard abs-path snapshot)
   "Run checks 1-4 of CHECK-EDIT-GUARD against GUARD, ABS-PATH and SNAPSHOT --
 the checks that need no matched form, and so can run before SNAPSHOT's text is
@@ -815,8 +935,11 @@ does not parse. A file larger than the fs read cap is reported as such
 instead, because its truncated prefix would only yield a misleading delimiter
 diagnosis.
 
-GUARD, when non-NIL, is an edit_guard JSON object (design doc section 4.1).
-It changes how the file is read: instead of FS-READ-FILE, the file is read
+GUARD, when non-NIL, is an edit_guard JSON object (design doc section 4.1), or
+the compact token clos-describe prints for one, which NORMALIZE-EDIT-GUARD
+reads into the same object before anything else happens -- a token that cannot
+be read signals EDIT-GUARD-CONFLICT-ERROR here rather than degrading into an
+unguarded edit.  It changes how the file is read: instead of FS-READ-FILE, the file is read
 once via CL-MCP/SRC/SOURCE-SNAPSHOT:READ-SOURCE-SNAPSHOT, so ORIGINAL (below)
 and the digests the guard is verified against come from the exact same bytes
 -- this function never reads the file twice for one call. The six checks of
@@ -852,7 +975,8 @@ Returns eight values:
   TARGET-SNIPPET — text of the matched form
   FORM-TYPE-STR — downcased form-type string
   FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form"
-  (let ((form-type-str (string-downcase form-type)))
+  (let ((form-type-str (string-downcase form-type))
+        (guard (normalize-edit-guard guard)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
       (let (original snapshot)

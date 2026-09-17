@@ -63,8 +63,11 @@ definition is still the same one — only then does the entry carry a `form_type
 An entry whose source no longer matches (or could not be confirmed) carries a `source_match` of
 `"mismatched"` or `"unverified"` and a `source_match_reason` instead of the two edit fields —
 see `docs/tools.md`'s `clos-describe` section for the full three-state contract.
-A `matched` entry also carries an `edit_guard`; pass it as `lisp-edit-form`'s `guard` argument
-rather than calling with just `form_type`/`form_name`, and re-run `clos-describe` for a fresh one on conflict.
+A `matched` entry also prints its edit guard at the end of the line as `[guard: TOKEN]`; pass
+that token as `lisp-edit-form`'s `guard_token` argument rather than calling with just
+`form_type`/`form_name`, and re-run `clos-describe` for a fresh one on conflict. (The same guard
+is also a JSON `edit_guard` object for `lisp-edit-form`'s `guard`, but only the token appears in
+the text a client actually renders.)
 
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).

@@ -29,6 +29,8 @@
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:format-edit-guard-token
+                #:parse-edit-guard-token
                 #:locate-form-in-nodes)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-source-text)
@@ -281,6 +283,30 @@ so arrays are lists and false is NIL."
       (ok (equal (snapshot-range-digest snapshot (cst-node-start node) (cst-node-end node))
                  (gethash "form_digest" guard))))))
 
+(deftest clos-describe-text-carries-a-matched-entrys-edit-guard
+  (testing "the guard reaches content[].text as a token"
+    ;; The edit_guard object is a sibling JSON field.  A client that renders
+    ;; only content[].text -- which is most of them -- never sees it, so the
+    ;; guarded edit this tool's own conflict message demands was unreachable
+    ;; until the token was printed here.
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (clos-describe-report "cl-mcp-clos-fixture:circle"))
+           (text (%text (build-clos-describe-response report #'%verify-inline)))
+           (class (gethash "class" report))
+           (guard (gethash "edit_guard" class))
+           (token (format-edit-guard-token guard)))
+      (ok (equal "matched" (gethash "source_match" class)))
+      (ok (stringp token) "a matched entry's guard prints a token")
+      (ok (search (format nil "[guard: ~A]" token) text)
+          "and that exact token stands in the text beside its definition")
+      (let ((parsed (parse-edit-guard-token token)))
+        (ok (every (lambda (field)
+                     (equal (gethash field guard) (gethash field parsed)))
+                   '("version" "file_digest" "form_start" "form_end"
+                     "form_digest" "abs_path"))
+            "reading the token back yields the fields the six checks read")))))
+
 (deftest annotate-report-forms-reads-each-file-once
   (testing "one snapshot per file feeds the scan, the round trip and the guard"
     (%load-fixture)
@@ -461,7 +487,15 @@ so arrays are lists and false is NIL."
                (ok (not (nth-value 1 (gethash "edit_guard" method)))
                    "a mismatched entry carries no edit_guard")
                (ok (search "[mismatched:" text))
-               (ok (not (search "(defmethod" text)))))
+               (ok (not (search "(defmethod" text)))
+               ;; The DEFGENERIC above is untouched and still matches, so it
+               ;; keeps its guard; only the mismatched method must not offer
+               ;; one, since there is nothing there it would be safe to edit.
+               (ok (notany (lambda (line)
+                             (and (search "[mismatched:" line)
+                                  (search "[guard:" line)))
+                           (uiop:split-string text :separator '(#\Newline)))
+                   "the mismatched line carries no guard token")))
         (ignore-errors (delete-file file))))))
 
 (deftest annotate-report-forms-falls-back-when-the-edit-tool-cannot-locate-it-uniquely

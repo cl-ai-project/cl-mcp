@@ -9,12 +9,14 @@
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/source-snapshot
-                #:read-source-snapshot)
+                #:read-source-snapshot
+                #:snapshot-range-digest)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-start
                 #:cst-node-end)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:format-edit-guard-token
                 #:locate-form-in-nodes)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
@@ -1772,6 +1774,72 @@
                (ok (stringp (gethash "reason" data)))
                (ok (search "file_digest" (gethash "reason" data)))
                (ok (string= (uiop:read-file-string abs-path) before)))
+          (ignore-errors (delete-file abs-path)))))))
+
+(deftest tools-call-lisp-edit-form-guard-token
+  (testing "tools/call lisp-edit-form accepts the guard token clos-describe prints"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-guard-token-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string "(defun target () :old)" out))
+        (unwind-protect
+             (let* ((snapshot (read-source-snapshot abs-path))
+                    (nodes (parse-top-level-forms (getf snapshot :text)))
+                    (node (locate-form-in-nodes nodes "defun" "target"))
+                    (start (cst-node-start node))
+                    (end (cst-node-end node))
+                    (token (format-edit-guard-token
+                            (make-ht "version" 1
+                                     "abs_path" (getf snapshot :abs-path)
+                                     "file_digest" (getf snapshot :digest)
+                                     "form_start" start
+                                     "form_end" end
+                                     "form_digest"
+                                     (snapshot-range-digest snapshot start end))))
+                    (req (format nil
+                                 (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":9102,\"method\":\"tools/call\","
+                                  "\"params\":{\"name\":\"lisp-edit-form\","
+                                  "\"arguments\":{\"file_path\":\"~A\","
+                                  "\"form_type\":\"defun\",\"form_name\":\"target\","
+                                  "\"operation\":\"replace\","
+                                  "\"content\":\"(defun target () :new)\","
+                                  "\"guard_token\":\"~A\"}}}")
+                                 tmp-path token))
+                    (obj (parse (%pjl req))))
+               (ok (stringp token) "a complete guard prints a token")
+               (ok (not (%tool-call-failed-p obj))
+                   "the token is accepted over the wire, as the object is")
+               (ok (search ":new" (uiop:read-file-string abs-path))
+                   "and the edit landed"))
+          (ignore-errors (delete-file abs-path))))))
+  (testing "sending both spellings of one guard is refused rather than guessed at"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/edit-form-guard-both-wire.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string "(defun target () :old)" out))
+        (unwind-protect
+             (let* ((before (uiop:read-file-string abs-path))
+                    (req (format nil
+                                 (concatenate
+                                  'string
+                                  "{\"jsonrpc\":\"2.0\",\"id\":9103,\"method\":\"tools/call\","
+                                  "\"params\":{\"name\":\"lisp-edit-form\","
+                                  "\"arguments\":{\"file_path\":\"~A\","
+                                  "\"form_type\":\"defun\",\"form_name\":\"target\","
+                                  "\"operation\":\"replace\","
+                                  "\"content\":\"(defun target () :new)\","
+                                  "\"guard\":{\"version\":1},"
+                                  "\"guard_token\":\"1|md5:a|0|1|md5:b|/x.lisp\"}}}")
+                                 tmp-path))
+                    (obj (parse (%pjl req))))
+               (ok (%tool-call-failed-p obj))
+               (ok (search "not both" (%tool-call-message obj)))
+               (ok (string= before (uiop:read-file-string abs-path))
+                   "and nothing was written while the two disagreed"))
           (ignore-errors (delete-file abs-path)))))))
 
 (deftest tools-call-lisp-check-parens-reader-error

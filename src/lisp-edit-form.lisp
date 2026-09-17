@@ -521,8 +521,10 @@ READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-
 to use for parsing both the file and the new content.
 
 GUARD, if provided, is an edit_guard JSON object (clos-describe's edit_guard,
-design doc 2026-09-16-clos-describe-fail-closed section 4.1) that must still
-describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
+design doc 2026-09-16-clos-describe-fail-closed section 4.1), or the compact
+token clos-describe prints for it in its content text -- the form a client
+that renders only content[].text can actually get hold of. Either way it must
+still describe the current file and target form; CL-MCP/SRC/LISP-EDIT-FORM-CORE:
 %LOCATE-TARGET-FORM signals EDIT-GUARD-CONFLICT-ERROR, before any value is
 returned and before anything is written, when it does not. Without GUARD,
 this call behaves as before -- there is no guarantee the located form still
@@ -677,12 +679,24 @@ is used instead of Eclector, which means comments are NOT preserved.")
 file_digest, form_start, form_end, form_digest}. When given, the edit (including
 dry_run) is refused with a conflict object, and nothing is written, unless the
 file and the matched form still look exactly as observed. Without it, this call
-behaves as before: the located form may not be the one an earlier read saw."))
+behaves as before: the located form may not be the one an earlier read saw.")
+         (guard_token :type :string
+                      :description "The same edit guard in the compact one-line form
+clos-describe prints beside a matched definition as [guard: ...]:
+version|file_digest|form_start|form_end|form_digest|abs_path. Copy that token
+verbatim; it is checked exactly as the guard object is. Use this rather than
+'guard' when reading clos-describe's content text, which is where the token
+appears. Passing both is an error."))
   :body
   (progn
     (when (and (not content) (string/= (string-downcase operation) "delete"))
       (error 'arg-validation-error :arg-name "content"
              :message (format nil "content is required for ~A operation" operation)))
+    ;; Two spellings of one guard: refuse both rather than pick a winner, so a
+    ;; caller that sent a stale one alongside a fresh one is told, not guessed at.
+    (when (and guard guard_token)
+      (error 'arg-validation-error :arg-name "guard_token"
+             :message "pass either guard or guard_token, not both"))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
                               repaired-form bracket-warning)
@@ -694,7 +708,7 @@ behaves as before: the located form may not be the one an earlier read saw."))
                             :dry-run dry_run
                             :normalize-blank-lines normalize_blank_lines
                             :readtable (%parse-readtable-designator readtable)
-                            :guard guard)
+                            :guard (or guard guard_token))
           (if dry_run
               ;; The summary inlines only the edited FORM (preview_form), never
               ;; the whole updated file: "preview" holds the full file and is
