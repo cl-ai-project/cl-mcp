@@ -32,6 +32,9 @@
   (:shadow #:defmethod #:quote)
   (:export #:quote))
 
+(defpackage #:cl-mcp-verify-escape-test
+  (:use #:cl))
+
 (defvar *verify-core-side-effect-counter* 0)
 
 ;;; ---------------------------------------------------------------------------
@@ -350,6 +353,42 @@ one result's \"status\"."
       (ok (equal "matched" (%verify1 "e2" foo-upper-identity foo-upper-candidates)))
       (ok (equal "mismatched" (%verify1 "e3" foo-identity foo-upper-candidates))
           "the same name in a different case is a different symbol"))))
+
+(deftest verify-entries-applies-single-escapes-inside-bars
+  (testing "a backslash inside |...| quotes, so neither method matches the other's form"
+    ;; One unedited file holding the two class names a mis-read backslash
+    ;; confuses: the source text |A\\B| names A\B, and |A\B| names AB.  A lexer
+    ;; that copies the backslash verbatim swaps them, and each method is then
+    ;; confirmed against the OTHER method's form -- which neither the CST round
+    ;; trip nor the edit guard can catch, since both pin the form already chosen.
+    (let ((path (%write-tmp "verify-core-escaped-bars.lisp"
+                            (format nil "~{~A~%~}"
+                                    (list "(in-package #:cl-mcp-verify-escape-test)"
+                                          "(defclass |A\\\\B| () ())"
+                                          "(defclass |A\\B| () ())"
+                                          "(defgeneric touch (x))"
+                                          "(defmethod touch ((x |A\\\\B|)) 1)"
+                                          "(defmethod touch ((x |A\\B|)) 2)")))))
+      (unwind-protect
+           (progn
+             (%compile-and-load path)
+             (let* ((methods (%methods
+                              (first (%gfs (%report "cl-mcp-verify-escape-test:touch")))))
+                    ;; Found by identity: the live specializer class names are
+                    ;; the 3-character A\B and the 2-character AB.
+                    (backslash (%identity (%method-with-specializer-name methods "A\\B")))
+                    (plain (%identity (%method-with-specializer-name methods "AB")))
+                    (backslash-candidates (%candidates-at path 5)) ; ((x |A\\B|))
+                    (plain-candidates (%candidates-at path 6)))    ; ((x |A\B|))
+               (ok backslash)
+               (ok plain)
+               (ok (equal "matched" (%verify1 "b1" backslash backslash-candidates)))
+               (ok (equal "matched" (%verify1 "p1" plain plain-candidates)))
+               (ok (equal "mismatched" (%verify1 "b2" backslash plain-candidates))
+                   "the A\\B method must never be confirmed against AB's form")
+               (ok (equal "mismatched" (%verify1 "p2" plain backslash-candidates))
+                   "the AB method must never be confirmed against A\\B's form")))
+        (ignore-errors (delete-file path))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; EQL specializers: every tagged kind, plus quoting styles

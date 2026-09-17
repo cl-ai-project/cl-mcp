@@ -62,16 +62,19 @@ are NIL and PROBLEM is a sentence saying why."
         (fail "~A is an uninterned symbol; it has no references to find" text))
       (loop while (< i length)
             do (let ((ch (char text i)))
+                 ;; Clause order follows CLHS 2.4.8.1: a single escape wins over
+                 ;; a multiple escape, so a backslash quotes the next character
+                 ;; inside |...| as well as outside it.
                  (cond
-                   ((char= ch #\|)
-                    (setf in-bars (not in-bars)))
-                   (in-bars
-                    (write-char ch buffer))
                    ((char= ch #\\)
                     (incf i)
                     (when (>= i length)
                       (fail "~A ends with an escaping backslash" text))
                     (write-char (char text i) buffer))
+                   ((char= ch #\|)
+                    (setf in-bars (not in-bars)))
+                   (in-bars
+                    (write-char ch buffer))
                    ((char= ch #\:)
                     (cond
                       ((null package-part)

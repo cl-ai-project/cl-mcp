@@ -71,6 +71,24 @@
       (ok (stringp (problem "foo\\")))
       (ok (null (nth-value 0 (parse-symbol-text "a:b:c")))))))
 
+(deftest parse-symbol-text-applies-single-escapes-inside-bars
+  (testing "a backslash quotes the next character inside |...| too (CLHS 2.4.8.1)"
+    ;; Every expectation below is the name and package SBCL's own reader
+    ;; produces for the same text; the lexer is wrong whenever it disagrees.
+    (flet ((parts (text) (multiple-value-list (parse-symbol-text text))))
+      (ok (equal '("AB" nil nil) (parts "|A\\B|")))
+      (ok (equal '("A\\B" nil nil) (parts "|A\\\\B|")))
+      (ok (equal '("A|B" nil nil) (parts "|A\\|B|")))
+      (ok (equal '("AB" "PKG" nil) (parts "pkg:|A\\B|")))
+      (ok (equal '("AB" "PKG" nil) (parts "|PKG|:|A\\B|")))
+      (ok (equal '("a b" nil nil) (parts "|a b|")))
+      (ok (equal '("Ab" nil nil) (parts "a\\b")))
+      (ok (equal '("|" nil nil) (parts "\\|")))
+      ;; |A|B| is a reader error in SBCL: the third | opens a quote nothing
+      ;; closes.  It must stay a problem, so callers keep failing closed.
+      (ok (stringp (nth-value 2 (parse-symbol-text "|A|B|"))))
+      (ok (null (nth-value 0 (parse-symbol-text "|A|B|")))))))
+
 (deftest parse-target-designator-signals-validation-errors
   (testing "keywords and malformed text are argument errors"
     (ok (%validation-error-p (lambda () (parse-target-designator ":foo"))))
