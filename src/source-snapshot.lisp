@@ -10,6 +10,11 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path)
+  ;; No cycle: fs depends on paths, proxy, pool and paren-diagnostics, none of
+  ;; which reach this file.  The parent-only consumers (lisp-edit-form-core and
+  ;; the clos-describe response builders) already load fs.
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-source-octets)
   (:export #:read-source-snapshot
            #:snapshot-decode-lossy-p
            #:snapshot-range-digest
@@ -62,20 +67,14 @@ else NIL.
 The policy is FS-READ-FILE's: CL-MCP/SRC/UTILS/PATHS:ALLOWED-READ-PATH, the
 same predicate FS-READ-SOURCE-TEXT and CODE-REFS-SCAN's %READABLE-PATH use.
 NIL also when *PROJECT-ROOT* is unset or the check itself signals, so a path
-the policy cannot vouch for is never opened."
+the policy cannot vouch for is never opened.
+
+FS-READ-SOURCE-OCTETS re-applies the same check when it opens the file; this
+one runs first so READ-SOURCE-SNAPSHOT can report a refusal as :DENIED
+instead of as an unreadable file."
   (and *project-root*
        (handler-case (allowed-read-path path)
          (error () nil))))
-
-(defun %read-file-octets (pathname)
-  "Return the entire contents of PATHNAME as a fresh vector of
-(UNSIGNED-BYTE 8), read in one pass so a caller can derive both a digest and
-decoded text from the exact same bytes."
-  (with-open-file (stream pathname :element-type '(unsigned-byte 8))
-    (let* ((size (or (file-length stream) 0))
-           (buffer (make-array size :element-type '(unsigned-byte 8)))
-           (end (read-sequence buffer stream)))
-      (if (= end size) buffer (subseq buffer 0 end)))))
 
 (defun %decode-utf-8-replacing (octets)
   "Decode OCTETS as UTF-8 text, replacing every invalid byte with #\\?, the
@@ -98,8 +97,11 @@ same bytes -- never mix a :TEXT from one read with a :DIGEST from another.
 :DIGEST is NIL when SB-MD5 cannot be loaded in this image; treat that as
 UNVERIFIED, never as a fabricated match.
 
-Reading passes through the same policy as FS-READ-FILE and CODE-REFS-SCAN's
-%READABLE-PATH (CL-MCP/SRC/UTILS/PATHS:ALLOWED-READ-PATH). FAILURE is NIL on
+The file is opened by CL-MCP/SRC/FS:FS-READ-SOURCE-OCTETS, so the read goes
+through the fs layer and its policy (CL-MCP/SRC/UTILS/PATHS:ALLOWED-READ-PATH,
+the same predicate behind FS-READ-FILE and CODE-REFS-SCAN's %READABLE-PATH);
+%READABLE-PATH applies that policy here first so a refusal is reported as
+:DENIED rather than as an unreadable file. FAILURE is NIL on
 success, :DENIED when the policy refuses ABS-PATH -- the file is then never
 opened -- and a one-line string when the file cannot be read for any other
 reason (missing, permission, I/O error). SNAPSHOT is NIL whenever FAILURE is
@@ -108,7 +110,7 @@ non-NIL: a refused or unreadable file never yields a partial snapshot."
     (if (null readable)
         (values nil :denied)
         (handler-case
-            (let* ((octets (%read-file-octets readable))
+            (let* ((octets (fs-read-source-octets readable))
                    (text (%decode-utf-8-replacing octets)))
               (values (list :abs-path (namestring readable)
                             :text text

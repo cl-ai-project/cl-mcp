@@ -15,6 +15,7 @@
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-read-source-text
+                #:fs-read-source-octets
                 #:fs-write-file
                 #:fs-window-start
                 #:fs-list-directory
@@ -122,6 +123,52 @@
           (write-string "(defun secret () 1)" out))
         (unwind-protect
              (ok (handler-case (progn (fs-read-source-text outside) nil)
+                   (error (e) (and (search "not permitted" (princ-to-string e)) t))))
+          (ignore-errors (delete-file outside)))))))
+
+(deftest fs-read-source-octets-returns-the-files-exact-bytes
+  (testing "an invalid UTF-8 byte survives the read, unlike fs-read-source-text"
+    (with-test-project-root
+      (let ((abs (merge-pathnames "tests/tmp/source-octets-bad-byte.lisp"
+                                  cl-mcp/src/project-root:*project-root*))
+            (expected (concatenate '(vector (unsigned-byte 8))
+                                   (sb-ext:string-to-octets "(defun a () 1) ; "
+                                                            :external-format :utf-8)
+                                   (vector #xE9)
+                                   (sb-ext:string-to-octets (format nil " あ end~%")
+                                                            :external-format :utf-8))))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (write-sequence expected out))
+        (unwind-protect
+             (let ((octets (fs-read-source-octets abs)))
+               (ok (equalp expected octets))
+               ;; The digest an edit guard takes is over these bytes; the
+               ;; decoded text replaces #xE9 with #\? and could not reproduce
+               ;; them.
+               (ok (find #xE9 octets)))
+          (ignore-errors (delete-file abs))))))
+  (testing "a file past fs-read-file's cap is read whole"
+    (with-test-project-root
+      (let ((abs (merge-pathnames "tests/tmp/source-octets-over-cap.lisp"
+                                  cl-mcp/src/project-root:*project-root*))
+            (size (+ cl-mcp/src/fs::*fs-read-max-bytes* 10)))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (loop repeat size do (write-byte 97 out)))
+        (unwind-protect
+             (ok (= size (length (fs-read-source-octets abs))))
+          (ignore-errors (delete-file abs))))))
+  (testing "a path outside the readable paths signals, even when the file exists"
+    (with-test-project-root
+      (let ((outside (merge-pathnames (format nil "cl-mcp-source-octets-~D.lisp" (random 1000000))
+                                      (uiop:temporary-directory))))
+        (with-open-file (out outside :direction :output :if-exists :supersede)
+          (write-string "(defun secret () 1)" out))
+        (unwind-protect
+             (ok (handler-case (progn (fs-read-source-octets outside) nil)
                    (error (e) (and (search "not permitted" (princ-to-string e)) t))))
           (ignore-errors (delete-file outside)))))))
 

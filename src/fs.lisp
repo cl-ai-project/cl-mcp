@@ -45,6 +45,7 @@
            #:fs-resolve-read-path
            #:fs-read-file
            #:fs-read-source-text
+           #:fs-read-source-octets
            #:fs-window-start
            #:fs-write-file
            #:fs-list-directory
@@ -101,6 +102,18 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
                           (and (null limit) remaining))))
       (values text truncated raw-len remaining))))
 
+(defun %read-file-octets (pn)
+  "Read the whole file PN as a fresh vector of (UNSIGNED-BYTE 8).
+
+The stream is opened with an octet element type, so the result is the file's
+exact bytes: nothing is decoded and no read cap applies.  FS-READ-SOURCE-OCTETS
+is the caller-facing entry; this helper does no policy check of its own."
+  (with-open-file (in pn :direction :input :element-type '(unsigned-byte 8))
+    (let* ((size (or (file-length in) 0))
+           (buffer (make-array size :element-type '(unsigned-byte 8)))
+           (count (read-sequence buffer in)))
+      (if (= count size) buffer (subseq buffer 0 count)))))
+
 (defun fs-resolve-read-path (path)
   "Return a canonical pathname for PATH when it is readable per policy.
 Signals an error when PATH is outside the allow-list."
@@ -154,6 +167,28 @@ opened or read signals as well."
     (unwind-protect
          (uiop:read-file-string pn :external-format '(:utf-8 :replacement #\?))
       (log-event :debug "fs.read-source.close"
+                 "path" (namestring pn)
+                 "fd" (fd-count)))))
+
+(defun fs-read-source-octets (path)
+  "Return the whole file at PATH as a fresh vector of (UNSIGNED-BYTE 8).
+
+The octet counterpart of FS-READ-SOURCE-TEXT, for a caller that needs the
+file's exact bytes rather than decoded text: CL-MCP/SRC/SOURCE-SNAPSHOT digests
+them for an edit guard, and a digest taken over re-encoded text would not
+describe the bytes on disk.  Like FS-READ-SOURCE-TEXT the whole file is read
+(*FS-READ-MAX-BYTES* caps FS-READ-FILE only) under FS-READ-FILE's read policy:
+an error is signalled when ALLOWED-READ-PATH does not permit PATH, and the file
+is then never opened.  A file that cannot be opened or read signals as well."
+  (let ((pn (allowed-read-path path)))
+    (unless pn
+      (error "Read not permitted for path ~A" path))
+    (log-event :debug "fs.read-source-octets.open"
+               "path" (namestring pn)
+               "fd" (fd-count))
+    (unwind-protect
+         (%read-file-octets pn)
+      (log-event :debug "fs.read-source-octets.close"
                  "path" (namestring pn)
                  "fd" (fd-count)))))
 
