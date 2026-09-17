@@ -464,8 +464,13 @@ tests/fixtures/clos-identity-fixture.lisp on which NEEDLE starts."
            (testing "a resolved quoted datum still contradicts a different one"
              (ok (equal "mismatched" (%verify1 "q4" unit (%candidates-at path 5)))
                  "':other is a different keyword from :unit")
-             (ok (equal "mismatched" (%verify1 "q5" three (%candidates-at path 2)))
-                 "a quoted symbol is never EQL to an integer")
+             (let ((result (first (%verify (vector (%entry "q5" three
+                                                           (%candidates-at path 2)))))))
+               (ok (equal "mismatched" (gethash "status" result))
+                   "a quoted symbol is never EQL to an integer")
+               (ok (equal "a symbol is never EQL to an integer, ratio or character"
+                          (gethash "reason" result))
+                   "and says so, rather than reusing the generic kind-mismatch reason"))
              (ok (equal "mismatched" (%verify1 "q6" false (%candidates-at path 3)))
                  "'t is not the method specialized on NIL")))
       (ignore-errors (delete-file path)))))

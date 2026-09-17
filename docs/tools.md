@@ -140,9 +140,11 @@ in its error data so a client can discover the opt-in.
 Concurrent cl-mcp calls: like `lisp-edit-form` and `lisp-patch-form`, a write holds one
 per-file lock for its whole decide-then-write span, so a concurrent `lisp-edit-form` or
 `lisp-patch-form` on the same file cannot land between this tool's overwrite decision and
-its write. This serialises the writes of one cl-mcp process only: an external editor — and
-equally a second cl-mcp server over the same checkout — is not coordinated. The lock is
-neither a transaction nor a crash-safety mechanism.
+its write. Those three parent-side tools are all the lock covers: a write made by the worker-side
+tools (evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no
+lock and happens in a different process, and an external editor — and equally a second cl-mcp
+server over the same checkout — is not coordinated. The lock is neither a transaction nor a
+crash-safety mechanism.
 
 ## `fs-list-directory`
 List entries in a directory (files/directories only, skips hidden and build artifacts).
@@ -425,17 +427,19 @@ never lets this tool read more than an unguarded call could. A file that is not 
 refused the same way, with a plain error rather than a `conflict`: its undecodable bytes would
 be replaced by `?` on the way back to disk, and an unguarded call refuses it too (its decoder
 signals). This is not compare-and-swap.
-Between the check above and the write, no *other cl-mcp call* can slip in: `lisp-edit-form`,
-`lisp-patch-form` and `fs-write-file` take one per-file lock, and `lisp-edit-form` holds it
-from before it reads the file until after it writes, so read → check → build → write is one
-critical section. A second concurrent edit of the same file therefore runs after this one
-finishes, reads what it wrote, and — with the same `guard` — gets a `conflict` instead of
-silently overwriting it. The lock lives in the server's own memory, so this orders the calls of
-**one cl-mcp process**: an external editor, and equally a *second cl-mcp server* running over the
-same checkout, is not coordinated, and that window is not closed. What *is* caught: any
-change after `guard` was built, reusing the same `guard` for a second edit after the first
-one already succeeded, and a change anywhere else in the file (an edited `in-package`, say)
-even when the target form's own text is untouched.
+Between the check above and the write, no *other write by these three tools* can slip in:
+`lisp-edit-form`, `lisp-patch-form` and `fs-write-file` take one per-file lock, and
+`lisp-edit-form` holds it from before it reads the file until after it writes, so read → check →
+build → write is one critical section. A second concurrent edit of the same file therefore runs
+after this one finishes, reads what it wrote, and — with the same `guard` — gets a `conflict`
+instead of silently overwriting it. The lock lives in the parent process's own memory and only
+those three tools take it, so it orders **nothing else**: a write made by the worker-side tools
+(evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no lock and
+happens in a different process, and an external editor — and equally a *second cl-mcp server*
+running over the same checkout — is not coordinated either; those windows are not closed. What
+*is* caught: any change after `guard` was built, reusing the same `guard` for a second edit after
+the first one already succeeded, and a change anywhere else in the file (an edited `in-package`,
+say) even when the target form's own text is untouched.
 
 ## `lisp-patch-form`
 Scoped text replacement within a matched top-level Lisp form. Finds `old_text` (exact,
@@ -479,10 +483,12 @@ a file or form changed since the observation stops the write.
 
 Concurrent cl-mcp calls: like `lisp-edit-form`, a patch holds one per-file lock from before it
 reads the file until after it writes, so two patches to two different forms of one file both
-land instead of the second silently dropping the first. This serialises the writes of one cl-mcp
-process only: an external editor — and equally a second cl-mcp server over the same checkout — is
-not coordinated, and, since there is no `guard` here, a change made between your read and this
-patch is neither detected nor reported.
+land instead of the second silently dropping the first. That lock covers three parent-side tools
+and no more — this one, `lisp-edit-form` and `fs-write-file`. A write made by the worker-side
+tools (evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no
+lock and happens in a different process, and an external editor — and equally a second cl-mcp
+server over the same checkout — is not coordinated; and, since there is no `guard` here, a change
+made between your read and this patch is neither detected nor reported.
 
 Output:
 - `path`, `form_type`, `form_name`
@@ -671,11 +677,14 @@ through as `guard` on the `lisp-edit-form` call `form_type`/`form_name` heads to
 for every edit built from a `clos-describe` result, not just when a race seems likely. Doing so
 catches a change to the target form, or anywhere else in the file, made after this
 `clos-describe` call returned, and catches reusing the same `edit_guard` for a second edit after
-the first one already consumed it. Another cl-mcp call cannot race between `lisp-edit-form`'s own
-check and its write — one cl-mcp process serialises its own writes to one file, so the second call
-runs after the first and sees the changed file — but an external editor, and equally a second
-cl-mcp server over the same checkout, is not coordinated, and `edit_guard` remains a precondition,
-not a lock or an access token. On a conflict, call `clos-describe` again for a fresh
+the first one already consumed it. Only cl-mcp's three parent-side write tools — `fs-write-file`,
+`lisp-edit-form` and `lisp-patch-form` — are serialised against each other per file, so none of
+them can land between `lisp-edit-form`'s own check and its write; the second one runs after the
+first and sees the changed file. Nothing else is ordered: a write made by the worker-side tools
+(evaluation under `repl-eval`, and whatever `run-tests` and `load-system` write) takes no lock and
+happens in a different process, and neither a second cl-mcp server over the same checkout nor an
+editor outside cl-mcp is coordinated. `edit_guard` remains a precondition, not a lock or an
+access token. On a conflict, call `clos-describe` again for a fresh
 `edit_guard` rather than retrying without one or falling back to a plain
 `form_type`/`form_name` call against possibly-changed source. `edit_guard` is present
 exactly when `form_type`/`form_name` carry values: an entry with no edit information (both of

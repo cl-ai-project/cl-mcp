@@ -235,14 +235,19 @@ Returns (VALUES 0 0) for a NIL or zero OFFSET."
 cl-mcp's own writes to that file. Read and written only under
 *FILE-LOCK-TABLE-LOCK*.
 
-Entries are never removed. An entry is one small lock object and the set of
-keys is bounded by the files this process has been asked to write: the three
-callers (FS-WRITE-FILE, LISP-EDIT-FORM, LISP-PATCH-FORM) each resolve their
-argument to a path under the project root before taking the lock, so the table
-grows with the project's files, not with uptime. Reclaiming an entry would also
-have to prove that no thread is about to take the lock being dropped, and
-getting that wrong hands two threads two different locks for one file, which
-is exactly the bug the table exists to prevent.")
+Entries are never removed. An entry is one small lock object, and a key is one
+distinct path this process has been asked to write: the three callers
+(FS-WRITE-FILE, LISP-EDIT-FORM, LISP-PATCH-FORM) each resolve their argument to
+a path under the project root before taking the lock. The bound is therefore
+the number of distinct paths written over this image's lifetime, which is not
+the same as the number of files the project has: PROJECT-SCAFFOLD's
+%WRITE-FILES-TO-TEMP writes every generated file through FS-WRITE-FILE into a
+fresh .tmp-project-scaffold-<random>/ directory, so each scaffold call leaves
+one key per file behind permanently, keyed on a path renamed away moments
+later. Reclaiming an entry would also have to prove that no thread is about to
+take the lock being dropped, and getting that wrong hands two threads two
+different locks for one file, which is exactly the bug the table exists to
+prevent.")
 
 (defvar *file-lock-table-lock* (make-lock "cl-mcp-file-lock-table")
   "Guards *FILE-LOCK-TABLE*. Held only around the table lookup and insert in
@@ -259,10 +264,12 @@ ENSURE-WRITE-PATH already take, and therefore the same resolution
 one key and so take one lock.
 
 A file that does not exist yet has no TRUENAME and keys on its unresolved
-absolute namestring instead, so creating a path and later editing it may use
-two different locks. That is harmless: until the file exists there is nothing
-for a second writer to lose, and once it exists every caller resolves it the
-same way.
+absolute namestring instead, so two acquisitions for one path can key
+differently: once the file exists every caller resolves it the same way, but
+a caller that took the unresolved key before it existed holds a different lock
+from one arriving after. That is what WITH-FILE-LOCK's nesting note means by
+the outer and inner keys not always agreeing; it costs mutual exclusion over
+that one span and cannot deadlock.
 
 Signals when *PROJECT-ROOT* is unset, as every write path already does."
   (let* ((abs (canonical-path path))
@@ -271,9 +278,13 @@ Signals when *PROJECT-ROOT* is unset, as every write path already does."
 
 (defun file-lock (path)
   "Return the recursive lock that serialises cl-mcp's writes to PATH, creating
-it on first use. The lock is per file, keyed by FILE-LOCK-KEY. WITH-FILE-LOCK
-is the intended entry point; call this directly only to hold the lock over a
-span a macro cannot express."
+it on first use. The lock is per file, keyed by FILE-LOCK-KEY.
+
+Internal: the symbol is not exported, and mallet forbids the :: that would let
+production code in another package name it, so WITH-FILE-LOCK -- which expands
+into a call to this -- is the entry point everywhere outside this file. Only
+CL-MCP/TESTS/FS-TEST reaches it directly, through an :IMPORT-FROM that needs no
+export, to check the keying."
   (let ((key (file-lock-key path)))
     (with-lock-held (*file-lock-table-lock*)
       (or (gethash key *file-lock-table*)
@@ -286,10 +297,17 @@ read-verify-write sequences on one file cannot interleave and silently lose
 each other's changes. PATH is evaluated once; every spelling of the same
 existing file takes the same lock (FILE-LOCK-KEY).
 
-The lock is recursive, so an outer holder nests with an inner one:
-LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read the file
-until after they write it, and FS-WRITE-FILE takes the same lock again
-underneath.
+The lock is recursive, so an outer holder nests with an inner one that keys
+the same way: LISP-EDIT-FORM and LISP-PATCH-FORM hold it from before they read
+the file until after they write it, and FS-WRITE-FILE takes it again
+underneath. The two keys agree for every file that already exists. For a file
+that does not (FILE-LOCK-KEY keys it on its unresolved absolute path), they
+CAN differ -- if something outside these three tools creates the file between
+the outer and the inner acquisition, TRUENAME then resolves and the inner one
+takes a different lock, leaving the inner span outside the outer one's mutual
+exclusion. That loses serialisation for that span, not safety: these locks are
+only ever taken outer then inner, so no opposing order exists and nesting
+cannot deadlock on it.
 
 DEADLOCK DISCIPLINE -- while this lock is held, take no other cl-mcp lock
 except CL-MCP/SRC/LOG's *LOG-LOCK*, and *FILE-LOCK-TABLE-LOCK* itself through
@@ -303,11 +321,13 @@ rather than setting it, and never make a worker RPC
 process or on a reply. The three tools that hold it today run inline in the
 parent and call no worker.
 
-What it does NOT provide: the lock lives in this image, so it serialises the
-writes of ONE cl-mcp process only. A second cl-mcp server over the same
-checkout is coordinated no more than an external editor is -- its writes take
-their own, unrelated lock table. Nor is the lock a transaction or a
-crash-safety mechanism."
+What it does NOT provide: the lock lives in this image and only the three
+tools above take it, so those three writers are all it orders. A write made
+from the worker process -- evaluation under REPL-EVAL, and whatever RUN-TESTS
+and LOAD-SYSTEM write -- takes no lock at all and is not in this image anyway,
+and a second cl-mcp server over the same checkout is coordinated no more than
+an external editor is: its writes take their own, unrelated lock table. Nor is
+the lock a transaction or a crash-safety mechanism."
   (let ((lock (gensym "FILE-LOCK")))
     `(let ((,lock (file-lock ,path)))
        (with-recursive-lock-held (,lock)

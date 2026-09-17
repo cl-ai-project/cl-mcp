@@ -752,3 +752,80 @@ live (SETF X) writer, even when the file's write date never advanced"
              (ok (null (gethash "edit_guard" writer))
                  "an entry with no edit information carries no guard either")))
       (%delete-fixture *accessor-fixture-path*))))
+
+;;; ---------------------------------------------------------------------------
+;;; Deftest 5: a quoted EQL keyword, judged over the real worker RPC
+;;; ---------------------------------------------------------------------------
+
+(defparameter *quoted-eql-fixture-path*
+  (asdf/system:system-relative-pathname
+   :cl-mcp "tests/tmp/clos-describe-quoted-eql-fixture.lisp")
+  "A fourth scratch file, loaded only in a spawned worker and never edited.
+It exists to put one quoted EQL specializer -- (eql ':ready), whose source
+text reads as a symbol while the live specializer object is the keyword
+:READY -- through the worker-proxied path CL-MCP/SRC/CLOS:CLOS-DESCRIBE
+actually takes, which the in-process unit tests never cross.")
+
+(defparameter *quoted-eql-fixture-text*
+  "
+;;;; Written by cl-mcp/tests/clos-describe-integration-test; deleted after.
+
+(defpackage #:cl-mcp-clos-quoted-eql-fixture
+  (:use #:cl)
+  (:export #:advance))
+
+(in-package #:cl-mcp-clos-quoted-eql-fixture)
+
+(defgeneric advance (state))
+
+(defmethod advance ((state (eql ':ready)))
+  :running)
+"
+  "Compiled and loaded in the spawned worker only: CLOS-DESCRIBE-REPORT and
+VERIFY-ENTRIES both run there, while the parent half of the flow reads this
+file from disk rather than from any image.")
+
+(deftest clos-describe-matches-a-quoted-eql-keyword-over-the-worker-rpc
+  (testing "(eql ':ready) in source names the live :READY specializer, worker-proxied"
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (unwind-protect
+         (progn
+           (%write-text *quoted-eql-fixture-path* *quoted-eql-fixture-text*)
+           (let ((*project-root* (system-source-directory :cl-mcp))
+                 (*use-worker-pool* t)
+                 (*current-session-id* "clos-describe-integration-quoted-eql"))
+             (with-pool ()
+               (let* ((truename (truename *quoted-eql-fixture-path*))
+                      (load-code
+                       (format nil "~
+(with-compilation-unit (:override t :source-namestring (namestring (truename ~S)))
+  (handler-bind ((warning (function muffle-warning)))
+    (load (compile-file (truename ~S) :verbose nil :print nil))))
+:loaded"
+                               (namestring truename) (namestring truename)))
+                      (load-result
+                       (proxy-to-worker 1 "worker/eval"
+                                        (make-ht "code" load-code "package" "CL-USER"))))
+                 (ok (not (gethash "isError" load-result))
+                     "the worker compiled and loaded the quoted-EQL fixture")
+                 (let* ((report (%pool-report "cl-mcp-clos-quoted-eql-fixture:advance"))
+                        (method (first (%methods (first (%gfs report)))))
+                        (datum (gethash "datum"
+                                        (aref (gethash "specializers"
+                                                       (gethash "identity" method))
+                                              0))))
+                   (ok (equal "keyword" (gethash "kind" datum)))
+                   (ok (equal "READY" (gethash "name" datum))
+                       "the one method described is the :READY one")
+                   (ok (equal "matched" (gethash "source_match" method))
+                       "the quote is read through before the datum's kind is judged")
+                   (ok (null (gethash "source_match_reason" method))
+                       "a matched entry carries no reason")
+                   (ok (equal "defmethod" (gethash "form_type" method)))
+                   (ok (stringp (gethash "form_name" method))
+                       "a matched entry hands out a form_name a mismatched one never would")
+                   (ok (search "advance" (string-downcase
+                                          (or (gethash "form_name" method) "")))
+                       "and that form_name names this method"))))))
+      (%delete-fixture *quoted-eql-fixture-path*))))

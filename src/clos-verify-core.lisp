@@ -231,7 +231,8 @@ datum such as an integer included, is MISMATCHED."
             (:symbol (if (eq source-symbol target-symbol)
                          (values :matched nil)
                          (values :mismatched "the resolved symbols are not the same")))
-            (:other (values :mismatched "EQL datum kinds differ"))
+            (:other (values :mismatched
+                            "a symbol is never EQL to an integer, ratio or character"))
             (t (values :unverified
                        "an EQL datum could not be resolved to a symbol in this image")))))))
 
