@@ -35,6 +35,8 @@
   (:import-from #:bordeaux-threads
                 #:make-thread
                 #:join-thread
+                #:thread-alive-p
+                #:destroy-thread
                 #:make-semaphore
                 #:signal-semaphore
                 #:wait-on-semaphore)
@@ -2806,8 +2808,9 @@ ERROR, so a non-ERROR failure in one thread cannot leave the other unjoined.
 Each thread signals a shared completion semaphore from an UNWIND-PROTECT and
 this function waits on that instead of blocking in JOIN-THREAD, so a thread
 still running after *PARALLEL-WAIT-SECONDS* leaves :DID-NOT-FINISH in its slot
-and this returns: a deadlock regression fails the calling test rather than
-hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
+and is then destroyed and joined, so a deadlock regression fails the calling
+test rather than hanging the suite, and no thread outlives this call. Callers
+must treat :DID-NOT-FINISH as a failure."
   (let ((a-ready (make-semaphore))
         (b-ready (make-semaphore))
         (finished (make-semaphore))
@@ -2826,9 +2829,19 @@ hanging the suite. Callers must treat :DID-NOT-FINISH as a failure."
                                         :name "cl-mcp-edit-lock-test-a")
                            (make-thread (runner 1 b-ready a-ready thunk-b)
                                         :name "cl-mcp-edit-lock-test-b"))))
-        (when (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
-                   (wait-on-semaphore finished :timeout *parallel-wait-seconds*))
-          (mapc #'join-thread threads))))
+        (let ((finished-p
+                (and (wait-on-semaphore finished :timeout *parallel-wait-seconds*)
+                     (wait-on-semaphore finished :timeout *parallel-wait-seconds*))))
+          ;; Reap every thread before returning, whichever way the wait ended:
+          ;; a thread still running would keep writing files into the rest of
+          ;; the suite.  One that timed out is destroyed first, which unwinds
+          ;; it and releases any lock it holds, and JOIN-THREAD on a destroyed
+          ;; thread signals, so the join is guarded.
+          (dolist (thread threads)
+            (unless finished-p
+              (when (thread-alive-p thread)
+                (ignore-errors (destroy-thread thread))))
+            (ignore-errors (join-thread thread))))))
     (coerce results 'list)))
 
 (defun %concurrent-guarded-edit-verdict (rounds)
