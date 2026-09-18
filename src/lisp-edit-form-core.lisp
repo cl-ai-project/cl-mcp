@@ -690,7 +690,11 @@ overwrite protection, so the text points at the readtable parameter instead."
    (editable-prefix :initarg :editable-prefix :initform nil
                     :reader file-unparseable-editable-prefix-p)
    (unavailable-readtable :initarg :unavailable-readtable :initform nil
-                          :reader file-unparseable-unavailable-readtable))
+                          :reader file-unparseable-unavailable-readtable
+                          :documentation
+                          "The readtable the file's own (in-readtable ...) names, when this
+process cannot resolve it; NIL otherwise. Set by
+MAKE-FILE-UNPARSEABLE-CONDITION from the file's text."))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -702,7 +706,13 @@ balanced plist and RECOVERABLE is NIL), and the message says so.
 EDITABLE-PREFIX is T when the parse still returned the forms before the
 breakage (the lenient CL-reader pass after an IN-READTABLE switch does), so
 those forms remain editable and the message must not claim that no form can
-be located."))
+be located.
+UNAVAILABLE-READTABLE names the readtable the file itself declares when this
+process cannot resolve it. Nothing an agent can call registers a readtable
+here, so such a file has no structural path at all: the message says so rather
+than recommending the readtable argument, and fs-write-file lets it be
+rewritten whole (%FILE-UNPARSEABLE-BY-EDIT-TOOLS-P's :READTABLE-UNAVAILABLE
+verdict)."))
 
 (defun make-file-unparseable-condition (abs text cause &key readtable editable-prefix)
   "Return a FILE-UNPARSEABLE-ERROR for the file at ABS whose TEXT failed to
