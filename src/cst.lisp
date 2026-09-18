@@ -11,6 +11,15 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  ;; No symbol is wanted from it: the registry is reached through FIND-PACKAGE
+  ;; and FIND-SYMBOL so that either of its package names works.  The import is
+  ;; what makes package-inferred-system load it, and it has to be loaded for
+  ;; "this readtable is not registered" to mean anything.  Without it,
+  ;; CALL-WITH-LENIENT-PACKAGES answers a qualified
+  ;; named-readtables:in-readtable with a temporary stub package -- which
+  ;; FIND-PACKAGE then finds, while FIND-READTABLE is not in it -- so a
+  ;; perfectly parseable file looked like one naming a missing readtable.
+  (:import-from #:named-readtables)
   (:export #:cst-node
            #:cst-node-kind
            #:cst-node-value
@@ -92,26 +101,19 @@ whitespace still mean what the structural checks assume. Never modified.")
 
 (defun %try-switch-readtable (designator)
   "Try to get the named readtable for DESIGNATOR.
-Returns the readtable if found, NIL if named-readtables is not loaded
-or the readtable is not found."
+Returns the readtable if found, NIL if it is not registered in this image.
+
+This file depends on named-readtables, so NIL means \"not registered\" and
+nothing else.  It used to also mean \"the library is not loaded\", and the two
+cannot be told apart after the fact: CALL-WITH-LENIENT-PACKAGES answers a
+qualified named-readtables:in-readtable with a temporary stub package, so
+FIND-PACKAGE succeeds on a name nothing registered."
   (let ((pkg (or (find-package :named-readtables)
                  (find-package :editor-hints.named-readtables))))
     (when pkg
       (let ((find-fn (find-symbol "FIND-READTABLE" pkg)))
         (when (and find-fn (fboundp find-fn))
           (funcall find-fn designator))))))
-
-(defun %named-readtables-loaded-p ()
-  "True when the named-readtables machinery is present in this image at all.
-
-%TRY-SWITCH-READTABLE answers NIL both for \"this designator is not
-registered\" and for \"there is no registry to ask\", and the two call for
-opposite treatment.  Without the library nothing is known about the
-declaration, so parsing carries on as it always has; with it, an unregistered
-name is evidence, and the parse stops."
-  (and (or (find-package :named-readtables)
-           (find-package :editor-hints.named-readtables))
-       t))
 
 (defun %skip-whitespace-and-comments (stream readtable)
   "Advance STREAM past whitespace, line comments and (nested) block comments,
@@ -434,16 +436,10 @@ read without it has not been shown to read correctly."))
                                (%in-readtable-form-p (cst-node-value result))))
                          (when designator
                            (let ((custom-rt (%try-switch-readtable designator)))
-                             (if (or custom-rt (not (%named-readtables-loaded-p)))
-                                 ;; Switch to the readtable when there is one.
-                                 ;; When there is no registry to ask at all,
-                                 ;; the declaration says nothing either way, so
-                                 ;; carry on as before rather than call a file
-                                 ;; unreadable over a library never loaded.
-                                 (when custom-rt
-                                   (return
-                                     (%read-remaining-with-cl-reader
-                                      stream nodes custom-rt text)))
+                             (if custom-rt
+                                 (return
+                                   (%read-remaining-with-cl-reader
+                                    stream nodes custom-rt text))
                                  ;; Fail closed.  Carrying on with the standard
                                  ;; reader would hand back a CST built under the
                                  ;; wrong syntax whenever the rest of the file

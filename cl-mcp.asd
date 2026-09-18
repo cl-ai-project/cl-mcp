@@ -28,6 +28,7 @@
                "usocket"
                "bordeaux-threads"
                "eclector"
+               "named-readtables"
                "hunchentoot"
                "cl-mcp/main")
   :in-order-to ((test-op (test-op "cl-mcp/tests"))))

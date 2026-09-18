@@ -341,8 +341,9 @@ Input:
   macros. **The readtable must be registered in the cl-mcp server process**, which is where
   files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so
   registering it there does not reach the server, and no tool registers one in the server.
-  When the parser reaches a top-level `(in-readtable ...)` naming a readtable the server does
-  not have, it **stops there** rather than carrying on with the standard reader — an unknown
+  cl-mcp depends on `named-readtables`, so the registry always exists in the server and "not
+  registered" means exactly that. When the parser reaches a top-level `(in-readtable ...)` naming
+  a readtable the server does not have, it **stops there** rather than carrying on with the standard reader — an unknown
   readtable may have changed what quote, case or a macro character mean, so a file that happens
   to read without it has not been shown to read correctly. The forms read before the declaration
   stay editable; the rest is not editable at all, and for that file `fs-write-file` with

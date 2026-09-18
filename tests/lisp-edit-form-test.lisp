@@ -2493,10 +2493,8 @@ value instead of a GETF type error on a string."
   (if (listp payload) (getf payload key) (princ-to-string payload)))
 
 (deftest an-unresolvable-declared-readtable-is-classified-apart
-  ;; The verdict rests on asking the named-readtables registry and being told
-  ;; no; with no registry in the image a declaration says nothing either way.
-  (unless (%try-load :named-readtables)
-    (skip "named-readtables not available"))
+  ;; No skip: cl-mcp/src/cst depends on named-readtables, so the registry is
+  ;; always there to ask and every case below is the production behaviour.
   (labels ((verdict (source)
              (with-temp-file
               "tests/tmp/declared-rt-verdict.lisp" source
@@ -2541,7 +2539,18 @@ value instead of a GETF type error on a string."
       ;; :standard resolves here, so the readtable argument is a real option and
       ;; rewriting the file wholesale is the worse tool.
       (let ((v (verdict (format nil "(in-readtable :standard)~%(defun f () #?\"x\")~%"))))
-        (ok (not (first v)))))))
+        (ok (not (first v)))))
+    (testing "a package-qualified declaration of a resolvable readtable, on a
+valid file, leaves it parseable"
+      ;; The lenient reader answers an unknown package with a temporary stub, so
+      ;; a qualified named-readtables:in-readtable used to make FIND-PACKAGE
+      ;; succeed on a registry that was never loaded -- and this file, which
+      ;; parses perfectly well, was classified as naming a missing readtable and
+      ;; became overwritable.  Depending on named-readtables is what settles it.
+      (let ((v (verdict (format nil "(named-readtables:in-readtable :standard)~%~
+                                     (defun f () 1)~%"))))
+        (ok (not (first v)) "a parseable file is never wholesale-overwritable")
+        (ok (eq :parsed (second v)) "and it is reported as what it is")))))
 
 (deftest an-unresolvable-readtable-message-does-not-send-the-caller-in-a-circle
   (testing "the guidance names where a readtable lives and a path that works"
@@ -2549,8 +2558,6 @@ value instead of a GETF type error on a string."
     ;; parameter, passing it said the readtable does not exist, and that error
     ;; said fs-write-file could rewrite the file -- which fs-write-file then
     ;; refused, pointing back at lisp-edit-form.
-    (unless (%try-load :named-readtables)
-      (skip "named-readtables not available"))
     (with-temp-file
      "tests/tmp/declared-missing-rt-message.lisp"
      (format nil "(in-readtable :no-such-readtable-here)~%(defun f () #?\"x\")~%")
@@ -2601,8 +2608,6 @@ value instead of a GETF type error on a string."
     ;; character mean, so a file that happens to read without it has not been
     ;; shown to read correctly.  Carrying on used to hand back that CST and
     ;; accept edits against it.
-    (unless (%try-load :named-readtables)
-      (skip "named-readtables not available"))
     (with-temp-file
      "tests/tmp/declared-rt-fail-closed.lisp"
      (format nil "(defun before () 1)~%~
