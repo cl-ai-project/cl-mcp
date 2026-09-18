@@ -493,7 +493,9 @@ file that does parse is never rewritten wholesale."
 the file does not fail on a missing or stray parenthesis (it parses, or fails for ~
 a reader-level reason such as an unknown reader macro), so allow_unparseable_overwrite ~
 does not apply; use lisp-edit-form (with the readtable parameter if the file uses ~
-custom reader syntax).")
+custom reader syntax -- that is refused only while the readtable the file needs can ~
+still be resolved in this process; a file whose own (in-readtable ...) names one this ~
+process does not have is overwritable here instead, since nothing could parse it).")
                          (make-ht "code" "existing_lisp_overwrite_forbidden"
                                   "path" path
                                   "next_tool" "lisp-edit-form"

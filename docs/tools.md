@@ -137,10 +137,14 @@ Input:
 Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
 file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
 `lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
-first, and the write is allowed only when the parse fails on a delimiter (a
+first, and the write is allowed in two cases: the parse fails on a delimiter (a
 missing or stray `)`, or an unterminated string or `#|` comment) that no
-readtable could fix; a file that parses, a truncated read, or an unreadable
-file is still refused. The intended recovery loop is `lisp-check-parens` →
+readtable could fix, **or** the file's own `(in-readtable ...)` names a readtable
+this server process does not have — nothing can parse that file here and the
+`readtable` argument resolves in this same process, so refusing would leave it
+with no write path while pointing at `lisp-edit-form`, which points back. A file
+that parses, one that fails at reader level while the readtable it needs *is*
+available here, a truncated read, or an unreadable file is still refused. The intended recovery loop is `lisp-check-parens` →
 `fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
 project root, and the guidance the tools print gives it in that form. The
 plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
@@ -330,7 +334,13 @@ Input:
 - `content` (string, required): full form text to insert or replace with
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
-- `readtable` (string, optional): named-readtable designator for files using custom reader macros
+- `readtable` (string, optional): named-readtable designator for files using custom reader
+  macros. **The readtable must be registered in the cl-mcp server process**, which is where
+  files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so
+  registering it there does not reach the server, and no tool registers one in the server.
+  A file whose own `(in-readtable ...)` names a readtable the server does not have therefore
+  cannot be edited structurally at all; for that case `fs-write-file` with
+  `allow_unparseable_overwrite: true` is permitted, so the file can still be rewritten whole.
 - `guard` (object, optional): an edit_guard object (design doc
   `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
   form an earlier read observed — `clos-describe`'s own `edit_guard` field, on a `matched`

@@ -66,6 +66,7 @@
            #:file-unparseable-readtable
            #:file-unparseable-recoverable-p
            #:file-unparseable-editable-prefix-p
+           #:file-unparseable-unavailable-readtable
            #:file-unparseable-message
            #:make-file-unparseable-condition
            #:signal-file-unparseable
@@ -496,6 +497,84 @@ a genuinely stray ) keeps its instruction."
   (and (typep condition 'reader-error)
        (not (%delimiter-failure-p condition))))
 
+(defun %readtable-available-p (designator)
+  "True when DESIGNATOR names a readtable registered in this process.
+
+Guarded, because DESIGNATOR reaches here as the caller wrote it: FIND-READTABLE
+signals a type error on a value that is neither a readtable nor a symbol -- a
+readtable passed to LISP-EDIT-FORM as the string the tool layer would have
+converted, for one.  That is an answer of \"no\", not something to let escape;
+this is called from a condition's report function, where an escaping error
+replaces the diagnosis the caller was about to read."
+  (and designator
+       (ignore-errors (and (%resolve-named-readtable designator) t))))
+
+(defun %declared-readtable-name (text)
+  "Return the designator written in TEXT's first (in-readtable ...) form, or NIL.
+
+Read lexically, with a regular expression, because this is asked about a file
+the parser could not get through -- which is exactly when the declaration
+matters."
+  (multiple-value-bind (whole groups)
+      (scan-to-strings "(?i)\\(\\s*(?:[^\\s()]+:)?in-readtable\\s+([^\\s()]+)\\s*\\)"
+                       text)
+    (declare (ignore whole))
+    (when (and groups (plusp (length groups)))
+      (aref groups 0))))
+
+(defun %unavailable-declared-readtable (text)
+  "Return the readtable TEXT declares with (in-readtable ...) when this process
+cannot resolve it; NIL when none is declared, or when the declared one is
+registered here.
+
+A readtable lives in a Lisp image, and the structural tools run in the cl-mcp
+SERVER process.  load-system and repl-eval load into the session's WORKER, so
+a project whose sources need a readtable its own systems register leaves the
+server unable to read those files -- and the tools' readtable argument cannot
+help either, because that name is resolved here too.  Nothing an agent can
+call registers a readtable in this process, so such a file has no structural
+path at all, and the overwrite guard's standing advice (\"use lisp-edit-form
+with the readtable parameter\") names something that cannot succeed.
+
+%FILE-UNPARSEABLE-BY-EDIT-TOOLS-P uses this to open the overwrite path for
+exactly that case: not because the breakage is known to be real, but because
+the alternative it would otherwise insist on does not exist."
+  (let ((name (%declared-readtable-name text)))
+    (when name
+      (multiple-value-bind (designator failed)
+          (handler-case (values (%parse-readtable-designator name) nil)
+            (error () (values nil t)))
+        (when (or failed
+                  (null designator)
+                  (not (%readtable-available-p designator)))
+          name)))))
+
+(defun %project-relative-path (path)
+  "Return PATH written relative to *PROJECT-ROOT*, or NIL when it lies outside.
+fs-write-file takes only a project-relative path, so that is the form any
+instruction naming it has to give."
+  (let ((root (ignore-errors
+               (ensure-directory-pathname
+                (truename (ensure-directory-pathname *project-root*))))))
+    (and root
+         (subpathp (pathname path) root)
+         (ignore-errors
+          (namestring (enough-pathname (pathname path) root))))))
+
+(defun %rewrite-whole-file-instruction (path)
+  "Return the sentence telling a caller how to rewrite PATH wholesale, or why
+they cannot.  Used where no structural edit is possible at all, so rewriting
+the file is the remaining path -- and where it is not, saying so beats naming
+a tool that will refuse."
+  (let ((relative (%project-relative-path path)))
+    (if relative
+        (format nil "Rewrite it whole with fs-write-file (path=~S, relative to ~
+                     the project root, allow_unparseable_overwrite=true), ~
+                     reading the exact bytes with fs-read-file first -- ~
+                     lisp-read-file's raw mode re-joins lines."
+                relative)
+        "It is also outside the project root, so fs-write-file cannot rewrite it either; fix it outside cl-mcp.")))
+
 (defun file-unparseable-message (condition)
   "Return the guidance text for CONDITION, a FILE-UNPARSEABLE-ERROR.
 When the failure is recoverable (a delimiter problem no readtable can fix),
@@ -524,13 +603,7 @@ overwrite protection, so the text points at the readtable parameter instead."
       ((file-unparseable-recoverable-p condition)
        ;; fs-write-file takes only a project-relative path, so that is the
        ;; form the instruction gives; the absolute one stays in the head.
-       (let* ((root (ignore-errors
-                     (ensure-directory-pathname
-                      (truename (ensure-directory-pathname *project-root*)))))
-              (relative (and root
-                             (subpathp (pathname path) root)
-                             (ignore-errors
-                              (namestring (enough-pathname (pathname path) root))))))
+       (let ((relative (%project-relative-path path)))
          (if relative
              (format nil "~A~%The file itself does not parse~:[, so lisp-edit-form and ~
                           lisp-patch-form cannot locate any form in it~; past its ~
@@ -553,6 +626,15 @@ overwrite protection, so the text points at the readtable parameter instead."
                           root, so fs-write-file cannot rewrite it and lisp-edit-form ~
                           cannot locate any form in it; fix it outside cl-mcp."
                      head))))
+      ((and readtable (not (%readtable-available-p readtable)))
+       ;; The readtable the caller named is not registered in THIS process, so
+       ;; every structural tool is blocked on this file and the advice the
+       ;; other branches give -- pass the readtable parameter -- names the very
+       ;; thing that just failed.  Saying where a readtable has to live is the
+       ;; only guidance that leads anywhere.
+       (format nil "~A~%No tool registers a readtable in this process, so no ~
+                    structural edit of this file is possible here. ~A"
+               head (%rewrite-whole-file-instruction path)))
       (readtable
        (format nil "~A~%No standard-syntax diagnosis is offered under a custom ~
                     readtable (a reader macro may consume raw parentheses). Run ~
@@ -562,6 +644,22 @@ overwrite protection, so the text points at the readtable parameter instead."
                     it (that guard judges the file with the default reader); ~
                     otherwise fix the custom syntax the reader complained about."
                head path))
+      ((file-unparseable-unavailable-readtable condition)
+       ;; The file says which readtable it needs and this process does not have
+       ;; it.  Telling the reader to pass that name as the readtable argument
+       ;; -- what the branch below does -- sends them to a lookup that fails in
+       ;; this same process, so the overwrite path is named instead, and it is
+       ;; open: %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P returns T for this case.
+       (format nil "~A~%The file declares (in-readtable ~A), and that readtable ~
+                    is not registered in the cl-mcp server process -- which is ~
+                    where lisp-edit-form, lisp-patch-form, lisp-read-file and ~
+                    lisp-macroexpand parse files. load-system and repl-eval load ~
+                    into the session's WORKER, so loading the library there does ~
+                    not register it here, and passing it as the readtable ~
+                    argument resolves the name here too. No structural edit of ~
+                    this file is possible in this process. ~A"
+               head (file-unparseable-unavailable-readtable condition)
+               (%rewrite-whole-file-instruction path)))
       (t
        ;; The reader stopped on something other than a delimiter. When the
        ;; scan also found a delimiter problem, both are shown: the reader's
@@ -590,7 +688,9 @@ overwrite protection, so the text points at the readtable parameter instead."
    (recoverable :initarg :recoverable :initform nil
                 :reader file-unparseable-recoverable-p)
    (editable-prefix :initarg :editable-prefix :initform nil
-                    :reader file-unparseable-editable-prefix-p))
+                    :reader file-unparseable-editable-prefix-p)
+   (unavailable-readtable :initarg :unavailable-readtable :initform nil
+                          :reader file-unparseable-unavailable-readtable))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -624,6 +724,7 @@ the forms it could still show."
                                  (diagnose-delimiters text))
                   :recoverable (and (null readtable)
                                     (%delimiter-failure-p cause))
+                  :unavailable-readtable (%unavailable-declared-readtable text)
                   :cause (sanitize-condition-text cause)))
 
 (defun signal-file-unparseable (abs text cause &key readtable editable-prefix)
@@ -1133,9 +1234,17 @@ delimiter failure per %DELIMITER-FAILURE-P. Any other reader failure -- an
 unknown dispatch macro such as #? that may even consume delimiter-looking
 characters as data -- is not evidence, since the tools' readtable parameter
 may make the file editable, so the overwrite guard must stay in place.
+The one exception is a file whose own (in-readtable ...) names a readtable
+this process cannot resolve (%UNAVAILABLE-DECLARED-READTABLE): the readtable
+parameter cannot make that file editable either, because it is resolved in
+this process too and nothing an agent can call registers one here, so the
+overwrite path is opened rather than leaving the file with no path at all.
+
 The second value says why: :DELIMITER (the primary value is T), :PARSED (the
 file parses cleanly, so a scan verdict against it is a false positive),
-:READER-LEVEL (it fails, but not on a delimiter), or :TRUNCATED. The third
+:READER-LEVEL (it fails, but not on a delimiter, and a readtable this process
+has could still make it editable), :READTABLE-UNAVAILABLE (the primary value
+is T; see above), or :TRUNCATED. The third
 value is T when the failing parse still returned forms (the lenient
 CL-reader pass after an IN-READTABLE switch keeps the forms before the
 breakage), so those forms remain editable with lisp-edit-form and the
@@ -1158,11 +1267,14 @@ by lisp-check-parens so its next-step hint rests on the same verdict."
               (cond ((null swallowed) (values nil :parsed nil))
                     ((%delimiter-failure-p swallowed)
                      (values t :delimiter (and nodes t)))
+                    ((%unavailable-declared-readtable source)
+                     (values t :readtable-unavailable (and nodes t)))
                     (t (values nil :reader-level (and nodes t)))))
           (error (e)
-            (if (%delimiter-failure-p e)
-                (values t :delimiter nil)
-                (values nil :reader-level nil)))))))
+            (cond ((%delimiter-failure-p e) (values t :delimiter nil))
+                  ((%unavailable-declared-readtable source)
+                   (values t :readtable-unavailable nil))
+                  (t (values nil :reader-level nil))))))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.

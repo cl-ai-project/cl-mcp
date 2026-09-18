@@ -352,7 +352,11 @@ tell it apart from reader-macro failures that a readtable might resolve."))
              (lambda ()
                (with-input-from-string (stream text)
                  (%read-remaining-with-cl-reader stream nil custom-rt text))))
-            (error "Readtable ~S not found." readtable)))
+            (error "Readtable ~S is not registered in the cl-mcp server ~
+                    process, which is where files are parsed. load-system and ~
+                    repl-eval load into the session's worker, so registering it ~
+                    there does not reach this process."
+                   readtable)))
       (let ((*readtable* (copy-readtable))
             (*read-eval* nil)
             (nodes '())

@@ -341,6 +341,38 @@
                        (format nil "(defun f ()~%  #?[(])~%")
                        96))))))
 
+(deftest tools-call-fs-write-allows-overwrite-when-the-readtable-is-unavailable
+  (testing "a file naming a readtable this process lacks is overwritable"
+    ;; The guard above refuses a reader-level failure because the readtable
+    ;; parameter might still make the file editable.  It cannot when the file
+    ;; says which readtable it needs and this process does not have it: that
+    ;; name is resolved here too, and no tool registers one here, so refusing
+    ;; leaves the file with no write path at all while the refusal points at
+    ;; lisp-edit-form and lisp-edit-form points back.
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/declared-missing-readtable.lisp")
+             (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
+             (initial (format nil "(in-readtable :no-such-readtable-here)~%~
+                                   (defun greet (name)~%  #?\"Hello ${name}\")~%"))
+             (req (format nil
+                          (concatenate
+                           'string
+                           "{\"jsonrpc\":\"2.0\",\"id\":97,\"method\":\"tools/call\","
+                           "\"params\":{\"name\":\"fs-write-file\","
+                           "\"arguments\":{\"path\":\"~A\",\"content\":\";; rewritten\","
+                           "\"allow_unparseable_overwrite\":true}}}")
+                          tmp-path)))
+        (ensure-directories-exist abs-path)
+        (with-open-file (out abs-path :direction :output :if-exists :supersede)
+          (write-string initial out))
+        (unwind-protect
+             (let ((obj (parse (%pjl req))))
+               (ok (not (%tool-call-failed-p obj))
+                   "the overwrite is permitted, because nothing else can touch it")
+               (ok (search "rewritten" (uiop:read-file-string abs-path))
+                   "and it actually happened"))
+          (ignore-errors (delete-file abs-path)))))))
+
 (deftest tools-call-fs-write-unparseable-check-follows-edit-tools
   (testing "a broken file that merely mentions in-readtable in a comment can be overwritten"
     (with-test-project-root

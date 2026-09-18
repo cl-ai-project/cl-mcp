@@ -2492,6 +2492,68 @@ assert on a conflict field and report a non-conflict outcome as a mismatched
 value instead of a GETF type error on a string."
   (if (listp payload) (getf payload key) (princ-to-string payload)))
 
+(deftest an-unresolvable-declared-readtable-is-classified-apart
+  (testing "a file naming a readtable this process lacks is its own verdict"
+    (with-temp-file
+     "tests/tmp/declared-missing-rt.lisp"
+     (format nil "(in-readtable :no-such-readtable-here)~%(defun f () #?\"x\")~%")
+     (lambda (path)
+       (multiple-value-bind (overwritable why)
+           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
+         (ok overwritable "the overwrite path is open")
+         (ok (eq :readtable-unavailable why)
+             "and it is open for this reason, not as a delimiter failure")))))
+  (testing "the same syntax without a declaration keeps the guard"
+    ;; A readtable the caller supplies could still make this one editable, so
+    ;; the file stays protected -- this is the distinction the new verdict rests
+    ;; on, and it is what keeps the existing guard tests true.
+    (with-temp-file
+     "tests/tmp/undeclared-custom-rt.lisp"
+     (format nil "(defun f () #?\"x\")~%")
+     (lambda (path)
+       (multiple-value-bind (overwritable why)
+           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
+         (ok (not overwritable))
+         (ok (eq :reader-level why))))))
+  (testing "a declaration this process CAN resolve keeps the guard too"
+    (with-temp-file
+     "tests/tmp/declared-present-rt.lisp"
+     (format nil "(in-readtable :standard)~%(defun f () #?\"x\")~%")
+     (lambda (path)
+       (multiple-value-bind (overwritable why)
+           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
+         (declare (ignore why))
+         (ok (not overwritable)
+             ":standard resolves here, so the readtable argument is a real option"))))))
+
+(deftest an-unresolvable-readtable-message-does-not-send-the-caller-in-a-circle
+  (testing "the guidance names where a readtable lives and a path that works"
+    ;; The loop this replaces: lisp-edit-form said to pass the readtable
+    ;; parameter, passing it said the readtable does not exist, and that error
+    ;; said fs-write-file could rewrite the file -- which fs-write-file then
+    ;; refused, pointing back at lisp-edit-form.
+    (with-temp-file
+     "tests/tmp/declared-missing-rt-message.lisp"
+     (format nil "(in-readtable :no-such-readtable-here)~%(defun f () #?\"x\")~%")
+     (lambda (path)
+       (let ((text (handler-case
+                       (progn (lisp-edit-form :file-path path
+                                              :form-type "defun"
+                                              :form-name "f"
+                                              :operation "replace"
+                                              :content "(defun f () :new)")
+                              nil)
+                     (file-unparseable-error (e) (file-unparseable-message e)))))
+         (ok text "the edit is still refused")
+         (ok (search ":no-such-readtable-here" text)
+             "the readtable the file asked for is named")
+         (ok (search "server process" text)
+             "and the message says where a readtable has to be registered")
+         (ok (search "allow_unparseable_overwrite=true" text)
+             "the escape it names is the one that is actually open")
+         (ok (not (search "pass the readtable parameter" text))
+             "and it no longer recommends the argument that just cannot work"))))))
+
 (defun %guarded-edit-outcome (path form-name guard)
   "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and
 classify how the call ended.  Returns (VALUES KIND PAYLOAD): :CONFLICT with the
