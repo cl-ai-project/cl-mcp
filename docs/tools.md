@@ -23,7 +23,12 @@ Output fields:
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
 - `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
-- `error_context` (object|null): when an error occurs, contains structured error info including `condition_type`, `message`, `restarts`, and `frames` with local variable inspection
+- `error_context` (object|null): when an error occurs, contains structured error info including
+  `condition_type`, `message`, `restarts`, and `frames` with local variable inspection. The
+  content text carries the same thing: each displayed frame is followed by its locals as
+  `NAME = VALUE`, with `[object-id: N]` on a non-primitive one, capped at 10 per frame.
+  `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
+  the top N frames underneath it
 
 Example JSON‑RPC request:
 

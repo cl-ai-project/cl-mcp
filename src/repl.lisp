@@ -41,10 +41,15 @@ the response includes:
 The preview reduces round-trips by providing immediate insight into the result structure.
 Use 'inspect-object' only when you need to drill deeper than the preview shows.
 
-When an error occurs, 'error_context' includes stack frames with local variables.
-Non-primitive locals include 'object_id' for drill-down via 'inspect-object'.
+When an error occurs, 'error_context' includes stack frames with local variables,
+and the backtrace in the content text lists each displayed frame's locals as
+NAME = VALUE beneath it.
+Non-primitive locals include 'object_id' for drill-down via 'inspect-object',
+shown on the same line.
 Set 'locals_preview_frames' > 0 to auto-expand local variable previews in top N frames,
-providing immediate insight without extra inspect-object calls during debugging.
+providing immediate insight without extra inspect-object calls during debugging: a
+non-primitive local in one of those frames has its entries, elements or slots
+written out under it instead of only its printed form.
 The 'locals_preview_skip_internal' parameter (default: true) skips internal frames
 (CL-MCP, SBCL internals, ASDF, etc.) when counting frames for preview eligibility.
 This ensures user code frames get previews even when buried under infrastructure.

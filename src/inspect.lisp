@@ -468,8 +468,15 @@ For nested non-primitive values, id fields are included for drill-down."
     (setf (gethash "id" result) id)
     result))
 
-(defun format-inspect-elements (inspection-result)
-  "Format structured inspection data as human-readable text lines."
+(defun format-inspect-elements (inspection-result &key (header t))
+  "Format structured inspection data as human-readable text lines.
+
+HEADER, true by default, writes the leading kind/summary, object-id and hint
+lines.  A caller that has already named the object -- repl-eval's backtrace,
+which prints a local's name, value and object-id on its own line before
+expanding it -- passes NIL and gets only the body: the elements, entries,
+slots and truncation note.  The result is then the empty string for an object
+whose preview has no body, so a caller must check before writing it."
   (flet ((%repr-text (repr)
            "Extract readable text from a value-representation hash-table.
 If REPR is not a hash-table, return its princ-to-string."
@@ -480,13 +487,14 @@ If REPR is not a hash-table, return its princ-to-string."
                      (or (gethash "summary" repr) "?")))
                (princ-to-string repr))))
     (with-output-to-string (s)
-      (format s "[~A] ~A"
-              (gethash "kind" inspection-result)
-              (gethash "summary" inspection-result))
-      (when (gethash "id" inspection-result)
-        (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
-      (when (gethash "hint" inspection-result)
-        (format s "~&Hint: ~A" (gethash "hint" inspection-result)))
+      (when header
+        (format s "[~A] ~A"
+                (gethash "kind" inspection-result)
+                (gethash "summary" inspection-result))
+        (when (gethash "id" inspection-result)
+          (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+        (when (gethash "hint" inspection-result)
+          (format s "~&Hint: ~A" (gethash "hint" inspection-result))))
       ;; List/array elements
       (let ((elements (gethash "elements" inspection-result)))
         (when (and elements (plusp (length elements)))
