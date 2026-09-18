@@ -137,10 +137,17 @@ Input:
 Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
 file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
 `lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
-first, and the write is allowed only when the parse fails on a delimiter (a
+first, and the write is allowed in two cases: the parse fails on a delimiter (a
 missing or stray `)`, or an unterminated string or `#|` comment) that no
-readtable could fix; a file that parses, a truncated read, or an unreadable
-file is still refused. The intended recovery loop is `lisp-check-parens` →
+readtable could fix, **or** the parser reached a top-level `(in-readtable ...)`
+naming a readtable this server process does not have — nothing can parse past
+that point here and the `readtable` argument resolves in this same process, so
+refusing would leave the file with no write path while pointing at
+`lisp-edit-form`, which points back. The evidence is the parser's, not a scan of
+the text, so a mention in a comment, a string or a quoted list does not open the
+guard, and neither does a declaration past the point the reader reached. A file
+that parses, one that fails at reader level while the readtable it needs *is*
+available here, a truncated read, or an unreadable file is still refused. The intended recovery loop is `lisp-check-parens` →
 `fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
 project root, and the guidance the tools print gives it in that form. The
 plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
@@ -330,7 +337,19 @@ Input:
 - `content` (string, required): full form text to insert or replace with
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
-- `readtable` (string, optional): named-readtable designator for files using custom reader macros
+- `readtable` (string, optional): named-readtable designator for files using custom reader
+  macros. **The readtable must be registered in the cl-mcp server process**, which is where
+  files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so
+  registering it there does not reach the server, and no tool registers one in the server.
+  cl-mcp depends on `named-readtables`, so the registry always exists in the server and "not
+  registered" means exactly that. When the parser reaches a top-level `(in-readtable ...)` naming
+  a readtable the server does not have, it **stops there** rather than carrying on with the standard reader — an unknown
+  readtable may have changed what quote, case or a macro character mean, so a file that happens
+  to read without it has not been shown to read correctly. The forms read before the declaration
+  stay editable; the rest is not editable at all, and for that file `fs-write-file` with
+  `allow_unparseable_overwrite: true` is permitted so it can still be rewritten whole. Only a
+  declaration the parser actually reached counts: a mention in a comment, a string or a quoted
+  list is not one, and neither is a declaration further down the file than the reader got.
 - `guard` (object, optional): an edit_guard object (design doc
   `2026-09-16-clos-describe-fail-closed`, section 4.1) pinning the edit to the exact file and
   form an earlier read observed — `clos-describe`'s own `edit_guard` field, on a `matched`

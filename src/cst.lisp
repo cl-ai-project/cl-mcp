@@ -11,6 +11,15 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  ;; No symbol is wanted from it: the registry is reached through FIND-PACKAGE
+  ;; and FIND-SYMBOL so that either of its package names works.  The import is
+  ;; what makes package-inferred-system load it, and it has to be loaded for
+  ;; "this readtable is not registered" to mean anything.  Without it,
+  ;; CALL-WITH-LENIENT-PACKAGES answers a qualified
+  ;; named-readtables:in-readtable with a temporary stub package -- which
+  ;; FIND-PACKAGE then finds, while FIND-READTABLE is not in it -- so a
+  ;; perfectly parseable file looked like one naming a missing readtable.
+  (:import-from #:named-readtables)
   (:export #:cst-node
            #:cst-node-kind
            #:cst-node-value
@@ -22,6 +31,9 @@
            #:parse-top-level-forms
            #:unterminated-source
            #:stray-right-parenthesis
+           #:readtable-unavailable
+           #:readtable-unavailable-designator
+           #:readtable-unavailable-origin
            #:*standard-readtable*
            ;; Exported for lisp-edit-form's content check, which reads with
            ;; the CL reader and needs the same structural stray-) evidence.
@@ -89,8 +101,13 @@ whitespace still mean what the structural checks assume. Never modified.")
 
 (defun %try-switch-readtable (designator)
   "Try to get the named readtable for DESIGNATOR.
-Returns the readtable if found, NIL if named-readtables is not loaded
-or the readtable is not found."
+Returns the readtable if found, NIL if it is not registered in this image.
+
+This file depends on named-readtables, so NIL means \"not registered\" and
+nothing else.  It used to also mean \"the library is not loaded\", and the two
+cannot be told apart after the fact: CALL-WITH-LENIENT-PACKAGES answers a
+qualified named-readtables:in-readtable with a temporary stub package, so
+FIND-PACKAGE succeeds on a name nothing registered."
   (let ((pkg (or (find-package :named-readtables)
                  (find-package :editor-hints.named-readtables))))
     (when pkg
@@ -343,6 +360,35 @@ Like UNTERMINATED-SOURCE this keeps the failure identifiable as a delimiter
 problem, which no readtable can fix, so the fs-write-file overwrite guard can
 tell it apart from reader-macro failures that a readtable might resolve."))
 
+(define-condition readtable-unavailable (error)
+  ((designator :initarg :designator
+               :reader readtable-unavailable-designator
+               :documentation "The named-readtable designator that did not resolve.")
+   (origin :initarg :origin
+           :reader readtable-unavailable-origin
+           :documentation
+           ":SOURCE when a top-level (in-readtable ...) the parser actually
+reached named it, :ARGUMENT when a caller passed it as the readtable
+argument.  The two need different advice, so they are told apart here rather
+than guessed at from the message.")
+   (message :initarg :message :reader readtable-unavailable-message))
+  (:report (lambda (c s) (write-string (readtable-unavailable-message c) s)))
+  (:documentation "Signaled or returned when a named readtable is not registered
+in this process.
+
+A readtable lives in an image, and files are parsed in the cl-mcp SERVER
+process while load-system and repl-eval load into the session's WORKER, so a
+project whose sources need a readtable its own systems register leaves the
+server unable to read them.
+
+With :ORIGIN :SOURCE the parser had already read the declaration as a real
+top-level form, which is what makes it evidence: a mention inside a comment,
+a string or a quoted list is not one, and neither is a declaration further
+down the file than the reader ever got.  Parsing stops there rather than
+carrying on with the standard reader, because an unknown readtable may have
+changed what quote, case or a macro character mean -- a file that happens to
+read without it has not been shown to read correctly."))
+
 (defun %parse-top-level-forms-core (text readtable)
   "Parse TEXT into CST nodes assuming *PACKAGE* and *LINE-TABLE* are already bound."
   (if readtable
@@ -352,7 +398,16 @@ tell it apart from reader-macro failures that a readtable might resolve."))
              (lambda ()
                (with-input-from-string (stream text)
                  (%read-remaining-with-cl-reader stream nil custom-rt text))))
-            (error "Readtable ~S not found." readtable)))
+            (error 'readtable-unavailable
+                   :designator readtable
+                   :origin :argument
+                   :message
+                   (format nil "Readtable ~S is not registered in the cl-mcp ~
+                                server process, which is where files are ~
+                                parsed. load-system and repl-eval load into ~
+                                the session's worker, so registering it there ~
+                                does not reach this process."
+                           readtable))))
       (let ((*readtable* (copy-readtable))
             (*read-eval* nil)
             (nodes '())
@@ -381,10 +436,35 @@ tell it apart from reader-macro failures that a readtable might resolve."))
                                (%in-readtable-form-p (cst-node-value result))))
                          (when designator
                            (let ((custom-rt (%try-switch-readtable designator)))
-                             (when custom-rt
-                               (return
-                                 (%read-remaining-with-cl-reader
-                                  stream nodes custom-rt text)))))))))))
+                             (if custom-rt
+                                 (return
+                                   (%read-remaining-with-cl-reader
+                                    stream nodes custom-rt text))
+                                 ;; Fail closed.  Carrying on with the standard
+                                 ;; reader would hand back a CST built under the
+                                 ;; wrong syntax whenever the rest of the file
+                                 ;; happens to read without the readtable -- and
+                                 ;; an unknown readtable may have changed what
+                                 ;; quote, case or a macro character mean, so
+                                 ;; "it read" is not "it read correctly".  The
+                                 ;; forms already read stay editable; the rest
+                                 ;; does not exist as far as this parse is
+                                 ;; concerned.
+                                 (return
+                                   (values
+                                    (nreverse nodes)
+                                    (make-condition
+                                     'readtable-unavailable
+                                     :designator designator
+                                     :origin :source
+                                     :message
+                                     (format nil "The file declares ~
+                                                  (in-readtable ~S), and that ~
+                                                  readtable is not registered ~
+                                                  in the cl-mcp server ~
+                                                  process, which is where ~
+                                                  files are parsed."
+                                             designator)))))))))))))
             (reader-error (e)
               (let ((msg (format nil "~A" e)))
                 (cond
