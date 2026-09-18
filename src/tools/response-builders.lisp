@@ -82,6 +82,93 @@ useful debug information."
               display-frames)
       'vector))))
 
+(defparameter *locals-shown-per-frame* 10
+  "Locals listed per backtrace frame in repl-eval's content text; the rest are
+counted.  A frame compiled at (debug 3) can hold more names than a reader
+wants at once, and the whole response is bounded again by max_output_length.")
+
+(defparameter *locals-value-max-chars* 200
+  "Characters of one local's printed value written into the backtrace text.
+
+print_level and print_length do NOT bound this.  Per the standard they limit
+the depth and the element count of a printed structure, and neither applies to
+a string, a symbol name or a bignum: a local holding a 100 KB request body
+prints all of it.  Without a cap here the first such local spends the whole
+max_output_length budget, and the locals after it -- and every caller frame
+below it -- fall off the end of the text a client actually reads.")
+
+(defparameter *locals-preview-max-lines* 20
+  "Lines of one local's expanded preview written into the backtrace text.
+preview_max_elements bounds how wide each level of a preview is, but a raised
+locals_preview_max_depth multiplies those levels together, so the rendered
+body needs a bound of its own.")
+
+(defun %clip-local-text (text limit)
+  "Return TEXT, or its first LIMIT characters marked as cut.
+The marker carries the full length, because the useful thing about a value too
+big to show is usually how big it is."
+  (if (and (stringp text) (> (length text) limit))
+      (format nil "~A… [cut, ~D chars]" (subseq text 0 limit) (length text))
+      text))
+
+(defun %write-frame-locals (stream frame indent)
+  "Write FRAME's locals to STREAM, one per line, indented INDENT spaces.
+Writes nothing when the frame has none.
+
+Locals are what a backtrace is read for, and they were reaching the caller
+only as error_context.frames[].locals -- a sibling JSON field a client that
+renders content[].text never sees.  That made locals_preview_frames and its
+three companion arguments produce no observable output at all, so the
+debugging procedure in prompts/repl-driven-development.md could be followed
+exactly and return nothing.
+
+Every displayed frame gets its locals, because CL-MCP/SRC/FRAME-INSPECTOR's
+%FRAME-LOCALS collects a name and a printed value for all of them regardless
+of that argument.  What locals_preview_frames selects is the structural
+preview attached to a non-primitive local in the top N frames, and that is
+what gets expanded underneath the local's own line here -- so the argument is
+visible in the text exactly where it does its work.
+
+Each value and each preview line is cut at *LOCALS-VALUE-MAX-CHARS*, and the
+preview at *LOCALS-PREVIEW-MAX-LINES* lines.  That is not tidiness: the text
+is truncated whole at max_output_length afterwards, so without a per-value
+bound one local holding a large string would push the locals after it, and
+every caller frame below it, off the end -- taking away frames that were
+visible before locals were written here at all."
+  (let ((locals (getf frame :locals)))
+    (when locals
+      (let ((pad (make-string indent :initial-element #\Space))
+            (item-pad (make-string (+ indent 2) :initial-element #\Space))
+            (preview-pad (make-string (+ indent 4) :initial-element #\Space))
+            (shown 0))
+        (format stream "~&~Alocals:" pad)
+        (dolist (local locals)
+          (when (>= shown *locals-shown-per-frame*)
+            (format stream "~&~A... and ~D more"
+                    item-pad (- (length locals) shown))
+            (return))
+          (incf shown)
+          (format stream "~&~A~A = ~A~@[  [object-id: ~A]~]"
+                  item-pad
+                  (sanitize-for-json (getf local :name))
+                  (%clip-local-text (sanitize-for-json (getf local :value))
+                                    *locals-value-max-chars*)
+                  (getf local :object-id))
+          (let ((preview (getf local :preview)))
+            (when (hash-table-p preview)
+              (let ((body (format-inspect-elements preview :header nil))
+                    (written 0))
+                ;; The preview's own indentation is kept and shifted whole, so
+                ;; its nesting (Entries: above its rows) still reads as nesting.
+                (dolist (line (uiop:split-string body :separator '(#\Newline)))
+                  (when (plusp (length (string-trim " " line)))
+                    (when (>= written *locals-preview-max-lines*)
+                      (format stream "~&~A… (preview cut)" preview-pad)
+                      (return))
+                    (incf written)
+                    (format stream "~&~A~A" preview-pad
+                            (%clip-local-text line *locals-value-max-chars*))))))))))))
+
 (defun build-eval-response
     (printed raw-value stdout stderr error-context
      &key include-result-preview
@@ -93,7 +180,10 @@ Called by both the inline tool path and the worker handler.
 Returns a hash-table with content, stdout, stderr, and optional
 result_object_id, result_preview, and error_context.
 The content text includes stdout/stderr/error-context/object-id
-so that MCP clients rendering only content[].text still see them."
+so that MCP clients rendering only content[].text still see them --
+each displayed frame's locals included (%WRITE-FRAME-LOCALS), with the
+structural preview of one from a locals_preview_frames frame expanded
+under it."
   (let ((ht (make-ht "stdout" stdout "stderr" stderr))
         (object-id nil)
         (effective-limit (or max-output-length *default-max-output-length*)))
@@ -166,6 +256,7 @@ so that MCP clients rendering only content[].text still see them."
                                        (sanitize-for-json
                                         (getf frame :source-file))
                                        (getf frame :source-line))
+                               (%write-frame-locals s frame 5)
                             until (>= shown 5)))))))))
       (setf (gethash "content" ht)
             (text-content

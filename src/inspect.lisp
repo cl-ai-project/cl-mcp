@@ -468,29 +468,61 @@ For nested non-primitive values, id fields are included for drill-down."
     (setf (gethash "id" result) id)
     result))
 
-(defun format-inspect-elements (inspection-result)
-  "Format structured inspection data as human-readable text lines."
-  (flet ((%repr-text (repr)
-           "Extract readable text from a value-representation hash-table.
-If REPR is not a hash-table, return its princ-to-string."
-           (if (hash-table-p repr)
-               (let ((v (gethash "value" repr)))
-                 (if (and v (not (hash-table-p v)))
-                     (princ-to-string v)
-                     (or (gethash "summary" repr) "?")))
-               (princ-to-string repr))))
-    (with-output-to-string (s)
-      (format s "[~A] ~A"
-              (gethash "kind" inspection-result)
-              (gethash "summary" inspection-result))
-      (when (gethash "id" inspection-result)
-        (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
-      (when (gethash "hint" inspection-result)
-        (format s "~&Hint: ~A" (gethash "hint" inspection-result)))
-      ;; List/array elements
-      (let ((elements (gethash "elements" inspection-result)))
+(defparameter *inspect-format-max-depth* 8
+  "How deep %WRITE-INSPECT-BODY will recurse into an already-generated preview.
+
+The preview tree is finite -- %VALUE-REPR stops at its own MAX-DEPTH and emits
+a circular-ref rather than revisiting an object on the active path -- so this
+is not what terminates the walk.  It is a guard for a renderer that is also
+handed data decoded from a worker's JSON, where nothing in this process
+produced the shape.")
+
+(defun %inspect-repr-text (repr)
+  "Return readable text for REPR, a value representation from %VALUE-REPR.
+A primitive carries its printed form under \"value\"; anything else -- an
+expanded node, an object-ref, a circular-ref -- is named by its \"summary\".
+A REPR that is not a hash-table at all is printed as it stands."
+  (if (hash-table-p repr)
+      (let ((v (gethash "value" repr)))
+        (if (and v (not (hash-table-p v)))
+            (princ-to-string v)
+            (or (gethash "summary" repr) "?")))
+      (princ-to-string repr)))
+
+(defun %inspect-expandable-p (repr)
+  "True when REPR is a node whose own contents were already expanded.
+
+An object-ref and a circular-ref carry a summary and an id and nothing else,
+so they answer false and the walk stops there -- which is exactly where
+%VALUE-REPR decided the expansion should stop, whether for depth, for sharing
+or for a cycle."
+  (and (hash-table-p repr)
+       (flet ((filled (key)
+                (let ((v (gethash key repr)))
+                  (and v (plusp (length v))))))
+         (or (filled "elements") (filled "entries") (filled "slots")))))
+
+(defun %write-inspect-body (stream node indent depth)
+  "Write NODE's elements, entries, slots and truncation note to STREAM, each
+line indented INDENT spaces, recursing into a child that was itself expanded.
+
+The recursion is what makes a raised max_depth visible.  %VALUE-REPR already
+builds the nested node -- a hash-table inside a hash-table comes back with its
+own \"entries\" -- and this used to print only its summary, so asking for more
+depth changed the JSON and nothing a reader could see.  Nothing is inspected
+again here; only what was already generated is written out.
+
+A composite hash-table KEY is named with its object-id rather than expanded:
+its structure under the row it keys reads as the value's."
+  (let ((pad (make-string indent :initial-element #\Space))
+        (item-pad (make-string (+ indent 2) :initial-element #\Space)))
+    (flet ((nested (repr)
+             (when (and (< depth *inspect-format-max-depth*)
+                        (%inspect-expandable-p repr))
+               (%write-inspect-body stream repr (+ indent 4) (1+ depth)))))
+      (let ((elements (gethash "elements" node)))
         (when (and elements (plusp (length elements)))
-          (format s "~&Elements:")
+          (format stream "~&~AElements:" pad)
           (loop for el in (coerce elements 'list)
                 for i from 0
                 do (if (hash-table-p el)
@@ -498,50 +530,75 @@ If REPR is not a hash-table, return its princ-to-string."
                        ;; handle under "ref_id", and it is the one nested kind
                        ;; that would otherwise render with no marker at all --
                        ;; conspicuous now that its siblings have one.
-                       (format s "~&  [~D] ~A~@[ [object-id: ~A]~]"
-                               i (%repr-text el)
-                               (or (gethash "id" el) (gethash "ref_id" el)))
-                       (format s "~&  [~D] ~A" i el)))))
-      ;; Hash-table entries
-      (let ((entries (gethash "entries" inspection-result)))
+                       (progn
+                         (format stream "~&~A[~D] ~A~@[ [object-id: ~A]~]"
+                                 item-pad i (%inspect-repr-text el)
+                                 (or (gethash "id" el) (gethash "ref_id" el)))
+                         (nested el))
+                       (format stream "~&~A[~D] ~A" item-pad i el)))))
+      (let ((entries (gethash "entries" node)))
         (when (and entries (plusp (length entries)))
-          (format s "~&Entries (~A test):"
-                  (or (gethash "test" inspection-result) "EQL"))
+          (format stream "~&~AEntries (~A test):" pad
+                  (or (gethash "test" node) "EQL"))
           (loop for entry in (coerce entries 'list)
                 do (when (hash-table-p entry)
                      (let ((k (gethash "key" entry))
                            (v (gethash "value" entry)))
-                       ;; A composite KEY is drillable too, and its handle was
-                       ;; reachable only from the JSON before.
-                       (format s "~&  ~A~@[ [key-object-id: ~A]~] => ~A~@[ [object-id: ~A]~]"
-                               (%repr-text k)
+                       (format stream
+                               "~&~A~A~@[ [key-object-id: ~A]~] => ~A~@[ [object-id: ~A]~]"
+                               item-pad
+                               (%inspect-repr-text k)
                                (when (hash-table-p k)
                                  (or (gethash "id" k) (gethash "ref_id" k)))
-                               (%repr-text v)
+                               (%inspect-repr-text v)
                                (when (hash-table-p v)
-                                 (or (gethash "id" v) (gethash "ref_id" v)))))))))
-      ;; CLOS slots
-      (let ((slots (gethash "slots" inspection-result)))
+                                 (or (gethash "id" v) (gethash "ref_id" v))))
+                       (nested v))))))
+      (let ((slots (gethash "slots" node)))
         (when (and slots (plusp (length slots)))
-          (format s "~&Slots:")
+          (format stream "~&~ASlots:" pad)
           (loop for slot in (coerce slots 'list)
                 do (when (hash-table-p slot)
                      (let ((v (gethash "value" slot)))
-                       (format s "~&  ~A: ~A~@[ [object-id: ~A]~]"
+                       (format stream "~&~A~A: ~A~@[ [object-id: ~A]~]"
+                               item-pad
                                (gethash "name" slot "?")
-                               (%repr-text v)
+                               (%inspect-repr-text v)
                                (when (hash-table-p v)
-                                 (or (gethash "id" v)
-                                     (gethash "ref_id" v)))))))))
-      ;; Meta info (truncation)
-      (let ((meta (gethash "meta" inspection-result)))
+                                 (or (gethash "id" v) (gethash "ref_id" v))))
+                       (nested v))))))
+      (let ((meta (gethash "meta" node)))
         (when (and meta (hash-table-p meta) (gethash "truncated" meta))
           ;; Different inspectors use different keys for total count:
           ;; list="length", vector/array="total_elements", hash-table="count"
           (let ((total (or (gethash "total_elements" meta)
                            (gethash "count" meta)
                            (gethash "length" meta))))
-            (format s "~&  ... (truncated, ~A total)" total)))))))
+            (format stream "~&~A... (truncated, ~A total)" item-pad total)))))))
+
+(defun format-inspect-elements (inspection-result &key (header t))
+  "Format structured inspection data as human-readable text lines.
+
+HEADER, true by default, writes the leading kind/summary, object-id and hint
+lines.  A caller that has already named the object -- repl-eval's backtrace,
+which prints a local's name, value and object-id on its own line before
+expanding it -- passes NIL and gets only the body: the elements, entries,
+slots and truncation note.  The result is then the empty string for an object
+whose preview has no body, so a caller must check before writing it.
+
+A child that was itself expanded is written out under its own row
+(%WRITE-INSPECT-BODY), so raising max_depth shows more here and not only in
+the JSON."
+  (with-output-to-string (s)
+    (when header
+      (format s "[~A] ~A"
+              (gethash "kind" inspection-result)
+              (gethash "summary" inspection-result))
+      (when (gethash "id" inspection-result)
+        (format s "~&[object-id: ~A]" (gethash "id" inspection-result)))
+      (when (gethash "hint" inspection-result)
+        (format s "~&Hint: ~A" (gethash "hint" inspection-result))))
+    (%write-inspect-body s inspection-result 0 0)))
 
 ;;; MCP Tool Definition
 

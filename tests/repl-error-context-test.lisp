@@ -93,3 +93,130 @@
          "Backtrace header appears despite all frames being internal")
      (ok (search "SB-KERNEL::ERROR" text)
          "fallback includes the first would-be-filtered frame"))))
+
+(defun %response-text (error-context &key max-output-length)
+  "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
+MAX-OUTPUT-LENGTH is passed through, so a test can put the text under the same
+budget pressure a real response is under."
+  (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
+                "" nil "" "" error-context
+                :max-output-length max-output-length))
+         (content (gethash "content" resp)))
+    (when (and (vectorp content) (plusp (length content)))
+      (gethash "text" (aref content 0)))))
+
+(deftest backtrace-text-carries-each-frames-locals
+  (testing "a frame's locals reach content[].text, not only the JSON"
+    ;; They used to reach the response as error_context.frames[].locals alone,
+    ;; which a client rendering content[].text never sees -- so
+    ;; locals_preview_frames and its companions produced nothing observable.
+    (let ((text (%response-text
+                 (list :error t
+                       :condition-type "SIMPLE-ERROR"
+                       :message "test"
+                       :restarts nil
+                       :frames
+                       (list (list :index 0 :function "MY-APP::CRUNCH"
+                                   :source-file "src/a.lisp" :source-line 7
+                                   :locals (list (list :name "COUNT" :value "42")
+                                                 (list :name "LABEL"
+                                                       :value "\"trouble\"")
+                                                 (list :name "TABLE"
+                                                       :value "#<HASH-TABLE>"
+                                                       :object-id 99))))))))
+      (ok (search "locals:" text) "the section is labelled")
+      (ok (search "COUNT = 42" text))
+      (ok (search "LABEL = \"trouble\"" text)
+          "a string local keeps the quotes its printed value carries")
+      (ok (search "TABLE = #<HASH-TABLE>  [object-id: 99]" text)
+          "a non-primitive local names the id inspect-object drills into"))))
+
+(deftest backtrace-text-omits-the-locals-label-for-a-frame-with-none
+  (testing "a frame with no locals gets no empty locals: heading"
+    (let ((text (%response-text
+                 (list :error t :condition-type "SIMPLE-ERROR" :message "test"
+                       :restarts nil
+                       :frames (list (list :index 0 :function "MY-APP::F"
+                                           :source-file nil :source-line nil
+                                           :locals nil))))))
+      (ok (search "MY-APP::F" text))
+      (ok (not (search "locals:" text))))))
+
+(deftest backtrace-text-caps-the-locals-it-lists
+  (testing "a frame with many locals is cut, and says how many are left"
+    (let* ((cap cl-mcp/src/tools/response-builders::*locals-shown-per-frame*)
+           (extra 3)
+           (locals (loop for i from 1 to (+ cap extra)
+                         collect (list :name (format nil "V~D" i)
+                                       :value (princ-to-string i))))
+           (text (%response-text
+                  (list :error t :condition-type "SIMPLE-ERROR" :message "test"
+                        :restarts nil
+                        :frames (list (list :index 0 :function "MY-APP::WIDE"
+                                            :source-file nil :source-line nil
+                                            :locals locals))))))
+      (ok (search (format nil "V~D = ~D" cap cap) text)
+          "the last local within the cap is listed")
+      (ok (not (search (format nil "V~D = " (1+ cap)) text))
+          "the first one past it is not")
+      (ok (search (format nil "... and ~D more" extra) text)
+          "and the remainder is counted rather than dropped silently"))))
+
+(deftest locals-preview-frames-is-visible-in-the-text
+  (testing "the argument expands a non-primitive local in place, and only when asked"
+    ;; End to end: a real function compiled at (debug 3), through repl-eval and
+    ;; the response builder, because the defect was that nothing the argument
+    ;; produced ever reached the text.
+    (let ((code "(defun %locals-probe-crunch (words)
+  (declare (optimize (debug 3)))
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (w words) (incf (gethash w table 0)))
+    (error \"crunch failed\")))
+(%locals-probe-crunch (list \"a\" \"b\" \"a\"))"))
+      (flet ((text-for (frames)
+               (multiple-value-bind (printed raw stdout stderr ctx)
+                   (apply #'repl-eval code :package "CL-USER"
+                          (when frames (list :locals-preview-frames frames)))
+                 (declare (ignore printed raw stdout stderr))
+                 (%response-text ctx))))
+        (let ((without (text-for nil))
+              (with (text-for 3)))
+          #+sbcl
+          (progn
+            (ok (search "TABLE = " without)
+                "the local is listed whether or not a preview was asked for")
+            (ok (not (search "Entries (" without))
+                "without the argument nothing is expanded under it")
+            (ok (search "TABLE = " with))
+            (ok (search "Entries (" with)
+                "with it the hash-table's entries are expanded in place")
+            (ok (search "a => 2" with)
+                "and those entries are the real contents")))))))
+
+(deftest one-huge-local-does-not-evict-the-frames-below-it
+  (testing "a long value is cut, so later locals and caller frames survive"
+    ;; print_level and print_length bound a printed structure's depth and its
+    ;; element count; neither applies to a string, so a local holding one
+    ;; prints in full.  The text is truncated whole at max_output_length
+    ;; afterwards, so without a per-value cut the first such local pushed its
+    ;; own siblings and every caller frame below it off the end -- taking away
+    ;; frames that were visible before locals were written here at all.
+    (let* ((big (make-string 3000 :initial-element #\x))
+           (ctx (list :error t :condition-type "SIMPLE-ERROR" :message "test"
+                      :restarts nil
+                      :frames
+                      (list (list :index 0 :function "MY-APP::VICTIM"
+                                  :source-file nil :source-line nil
+                                  :locals (list (list :name "BODY" :value big)
+                                                (list :name "COUNT" :value "42")))
+                            (list :index 1 :function "MY-APP::CALLER"
+                                  :source-file nil :source-line nil
+                                  :locals (list (list :name "N" :value "3000"))))))
+           (text (%response-text ctx :max-output-length 900)))
+      (ok (search "[cut, 3000 chars]" text)
+          "the value says it was cut, and how big it was")
+      (ok (search "COUNT = 42" text)
+          "the local declared after it is still there")
+      (ok (search "MY-APP::CALLER" text)
+          "and so is the caller frame, which is what used to be lost")
+      (ok (search "N = 3000" text) "with its own locals"))))

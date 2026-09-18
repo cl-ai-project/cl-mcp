@@ -166,13 +166,25 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 
 ## Debugging
 
-1. **Reproduce** via `repl-eval`. On error, response includes `error_context`:
-   - `condition_type`, `message`, `restarts`
+1. **Reproduce** via `repl-eval`. On error, the backtrace in the response text lists,
+   under each frame, its locals as `NAME = VALUE`:
+   - `condition_type`, `message`, `restarts` head the block
    - `frames`: stack frames with function names, source locations, local variables
-   - Locals include `object_id` for non-primitives (drill down via `inspect-object`)
-   - Local capture requires `(declare (optimize (debug 3)))` in the function
+   - Locals include `[object-id: N]` for non-primitives (drill down via `inspect-object`)
+   - Local capture requires `(declare (optimize (debug 3)))` in the function; without it
+     the frame is listed with no locals under it
+   - At most 10 locals per frame are listed; the rest are counted, and a value
+     longer than 200 characters is cut with its full length noted — `print_level`
+     and `print_length` do not bound a string, so without that one large local
+     would push the frames below it out of the response
 
-2. **Auto-expand locals**: Set `locals_preview_frames` (e.g., 3) to include variable previews in top N frames. `locals_preview_skip_internal` (default true) skips CL-MCP/SBCL/ASDF infrastructure frames.
+2. **Auto-expand locals**: Set `locals_preview_frames` (e.g., 3) to expand non-primitive locals
+   in the top N frames — a hash-table's entries, a list's elements or an instance's slots are
+   written out under the local instead of only its printed form, which is often enough to skip
+   the `inspect-object` round-trip. A child that `locals_preview_max_depth` reached is
+   expanded under its own row too, so raising the depth shows more here and not only in
+   the JSON. `locals_preview_skip_internal` (default true) skips CL-MCP/SBCL/ASDF
+   infrastructure frames when counting which frames qualify.
 
 3. **Analyze**: `code-find-references` for usage analysis, `lisp-check-parens` for syntax issues, `code-describe` to verify signatures.
 
