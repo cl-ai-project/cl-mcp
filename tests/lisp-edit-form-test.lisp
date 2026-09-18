@@ -2493,38 +2493,55 @@ value instead of a GETF type error on a string."
   (if (listp payload) (getf payload key) (princ-to-string payload)))
 
 (deftest an-unresolvable-declared-readtable-is-classified-apart
-  (testing "a file naming a readtable this process lacks is its own verdict"
-    (with-temp-file
-     "tests/tmp/declared-missing-rt.lisp"
-     (format nil "(in-readtable :no-such-readtable-here)~%(defun f () #?\"x\")~%")
-     (lambda (path)
-       (multiple-value-bind (overwritable why)
-           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
-         (ok overwritable "the overwrite path is open")
-         (ok (eq :readtable-unavailable why)
-             "and it is open for this reason, not as a delimiter failure")))))
-  (testing "the same syntax without a declaration keeps the guard"
-    ;; A readtable the caller supplies could still make this one editable, so
-    ;; the file stays protected -- this is the distinction the new verdict rests
-    ;; on, and it is what keeps the existing guard tests true.
-    (with-temp-file
-     "tests/tmp/undeclared-custom-rt.lisp"
-     (format nil "(defun f () #?\"x\")~%")
-     (lambda (path)
-       (multiple-value-bind (overwritable why)
-           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
-         (ok (not overwritable))
-         (ok (eq :reader-level why))))))
-  (testing "a declaration this process CAN resolve keeps the guard too"
-    (with-temp-file
-     "tests/tmp/declared-present-rt.lisp"
-     (format nil "(in-readtable :standard)~%(defun f () #?\"x\")~%")
-     (lambda (path)
-       (multiple-value-bind (overwritable why)
-           (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
-         (declare (ignore why))
-         (ok (not overwritable)
-             ":standard resolves here, so the readtable argument is a real option"))))))
+  ;; The verdict rests on asking the named-readtables registry and being told
+  ;; no; with no registry in the image a declaration says nothing either way.
+  (unless (%try-load :named-readtables)
+    (skip "named-readtables not available"))
+  (labels ((verdict (source)
+             (with-temp-file
+              "tests/tmp/declared-rt-verdict.lisp" source
+              (lambda (path)
+                (multiple-value-list
+                 (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                  path))))))
+    (testing "a real top-level declaration this process cannot resolve opens the path"
+      (let ((v (verdict (format nil "(in-readtable :no-such-readtable-here)~%~
+                                     (defun f () #?\"x\")~%"))))
+        (ok (first v) "the overwrite path is open")
+        (ok (eq :readtable-unavailable (second v))
+            "and for this reason, not as a delimiter failure")))
+    ;; The evidence is the parser's: it had read the declaration as a real
+    ;; top-level form.  A scan of the raw text cannot tell that from a mention,
+    ;; and every case below would have opened the guard on a file that never
+    ;; declared anything -- an overwrite of working source.
+    (testing "a mention the parser never reads as a declaration does not"
+      (dolist (case (list
+                     (cons "a comment"
+                           (format nil ";; (in-readtable :no-such-readtable-here)~%~
+                                        (defun f () #?\"x\")~%"))
+                     (cons "a string"
+                           (format nil "(defparameter *s* ~
+                                        \"(in-readtable :no-such-readtable-here)\")~%~
+                                        (defun f () #?\"x\")~%"))
+                     (cons "a quoted form"
+                           (format nil "(defun g () '(in-readtable :no-such-readtable-here))~%~
+                                        (defun f () #?\"x\")~%"))
+                     (cons "a declaration past the failure"
+                           (format nil "(defun f () #?\"x\")~%~
+                                        (in-readtable :no-such-readtable-here)~%"))))
+        (let ((v (verdict (cdr case))))
+          (ok (not (first v)) (format nil "~A keeps the guard" (car case)))
+          (ok (eq :reader-level (second v))
+              (format nil "~A is a plain reader-level failure" (car case))))))
+    (testing "the same syntax with no declaration at all keeps the guard"
+      (let ((v (verdict (format nil "(defun f () #?\"x\")~%"))))
+        (ok (not (first v)))
+        (ok (eq :reader-level (second v)))))
+    (testing "a declaration this process CAN resolve keeps the guard too"
+      ;; :standard resolves here, so the readtable argument is a real option and
+      ;; rewriting the file wholesale is the worse tool.
+      (let ((v (verdict (format nil "(in-readtable :standard)~%(defun f () #?\"x\")~%"))))
+        (ok (not (first v)))))))
 
 (deftest an-unresolvable-readtable-message-does-not-send-the-caller-in-a-circle
   (testing "the guidance names where a readtable lives and a path that works"
@@ -2532,6 +2549,8 @@ value instead of a GETF type error on a string."
     ;; parameter, passing it said the readtable does not exist, and that error
     ;; said fs-write-file could rewrite the file -- which fs-write-file then
     ;; refused, pointing back at lisp-edit-form.
+    (unless (%try-load :named-readtables)
+      (skip "named-readtables not available"))
     (with-temp-file
      "tests/tmp/declared-missing-rt-message.lisp"
      (format nil "(in-readtable :no-such-readtable-here)~%(defun f () #?\"x\")~%")
@@ -2545,7 +2564,7 @@ value instead of a GETF type error on a string."
                               nil)
                      (file-unparseable-error (e) (file-unparseable-message e)))))
          (ok text "the edit is still refused")
-         (ok (search ":no-such-readtable-here" text)
+         (ok (search "no-such-readtable-here" (string-downcase text))
              "the readtable the file asked for is named")
          (ok (search "server process" text)
              "and the message says where a readtable has to be registered")
@@ -2553,6 +2572,83 @@ value instead of a GETF type error on a string."
              "the escape it names is the one that is actually open")
          (ok (not (search "pass the readtable parameter" text))
              "and it no longer recommends the argument that just cannot work"))))))
+
+(deftest inspecting-a-file-interns-nothing-it-only-mentions
+  (testing "a name written in a comment or a string does not reach a package"
+    ;; The classification used to come from a regular expression over the raw
+    ;; text, fed to a designator parser that interns -- so merely looking at a
+    ;; file added symbols to this long-lived image, including to an existing
+    ;; package the file only named in a comment.
+    (with-temp-file
+     "tests/tmp/declared-rt-intern-canary.lisp"
+     (format nil ";; (in-readtable cl-user:rt-canary-in-comment)~%~
+                  (defparameter *s* \"(in-readtable :rt-canary-in-string)\")~%~
+                  (defun f () #?\"x\")~%")
+     (lambda (path)
+       (let ((comment-before (nth-value 1 (find-symbol "RT-CANARY-IN-COMMENT" :cl-user)))
+             (string-before (nth-value 1 (find-symbol "RT-CANARY-IN-STRING" :keyword))))
+         (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p path)
+         (ok (eq comment-before
+                 (nth-value 1 (find-symbol "RT-CANARY-IN-COMMENT" :cl-user)))
+             "nothing was interned into an existing package")
+         (ok (eq string-before
+                 (nth-value 1 (find-symbol "RT-CANARY-IN-STRING" :keyword)))
+             "and nothing from inside a string literal"))))))
+
+(deftest an-unresolved-declaration-stops-the-parse-instead-of-guessing
+  (testing "forms after it are not edited under the standard reader"
+    ;; An unknown readtable may have changed what quote, case or a macro
+    ;; character mean, so a file that happens to read without it has not been
+    ;; shown to read correctly.  Carrying on used to hand back that CST and
+    ;; accept edits against it.
+    (unless (%try-load :named-readtables)
+      (skip "named-readtables not available"))
+    (with-temp-file
+     "tests/tmp/declared-rt-fail-closed.lisp"
+     (format nil "(defun before () 1)~%~
+                  (in-readtable :no-such-readtable-here)~%~
+                  (defun after () 2)~%")
+     (lambda (path)
+       (ok (handler-case
+               (progn (lisp-edit-form :file-path path :form-type "defun"
+                                      :form-name "after" :operation "replace"
+                                      :content "(defun after () 99)" :dry-run t)
+                      nil)
+             (file-unparseable-error () t))
+           "a form past the unresolved declaration is not editable")
+       (ok (handler-case
+               (progn (lisp-edit-form :file-path path :form-type "defun"
+                                      :form-name "before" :operation "replace"
+                                      :content "(defun before () 99)" :dry-run t)
+                      t)
+             (file-unparseable-error () nil))
+           "while the forms read before it still are")))))
+
+(deftest a-missing-caller-readtable-is-not-sent-to-fs-write-file
+  (testing "the argument branch names a step that can actually settle it"
+    ;; fs-write-file re-reads the file with no readtable argument, so whether
+    ;; its guard is open depends on the file, not on this call: a file that
+    ;; parses perfectly well would be refused, which is the loop this change
+    ;; exists to end.
+    (with-temp-file
+     "tests/tmp/caller-rt-on-parseable.lisp"
+     (format nil "(defun f () 1)~%")
+     (lambda (path)
+       (let ((text (handler-case
+                       (progn (lisp-edit-form :file-path path :form-type "defun"
+                                              :form-name "f" :operation "replace"
+                                              :content "(defun f () 2)"
+                                              :readtable :no-such-readtable-here
+                                              :dry-run t)
+                              nil)
+                     (file-unparseable-error (e) (file-unparseable-message e)))))
+         (ok text "the call is refused")
+         (ok (search "server process" text)
+             "and says where a readtable has to be registered")
+         (ok (not (search "fs-write-file" text))
+             "without naming a tool that would refuse this very file")
+         (ok (search "without the readtable argument" text)
+             "pointing instead at the step that settles it"))))))
 
 (defun %guarded-edit-outcome (path form-name guard)
   "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and

@@ -349,6 +349,15 @@
     ;; name is resolved here too, and no tool registers one here, so refusing
     ;; leaves the file with no write path at all while the refusal points at
     ;; lisp-edit-form and lisp-edit-form points back.
+    ;; The verdict rests on asking the named-readtables registry and being told
+    ;; no.  With no registry in the image the declaration says nothing either
+    ;; way and the guard stays closed by design, so this has to run with the
+    ;; library present or not at all.
+    (unless (or (find-package :named-readtables)
+                (ignore-errors (uiop:symbol-call :ql :quickload :named-readtables
+                                                 :silent t)
+                               t))
+      (skip "named-readtables not available"))
     (with-test-project-root
       (let* ((tmp-path "tests/tmp/declared-missing-readtable.lisp")
              (abs-path (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))
