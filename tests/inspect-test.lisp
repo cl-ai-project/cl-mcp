@@ -41,6 +41,30 @@
   (let ((*object-registry* (make-object-registry)))
     (funcall thunk)))
 
+(deftest format-inspect-elements-expands-an-already-expanded-child
+  (testing "raising max-depth shows more text, not only more JSON"
+    ;; %VALUE-REPR builds the nested node -- a hash-table inside a hash-table
+    ;; comes back carrying its own "entries" -- and the formatter used to print
+    ;; only its summary, so asking for more depth changed nothing a reader saw.
+    (with-fresh-registry
+     (lambda ()
+       (let ((outer (make-hash-table :test #'equal))
+             (inner (make-hash-table :test #'equal)))
+         (setf (gethash "answer" inner) 42)
+         (setf (gethash "inner" outer) inner)
+         (let ((shallow (cl-mcp/src/inspect:format-inspect-elements
+                         (generate-result-preview outer :max-depth 1)))
+               (deep (cl-mcp/src/inspect:format-inspect-elements
+                      (generate-result-preview outer :max-depth 3))))
+           (ok (search "inner =>" shallow)
+               "the outer entry is listed at either depth")
+           (ok (not (search "answer =>" shallow))
+               "at depth 1 the child was never expanded, so nothing to write")
+           (ok (search "inner =>" deep))
+           (ok (search "answer =>" deep)
+               "at depth 3 the child's own entries are written out")
+           (ok (search "42" deep) "with their values")))))))
+
 ;;; Test error handling
 
 (deftest inspect-nonexistent-id

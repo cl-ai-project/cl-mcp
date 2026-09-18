@@ -28,7 +28,11 @@ Output fields:
   content text carries the same thing: each displayed frame is followed by its locals as
   `NAME = VALUE`, with `[object-id: N]` on a non-primitive one, capped at 10 per frame.
   `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
-  the top N frames underneath it
+  the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached. A
+  value over 200 characters is cut with its full length noted, and a preview over 20 lines
+  likewise: `print_level`/`print_length` bound a structure's depth and width but not a
+  string, so one large local would otherwise spend the whole `max_output_length` budget and
+  drop the frames below it
 
 Example JSON‑RPC request:
 

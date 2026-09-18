@@ -94,10 +94,13 @@
      (ok (search "SB-KERNEL::ERROR" text)
          "fallback includes the first would-be-filtered frame"))))
 
-(defun %response-text (error-context)
-  "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT."
+(defun %response-text (error-context &key max-output-length)
+  "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
+MAX-OUTPUT-LENGTH is passed through, so a test can put the text under the same
+budget pressure a real response is under."
   (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
-                "" nil "" "" error-context))
+                "" nil "" "" error-context
+                :max-output-length max-output-length))
          (content (gethash "content" resp)))
     (when (and (vectorp content) (plusp (length content)))
       (gethash "text" (aref content 0)))))
@@ -189,3 +192,31 @@
                 "with it the hash-table's entries are expanded in place")
             (ok (search "a => 2" with)
                 "and those entries are the real contents")))))))
+
+(deftest one-huge-local-does-not-evict-the-frames-below-it
+  (testing "a long value is cut, so later locals and caller frames survive"
+    ;; print_level and print_length bound a printed structure's depth and its
+    ;; element count; neither applies to a string, so a local holding one
+    ;; prints in full.  The text is truncated whole at max_output_length
+    ;; afterwards, so without a per-value cut the first such local pushed its
+    ;; own siblings and every caller frame below it off the end -- taking away
+    ;; frames that were visible before locals were written here at all.
+    (let* ((big (make-string 3000 :initial-element #\x))
+           (ctx (list :error t :condition-type "SIMPLE-ERROR" :message "test"
+                      :restarts nil
+                      :frames
+                      (list (list :index 0 :function "MY-APP::VICTIM"
+                                  :source-file nil :source-line nil
+                                  :locals (list (list :name "BODY" :value big)
+                                                (list :name "COUNT" :value "42")))
+                            (list :index 1 :function "MY-APP::CALLER"
+                                  :source-file nil :source-line nil
+                                  :locals (list (list :name "N" :value "3000"))))))
+           (text (%response-text ctx :max-output-length 900)))
+      (ok (search "[cut, 3000 chars]" text)
+          "the value says it was cut, and how big it was")
+      (ok (search "COUNT = 42" text)
+          "the local declared after it is still there")
+      (ok (search "MY-APP::CALLER" text)
+          "and so is the caller frame, which is what used to be lost")
+      (ok (search "N = 3000" text) "with its own locals"))))
