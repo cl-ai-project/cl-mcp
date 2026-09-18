@@ -7,7 +7,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
-                #:allowed-read-path #:normalize-path-for-display #:path-inside-p)
+                #:allowed-read-path #:normalize-path-for-display #:path-inside-p
+                #:native-path-namestring)
   (:import-from #:uiop
                 #:read-file-string #:ensure-pathname
                 #:ensure-directory-pathname #:absolute-pathname-p)
@@ -452,13 +453,23 @@ all: %FORM-START-OFFSET falls back to reading the file directly."
         table))))
 
 (defun %debug-source-for (pathname)
-  "Return the newest debug source compiled from PATHNAME, or NIL."
+  "Return the newest debug source compiled from PATHNAME, or NIL.
+
+Looked up under both spellings of the path.  The table is keyed by whatever
+string the compiler recorded, and that is the caller's choice: SBCL keeps the
+NAMESTRING it was given, which for a path holding [ or ] is the escaped one,
+while a build that passed a native path recorded that instead.  Trying one
+spelling only loses the source line for such a file -- silently, since a
+missing line reads exactly like a definition that never had one."
   (let ((table (cond
                  ((hash-table-p *debug-sources*) *debug-sources*)
                  ((eq *debug-sources* :unbuilt)
                   (setf *debug-sources* (%debug-sources-by-namestring)))
                  (t (%debug-sources-by-namestring)))))
-    (and table pathname (gethash (namestring pathname) table))))
+    (and table pathname
+         (or (gethash (namestring pathname) table)
+             (let ((native (native-path-namestring pathname)))
+               (and native (gethash native table)))))))
 
 (defun %read-form-starts (pathname)
   "Return a vector of the file positions at which PATHNAME's top-level forms
@@ -871,10 +882,18 @@ OUTER.  Lambdas and other shapes have no such symbol."
     (t nil)))
 
 (defun %truename-string (pathname)
-  "Return PATHNAME's truename as a namestring, or its namestring when it has none."
+  "Return PATHNAME's truename as a native path string, or PATHNAME's own when
+it has no truename.
+
+Native, not NAMESTRING: this is the absolute path clos-describe and
+code-find hand back, read files with, and put in an edit guard, and
+NAMESTRING escapes the characters the pathname reader treats as wild -- a file
+under demo[old]/ came back as demo\\[old]/, which opens nothing and which the
+caller could not paste into another tool either."
   (and pathname
-       (handler-case (namestring (truename pathname))
-         (error () (namestring pathname)))))
+       (native-path-namestring
+        (handler-case (truename pathname)
+          (error () pathname)))))
 
 (defun %source-stale-p (pathname recorded-write-date)
   "True when PATHNAME was written after RECORDED-WRITE-DATE, the date SBCL kept."

@@ -29,6 +29,7 @@
                 #:fs-read-source-text)
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path
+                #:native-path-namestring
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
@@ -587,7 +588,8 @@ JSON-ready hash-table:
   truncated_at    MAX-SITES when collection stopped there, else null
   skipped_reason  why nothing was scanned, else null"
   (let ((name (target-name-from-designator designator))
-        (root-truename (and root (ignore-errors (namestring (truename root)))))
+        (root-truename (and root (ignore-errors
+                                  (native-path-namestring (truename root)))))
         (forms '())
         (failures '())
         (scanned-files '())
@@ -631,8 +633,13 @@ JSON-ready hash-table:
           (let ((readable (%readable-path file)))
             (if (null readable)
                 (incf denied)
-                (let ((abs-path (or (ignore-errors (namestring (truename file)))
-                                    (namestring file))))
+                ;; Native, and for two reasons: this string is compared with
+                ;; CODE-CORE's %TRUENAME-STRING to decide whether a file was
+                ;; scanned, so the two must spell a path the same way, and it
+                ;; is also what a caller sees and may paste back.
+                (let ((abs-path (or (ignore-errors
+                                     (native-path-namestring (truename file)))
+                                    (native-path-namestring file))))
                   (incf scanned)
                   (push abs-path scanned-files)
                   (unless truncated

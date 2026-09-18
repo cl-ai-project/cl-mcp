@@ -9,7 +9,8 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
-                #:allowed-read-path)
+                #:allowed-read-path
+                #:native-path-namestring)
   ;; No cycle: fs depends on paths, proxy, pool and paren-diagnostics, none of
   ;; which reach this file.  The parent-only consumers (lisp-edit-form-core and
   ;; the clos-describe response builders) already load fs.
@@ -112,7 +113,11 @@ non-NIL: a refused or unreadable file never yields a partial snapshot."
         (handler-case
             (let* ((octets (fs-read-source-octets readable))
                    (text (%decode-utf-8-replacing octets)))
-              (values (list :abs-path (namestring readable)
+              ;; Native: this string is an edit guard's abs_path, compared
+              ;; with the path the edit tools resolved and handed to a caller
+              ;; to send back.  NAMESTRING escapes [ and ], so the guard would
+              ;; carry a path that opens nothing.
+              (values (list :abs-path (native-path-namestring readable)
                             :text text
                             :octet-count (length octets)
                             :digest (%md5-digest-of-octets octets))

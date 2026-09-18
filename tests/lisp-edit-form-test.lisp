@@ -34,6 +34,8 @@
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:bordeaux-threads
                 #:make-thread
                 #:join-thread
@@ -2654,6 +2656,39 @@ valid file, leaves it parseable"
              "without naming a tool that would refuse this very file")
          (ok (search "without the readtable argument" text)
              "pointing instead at the step that settles it"))))))
+
+(deftest a-guard-round-trips-through-a-directory-named-with-brackets
+  (testing "the snapshot's abs_path and the resolved path agree on such a file"
+    ;; [ and ] are wild in this implementation's pathname syntax, so NAMESTRING
+    ;; escaped them and the guard carried an abs_path naming nothing on disk --
+    ;; while the path the edit resolved spelled it the other way, so check 2
+    ;; could never match.
+    ;; Built natively on purpose: MERGE-PATHNAMES on a string with brackets
+    ;; parses them as wild, which is the same confusion under test.
+    (let* ((dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/guard[br]/"
+                         (native-path-namestring
+                          cl-mcp/src/project-root:*project-root*))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "target.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out "(defun target () :old)~%"))
+             (let* ((path (native-path-namestring (truename file)))
+                    (guard (%edit-guard-for path "defun" "target")))
+               (ok (search "guard[br]" path)
+                   "the path cl-mcp works with is the one on disk")
+               (ok (search "guard[br]" (gethash "abs_path" guard))
+                   "and so is the one the guard records")
+               (multiple-value-bind (kind payload)
+                   (%guarded-edit-outcome path "target" guard)
+                 (declare (ignore payload))
+                 (ok (eq :ok kind)
+                     "so a guarded edit of a file under such a directory goes through"))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))
 
 (defun %guarded-edit-outcome (path form-name guard)
   "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and

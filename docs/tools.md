@@ -2,6 +2,17 @@
 
 Detailed input/output schemas and examples for all cl-mcp tools.
 
+## Paths cl-mcp prints
+
+Every path a tool reports is a **native** filesystem path, so it can be passed straight back to
+another tool. That is not the same as Common Lisp's `namestring`, which escapes the characters
+the pathname reader treats as wild — on SBCL `[` and `]` among them — and therefore describes a
+file under `demo[old]/` as `demo\[old]/`, a name nothing on disk answers to. Source locations
+from the running image are converted before they are reported, compared, or opened, so
+`clos-describe`, `code-find`, `code-find-references` and `clgrep-search` all name such a file the
+way `lisp-read-file` and `lisp-edit-form` expect to receive it, and an `edit_guard`'s `abs_path`
+matches the file the edit resolves.
+
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.
 
@@ -23,6 +34,7 @@ Output fields:
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
 - `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+
 - `error_context` (object|null): when an error occurs, contains structured error info including
   `condition_type`, `message`, `restarts`, and `frames` with local variable inspection. The
   content text carries the same thing: each displayed frame is followed by its locals as
