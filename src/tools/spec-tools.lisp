@@ -177,9 +177,12 @@ guard, outcome, returns/signals and postconditions. Reading a contract runs
 none of it -- no target call, no :pre, no capture form, no case guard, no
 post form. core_record carries cl-spec's own versioned definition record
 under the same availability/schema_supported/field_availability rules
-spec-check's core_result uses (see that tool); when schema_supported is
-false, v1-only normalizations such as kind-absent-means-required do not
-apply.
+spec-check's core_result uses (see that tool). It never carries
+schema_supported false: this call validates the schema before projecting
+anything, so an unreadable schema version (or a malformed record) returns
+status='unsupported' with name and message instead -- no core_record, no
+arguments, nothing projected. When core_record is present at all, v1-only
+normalizations such as kind-absent-means-required always apply to it.
 
 Long bodies are cut at max_chars and the cut is reported. Truncated text is a
 preview for reading, NOT a form that can be read back.
@@ -337,7 +340,10 @@ failure\" and \"shrunk normally\"; data.shrunk_outcome (used / none /
 different-failure) is what actually describes ordinary shrinking. A present
 shrink_report's termination is reported exactly as cl-spec gave it: there is
 no \"completed\" value, and exhausted is the SUCCESSFUL search, not an
-incomplete one. exhaustion_phase of shrinking on data.generation_report means
+incomplete one. data.generation_report has its OWN, separately-spelled
+termination field, and its vocabulary DOES include completed -- the
+no-completed rule above is specific to shrink_report and does not carry
+over. exhaustion_phase of shrinking on data.generation_report means
 the failure is already established and only its reduction ran out of budget
 -- NOT a gap; exhaustion_phase of generation is generation-incomplete.
 

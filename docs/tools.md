@@ -1116,10 +1116,15 @@ construction is supported; it does not guarantee successful draws or reductions.
   - `core_record` carries cl-spec's own versioned definition record, under
     the same `availability` / `schema_supported` / `field_availability` /
     `unknown_keys` / `projection` transport metadata `spec-check`'s
-    `core_result` uses — see that entry below for the shared rules. When
-    `schema_supported` is `false`, the v1-only normalizations above (such as
-    an absent `kind` meaning `required`) do not apply; the record is
-    returned as an unparsed projection instead.
+    `core_result` uses — see that entry below for the shared rules. It never
+    carries `schema_supported: false`: `spec-describe` validates the schema
+    *before* projecting anything, so a schema version this adapter does not
+    know (or a malformed record) short-circuits the whole call into a
+    top-level `status: "unsupported"` response with `name` and `message`
+    instead — no `core_record`, no `arguments`, no `cases`, nothing
+    projected. When `core_record` is present at all, the v1-only
+    normalizations above (such as an absent `kind` meaning `required`)
+    always apply to it.
 - `spec-check` — run one property, every property registered `(:about
   <symbol>)`, or one function spec against its function.
   - `property` **or** `symbol` **or** `function` (exactly one), `package`,
@@ -1229,7 +1234,10 @@ construction is supported; it does not guarantee successful draws or reductions.
     into complete or incomplete: there is no `completed` value to contrast
     with, and `exhausted` is the **successful** search — it ran out of
     smaller candidates to try, not out of time. An unrecognized termination
-    is shown as text rather than classified.
+    is shown as text rather than classified. `data.generation_report` has
+    its **own**, separately-spelled `termination` field, and its vocabulary
+    is different: it **does** include `completed` — the "no `completed`
+    value" rule above is specific to `shrink_report` and does not carry over.
   - `data.generation_report.exhaustion_phase` of `shrinking` means the
     failure is already established and only its later reduction ran out of
     budget — this is **not** a verification gap. `exhaustion_phase` of
