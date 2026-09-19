@@ -36,7 +36,8 @@
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
-                #:broad-root-p)
+                #:broad-root-p
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
                 #:text-content)
@@ -397,13 +398,18 @@ Returns a success payload."
   (let ((path (gethash "path" params)))
     (unless path
       (error "path is required"))
-    (let ((dir-path (uiop/pathname:ensure-directory-pathname path)))
+    ;; PARSE-UNIX-NAMESTRING, matching how the parent writes this field
+    ;; (POOL's SEND-ROOT-TO-SESSION-WORKER and BROADCAST-ROOT-TO-WORKERS send
+    ;; UIOP:NATIVE-NAMESTRING). ENSURE-DIRECTORY-PATHNAME would read [ and ] as
+    ;; wildcard syntax and signal, so a bracketed root reached the worker only
+    ;; as a failed RPC the parent logs and swallows.
+    (let ((dir-path (uiop:parse-unix-namestring path :ensure-directory t)))
       (unless (uiop/filesystem:directory-exists-p dir-path)
         (error "Directory does not exist: ~A" path))
       ;; Reject overly broad roots (same policy as fs-set-project-root)
       (when (broad-root-p dir-path)
         (error "Refusing to set project root to ~A -- too broad"
-               (namestring dir-path)))
+               (native-path-namestring dir-path)))
       ;; Resolve symlinks for a canonical path
       (let ((resolved (truename dir-path)))
         (when resolved
@@ -415,10 +421,12 @@ Returns a success payload."
       ;; pool workers: without it a same-named system already reachable via the
       ;; inherited registry keeps winning after a root change.
       (register-project-root-source-registry dir-path)
-      (log-event :info "worker.project-root.set" "path" (namestring dir-path))
+      (log-event :info "worker.project-root.set"
+                 "path" (native-path-namestring dir-path))
       (make-ht "content" (text-content
-                          (format nil "Project root set to ~A" (namestring dir-path)))
-               "path" (namestring dir-path)))))
+                          (format nil "Project root set to ~A"
+                                  (native-path-namestring dir-path)))
+               "path" (native-path-namestring dir-path)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API

@@ -3223,3 +3223,33 @@ loser's text disappearing with no conflict reported anywhere."
           (if verdict
               (format nil "round ~S: ~A" (first verdict) (rest verdict))
               "every round: one winner, one edit_guard conflict, a file that parses")))))
+
+(deftest recovery-instruction-names-a-path-fs-write-file-resolves
+  (testing "a broken file under a bracketed directory is given a usable path"
+    ;; The instruction is fs-write-file's path argument, and fs-write-file
+    ;; resolves its argument natively.  NAMESTRING escaped [ and ] for the
+    ;; pathname reader, so the sentence named a path that tool would resolve to
+    ;; a differently-named directory -- the one round trip this text exists to
+    ;; start.
+    (let* ((root (system-source-directory :cl-mcp))
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/recovedit[br]/" (uiop:native-namestring root))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "broken.lisp") dir))
+           (text (format nil "(defun a ()~%  (list 1)~%")))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (write-string text out))
+             (let* ((cl-mcp/src/project-root:*project-root* root)
+                    (cause (handler-case
+                               (progn (cl-mcp/src/cst:parse-top-level-forms text) nil)
+                             (error (e) e)))
+                    (message (file-unparseable-message
+                              (make-file-unparseable-condition (truename file) text cause))))
+               (ok (search "fs-write-file (path=\"tests/tmp/recovedit[br]/broken.lisp\""
+                           message)
+                   (format nil "the path must be the one on disk; message was ~S" message))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))

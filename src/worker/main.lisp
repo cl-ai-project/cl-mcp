@@ -95,7 +95,12 @@ pathname on success, NIL if the environment variable is not set or
 the directory does not exist."
   (let ((env-root (uiop/os:getenv "MCP_PROJECT_ROOT")))
     (when (and env-root (plusp (length env-root)))
-      (let ((dir (uiop/pathname:ensure-directory-pathname env-root)))
+      ;; PARSE-UNIX-NAMESTRING, matching how the parent writes this variable
+      ;; (WORKER-CLIENT's %BUILD-ENVIRONMENT sends UIOP:NATIVE-NAMESTRING).
+      ;; The two are one protocol and have to move together: reader-escaping on
+      ;; one side with native parsing on the other leaves a literal backslash
+      ;; in the directory name.
+      (let ((dir (uiop:parse-unix-namestring env-root :ensure-directory t)))
         (if (uiop/filesystem:directory-exists-p dir)
             (progn
               (setf *project-root* dir)
@@ -105,7 +110,7 @@ the directory does not exist."
               ;; known via MCP_PROJECT_ROOT.
               (register-project-root-source-registry dir)
               (log-event :info "worker.project-root.set"
-                         "path" (namestring dir))
+                         "path" (uiop:native-namestring dir))
               dir)
             (progn
               (log-event :warn "worker.project-root.invalid"

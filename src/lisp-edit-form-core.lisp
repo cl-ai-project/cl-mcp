@@ -509,9 +509,17 @@ instruction naming it has to give."
                (ensure-directory-pathname
                 (truename (ensure-directory-pathname *project-root*))))))
     (and root
-         (subpathp (pathname path) root)
+         ;; ENSURE-PATHNAME, not PATHNAME: callers pass a namestring, and
+         ;; PATHNAME would read [ and ] as wildcard syntax, so the SUBPATHP
+         ;; below saw a wild pathname and signalled instead of answering.
+         (subpathp (uiop:ensure-pathname path) root)
+         ;; Native: this is handed to the caller as fs-write-file's path
+         ;; argument, and fs-write-file resolves it natively. NAMESTRING
+         ;; escaped [ and ] for the pathname reader, so the instruction named
+         ;; a path that tool would resolve to a differently-named directory.
          (ignore-errors
-          (namestring (enough-pathname (pathname path) root))))))
+          (native-path-namestring
+           (enough-pathname (uiop:ensure-pathname path) root))))))
 
 (defun %rewrite-whole-file-instruction (path)
   "Return the sentence telling a caller how to rewrite PATH wholesale, or why

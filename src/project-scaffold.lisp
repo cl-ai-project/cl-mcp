@@ -48,13 +48,17 @@ renames rather than a recursive delete. Both share one random suffix so
 that leftovers from a crashed run are traceable to the same call, and so
 that concurrent calls never collide."
   (let* ((suffix (%uuid-suffix))
+         ;; PARSE-UNIX-NAMESTRING on the two caller-supplied strings:
+         ;; ENSURE-DIRECTORY-PATHNAME reads them with the CL pathname reader,
+         ;; so a destination such as "demo[old]" became a wild pathname rather
+         ;; than a directory of that name.
          (dest-dir (uiop:ensure-directory-pathname
                     (merge-pathnames
-                     (uiop:ensure-directory-pathname destination)
+                     (uiop:parse-unix-namestring destination :ensure-directory t)
                      root)))
          (target-dir (uiop:ensure-directory-pathname
                       (merge-pathnames
-                       (uiop:ensure-directory-pathname name)
+                       (uiop:parse-unix-namestring name :ensure-directory t)
                        dest-dir)))
          (temp-dir (uiop:ensure-directory-pathname
                     (merge-pathnames
@@ -118,7 +122,12 @@ recognizable as cl-mcp-owned and therefore still deletable by
 %DELETE-SCAFFOLD-TREE. Caller cleans up TEMP-DIR if any intermediate
 write fails."
   (ensure-directories-exist temp-dir)
-  (let ((temp-relative (enough-namestring temp-dir *project-root*)))
+  ;; Native: this prefix is concatenated into fs-write-file's path argument,
+  ;; and fs-write-file resolves that natively. ENOUGH-NAMESTRING escapes [ and
+  ;; ] for the pathname reader, so under a bracketed project root every file
+  ;; would be written to a directory whose name carries a literal backslash.
+  (let ((temp-relative (native-path-namestring
+                        (uiop:enough-pathname temp-dir *project-root*))))
     (fs-write-file (concatenate 'string temp-relative *scaffold-marker-file*)
                    (scaffold-marker-content name (mapcar #'car plan)))
     (dolist (entry plan)
@@ -266,7 +275,10 @@ underlying error after cleaning up the temp directory."
                  (unless (ignore-errors (%delete-scaffold-tree backup-dir) t)
                    (setf leftover-backup backup-dir)))
                (list :target-dir target-dir
-                     :relative-path (enough-namestring target-dir *project-root*)
+                     ;; Native: reported as the tool's "path" and quoted in
+                     ;; next_steps, both of which a caller feeds back.
+                     :relative-path (native-path-namestring
+                                     (uiop:enough-pathname target-dir *project-root*))
                      :files (mapcar #'car plan)
                      :framework framework
                      :leftover-backup leftover-backup))

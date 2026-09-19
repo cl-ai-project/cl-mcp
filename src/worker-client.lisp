@@ -240,7 +240,12 @@ conflict with per-worker overrides."
                    (format nil "MCP_PARENT_PID=~A" (sb-posix:getpid))
                    "MCP_NO_WORKER_POOL=1")))
     (when *project-root*
-      (push (format nil "MCP_PROJECT_ROOT=~A" (namestring *project-root*))
+      ;; NATIVE-NAMESTRING, paired with the worker's PARSE-UNIX-NAMESTRING in
+      ;; %SETUP-PROJECT-ROOT. NAMESTRING escapes [ and ] for the pathname
+      ;; reader, which only cancelled out while the worker read it back with
+      ;; that same reader; against native parsing it leaves the backslash in
+      ;; the directory name. Change either side and the other must follow.
+      (push (format nil "MCP_PROJECT_ROOT=~A" (uiop:native-namestring *project-root*))
             env))
     ;; Inherit all parent environment variables except those that
     ;; conflict with per-worker overrides set above.

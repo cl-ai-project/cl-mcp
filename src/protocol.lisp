@@ -36,7 +36,8 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/paths
-                #:broad-root-p)
+                #:broad-root-p
+                #:native-path-namestring)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -198,7 +199,13 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                          root-uri)))))
       (when (and root (stringp root) (plusp (length root)))
         (handler-case
-            (let ((root-dir (uiop/pathname:ensure-directory-pathname root)))
+            ;; PARSE-UNIX-NAMESTRING: ENSURE-DIRECTORY-PATHNAME hands a string
+            ;; to the CL pathname reader, which reads [ and ] as wildcard
+            ;; syntax and then signals on the wild result.  The HANDLER-CASE
+            ;; below would swallow that into one log line and let initialize
+            ;; succeed, so a client rooted at project[old]/ would silently
+            ;; keep cl-mcp's own default root.
+            (let ((root-dir (uiop:parse-unix-namestring root :ensure-directory t)))
               (when (uiop/filesystem:directory-exists-p root-dir)
                 (let ((broad-p (broad-root-p root-dir)))
                   (cond
@@ -206,7 +213,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                     ;; Skip root application but continue initialization normally
                     (broad-p
                      (log-event :warn "initialize.sync-root.rejected"
-                                "path" (namestring root-dir)
+                                "path" (native-path-namestring root-dir)
                                 "reason" "too broad"))
                     (t
                      (with-lock-held (*project-root-lock*)
@@ -217,7 +224,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                      (ignore-errors
                        (send-root-to-session-worker *current-session-id* root-dir))
                      (log-event :info "initialize.sync-root" "rootPath"
-                                (namestring root-dir) "source"
+                                (native-path-namestring root-dir) "source"
                                 (if root-path "rootPath" "rootUri")))))))
           (error (e)
             (ignore-errors
