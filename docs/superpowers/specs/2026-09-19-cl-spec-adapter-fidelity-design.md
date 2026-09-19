@@ -41,25 +41,117 @@ versioned record (result-data / function-spec-data) の値
 - 同じ意味の値に対して矛盾しうる 2 つの公開フィールドを作らない。供給元だけ
   差し替え、公開フィールドは 1 つに保つ。
 - 「core 優先」は **どの reader を呼ぶか** の規則であって、2 つの値を実行時に
-  突き合わせて選ぶ規則ではない。`result-data` が読める revision ではその
-  レコードだけを読み、legacy reader は呼ばない。両者が食い違いうる状況を
-  そもそも作らない。
+  突き合わせて選ぶ規則ではない。`result-data` が読める revision では、
+  **同じ semantic fact については** そのレコードだけを読み、legacy reader を
+  呼ばない。両者が食い違いうる状況をそもそも作らない。
 
-## 3. 可用性の四状態
+- **例外（補助 reader）**: versioned record が持たない補助情報を取りにいく
+  legacy reader は使ってよい。ただしその情報で core record の意味を上書き・
+  再分類してはならない。実測で確認した唯一の該当例は live condition object:
 
-`result-data` 由来のサブレコードは、値の代わりに次の `status` を持ちうる。
-Task H が要求する「取得できなかった」と「測定されたゼロ・空」の区別を、
-散文ではなく構造で担保する。
+  ```
+  failure reason        -> result-data が権威
+  condition report      -> result-data が権威（:CONDITION-REPORT は文字列）
+  live condition object -> property-result-condition から補助的に取得し
+                           object_id を付ける（result-data には :condition キー
+                           自体が無い。実測で確認）
+  ```
 
-| status | 意味 |
+  役割分担は `cl-spec record = 過去の証拠` / `live condition object =
+  cl-mcp の inspection hook` であり、semantic authority を壊さない。
+
+- **互換 alias**: 「意味の異なる重複フィールドを新設しない」が原則であって、
+  既存の公開フィールドを互換 alias として残すことは禁じない。ただし alias は
+  **core record を解析した同一の値から生成し**、両者が食い違うことが構造上
+  不可能な形にする。
+
+  ```
+  parsed core record
+       ├── core_result.data.failure_reason   (canonical)
+       └── contract.failure_reason           (compatibility alias)
+  ```
+
+## 3. 可用性（availability）の四状態
+
+`result-data` 由来の情報について、cl-mcp がそれを**取得できたか**を表す。
+
+**`status` という名前は使わない。** cl-spec 自身が `:status`（`:passed` /
+`:failed` / `:error` / `:skipped`）を持っており、同じ key 名にすると
+「cl-spec が実行をどう分類したか」と「MCP がその情報を取得できたか」という
+まったく別の概念が衝突する。前者は `status`、後者は `availability` とし、
+設計書・JSON・コードで統一する。
+
+| availability | 意味 |
 |---|---|
 | `collected` | cl-spec が実測値を返した |
-| `not-collected` | cl-spec が明示的に `:NOT-COLLECTED` を返した（backend が参加しなかった等） |
-| `absent` | この cl-spec の `result-data` にその key が無い（新しい key を知らない revision） |
-| `unavailable` | この cl-spec に `result-data` 自体が無い。adapter は問うことすらできなかった |
+| `not-collected` | cl-spec が明示的に `:NOT-COLLECTED` を返した |
+| `absent` | この cl-spec の `result-data` にその key が無い |
+| `unavailable` | この cl-spec に `result-data` 自体が無い。問うことができなかった |
 
-既知 key を投影したうえで、未知 key は名前だけ `unknown_keys` に載せる。
-未知 key があること自体を adapter のエラーにはしない（Task F / H）。
+### 3.1 形
+
+`core_result` は「MCP 側のメタデータ」と「cl-spec のレコードそのもの」を
+構造的に分ける。`data` は cl-spec の record の純粋な写像であり、MCP が足した
+key は一つも入らない。
+
+```json
+"core_result": {
+  "availability": "collected",
+  "field_availability": {
+    "failure_phase": "collected",
+    "shrink_report": "not-collected",
+    "case_report": "collected"
+  },
+  "data": {
+    "status": "passed",
+    "failure_phase": null,
+    "shrink_report": null,
+    "case_report": { "declared_cases": [...], "never_called": [...] }
+  }
+}
+```
+
+サブレコードごとに wrapper を付けることはしない。`shrink_report` が
+`:NOT-COLLECTED` のときは `data.shrink_report` が `null`、
+`field_availability.shrink_report` が `"not-collected"` になる。
+
+### 3.2 scalar の present-NIL と absent
+
+`(getf plist :failure-phase)` は「key が無い」と「key があって値が NIL」を
+区別できない。`:failure-phase` の NIL は
+**「通常の target observation であり特殊な phase は無い」という正当な実測値**
+であって、古い revision に key が無いのとは別物である。
+
+したがって `field_availability` の判定には `getf` を使わず、`get-properties`
+（cl-mcp が `%optional-bool` と `definition-digest` で既に使っている手法）か
+sentinel を使う。
+
+```lisp
+(let ((found (get-properties record '(:failure-phase))))
+  (if found :collected :absent))
+```
+
+これは §3 で掲げた区別を scalar フィールドでも実際に成立させるための要件で
+あって、飾りではない。回帰テストを 1 件立てる（§12）。
+
+### 3.3 `result-data` の呼び出しが失敗した場合
+
+四状態のどれでもない第五の状態として扱う。
+
+| 状況 | 扱い |
+|---|---|
+| `RESULT-DATA` シンボルが無い / fbound でない | `availability: unavailable` + legacy fallback |
+| シンボルはあり、呼んだら condition が飛んだ | **`internal-error`。legacy fallback しない** |
+
+後者を `unavailable` にしたり legacy へ落としたりしてはならない。
+「問うことができなかった」のではなく「問えたが API 呼び出しが壊れた」で
+あり、signature mismatch のような不具合を「旧 reader で何となく応答できた」
+状態に隠してしまう。`%contract-plist` の `read-slot` が既に
+「名前が解決できたか」と「呼び出しが成功したか」を分けており、その思想の
+延長である。
+
+既知の前方互換レコード内の未知 key は adapter を失敗させない。既知 key を
+投影したうえで、未知 key は名前だけ `unknown_keys` に載せる（Task F / H）。
 
 ## 4. Task A — `spec-describe kind=function-spec`
 
@@ -70,11 +162,22 @@ Task H が要求する「取得できなかった」と「測定されたゼロ�
 | `:name` `:documentation` | あり | 変更なし | — | — |
 | `arguments[].variable` | あり | 変更なし | `symbol_data` | — |
 | `arguments[].spec` | あり | 変更なし | `%spec-tree` | — |
-| `arguments[].kind` | **欠落** | `arguments[].kind` | keyword→string | key 無し→`null` |
+| `arguments[].kind` | **欠落** | `arguments[].kind` | keyword→string、**absent は `"required"` に正規化** | 非対応 revision は `null` |
 | `arguments[].supplied-p` | **欠落** | `arguments[].supplied_p` | `symbol_data` | `null` |
 | `arguments[].keyword` | **欠落** | `arguments[].keyword` | keyword→string | `null` |
 | `:argument-generator` | **欠落** | `argument_generator` | `symbol_data` | `null` |
 | `:argument-schema` | **欠落** | `argument_schema` | `%spec-tree` | `null` |
+
+`function-spec-data` は required 引数について `:kind` を**省略する**
+（`(unless (eq :required (argument-binding-kind binding)) ...)`。実測でも
+required 引数のエントリに `:KIND` は無い）。つまり現行 v1 では
+**key の欠落は `:required` を意味する**。
+
+そのまま `null` にすると、LLM から見て「required なのか」「古い revision で
+kind 情報が無いのか」が区別できない。したがって:
+
+- レコードが v1（`:schema-version` が 1）で `:kind` が無い → `"required"` に正規化
+- `:kind` フィールド自体を持たない非対応 revision と判定 → `null`
 
 `%spec-tree` は現在 `spec->data` ノードの `:generator` を落としている。実測では
 `:argument-schema` の tuple ノードが
@@ -126,26 +229,33 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 | `:name` | 引数 `name` から | 変更なし | — |
 | `:status` | legacy `property-result-status` | `results[].status`（core 優先） | legacy reader |
 | `:trials` | legacy `property-result-trials` | `results[].trials.executed`（core 優先） | legacy reader |
-| `:budget` | **欠落**（`%trials-budget` で再導出） | `results[].trials.budget` + `core_result.budget` | `%recorded-budget` → `%trials-budget` |
-| `:rejected` | `contract.rejected`（legacy reader） | 同 field（core 優先）+ `core_result.rejected` | legacy reader |
+| `:budget` | **欠落**（`%trials-budget` で再導出） | `results[].trials.budget` + `core_result.data.budget` | `%recorded-budget` → `%trials-budget` |
+| `:rejected` | `contract.rejected`（legacy reader） | 同 field（core 優先）+ `core_result.data.rejected` | legacy reader |
 | `:seed` | legacy reader | `results[].seed`（core 優先） | legacy reader |
 | `:profile` | legacy reader | `results[].profile`（core 優先） | legacy reader |
-| `:options` | **欠落**（常に `options: null` + note） | `core_result.options` | `{status:"unavailable"}` |
-| `:provenance` | **欠落** | `core_result.provenance` | `{status:"unavailable"}` |
+| `:options` | **欠落**（常に `options: null` + note） | `core_result.data.options` | `field_availability: unavailable` |
+| `:provenance` | **欠落** | `core_result.data.provenance` | `field_availability: unavailable` |
 | `:counterexample` | legacy reader | `results[].counterexample`（core 優先） | legacy reader |
 | `:shrunk-counterexample` | legacy reader | `results[].shrunk_counterexample`（core 優先） | legacy reader |
-| `:shrunk-outcome` | **欠落** | `core_result.shrunk_outcome` | `null` |
-| `:shrink-report` | **欠落** | `core_result.shrink_report` | `{status:"unavailable"}` |
-| `:generation-report` | **欠落** | `core_result.generation_report` | `{status:"unavailable"}` |
-| `:failure-phase` | **欠落** | `core_result.failure_phase` | `null` |
-| `:failure-reason` | `contract.failure_reason`（legacy reader） | 同 field（core 優先）+ `core_result.failure_reason` | legacy reader |
-| `:case-report` | **欠落** | `core_result.case_report` | `{status:"unavailable"}` |
-| `:failure` | **欠落** | `core_result.failure` | `null` |
-| `:shrunk-failure` | **欠落** | `core_result.shrunk_failure` | `null` |
+| `:shrunk-outcome` | **欠落** | `core_result.data.shrunk_outcome` | `null` + `field_availability` で absent/unavailable を区別 |
+| `:shrink-report` | **欠落** | `core_result.data.shrink_report` | `field_availability: unavailable` |
+| `:generation-report` | **欠落** | `core_result.data.generation_report` | `field_availability: unavailable` |
+| `:failure-phase` | **欠落** | `core_result.data.failure_phase` | `null` + `field_availability` で absent/unavailable を区別 |
+| `:failure-reason` | `contract.failure_reason`（legacy reader） | 同 field（core 優先）+ `core_result.data.failure_reason` | legacy reader |
+| `:case-report` | **欠落** | `core_result.data.case_report` | `field_availability: unavailable` |
+| `:failure` | **欠落** | `core_result.data.failure` | `null` + `field_availability` で absent/unavailable を区別 |
+| `:shrunk-failure` | **欠落** | `core_result.data.shrunk_failure` | `null` + `field_availability` で absent/unavailable を区別 |
 | `:elapsed` | legacy reader | `results[].elapsed`（core 優先） | legacy reader |
 
-`core_result` 自身も `status` を持ち、`result-data` が無い revision では
-`{status:"unavailable"}` ひとつになる。
+`core_result.data` は上表の右列を cl-spec の綴りのまま snake_case にした純粋な
+写像である。既存の `results[].status` / `.trials.budget` / `.seed` /
+`contract.rejected` / `contract.failure_reason` などは**互換 alias**として残り、
+§2 のとおり `data` と同じ解析済み値から生成する。両者が食い違うことは構造上
+起こらない。
+
+`result-data` が無い revision では `core_result` は
+`{"availability": "unavailable", "field_availability": null, "data": null}` に
+なり、既存フィールドは legacy reader から埋まる。
 
 ### 5.1 `case_report`（Task C）
 
@@ -166,14 +276,43 @@ cl-spec の `case-run-report` をそのまま写す。
 
 ### 5.2 `generation_report`（Task E）
 
-`generation-request-report` の 13 key をそのまま写す。
+`generation-request-report` の top-level 14 key をそのまま写す。
 
 `scope` / `unit` / `policy` / `budget` / `budget_source` / `default_coefficient` /
 `requested_values` / `generated_values` / `attempts` / `rejections` /
 `phases.generation.{attempts,rejections}` / `phases.shrinking.{attempts,rejections}` /
 `termination` / `exhaustion_phase` / `exhausted_at`
 
-`termination` が `completed` 以外のときは検証未完了として扱う（後述 5.5）。
+**`termination != completed` を一律「検証未完了」と読まない。** generation
+フェーズと shrinking フェーズは別物であり、このレポートは両方の attempt を
+数えている。
+
+```
+:PHASES (:GENERATION (...) :SHRINKING (...))
+:TERMINATION :BUDGET-EXHAUSTED
+:EXHAUSTION-PHASE :GENERATION | :SHRINKING
+```
+
+`exhaustion-phase = :shrinking` は「target を呼び、契約違反を見つけ、反例は
+確立済みで、その反例を縮小している途中で予算が尽きた」状態でありうる。
+このとき未完了なのは**反例をどこまで縮小できたか**であって、検証そのもの
+ではない。「この契約は破られている」という判断は既に確定している。
+
+したがって判定は cl-spec が既に持つ `failure_phase` を権威とする。
+
+| 核となる値 | 意味 | verification gap か |
+|---|---|---|
+| `failure_phase = generation` | 検証対象へ十分到達できなかった | **はい**（`generation-incomplete`） |
+| `generation_report.exhaustion_phase = generation` | generation 側の未完了 | 上と同時に立つのでそちらで表す |
+| `generation_report.exhaustion_phase = shrinking` | 反例縮小の未完了 | **いいえ**。既存の failure evidence は有効 |
+| `shrink_report.termination != completed` | 縮小品質の問題 | **いいえ**。元の failure を無効化しない |
+
+generation フェーズの枯渇では cl-spec 自身が `:status :error` /
+`:failure-reason :generation-budget-exhausted` / `:failure-phase :generation`
+を返す（`src/backends/check-it.lisp` で確認）ので、`verified` は通常どおり
+false になる。adapter が termination から verification status を再推論しすぎ
+ないほうが §2 の中核ルールとも整合する。
+
 生成予算の枯渇は、仕様が充足不能である証拠でも target 実装が誤っている証拠でも
 ない。target の失敗に翻訳しない。
 
@@ -218,14 +357,20 @@ counterexample」と描画しない。両者は別のことを言っている。
 
   | gap | 出す条件 |
   |---|---|
-  | `cases-never-called` | `case_report.status` が `collected` かつ `never_called` が非空 |
-  | `case-coverage-unknown` | 契約が `:cases` を宣言している（`%contract-facts` が `function-spec-data` から読めた）のに `case_report.status` が `collected` でない |
-  | `generation-incomplete` | `generation_report.status` が `collected` かつ `termination` が `completed` 以外 |
+  | `cases-never-called` | `field_availability.case_report` が `collected` かつ `never_called` が非空 |
+  | `case-coverage-unknown` | 契約が `:cases` を宣言している（`%contract-facts` が `function-spec-data` から読めた）のに `field_availability.case_report` が `collected` でない |
+  | `generation-incomplete` | `data.failure_phase` が `generation` |
 
   `cases-never-called` と `case-coverage-unknown` は contract 実行にのみ
   適用する。property 実行には case も `case_report` も無いので出さない。
   `generation-incomplete` は property 実行にも適用する — property も生成
   予算を使い切りうる。
+
+  **gap にしないもの**: `generation_report.exhaustion_phase = shrinking` と
+  `shrink_report.termination != completed`。どちらも反例は確立済みで、
+  未完了なのは縮小だけである（§5.2）。テキストには
+  「failure established, shrinking incomplete」として出すが、
+  `verification_gaps` には入れないし `verified` も動かさない。
 
   `function-spec-data` 自体が読めなかったとき（`%contract-facts` の
   `:known nil`）は `case-coverage-unknown` を出さない。契約が case を
@@ -249,11 +394,49 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:reason` | `reason` | keyword→string |
 | `:signature` | `signature` | 有界 form |
 | `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
-| `:outcome` | `target_outcome` | keyword→string |
+| `:outcome` | `target_outcome` | **構造化オブジェクト**（後述） |
 | `:value` | `primary_value` | `externalize-value` |
 | `:case` | `selected_case` | keyword→string |
 | `:condition-report` | `condition_report` | 文字列（有界） |
 | `:state` | `state`（下記） | — |
+
+### 6.1 `target_outcome` は keyword ではない
+
+実測（target が呼ばれた失敗）:
+
+```lisp
+(:KIND :RETURNED :VALUES (0))     ; type-of => CONS
+```
+
+target が呼ばれていない場合（実測: case-selection error）:
+
+```lisp
+:NOT-COLLECTED
+```
+
+signal した場合は `(:KIND :SIGNALED :CONDITION-TYPE ... :CONDITION-REPORT ...)`。
+`call-outcome` 構造体の reader（`CALL-OUTCOME-KIND` 等）は **CL-SPEC から
+export されていない**（実測で確認）ので、この plist を読む以外の経路は無い。
+
+```json
+"target_outcome": { "kind": "returned", "values": [...] }
+"target_outcome": { "kind": "signaled",
+                    "condition_type": "...", "condition_report": "..." }
+"target_outcome": { "kind": "not-collected" }
+```
+
+**これが今回もっとも保存したい情報である。** `kind` が `not-collected` で
+ないことが「target が実際に呼ばれた」ことの**核となる事実**であり、
+adapter 側の推論ではない。したがって
+
+```
+failure_phase   = state-post
+target_outcome.kind = returned
+```
+
+から「target は正常に返り、状態契約だけが失敗した」が機械的に決まる。
+
+### 6.2 `explanation` は plist
 
 `:explanation` は文字列ではなく plist である。実測（case-selection error）:
 
@@ -280,6 +463,23 @@ state.capture    = {status, declared[], values[], error{binding,index,condition_
 state.state_post = {status, reason, case, index, form, condition_type}
    status: not-evaluated | passed | violation | error
 ```
+
+### 6.3 cl-spec が「凍結できなかった」と言った捕捉値
+
+`project-capture-value` は、スナップショットが同一性で保持してしまう値
+（CLOS インスタンス、構造体、ハッシュテーブル、関数など）を
+
+```lisp
+(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)
+```
+
+として投影する。これは「この値は証拠として凍結できなかった」という
+**cl-spec 側の明示的な宣言**である。
+
+cl-mcp がこれをさらに `externalize-value` にかけて `object_id` を付けると、
+「そのオブジェクトを証拠として取得できた」ように見えてしまう。マーカーを
+検出して、そのまま unavailable として通す。`object_id` を付けない。
+テストを 1 件立てる（§12）。
 
 これにより
 
@@ -333,12 +533,27 @@ per-result ブロックに追加する行（値があるときだけ出す）:
 | `%trials-budget` の `:property-trials` / `:backend-default` | ① 必要 | cl-spec は出さない |
 | `%recorded-budget`（`function-check-result-budget`） | ② legacy fallback | |
 | `shrink_status` の空リスト推論 | ② legacy fallback | `shrink_report` / `shrunk_outcome` が優先 |
-| `counterexample_status` の argument-count 推論 | ② legacy fallback | `core_result.failure` の有無が直接答える |
+| `counterexample_status` の argument-count 推論 | ② legacy fallback | 下記のとおり `failure` の有無だけでは答えられない |
 | `contract.rejected` / `contract.failure_reason` の legacy reader | ② legacy fallback | |
 | `rejection_status` の三値判定（overcount / contradicted / negative） | ① 必要 | cl-spec は「この計数が信用できるか」を言わない |
 | `contract.explanation`（`property-result-explanation`） | ① 必要 | cl-spec 側で reason フィルタ済みの選択値。observation の生 explanation は `core_result.failure.explanation` に別途出す |
 | `environment`（現 image の backend / registry） | ① 必要 | `provenance` とは別の問い。上書きしない |
 | `%verification-gaps` / `%verified-p` | ① 必要 | cl-mcp 側の「これは証拠か」判定 |
+
+**`counterexample_status` と failure evidence を混同しない。** failure
+observation は必ずしも target の反例ではない。capture error と
+case-selection error も failure observation を持ち、そのとき target は
+一度も呼ばれていない。実測では case-selection error でも
+`:COUNTEREXAMPLE (BALANCE 5 AMOUNT 5)` が入る。
+
+これを LLM が「この入力で関数が失敗した」と読むと、まさに本タスクが防ごうと
+している誤編集につながる。したがって
+
+- `counterexample_status` は従来どおり「反例の値が取れたか」だけを言う
+- 「target が呼ばれたか」は `core_result.data.failure.target_outcome.kind`
+  が `not-collected` でないことで答える（§6.1。core の事実であって
+  adapter の推論ではない）
+- テキストは `failure phase:` 行でどちらなのかを明示する（§7）
 
 ③（陳腐化・削除可）に分類したものは無い。互換性のための fallback を整理目的で
 消さない。
@@ -348,8 +563,9 @@ per-result ブロックに追加する行（値があるときだけ出す）:
 ## 9. 後方互換
 
 - `result-data` が無い revision: 既存の legacy reader 経路をそのまま残す。
-  `core_result` は `{status:"unavailable"}` になり、各サブレコードは
-  「未対応・未収集・不明」を明示する。現行 core の事実を合成しない。
+  `core_result` は `{"availability": "unavailable", "field_availability": null,
+  "data": null}` になり、既存フィールドは legacy reader から埋まる。
+  現行 core の事実を合成しない。
 - `result-data` はあるが新しい key が無い revision: その key だけ `absent` と
   し、レコード全体を拒否しない。
 - 既知の前方互換レコード内の未知 key は adapter を失敗させない。
@@ -428,9 +644,26 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 7. `result-data` はあるが新しい key を持たない revision — 該当 key だけ
    `absent` となり、レコード全体は拒否されないこと。
 
+8. **present-NIL と absent の分離** — `:failure-phase` が key として存在し
+   値が NIL の record と、key 自体が無い record で `field_availability` が
+   `collected` / `absent` に分かれること。§3.2 の最重要回帰テスト。
+9. **`result-data` はあるが呼ぶと signal する** — legacy fallback せず
+   `internal-error` になること（§3.3）。
+10. **live condition object の維持** — 現行 cl-spec 経路でも既存の
+    `condition.object_id` が失われないこと（§2 の補助 reader 例外）。
+11. **不透明な捕捉値** — cl-spec が
+    `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...)` を返したとき、
+    `object_id` を付けず unavailable のまま通ること（§6.3）。
+
 ### builder（`tests/spec-response-builders-test.lisp`）
 
-テキストと JSON の不一致を禁止するアサーション（§7 の 3 パターン）。
+テキストと JSON の不一致を禁止するアサーション（§7 の 3 パターン）に加えて:
+
+12. **shrinking 中の生成予算枯渇** — 反例は確立済みで
+    `generation_report.termination = budget-exhausted` /
+    `exhaustion_phase = shrinking` のとき、「verification incomplete」と
+    表示せず「failure established, shrinking incomplete」と表示すること。
+    `verification_gaps` にも入らないこと（§5.2 / §5.5）。
 
 ## 13. 非目標
 
