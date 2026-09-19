@@ -1315,3 +1315,44 @@ stub fixture（旧 revision 相当）での結果の双方を報告する。
 
 1. Task A（`spec-describe kind=function-spec` の忠実化）
 2. Task B〜J（`spec-check` の `result-data` 透過）+ 統合テスト + docs
+
+---
+
+## 16. 積み残し（マージ後の追補候補）
+
+実装とレビューを通じて記録された、マージを妨げないが将来の作業に値する項目。
+最終の全ブランチレビューが「ship」と判定したもののうち、根拠のあるものだけを残す。
+
+**cl-spec 側の表現について**（`docs/cl-spec-adapter-feedback.md` §7.2 に送付済み）
+
+- 凍結不能値のマーカー `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE X)` は素の
+  plist なので、テスト対象コードから出た同形のドメイン値と区別できない。
+  どんな認識器もパターンマッチであり誤検知しうる。構造体か予約された
+  uninterned マーカーなら消費側が確実に判定できる。
+- `CALL-OUTCOME` の reader が `CL-SPEC` から export されていないため、
+  observation の target outcome は `OBSERVATION-DATA` の plist 経由でしか
+  読めない。
+
+**cl-mcp 側**
+
+- `%format-core-evidence` の state-post 行は宣言された `:form` を
+  `princ-to-string` する。テスト対象コードの値ではなく著者が書いた source form
+  なので C2 とは種類が違うが、`with-display-printing` の `*print-level*` /
+  `*print-length*` を掛ければ `max_chars` を builder に通さずとも非停止の
+  リスクは消える。check テキストで唯一残る無制限印字。
+- `%strings`（`src/tools/spec-response-builders.lisp`）も同じ無防備な形。
+  シンボルや語のリストしか流れないので C2 の実例ではない。
+- builder 層の fixture は統合層の `%ok-core-record-read-whole` のような
+  実レコード照合を持たない。`%state-post-check-report` の `:shrunk-outcome nil`
+  は、実際の `:state-restoration-unavailable` run が記録する `:none` と
+  一歩ずれている。
+- alist / pairs の **名前**に `char-limit` が立つと、その値に立ったものと
+  同じ path を報告する。
+
+**このブランチが得た、次のアダプタ作業への規則**
+
+shape の記述は、cl-spec の構築サイトの `file:line` を添えて書く。そして
+統合スイートは `unknown_keys` が空であることと `projection.complete` が真で
+あることを毎シナリオで検証する。**shape と stub が同じ仮定で書かれていれば、
+両方誤っていても緑になる。実レコードだけが反論する。** このブランチは同じ型の
+欠陥を 3 回出し、いずれも導入から 4 タスク後に統合テストで初めて表面化した。
