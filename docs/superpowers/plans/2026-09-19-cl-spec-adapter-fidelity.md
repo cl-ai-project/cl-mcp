@@ -2498,7 +2498,7 @@ text "target failed"                    json failure_phase = "generation"
     (ok (search "target WAS called" text))
     (ok (search "captured:" text))
     (ok (search "BALANCE-BEFORE" text))
-    (ok (search "state-post: violated" text))))
+    (ok (search "state-post: violation" text))))
 
 (deftest an-ordinary-property-is-never-told-its-body-was-not-called
   ;; §12 case 14.  A property's observation records no target outcome, so

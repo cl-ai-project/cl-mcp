@@ -997,7 +997,7 @@ per-result ブロックに追加する行（値があるときだけ出す）:
     failure phase: state-post -- the target WAS called; the contract's
                    state-post clause is what failed
     captured: balance-before = 100
-    state-post: violated at form 0 -- (= (balance a) (- $before amount))
+    state-post: violation at form 0 -- (= (balance a) (- $before amount))
     generation: budget-exhausted in the generation phase (4000 of 4000
                 candidates) -- verification did NOT complete
     shrinking: not attempted -- state-restoration-unavailable
