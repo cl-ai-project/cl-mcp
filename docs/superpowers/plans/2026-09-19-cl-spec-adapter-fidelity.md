@@ -311,7 +311,8 @@ error datum settles it: `:actual` is a value from the code under test and
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/spec-core-record-test.lisp`, and extend its `:import-from` for
-`#:project-record` and `#:*projection-max-length*`:
+`#:project-record`, `#:*projection-max-depth*` and `#:*projection-max-length*`
+(the depth case below binds the first of those):
 
 ```lisp
 (deftest object-descriptor-projects-only-declared-keys
@@ -458,7 +459,7 @@ UNKNOWN-KEYS."
              (cond
                ((eq :leaf descriptor) (project-value value))
                ((eq :opaque descriptor) (list :value (externalize-value value)))
-               ((> depth *projection-max-depth*)
+               ((>= depth *projection-max-depth*)
                 (push (list :path (reverse path) :reason :depth-limit) issues)
                 (list :value (externalize-value value)))
                ((eq :word-list descriptor)
