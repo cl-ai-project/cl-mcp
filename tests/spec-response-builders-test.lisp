@@ -1011,3 +1011,58 @@ the result says which."
                               :failure-reason-readable t)))))
       (ok (search "broken half: postcondition" text))
       (ok (not (search "contract's own code" text))))))
+
+(deftest describe-response-carries-cases-in-json-and-text
+  (let* ((report
+           (list :status :ok :kind "function-spec"
+                 :name (%symbol-data "PROBE" "WITHDRAW")
+                 :arguments (list (list :variable (%symbol-data "PROBE" "AMOUNT")
+                                        :spec (list :kind :type :type "INTEGER")
+                                        :kind :key
+                                        :supplied-p (%symbol-data "PROBE" "AMOUNT-P")
+                                        :keyword :amount))
+                 :case-selection :exclusive
+                 :cases (list (list :name :sufficient-funds
+                                    :documentation "It fits."
+                                    :guard "(<= AMOUNT BALANCE)"
+                                    :guard-complete t
+                                    :outcome :returns
+                                    :returns (list :kind :type :type "INTEGER")
+                                    :postconditions "(= RESULT 1)"
+                                    :postconditions-complete t)
+                              (list :name :insufficient-funds
+                                    :guard "(> AMOUNT BALANCE)"
+                                    :guard-complete t
+                                    :outcome :signals
+                                    :signals (list :kind :type
+                                                   :type "INSUFFICIENT-FUNDS")
+                                    :postconditions-complete :not-applicable))
+                 :capture (list (list :name (%symbol-data "PROBE" "BALANCE-BEFORE")
+                                      :form "(ACCOUNT-BALANCE ACCOUNT)"
+                                      :form-complete t))
+                 :state-post "(= (ACCOUNT-BALANCE ACCOUNT) 0)"
+                 :environment *environment*))
+         (response (build-spec-describe-response report))
+         (text (first-text response)))
+    (testing "the JSON carries the ordered cases"
+      (let ((cases (gethash "cases" response)))
+        (ok (= 2 (length cases)))
+        (ok (equal "sufficient-funds" (gethash "name" (aref cases 0))))
+        (ok (equal "returns" (gethash "outcome" (aref cases 0))))
+        (ok (equal "signals" (gethash "outcome" (aref cases 1))))))
+    (testing "the argument keeps its kind and keyword in JSON"
+      (let ((argument (aref (gethash "arguments" response) 0)))
+        (ok (equal "key" (gethash "kind" argument)))
+        (ok (equal "amount" (gethash "keyword" argument)))
+        (ok (equal "AMOUNT-P" (gethash "name" (gethash "supplied_p" argument))))))
+    (testing "the text shows them too -- a client renders only this"
+      ;; %FORMAT-DESCRIBE-TEXT prints "cases (EXCLUSIVE selection):", naming
+      ;; the case-selection mode rather than a bare "cases:" label -- so this
+      ;; also confirms :CASE-SELECTION reached the text.
+      (ok (search "cases (exclusive selection):" text))
+      (ok (search "sufficient-funds" text))
+      (ok (search "insufficient-funds" text))
+      (ok (search "capture:" text))
+      (ok (search "BALANCE-BEFORE" text))
+      (ok (search "state-post:" text))
+      (ok (search "&key" text)))))

@@ -315,6 +315,7 @@ system defining them may simply not be loaded.")
              "max" (getf data :max)
              "class_name" (%symbol-ht (getf data :class-name))
              "source_form" (getf data :source-form)
+             "generator" (%symbol-ht (getf data :generator))
              "children" (coerce (mapcar #'%spec-tree-ht (getf data :children))
                                 'vector))))
 
@@ -419,13 +420,17 @@ to see the rest.~@[ ~A~]"
     (when (getf report :arguments)
       (format stream "~&~%arguments:")
       (dolist (argument (getf report :arguments))
-        (let ((spec (getf argument :spec))
-              (name (getf (getf argument :variable) :name)))
+        (let* ((spec (getf argument :spec))
+               (kind (getf argument :kind))
+               (name (format nil "~@[~A ~]~A~@[ [supplied-p ~A]~]"
+                             (case kind
+                               (:optional "&optional")
+                               (:key "&key")
+                               (:rest "&rest")
+                               (t nil))
+                             (getf (getf argument :variable) :name)
+                             (getf (getf argument :supplied-p) :name))))
           (if spec
-              ;; The node itself, not its children: the bounds, member values
-              ;; and base type live on the argument's own spec, and rendering
-              ;; only the children dropped exactly the half of a contract the
-              ;; tool promises -- which inputs it accepts.
               (%format-spec-node stream spec 0 name)
               (format stream "~&  ~A" name)))))
     ;; Cut and reported, like the body and the source form below.  A silently
@@ -441,6 +446,38 @@ to see the rest.~@[ ~A~]"
     (when (getf report :postconditions)
       (format stream "~&~%:post ~A" (getf report :postconditions))
       (%report-cut stream report :postconditions-complete :postconditions-omitted-chars))
+    ;; The lambda list as declared.  An argument rendered without its kind
+    ;; reads as positional, and a caller building a call from this description
+    ;; would pass a keyword argument by position.
+    (let ((signals (getf report :signals)))
+      (when signals
+        (format stream "~&~%signals:")
+        (%format-spec-node stream signals 0)))
+    (when (getf report :capture)
+      (format stream "~&~%capture:")
+      (dolist (binding (getf report :capture))
+        (format stream "~&  ~A = ~A"
+                (getf (getf binding :name) :name) (getf binding :form))))
+    (when (getf report :state-post)
+      (format stream "~&~%state-post: ~A" (getf report :state-post)))
+    (when (getf report :cases)
+      (format stream "~&~%cases (~A selection):"
+              (string-downcase (princ-to-string (getf report :case-selection))))
+      (dolist (case (getf report :cases))
+        (format stream "~&  ~A~@[ -- ~A~]"
+                (string-downcase (princ-to-string (getf case :name)))
+                (getf case :documentation))
+        (format stream "~&    when:  ~A" (getf case :guard))
+        (let ((outcome (getf case :outcome)))
+          (if (eq :signals outcome)
+              (progn (format stream "~&    signals:")
+                     (%format-spec-node stream (getf case :signals) 2))
+              (progn (format stream "~&    returns:")
+                     (%format-spec-node stream (getf case :returns) 2))))
+        (when (getf case :postconditions)
+          (format stream "~&    :post  ~A" (getf case :postconditions)))
+        (when (getf case :state-post)
+          (format stream "~&    state-post: ~A" (getf case :state-post)))))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -502,6 +539,71 @@ preconditions_complete.  Absent has to reach the consumer as null."
                         "instrumentation" (%keyword-string
                                            (getf capabilities :instrumentation)))))))
 
+(defun %projected-ht (node)
+  "Render one projection node from the record layer as JSON-ready data.
+
+The node carries its own kind, so this never has to tell a symbol plist from an
+externalized-value plist by looking for one of their keys."
+  (when node
+    (ecase (first node)
+      (:scalar (second node))
+      (:symbol (%symbol-ht (second node)))
+      (:value (%value-ht (second node)))
+      (:array (coerce (mapcar #'%projected-ht (second node)) 'vector))
+      (:object (let ((table (make-hash-table :test #'equal)))
+                 (loop for (key . child) in (second node)
+                       do (setf (gethash key table) (%projected-ht child)))
+                 table)))))
+
+(defun %projection-issue-ht (issue)
+  "Render one projection loss: where it happened, why, and how much was dropped."
+  (make-ht "path" (coerce (mapcar #'princ-to-string (getf issue :path)) 'vector)
+           "reason" (%keyword-string (getf issue :reason))
+           "omitted_items" (getf issue :omitted-items)))
+
+(defun %core-record-ht (report)
+  "Render a versioned cl-spec record and what cl-mcp knows about carrying it.
+
+DATA is the record; everything beside it is transport metadata.  Keeping them
+apart is what lets a reader ask whether a short list is short or was cut."
+  (when report
+    (make-ht "availability" (%keyword-string (getf report :availability))
+             "schema_supported" (json-bool (getf report :schema-supported))
+             "schema_version" (getf report :schema-version)
+             "field_availability"
+             (let ((table (make-hash-table :test #'equal)))
+               (loop for (key availability) on (getf report :field-availability)
+                       by #'cddr
+                     do (setf (gethash (substitute #\_ #\- (string-downcase
+                                                            (symbol-name key)))
+                                       table)
+                              (%keyword-string availability)))
+               table)
+             "unknown_keys" (coerce (getf report :unknown-keys) 'vector)
+             "projection"
+             (let ((projection (getf report :projection)))
+               (make-ht "complete" (json-bool (getf projection :complete))
+                        "issues" (coerce (mapcar #'%projection-issue-ht
+                                                 (getf projection :issues))
+                                         'vector)))
+             "data" (%projected-ht (getf report :data)))))
+
+(defun %case-ht (case)
+  "Render one named case of a Function Spec."
+  (make-ht "name" (%keyword-string (getf case :name))
+           "documentation" (sanitize-for-json (getf case :documentation))
+           "guard" (sanitize-for-json (getf case :guard))
+           "guard_complete" (%optional-bool case :guard-complete)
+           "guard_omitted_chars" (getf case :guard-omitted-chars)
+           "outcome" (%keyword-string (getf case :outcome))
+           "returns" (%spec-tree-ht (getf case :returns))
+           "signals" (%spec-tree-ht (getf case :signals))
+           "postconditions" (sanitize-for-json (getf case :postconditions))
+           "postconditions_complete" (%optional-bool case :postconditions-complete)
+           "postconditions_omitted_chars" (getf case :postconditions-omitted-chars)
+           "post_value_variables" (%symbol-hts (getf case :post-value-variables))
+           "state_post" (sanitize-for-json (getf case :state-post))))
+
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
   (case (getf report :status)
@@ -526,11 +628,37 @@ preconditions_complete.  Absent has to reach the consumer as null."
                                 (make-ht "variable"
                                          (%symbol-ht (getf argument :variable))
                                          "spec"
-                                         (%spec-tree-ht (getf argument :spec))))
+                                         (%spec-tree-ht (getf argument :spec))
+                                         "kind" (%keyword-string
+                                                 (getf argument :kind))
+                                         "supplied_p"
+                                         (%symbol-ht (getf argument :supplied-p))
+                                         "keyword" (%keyword-string
+                                                    (getf argument :keyword))))
                               (getf report :arguments))
                       'vector)
               "spec" (%spec-tree-ht (getf report :spec))
               "returns" (%spec-tree-ht (getf report :returns))
+              "argument_generator" (%symbol-ht (getf report :argument-generator))
+              "argument_schema" (%spec-tree-ht (getf report :argument-schema))
+              "signals" (%spec-tree-ht (getf report :signals))
+              "post_value_variables" (%symbol-hts
+                                      (getf report :post-value-variables))
+              "capture"
+              (coerce (mapcar (lambda (binding)
+                                (make-ht "name" (%symbol-ht (getf binding :name))
+                                         "form" (sanitize-for-json
+                                                 (getf binding :form))
+                                         "form_complete" (%optional-bool
+                                                          binding :form-complete)
+                                         "form_omitted_chars"
+                                         (getf binding :form-omitted-chars)))
+                              (getf report :capture))
+                      'vector)
+              "state_post" (sanitize-for-json (getf report :state-post))
+              "case_selection" (%keyword-string (getf report :case-selection))
+              "cases" (coerce (mapcar #'%case-ht (getf report :cases)) 'vector)
+              "core_record" (%core-record-ht (getf report :core-record))
               "preconditions" (sanitize-for-json (getf report :preconditions))
               "preconditions_complete" (%optional-bool report :preconditions-complete)
               "preconditions_omitted_chars" (getf report

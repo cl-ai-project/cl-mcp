@@ -52,7 +52,20 @@
     (let ((node (project-value (make-hash-table))))
       (ok (eq :value (first node)))
       (ok (stringp (getf (second node) :printed)))
-      (ok (equal "hash-table" (getf (second node) :type))))))
+      (ok (equal "hash-table" (getf (second node) :type)))))
+  (testing "cl-spec's own can-not-freeze-this marker is kept as data, not
+externalized -- externalizing it would assign an object id to the marker
+list itself rather than to the value cl-spec said it could not freeze"
+    (let ((node (project-value (list :unavailable :reason :opaque-value
+                                     :type :hash-table))))
+      (ok (eq :object (first node)))
+      (let ((fields (second node)))
+        (ok (equal '(:scalar t)
+                   (cdr (assoc "unavailable" fields :test #'equal))))
+        (ok (equal '(:scalar "opaque-value")
+                   (cdr (assoc "reason" fields :test #'equal))))
+        (ok (equal '(:scalar "hash-table")
+                   (cdr (assoc "type" fields :test #'equal))))))))
 
 (deftest object-descriptor-projects-only-declared-keys
   (let ((shape '(:object (:kind . :leaf) (:index . :leaf))))
