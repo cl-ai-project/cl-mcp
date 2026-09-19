@@ -341,7 +341,7 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 | `:postconditions` | あり | 変更なし | 有界 form | — |
 | `:post-value-variables` | **欠落** | `post_value_variables` | `symbol_data[]` | `null` |
 | `:capture` | **欠落** | `capture[]` = `{name, form, form_complete, form_omitted_chars}` | 有界 form | `null` |
-| `:state-post` | **欠落** | `state_post` + `state_post_complete` / `_omitted_chars` | 有界 form | `null` |
+| `:state-post` | **欠落** | `state_post` + `state_post_complete` / `_omitted_chars` | 有界 form。**複数節は `(and ...)` に畳む** | `null` |
 | `:case-selection` | **欠落** | `case_selection` | keyword→string | `null` |
 | `:cases` | **欠落** | `cases[]`（下表） | — | `null` |
 
@@ -357,7 +357,7 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 | `:signals` | `signals` | `%spec-tree` |
 | `:postconditions` | `postconditions` + complete/omitted | 有界 form |
 | `:post-value-variables` | `post_value_variables` | `symbol_data[]` |
-| `:state-post` | `state_post` + complete/omitted | 有界 form |
+| `:state-post` | `state_post` + complete/omitted | 有界 form。`:pre` / `:post` と同じ `(and ...)` の畳み方 |
 
 **root metadata も同じ扱いにする。** `function-spec-data` の root は
 `definition-metadata` が作る envelope をそのまま持ち、state 監視契約では
@@ -386,6 +386,13 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 **描画**: JSON/オブジェクト表現が一次。テキストはその要約であって、唯一の
 表現にはしない。大きな form は既存の `max_chars` 機構で有界にし、切られた
 場合は既存の complete/omitted メタデータのパターンを保つ。
+
+ただし **MCP クライアントが描くのは `content[].text` だけ**なので、payload に
+届いてテキストに届かないことは届かないことと同じである。`argument_generator`
+はこの表の中でも特に該当する: `:args-generator` を持つ契約は「そのジェネレータ
+が配ったもの」に対して検査されるので、上の argument spec を入力領域だと読んだ
+読者は run が一度も使わなかった領域を読んでいる。`argument_generator` と、
+`%spec-tree` に追加した各ノードの `generator` は、テキストにも出す。
 
 ## 5. Task B〜I — `spec-check` の `results[].core_result`
 
@@ -554,6 +561,15 @@ no-shrinker  generation-budget-exhausted
   「探索を尽くした」、`disabled` / `no-shrinker` は「縮小機構が無い」
 - **未知の値は値をそのまま表示し、`complete` / `incomplete` に勝手に分類
   しない**
+- **`shrunk_outcome` をテキストに出す。** `shrink_report` が本物の plist で
+  ないとき（＝通常の縮小経路。`:NOT-COLLECTED` は全 record に存在するので
+  「key があるか」で分岐してはならない）、縮小について語れるのは
+  `shrunk_outcome` だけである。ここを `shrink_report` に賭けると、**最も
+  普通の失敗 run のテキストが縮小について一言も言わなくなる**
+- 逆に `shrink_report` が本物の plist ならそちらが先に答える。cl-spec は
+  「探索して空だった」にも「探索そのものが走らなかった」にも
+  `:shrunk-outcome :none` を記録する（`backends/check-it.lisp:431` と直上の
+  `shrink-p` ガード）ので、その 2 つを分けられるのは termination だけである
 
 **`shrink_report` の `not-collected` は「縮小しなかった」ではない。**
 通常経路の縮小（汎用ジェネレータの `shrink`）はレポートを作らないため、
@@ -738,12 +754,36 @@ outcome.kind = returned
 | Lisp | JSON |
 |---|---|
 | keyword | 文字列（lower-case） |
+| `T` / `NIL`（**schema が二値と宣言した field のみ**） | JSON `true` / `false` |
 | その他のシンボル | `symbol_data` オブジェクト |
-| 文字列 | 文字列 |
+| `NIL`（上記以外） | `null` |
+| 文字列 | 文字列。**`max_chars` で切る**（§6.2.4） |
 | 整数 | §6.2.3 の safe integer 規則 |
 | その他の数・文字 | `externalize-value` |
 | cons | **既定では配列**。オブジェクトになるのは §6.2.1 の既知位置だけ |
 | それ以外（実際のユーザ値、CLOS インスタンス等） | `externalize-value` |
+
+**`T` / `NIL` を二値として読むのは field ごとの宣言に限る。** `T` は keyword で
+はないので既定では `symbol_data` オブジェクトになり、measured true が
+`{"package": "COMMON-LISP", "name": "T"}`、measured false が `null` という
+非対称な組になっていた。とはいえ `NIL` を一律に `false` と読むのも誤りで、同じ
+`NIL` が「空リスト」であり「特殊な phase が無い」でもある（§3.2）。したがって
+**descriptor が二値だと宣言した field だけ** `true` / `false` にし、それ以外の
+`NIL` は `null` のままにする。現行 v1 で該当するのは
+`definition_digest_complete` と explanation の `valid` の 2 つ。
+measured `null` と absent の区別は従来どおり `field_availability` が答える。
+
+**`(:OBJECT ...)` descriptor の下の `NIL` は `{}` ではなく `null`。**
+`result-data`（`cl-spec/src/property-runner.lisp:255-276`）は単一の `append` で
+あって全 key を常に出力し、`observation-data` は失敗証拠が無いとき `NIL` を返す
+（`property-runner.lisp:216,225`）。つまり**成功した全ての run** で
+`data.failure` と `data.shrunk_failure` は `NIL` になる。これを `{}` にすると
+「全 field が欠けた failure observation が存在する」と読め、cl-spec が言った
+「failure は無い」ではなくなる。空オブジェクトは record の存在の主張であり、
+`null` が cl-spec の報告した不在である。
+
+`(:ARRAY ...)` と `(:PAIRS ...)` はこの規則の対象外で、空コレクションは `[]` の
+ままにする。そちらは「測って空だった」であり、不在ではない。
 
 ### 6.2.1 既定は `externalize-value`。構造化するのは schema で分かる位置だけ
 
@@ -799,11 +839,14 @@ application / user の葉の cons -> externalize-value
 | `digest_omissions[]`（`(:kind :path :target :reason)`） | object[]。`:path` は配列 |
 | `explanation` root | object |
 | `explanation` の `:errors` / `:branches` / `:conjuncts` | error datum object[] |
+| `explanation` の `:expected`（`:missing-condition` 失敗の explanation そのもの、`function-spec.lisp:1419-1420`） | **再帰配列**（§6.2.5）。error datum の `:expected` と同じ扱い |
+| `explanation` の `:post-form`（`:postcondition` 失敗、`function-spec.lisp:1437-1441`） | §6.2.3 の整数規則 |
+| `explanation` の `:valid` | JSON `true` / `false`（§6.2 の二値規則） |
 | error datum の `:expected` | **再帰配列**（§6.2.6）。`signature` と同じ扱い |
 | error datum の `:path` / `:tuple-path` / `:field-path` / `:known-tags` | 配列 |
-| error datum の `:actual` / `:key` | **`externalize-value`** |
-| error datum の `:actual-length` / `:expected-length` / `:violated-bound` | §6.2.3 の整数規則 |
-| error datum の `:condition-report` | 文字列（有界） |
+| error datum の `:actual` / `:key` / `:observed-tag`（`explain.lisp:618`、値由来） | **`externalize-value`** |
+| error datum の `:actual-length` / `:expected-length` / `:violated-bound` / `:first-index`（`explain.lisp:327-328`） | §6.2.3 の整数規則 |
+| error datum の `:condition-report` | 文字列（有界、§6.2.4） |
 | `signature` | §6.2.5 |
 | **上記以外のすべて** | **`externalize-value`** |
 
@@ -862,20 +905,33 @@ cl-spec の record の写像であって、MCP が足した key を混ぜない�
 ```
 
 - 長さで切った場合: 先頭 N 件を残し、`issues` にそのパスと
-  `omitted_items` を記録する。
+  `omitted_items`（要素数）を `reason: "length-limit"` で記録する。
 - 深さで切った場合: その位置には **`externalize-value` の plist** を置く。
   これは `data` の中で任意の Lisp 値を表すのに既に使っている標準形なので、
-  新しい key の発明にはならない。パスは `issues` に記録する。
+  新しい key の発明にはならない。パスは `issues` に `reason: "depth-limit"`
+  で記録する。
+- **葉の文字列を切った場合**: 先頭 `max_chars` 文字を残し、`issues` に
+  `reason: "char-limit"` と `omitted_items`（**文字数**）を記録する。
+  `:condition-report` は 4 箇所で `(princ-to-string condition)`
+  （`cl-spec/src/explain.lisp:212,565,614` と `execution.lisp:288`）、
+  `:documentation` は著者の docstring であり、どちらも任意長になりうる。
+  `data` には MCP が足した key を混ぜられない（§3.1）ので、切ったことは
+  兄弟の `_complete` ではなく `issues` のエントリで伝える。
 
 error が 10 個あるのに JSON には 5 個しか無く、5 個しか無いように見える、
 という状態を作らない。
 
 ### 6.2.5 `expected` も位置的タグ付きリストである
 
-当初この表は `:expected` を「object」と書いていた。`explain.lisp` の
-`expected-descriptor` メソッドのうち plist を返す 5 つ（`spec` / `plist-spec` /
-`keyed-field-spec` / `object-spec` / `tagged-union-spec`）だけを読んだ誤りで、
-**18 中 13 は位置的なタグ付きリスト**である。
+当初この表は `:expected` を「object」と書いていた。`expected-descriptor`
+メソッドのうち `:KIND` 始まりの plist を返すものだけを読んだ誤りである。
+
+数え直すと `expected-descriptor` のメソッドは **20 個**で、18 個が
+`explain.lisp:101-169`、残る 2 個（`return-values-spec` / `call-arguments-spec`）
+は `call-validation.lisp:32,71` にある。うち **14 個が位置的なタグ付きリスト**、
+**6 個が `:KIND` 始まりの plist**（`spec` の既定 / `plist-spec` /
+`keyed-field-spec` / `object-spec` / `tagged-union-spec` / `call-arguments-spec`）
+である。`return-values-spec` は `(cons :values ...)` なので位置的な側に入る。
 
 ```lisp
 (list :range :min N :max M)                       ; タグ + plist 尾部
@@ -898,7 +954,8 @@ cl-spec が宣言していない関係の発明になる。入れ子の `expecte
 （`:and` / `:or` / `:tuple` / `:list-of` / `:nullable` / `:not` の内側）は
 再帰的に同じ規則で投影する。
 
-`:kind` で始まる 5 つの形（`tagged-union-spec` を含む）も配列になる。無損失であり、`data` を読む側は
+`:kind` で始まる 6 つの形（`tagged-union-spec` と `call-arguments-spec` を含む）
+も配列になる。無損失であり、`data` を読む側は
 先頭要素でどの形かを判別できる。object にする分岐を設けないのは、
 「形から役割を推測しない」という §6.2.1 の規則そのものである。
 
@@ -907,15 +964,35 @@ cl-spec が宣言していない関係の発明になる。入れ子の `expecte
 `signature` も文字列に潰さず、**同じ再帰 projector** を通す。ただし
 **flat array にはならないし、オブジェクトにもしない。**
 
-`failure-signature` が実際に組む形:
+cl-spec が実際に組む signature の**全文法**。当初この節は下の 2 つだけを
+挙げていたが、それは `failure-signature` の一部にすぎない。権威は cl-spec 自身
+の validator `valid-signature-shape-p`
+（`cl-spec/src/counterexample.lisp:88-108`）であって、こちらを読む。
 
 ```lisp
-(:return-value :return-spec (<failure-shape plist> ...))  ; ネストする
-(:condition-spec SIMPLE-ERROR (<failure-shape plist> ...))
-(:missing-condition)                                      ; 1 要素
-(:target-signal SIMPLE-ERROR)                             ; 位置的タグ
-(:case :sufficient-funds :state-postcondition 0)          ; 実測
+;; function spec
+(:return-value  :return-spec    (<failure-shape plist> ...))  ; ネストする
+(:return-values :return-spec    (<failure-shape plist> ...))  ; 同上、head 書換
+(:return-value  :postcondition  <explanation>)                ; ネストしない
+(:return-values :postcondition  <explanation>)                ; 同上
+(:condition-spec SIMPLE-ERROR   (<failure-shape plist> ...))  ; ネストする
+(:missing-condition)                                          ; 1 要素
+(:target-signal SIMPLE-ERROR)                                 ; 位置的タグ
+(:contract-error TYPE-ERROR)
+(:state-postcondition 0)                                      ; state-post 違反
+(:state-post 0 :contract-error TYPE-ERROR)                    ; state-post 内で signal
+(:case-selection :ambiguous-case)
+(:case-selection :case-guard-error :A)
+;; property
+(:property-false)
+(:property-condition SIMPLE-ERROR)
 ```
+
+さらに case を選んだ契約の失敗は `(:CASE NAME . INNER)` で包まれる
+（`cl-spec/src/function-spec.lisp:1572-1574`）。cl-spec 自身の剥がし方は
+`case-signature-parts`（`counterexample.lisp:76-84`）にある。
+`:return-values` への head 書換は `(values ...)` の return spec に対するもので
+（`function-spec.lisp:1400-1406`）、文法は `:return-value` と同じである。
 
 先頭の keyword は **key ではなくタグ**である。`(:target-signal SIMPLE-ERROR)`
 を `{"target-signal": "SIMPLE-ERROR"}` と読ませると、cl-spec が宣言していない
@@ -923,24 +1000,36 @@ key/value 関係を adapter が発明したことになる。また `:return-spe
 signature は `failure-shape` の plist を入れ子に持つので、スカラーの
 flat array でも表せない。
 
-`signature` のトップレベルは **array** に投影する。ただし
-「既定は `externalize-value`」に倒すと内側の `failure-shape` plist まで
-潰れてしまうので、`failure-signature` が実際に組む文法を 2 つだけ持たせる。
+`signature` のトップレベルは **array** に投影する。`(:CASE NAME . INNER)` は
+剥がしたうえで、2 要素を配列の先頭にそのまま残す（無損失で、読む側は先頭要素で
+形を判別できる）。内側の `failure-shape` plist を潰さないために、
+**第 3 要素が failure-shape のリストである文法 2 つだけ**に構造化を許す。
 
 ```
-(:return-value :return-spec <failure-shapes>)
+(:return-value|:return-values :return-spec <failure-shapes>)
 (:condition-spec <condition-type> <failure-shapes>)
 ```
 
 この `<failure-shapes>` の位置だけ **failure-shape の object[]**（error datum
 と同じ projector）として投影し、それ以外の要素は葉の型規則に従う。
-他の形（`(:missing-condition)`、`(:target-signal TYPE)`、
-`(:case :sufficient-funds :state-postcondition 0)`）はすべて葉の並びなので、
-配列のままで過不足ない。
+
+**判定に第 1 要素だけを使ってはならない。** `(:return-value :postcondition
+<explanation>)`（`function-spec.lisp:1335`）は head も長さも
+`:return-spec` 形と同じで、第 3 要素は failure-shape ではなく
+`(:post-form <index>)` または `NIL` である。head と長さだけで判定すると
+`:post-form` と `0` がそれぞれ `(:OBJECT ...)` descriptor 下の裸の atom として
+歩かれ、**通常の postcondition 失敗すべて**で `projection.complete` が false に
+なる。第 2 要素が `:return-spec` であることを要求する。
+なお `:postcondition` の explanation は葉として（つまり `externalize-value` で）
+入る。同じ `(:post-form <index>)` は observation の `explanation` 側に構造化
+された key として載るので（§6.2.2）、情報は失われない。
+
+他の形はすべて葉の並びなので、配列のままで過不足ない。
 
 ```json
 "signature": ["case", "sufficient-funds", "state-postcondition", 0]
 "signature": ["return-value", "return-spec", [ { "kind": "...", "expected": [...] } ]]
+"signature": ["case", "a", "return-value", "return-spec", [ { "kind": "..." } ]]
 ```
 
 これは failure identity の比較にも使える（順序を保つ無損失表現）。

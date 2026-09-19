@@ -1099,8 +1099,12 @@ construction is supported; it does not guarantee successful draws or reductions.
     `timeout_seconds` (number, default 30)
   - `function-spec` projects the contract: the spec of each argument, the spec
     of the return value, and the `:pre` / `:post` forms. It answers
-    `unsupported` only when the loaded cl-spec exports no `function-spec-data`
-    — a statement about that revision, not about whether a contract exists.
+    `unsupported` for three different reasons, and `message` says which: the
+    loaded cl-spec exports no `function-spec-data` — a statement about that
+    revision, not about whether a contract exists — or it answered a record
+    under a schema version this cl-mcp does not know, or it answered a record
+    that failed validation. The last two are the short-circuit described under
+    `core_record` below.
   - `:pre` and `:post` are cut at `max_chars` with the cut reported, like
     `body` and `source_form`.
   - `function-spec` also carries, beyond the argument and return specs above:
@@ -1110,9 +1114,15 @@ construction is supported; it does not guarantee successful draws or reductions.
     `supplied_p`, `keyword`, `argument_generator`, `argument_schema`,
     `signals`, `post_value_variables`, `capture`, `state_post`,
     `case_selection`, and the ordered `cases` (each with its own `guard`,
-    `outcome`, `returns` / `signals` and `postconditions`). Reading a
-    contract runs none of it — no target call, no `:pre`, no capture form, no
-    case guard, no post form.
+    `outcome`, `returns` / `signals`, `postconditions` and `state_post`).
+    Reading a contract runs none of it — no target call, no `:pre`, no capture
+    form, no case guard, no post form.
+  - `state_post` is one form, not the bare list of forms it was declared as:
+    several clauses print as `(and ...)`, so what you read can be pasted back.
+    It is cut at `max_chars` like every other form here, and carries
+    `state_post_complete` / `state_post_omitted_chars` beside it — at the
+    contract root and inside each case — so a cut clause cannot be mistaken
+    for the whole condition.
   - `core_record` carries cl-spec's own versioned definition record, under
     the same `availability` / `schema_supported` / `field_availability` /
     `unknown_keys` / `projection` transport metadata `spec-check`'s
@@ -1206,6 +1216,24 @@ construction is supported; it does not guarantee successful draws or reductions.
     elsewhere in the response says: `verified` is false and
     `core-schema-unsupported` (or `contract-schema-unsupported`, for the
     Function Spec declaration) is in `verification_gaps`.
+  - Four rules decide how one value inside `data` is rendered, and each one
+    exists because a shape cl-spec did not declare must never be invented.
+    A field cl-spec declares and did not measure is **`null`**, never `{}`:
+    `result-data` emits every key on every run, so `data.failure` and
+    `data.shrunk_failure` are `null` on a passing run rather than an empty
+    record whose fields all happen to be missing. An **empty collection stays
+    `[]`** — that one was measured empty. A **seed is always a decimal
+    string**, `data.seed` included, because a cl-spec seed exceeds JSON's
+    exact integer range. And a field cl-spec defines as two-valued —
+    `definition_digest_complete`, an explanation's `valid` — is JSON `true` or
+    `false`; every other `nil` is `null`, and `field_availability` is what
+    tells a measured `null` from an absent key.
+  - `projection.issues` carries a `reason` of `length-limit` when a list was
+    cut, `depth-limit` when the walk stopped descending, `char-limit` when a
+    long string leaf (a `condition_report`, a docstring) was cut, and
+    `atom-for-container` when cl-spec's record did not have the shape this
+    adapter's descriptor predicted. `omitted_items` counts list elements for
+    the first and characters for the third.
   - `data.failure` and `data.shrunk_failure` are observations, themselves a
     projection of cl-spec's own field names. Their `outcome` is **either** an
     object — `{"kind": "returned", "values": [...]}` or `{"kind": "signaled",
