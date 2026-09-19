@@ -28,6 +28,12 @@
   (:returns small-int)
   (:post (> result value)))
 
+(cl-spec:defspec-function grow-by-nothing
+  "GROW-BY-NOTHING returns more than it was given, which it never does."
+  (:args (value small-int))
+  (:returns small-int)
+  (:post (> result value)))
+
 (cl-spec:defspec-function never-callable
   "A contract whose precondition no generated value can satisfy."
   (:args (value small-int))

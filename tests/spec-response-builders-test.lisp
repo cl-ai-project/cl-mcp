@@ -101,6 +101,31 @@
                       :errored 0 :timed-out 0 :not-run 0)
         :environment *environment*))
 
+(defun %no-precondition-contract (&key effective-trials failure-reason
+                                       explanation)
+  "Return the :CONTRACT plist a real run of a contract without :PRE produces.
+
+Every contract fixture below carries one, and that is the point.  A result
+built without it sends %FORMAT-CONTRACT down its early return, so the whole
+eight-branch rejection CASE, the broken-half line and the return-value line
+are unreachable -- and a test asserting that some string is absent from the
+text passes because a third of the renderer never ran, not because the
+renderer is right.  %CONTRACT-PLIST (SRC/SPEC-ADAPTER-REPORT.LISP) fills these
+keys on every contract result cl-spec answers for, and a run of the fixture
+contracts in TESTS/FIXTURES/SPEC-FIXTURE-CONTRACTS.LISP -- none of which
+declares a :PRE -- reports exactly this :NO-PRECONDITION status."
+  (list :rejected 0
+        :rejection-status :no-precondition
+        :precondition-p nil
+        :rejected-measured t
+        :rejected-overcounted nil
+        :effective-trials effective-trials
+        :failure-reason failure-reason
+        :failure-reason-readable t
+        :explanation explanation
+        :explanation-complete (when explanation t)
+        :explanation-omitted-chars (when explanation 0)))
+
 (defun %contract-check-report-with-cases ()
   "Return a completed contract report whose second declared case was never
 reached.
@@ -140,7 +165,7 @@ omitting it -- the same shape TESTS/SPEC-CORE-RECORD-TEST.LISP's own
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE" "REMAINING-BALANCE"))
                 :source "explicit function argument"
                 :coverage "Only the contract named.")
@@ -150,6 +175,7 @@ omitting it -- the same shape TESTS/SPEC-CORE-RECORD-TEST.LISP's own
                       :status :passed
                       :trials (list :executed 2 :budget 2
                                     :budget-source "requested")
+                      :contract (%no-precondition-contract :effective-trials 2)
                       :seed "1"
                       :declares-cases t
                       :core-record core-record))
@@ -228,7 +254,7 @@ contradiction this task exists to stop."
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE"
                                               "WITHDRAW-WITHOUT-RECORDING!"))
                 :source "explicit function argument"
@@ -240,6 +266,10 @@ contradiction this task exists to stop."
                       :status :failed
                       :trials (list :executed 1 :budget 1
                                     :budget-source "requested")
+                      :contract (%no-precondition-contract
+                                 :effective-trials 1
+                                 :failure-reason :state-postcondition
+                                 :explanation "(:KIND :STATE-POSTCONDITION ...)")
                       :seed "1"
                       :shrink-status :none
                       :declares-cases t
@@ -290,7 +320,7 @@ all -- the target was never called, so there is nothing here to blame on it."
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE"
                                               "MAGNITUDE-OF-IMPOSSIBLE"))
                 :source "explicit function argument"
@@ -302,6 +332,13 @@ all -- the target was never called, so there is nothing here to blame on it."
                       :status :error
                       :trials (list :executed 0 :budget 50
                                     :budget-source "requested")
+                      ;; A real run of MAGNITUDE-OF-IMPOSSIBLE carries this,
+                      ;; and carrying it is what makes the assertions below
+                      ;; about the text mean anything: without it
+                      ;; %FORMAT-CONTRACT returns before writing a line.
+                      :contract (%no-precondition-contract
+                                 :effective-trials 0
+                                 :failure-reason :generation-budget-exhausted)
                       :core-record core-record))
           :counts (list :selected 1 :passed 0 :failed 0
                         :errored 1 :timed-out 0 :not-run 0)
@@ -344,7 +381,7 @@ PURPOSE: an ordinary property's failing observation carries a bare :OUTCOME
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "explicit" :kind :property :count 1
                 :selected (list (%symbol-data "PROBE"
                                               "CLAMP-IS-WRONG-ON-PURPOSE"))
                 :source "explicit property argument"
@@ -419,7 +456,7 @@ so OBSERVED-OUTCOME-DATA's answer is the bare :NOT-COLLECTED keyword."
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE" "OVERLAPPING-BALANCE"))
                 :source "explicit function argument"
                 :coverage "Only the contract named.")
@@ -429,6 +466,11 @@ so OBSERVED-OUTCOME-DATA's answer is the bare :NOT-COLLECTED keyword."
                       :status :error
                       :trials (list :executed 1 :budget 1
                                     :budget-source "requested")
+                      :contract (%no-precondition-contract
+                                 :effective-trials 1
+                                 :failure-reason :contract-error
+                                 :explanation
+                                 "(:KIND :CASE-SELECTION-ERROR ...)")
                       :seed "1"
                       :declares-cases t
                       :core-record core-record))
@@ -475,7 +517,7 @@ fallback rather than a table hit."
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "explicit" :kind :property :count 1
                 :selected (list (%symbol-data "PROBE"
                                               "CLAMP-IS-WRONG-ON-PURPOSE"))
                 :source "explicit property argument"
@@ -564,7 +606,7 @@ failure-phase gloss must not contradict."
     (list :status :completed
           :verified nil
           :selection
-          (list :mode "explicit" :count 1
+          (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE"
                                               "WITHDRAW-WITH-AUDIT!"))
                 :source "explicit function argument"
@@ -575,8 +617,169 @@ failure-phase gloss must not contradict."
                       :status :failed
                       :trials (list :executed 1 :budget 1
                                     :budget-source "requested")
+                      :contract (%no-precondition-contract
+                                 :effective-trials 1
+                                 :failure-reason :state-postcondition
+                                 :explanation "(:KIND :STATE-POSTCONDITION ...)")
                       :seed "1"
                       :declares-cases t
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %shrink-exhausted-check-report ()
+  "Return a completed contract report whose generation budget ran out while
+the shrinker was searching.
+
+Measured shape: cl-spec's SRC/GENERATION-REQUEST.LISP records
+:EXHAUSTION-PHASE :SHRINKING when the request-owned budget is denied during
+shrinking, and GENERATION-REPORT-P requires ATTEMPTS = BUDGET and the two
+phase counts to sum to the totals, which these do.  The run still returns its
+original failure -- SRC/BACKENDS/CHECK-IT.LISP catches that exhaustion and
+falls through to the ordinary failing return -- so the finding stands and only
+the reduction is unfinished.  That is the one distinction this fixture exists
+for: an exhaustion in the generation phase means nothing was learned about the
+code, and an exhaustion in the shrinking phase means the opposite."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-grow-by-nothing"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'grow-by-nothing :status :failed
+                 :trials 1 :budget 30 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample '(value 37)
+                 :shrunk-counterexample nil
+                 :shrunk-outcome :none :shrink-report :not-collected
+                 :generation-report
+                 (list :scope :request :unit :bounded-filter-source-call
+                       :policy :and-single-source-v1 :budget 5000
+                       :budget-source :default :default-coefficient 1000
+                       :requested-values 30 :generated-values 3
+                       :attempts 5000 :rejections 4900
+                       :phases
+                       (list :generation
+                             (list :attempts 1000 :rejections 900)
+                             :shrinking (list :attempts 4000 :rejections 4000))
+                       :termination :budget-exhausted
+                       :exhaustion-phase :shrinking :exhausted-at nil)
+                 :failure-phase nil :failure-reason :postcondition
+                 :case-report :not-collected
+                 :failure
+                 (list :arguments '(37) :status :failed
+                       :reason :postcondition
+                       ;; The shape FAILURE-SIGNATURE builds for an ordinary
+                       ;; postcondition failure
+                       ;; (cl-spec/src/function-spec.lisp:1335): three
+                       ;; elements under a :RETURN-VALUE head, and the third
+                       ;; is the explanation, not failure-shape data.
+                       :signature (list :return-value :postcondition
+                                        (list :post-form 0))
+                       :explanation (list :post-form 0)
+                       :outcome (list :kind :returned :values '(37))
+                       :value 37 :case nil :condition-report nil)
+                 :shrunk-failure nil :elapsed 0.4))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "contract" :kind :contract :count 1
+                :selected (list (%symbol-data "PROBE" "GROW-BY-NOTHING"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE" "GROW-BY-NOTHING")
+                      :kind :contract
+                      :status :failed
+                      :trials (list :executed 1 :budget 30
+                                    :budget-source "cl-spec result")
+                      :contract (%no-precondition-contract
+                                 :effective-trials 1
+                                 :failure-reason :postcondition)
+                      :seed "1"
+                      :counterexample (list (list :variable
+                                                  (%symbol-data "PROBE" "VALUE")
+                                                  :value (list :printed "37")))
+                      :counterexample-status :present
+                      :shrunk-counterexample nil
+                      :shrink-status :none
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %circular-value-check-report (value)
+  "Return a contract report whose target returned VALUE and captured it too.
+
+VALUE stands for anything the code under test can hand back.  cl-spec's
+SNAPSHOT-VALUE (cl-spec/src/execution.lisp:138-139) is documented to copy
+conses and arrays \"preserving cycles and sharing\", so whatever the target
+returned reaches :OUTCOME's :VALUES and CAPTURE-EVIDENCE's :VALUES with its
+structure intact -- a circular value included."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-returns-a-ring"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'returns-a-ring :status :failed
+                 :trials 1 :budget 1 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil
+                 :shrink-report (list :candidates 0 :budget 200 :termination
+                                      :state-restoration-unavailable)
+                 :generation-report :not-collected
+                 :failure-phase :state-post
+                 :failure-reason :state-postcondition
+                 :case-report :not-collected
+                 :failure
+                 (list :arguments (list 1) :status :failed
+                       :reason :state-postcondition
+                       :signature (list :state-postcondition 0)
+                       :explanation (list :kind :state-postcondition
+                                          :function 'returns-a-ring
+                                          :case nil :index 0 :form '(ringp x))
+                       :outcome (list :kind :returned :values (list value))
+                       :value nil :case nil :condition-report nil
+                       :state
+                       (list :capture
+                             (list :status :completed
+                                   :declared '(ring)
+                                   :values (list (cons 'ring value))
+                                   :error nil)
+                             :state-post
+                             (list :status :violation :reason nil :case nil
+                                   :index 0 :form '(ringp x)
+                                   :condition-type nil)))
+                 :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "contract" :kind :contract :count 1
+                :selected (list (%symbol-data "PROBE" "RETURNS-A-RING"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE" "RETURNS-A-RING")
+                      :kind :contract
+                      :status :failed
+                      :trials (list :executed 1 :budget 1
+                                    :budget-source "requested")
+                      :contract (%no-precondition-contract
+                                 :effective-trials 1
+                                 :failure-reason :state-postcondition)
+                      :seed "1"
+                      :shrink-status :none
                       :core-record core-record))
           :counts (list :selected 1 :passed 0 :failed 1
                         :errored 0 :timed-out 0 :not-run 0)
@@ -1614,27 +1817,66 @@ the gap, not only the body a reader may never reach"
       (ok (not (search "✓ VERIFIED" headline))))))
 
 (deftest shrinking-that-could-not-run-does-not-read-as-shrinking-that-found-nothing
+  ;; :STATE-RESTORATION-UNAVAILABLE says no search happened.  "no smaller
+  ;; input was found" is a claim about a search, so neither of the two
+  ;; wordings that make it may appear: +SHRINK-TERMINATIONS+'s :EXHAUSTED
+  ;; ("ran to exhaustion -- no smaller failing input was found") and
+  ;; +SHRUNK-OUTCOMES+'s :NONE ("the search ran and found no smaller failing
+  ;; input").  The previous spelling here asserted against "no smaller
+  ;; counterexample", which appears in no format string under SRC/ and so
+  ;; could not fail.
   (let* ((report (%state-post-check-report))
          (text (first-text (build-spec-check-response report))))
-    (ok (search "state-restoration-unavailable" text))
-    (ok (not (search "returned no smaller input" text)))
-    (ok (not (search "no smaller counterexample" text)))))
+    (testing "the reason the search did not run is the reason given"
+      (ok (search "state-restoration-unavailable" text))
+      (ok (search "nothing restores" text)))
+    (testing "and no wording claims a search came back empty"
+      (ok (not (search "no smaller failing input" text)))
+      (ok (not (search "returned no smaller input" text))))))
 
 (deftest a-generation-failure-does-not-read-as-a-target-failure
+  ;; Design section 7's third forbidden rendering: the text must not read as a
+  ;; finding about the code under test while failure_phase is "generation".
+  ;;
+  ;; The previous guard here was (not (search "the function" text)) against a
+  ;; fixture that carried no :CONTRACT -- so %FORMAT-CONTRACT returned before
+  ;; writing anything and the string was unreachable whatever the renderer
+  ;; did.  A real run of MAGNITUDE-OF-IMPOSSIBLE prints "contract: no :pre, so
+  ;; every generated input was passed to the function", which contains it: the
+  ;; assertion was not a weaker version of the requirement, it was a
+  ;; different one that the requirement contradicts.  The fixture now carries
+  ;; the contract plist a real run carries, and the assertions are on the two
+  ;; renderings that actually decide whether this reads as a target failure --
+  ;; the verdict and the phase gloss.
   (let* ((report (%generation-exhausted-check-report))
-         (text (first-text (build-spec-check-response report))))
-    (ok (search "generation" text))
-    (ok (search "did NOT complete" text))
-    ;; Nothing was learned about the function, and the text has to say so.
-    (ok (not (search "the function" text)))))
+         (text (first-text (build-spec-check-response report)))
+         (headline (%headline report)))
+    (testing "the phase and its consequence are stated"
+      (ok (search "failure phase: generation" text))
+      (ok (search "did NOT complete" text))
+      (ok (search "not a finding about the code under test" text)))
+    (testing "and the verdict does not present the run as a failure of the code"
+      (ok (search "NOT VERIFIED" headline))
+      (ok (not (search "FAILED" headline))))
+    (testing "no target outcome is reported, because the target never ran"
+      ;; The three lines %FORMAT-CORE-EVIDENCE can write here all begin
+      ;; "target: ", and a generation exhaustion carries no failure
+      ;; observation to write one from.
+      (ok (not (search "target: " text))))))
 
 (deftest a-state-post-violation-says-the-target-returned
   (let* ((report (%state-post-check-report))
          (text (first-text (build-spec-check-response report))))
     (ok (search "failure phase: state-post" text))
-    (ok (search "target WAS called" text))
+    ;; The line this test is named for.  "target WAS called" comes off the
+    ;; failure-phase gloss two rows up and is true of every state-post
+    ;; failure, signalling ones included; what says the target RETURNED is
+    ;; the target: line, built from the observation's own outcome -- and
+    ;; that line was deletable with this suite green.
+    (ok (search "target: returned 100" text))
+    (ok (search "the target WAS called" text))
     (ok (search "captured:" text))
-    (ok (search "BALANCE-BEFORE" text))
+    (ok (search "BALANCE-BEFORE = 100" text))
     ;; cl-spec's real STATE-POST-EVIDENCE records :STATE-STATUS :VIOLATION
     ;; (src/function-spec.lisp), never :VIOLATED -- confirmed against a real
     ;; cl-spec checkout.
@@ -1672,13 +1914,90 @@ the gap, not only the body a reader may never reach"
 (deftest a-signalling-case-with-a-state-post-violation-does-not-contradict-itself
   ;; A :SIGNALS case may carry :STATE-POST (cl-spec's DSL explicitly allows
   ;; it), and its target outcome is :SIGNALED, never :RETURNED.  The
-  ;; failure-phase gloss must not claim "and returned" two lines above a
-  ;; target: line that says "signalled".
+  ;; failure-phase gloss must not claim the target returned two lines above a
+  ;; target: line that says it signalled.
   (let* ((report (%signals-with-state-post-check-report))
          (text (first-text (build-spec-check-response report))))
     (ok (search "failure phase: state-post" text))
     (ok (search "the target WAS called; the contract's" text))
     (ok (search "target: signalled INSUFFICIENT-FUNDS" text))
     (ok (search "state-post: violation" text))
-    ;; The forbidden self-contradiction this fixture exists to catch.
-    (ok (not (search "WAS called and returned" text)))))
+    ;; The forbidden self-contradiction, asserted against a string the
+    ;; renderer can actually emit.  "WAS called and returned" appears in no
+    ;; format string under SRC/ and never could, so the old spelling of this
+    ;; line could not fail; "target: returned" is exactly what
+    ;; %FORMAT-CORE-EVIDENCE writes for a :RETURNED outcome, and this run
+    ;; has none.
+    (ok (not (search "target: returned" text)))))
+
+(deftest an-exhaustion-while-shrinking-does-not-void-the-failure
+  ;; The other polarity of A-GENERATION-FAILURE-DOES-NOT-READ-AS-A-TARGET-
+  ;; FAILURE, and the branch no assertion reached: the same
+  ;; :BUDGET-EXHAUSTED termination means "nothing was learned" in the
+  ;; generation phase and "the finding stands, only its reduction is
+  ;; unfinished" in the shrinking phase.  Saying the first of a run that
+  ;; found a real counterexample would tell a caller to ignore a true
+  ;; failure.
+  (let* ((report (%shrink-exhausted-check-report))
+         (text (remove #\Newline
+                       (first-text (build-spec-check-response report)))))
+    (ok (search "generation: budget-exhausted in the shrinking phase" text))
+    (ok (search "the failure above still stands; only the reduction is unfinished"
+                text))
+    (testing "and nothing says the run failed to reach a verdict"
+      (ok (not (search "did NOT complete" text)))
+      (ok (not (search "failure phase: generation" text))))))
+
+(deftest an-ordinary-failing-run-still-says-what-shrinking-did
+  ;; Design section 5.3: shrunk_outcome is the primary source for ordinary
+  ;; shrinking, because the built-in shrinker files no shrink report at all --
+  ;; RUN-PROPERTY leaves :SHRINK-REPORT at its :NOT-COLLECTED initform
+  ;; (cl-spec/src/property-runner.lisp:63), which is present on every record
+  ;; and is not a plist.  Keyed on the report's presence, as it was, the
+  ;; shrinking line never printed for the commonest failing run there is.
+  (let* ((report (%shrink-exhausted-check-report))
+         (text (remove #\Newline
+                       (first-text (build-spec-check-response report)))))
+    (ok (search "shrinking: none -- the search ran and found no smaller failing input"
+                text))))
+
+(deftest a-circular-value-from-the-code-under-test-does-not-hang-the-text
+  ;; cl-spec's SNAPSHOT-VALUE (cl-spec/src/execution.lisp:138-139) preserves
+  ;; cycles on purpose, so a circular value from the code under test reaches
+  ;; the record intact.  Rendered with PRINC-TO-STRING and no printer bound --
+  ;; %FORMAT-CHECK-TEXT is a bare WITH-OUTPUT-TO-STRING -- a target return
+  ;; value or a captured pre-state of that shape never returns, and a merely
+  ;; large one puts its whole printed form into content[].text.
+  ;;
+  ;; Under a deadline rather than bare: a regression here is a hang, and a
+  ;; hang in a test suite is indistinguishable from a machine that stopped.
+  (let* ((cycle (list 1 2 3))
+         (report (progn (setf (cdr (last cycle)) cycle)
+                        (%circular-value-check-report cycle))))
+    (multiple-value-bind (text timed-out)
+        (handler-case
+            (values (sb-ext:with-timeout 20
+                      (first-text (build-spec-check-response report)))
+                    nil)
+          (sb-ext:timeout () (values "" t)))
+      (ok (not timed-out))
+      (testing "both value paths render, bounded"
+        (ok (search "target: returned " text))
+        (ok (search "captured: RING = " text))
+        ;; *PRINT-CIRCLE* is on in EXTERNALIZE-VALUE's printer, so the cycle
+        ;; prints as a label rather than running forever.
+        (ok (search "#1=" text))))))
+
+(deftest a-large-value-from-the-code-under-test-is-cut-and-says-so
+  ;; The other half of the bound.  A value that terminates can still be
+  ;; arbitrarily long, and an evidence line is one line in a block a reader
+  ;; skims -- so it is cut, and the cut is stated with its size rather than
+  ;; handed over as a prefix that reads as the whole value.
+  (let* ((big (make-list 4000 :initial-element 'padding))
+         (report (%circular-value-check-report big))
+         (text (remove #\Newline
+                       (first-text (build-spec-check-response report)))))
+    (ok (search "target: returned " text))
+    (ok (search "the whole value is in core_result.data" text))
+    (testing "and the line is bounded, not the value's own length"
+      (ok (< (length text) 4000)))))

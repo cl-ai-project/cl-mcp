@@ -17,6 +17,7 @@
            #:function-specs-supported-p
            #:magnitude
            #:widen
+           #:grow-by-nothing
            #:never-callable
            #:small-int
            #:clamp-is-within-bounds
@@ -103,6 +104,16 @@ uniformly, so the test that reads the failure passed 300 trials and still came
 up empty about once in twenty runs -- measured at 4 misses in 60.  A fixture
 whose failure is rare makes the test that reads it a coin toss."
   (+ value 50))
+
+(defun grow-by-nothing (value)
+  "Return VALUE unchanged, although its contract's :POST requires more.
+
+WIDEN breaks its :RETURNS, and cl-spec classifies that first, so no run of it
+ever reaches the :POST.  This one is the other half: every answer it gives
+satisfies SMALL-INT and none of them satisfies (> result value), so every
+trial is an ordinary postcondition failure -- the commonest contract failure
+there is, and the one whose failure signature carries (:POST-FORM 0)."
+  value)
 
 (defun never-callable (value)
   "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."

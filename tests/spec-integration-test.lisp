@@ -164,6 +164,30 @@ reached the caller."
         (gethash "text" (aref content 0))
         "")))
 
+(defun %ok-core-record-read-whole (result)
+  "Assert RESULT's core_result was read whole, against a real cl-spec record.
+
+Two questions no scenario in this file asked.  UNKNOWN_KEYS names every key
+the record carries that no descriptor covers -- a key whose value is dropped
+rather than projected -- and PROJECTION.COMPLETE says whether the projection
+reached the end of the record without cutting or stumbling on a shape it did
+not predict.
+
+Both instruments existed and neither was pointed at a real run.  The one
+UNKNOWN-KEYS assertion in the suite ran the describe path against a
+hand-written stub, which by construction carries exactly the keys the
+descriptor declares, so a descriptor that did not match what cl-spec actually
+builds passed every test there was.  Called from each scenario below, this is
+what would have caught a signature guard matching a form whose third element
+is not failure data, and an explanation key landing in UNKNOWN_KEYS with its
+value discarded."
+  (let ((core (gethash "core_result" result)))
+    (ok (hash-table-p core))
+    (when core
+      (ok (equalp #() (gethash "unknown_keys" core)))
+      (ok (eq t (gethash "complete" (gethash "projection" core))))
+      (ok (equalp #() (gethash "issues" (gethash "projection" core)))))))
+
 (deftest real-function-core-schema-survives-check
   (if (or (not (%contracts-available-p))
           (not (find-symbol "SCHEMA-INFO" "CL-SPEC")))
@@ -533,6 +557,7 @@ reached the caller."
                (cases (gethash "case_report" record))
                (text (%text response)))
           (ok (equal "passed" (gethash "status" result)))
+          (%ok-core-record-read-whole result)
           (testing "the report distinguishes reached from declared"
             (ok (= 2 (length (gethash "declared_cases" cases))))
             ;; EQUALP, not EQUAL: EQUAL compares general vectors by EQ, so it
@@ -566,6 +591,7 @@ reached the caller."
                  (text (%text response)))
             (ok (equal "state-post" (gethash "failure_phase" record)))
             (ok (equal "state-postcondition" (gethash "failure_reason" record)))
+            (%ok-core-record-read-whole result)
             (testing "the target returned normally and that is visible"
               (ok (equal "returned"
                          (gethash "kind" (gethash "outcome" failure)))))
@@ -594,6 +620,7 @@ reached the caller."
                (record (gethash "data" (gethash "core_result" result)))
                (text (%text response)))
           (ok (equal "case-selection" (gethash "failure_phase" record)))
+          (%ok-core-record-read-whole result)
           (testing "the target was never called"
             ;; Not a (:kind ...) object here: cl-spec's raw :OUTCOME on this
             ;; observation is the bare :NOT-COLLECTED keyword, and
@@ -608,8 +635,18 @@ reached the caller."
           (testing "and the text says which half broke"
             (ok (search "the target was NOT called" text))
             ;; A counterexample exists for this run, and it must not read as
-            ;; an input the function failed on.
-            (ok (not (search "the function failed" text))))))))
+            ;; an input the function failed on.  Asserted against what the
+            ;; renderer can actually write: "the function failed" appears in
+            ;; no format string under SRC/ and never could, so the old
+            ;; spelling of this line could not fail.  The two lines
+            ;; %FORMAT-CORE-EVIDENCE writes for a target that finished are
+            ;; "target: returned" and "target: signalled", and this run has
+            ;; neither -- the reason it prints "target: not called" instead.
+            (ok (not (search "target: returned" text)))
+            (ok (not (search "target: signalled" text)))
+            ;; And the contract-error gloss, which is what says the finding
+            ;; is about the contract rather than about the function.
+            (ok (search "NOT about the function" text)))))))
 
 (deftest real-generation-exhaustion-is-not-a-target-failure
   (if (not (%contracts-available-p))
@@ -625,6 +662,7 @@ reached the caller."
                (text (%text response)))
           (ok (gethash "termination" generation))
           (ok (equal "generation" (gethash "failure_phase" record)))
+          (%ok-core-record-read-whole result)
           (ok (find "generation-incomplete"
                     (gethash "verification_gaps" response) :test #'equal))
           (ok (search "did NOT complete" text))))))
@@ -649,8 +687,49 @@ reached the caller."
                  (text (%text response)))
             (ok (equal "state-restoration-unavailable"
                        (gethash "termination" shrink)))
+            (%ok-core-record-read-whole result)
             (testing "the original evidence is still there"
               (ok (gethash "failure" record)))
             (testing "and nothing claims a minimal counterexample"
               (ok (not (search "no smaller" text)))
               (ok (search "nothing restores" text))))))))
+
+(deftest real-postcondition-failure-is-read-whole
+  ;; The commonest contract failure there is, and the one no scenario here
+  ;; covered.  WIDEN breaks its :RETURNS, which CLASSIFY-TARGET-OUTCOME
+  ;; classifies before it ever calls the :POST
+  ;; (cl-spec/src/function-spec.lisp), so every contract scenario in this file
+  ;; exercised :RETURN-SPEC and none of them :POSTCONDITION.
+  ;;
+  ;; Three things this branch meets at once.  The signature is
+  ;; (:RETURN-VALUE :POSTCONDITION <explanation>)
+  ;; (cl-spec/src/function-spec.lisp:1335) -- three elements under the same
+  ;; head as the :RETURN-SPEC form, whose third element IS failure-shape data
+  ;; and whose third element here is not.  The explanation is
+  ;; (:POST-FORM <index>) (function-spec.lisp:1437-1441), a key the shape
+  ;; table did not declare.  And %FORMAT-CONTRACT's broken-half line names the
+  ;; reason.
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (let* ((response (spec-check-response
+                          (make-ht "function" (%fixture-name "GROW-BY-NOTHING")
+                                   "trials" 5 "seed" "1")))
+               (result (%first-result response))
+               (record (gethash "data" (gethash "core_result" result)))
+               (failure (gethash "failure" record))
+               (text (%text response)))
+          (ok (equal "failed" (gethash "status" result)))
+          (ok (equal "postcondition" (gethash "failure_reason" record)))
+          (testing "the signature keeps cl-spec's grammar, leading tag first"
+            (let ((signature (gethash "signature" failure)))
+              (ok (= 3 (length signature)))
+              (ok (equal "return-value" (aref signature 0)))
+              (ok (equal "postcondition" (aref signature 1)))))
+          (testing "and the explanation names which :post form did not hold"
+            ;; Undeclared, this key landed in unknown_keys and its value was
+            ;; dropped -- which is the whole explanation for this failure.
+            (ok (eql 0 (gethash "post_form" (gethash "explanation" failure)))))
+          (%ok-core-record-read-whole result)
+          (testing "and the text names the half that broke"
+            (ok (search "broken half: postcondition" text)))))))

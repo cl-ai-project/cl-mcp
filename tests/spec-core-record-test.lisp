@@ -500,6 +500,212 @@ list itself rather than to the value cl-spec said it could not freeze"
         (ok (equal '(:scalar "range-failed")
                    (field-of (first (second shapes)) "kind")))))))
 
+(deftest a-signature-reads-the-grammar-cl-spec-actually-builds
+  ;; FAILURE-SIGNATURE (cl-spec/src/function-spec.lisp) builds more than the
+  ;; two forms this walk used to know, and cl-spec's own validator
+  ;; VALID-SIGNATURE-SHAPE-P (cl-spec/src/counterexample.lisp:88-108) is the
+  ;; list of them.  Only two carry failure-shape data in their third element.
+  (testing "a postcondition failure is not failure-shape data, although it
+matches on head and length"
+    ;; (:RETURN-VALUE :POSTCONDITION (:POST-FORM 0)) --
+    ;; cl-spec/src/function-spec.lisp:1335, asserted literally by
+    ;; cl-spec/tests/multiple-values-function-test.lisp:149.  Walked as
+    ;; failure shapes, :POST-FORM and 0 each land as a bare atom under an
+    ;; (:OBJECT ...) descriptor and each push an :ATOM-FOR-CONTAINER issue --
+    ;; so PROJECTION.COMPLETE read false on the commonest contract failure
+    ;; there is, which is exactly the signal that instrument exists to give.
+    (multiple-value-bind (node issues)
+        (project-record '(:return-value :postcondition (:post-form 0))
+                        :signature)
+      (ok (null issues))
+      (ok (eq :array (first node)))
+      (ok (equal '(:scalar "postcondition") (second (second node))))))
+  (testing "a (values ...) return spec rewrites the head and keeps the shapes"
+    ;; cl-spec/src/function-spec.lisp:1400-1406, asserted by
+    ;; cl-spec/tests/multiple-values-function-test.lisp:123,160.
+    (let* ((node (project-record
+                  '(:return-values :return-spec ((:kind :range-failed)))
+                  :signature))
+           (shapes (third (second node))))
+      (ok (equal '(:scalar "return-values") (first (second node))))
+      (ok (eq :array (first shapes)))
+      (ok (equal '(:scalar "range-failed")
+                 (field-of (first (second shapes)) "kind")))))
+  (testing "a case wrapper is peeled, and the inner grammar still recognized"
+    ;; (:CASE NAME . INNER), cl-spec/src/function-spec.lisp:1572-1574, with
+    ;; CASE-SIGNATURE-PARTS (counterexample.lisp:76-84) as cl-spec's own
+    ;; unwrapper.  Unpeeled, the nested failure shapes flatten to one
+    ;; externalized string.
+    (let* ((node (project-record
+                  '(:case :a :return-value :return-spec ((:kind :range-failed)))
+                  :signature))
+           (elements (second node)))
+      (ok (equal '(:scalar "case") (first elements)))
+      (ok (equal '(:scalar "a") (second elements)))
+      (ok (equal '(:scalar "return-value") (third elements)))
+      (let ((shapes (fifth elements)))
+        (ok (eq :array (first shapes)))
+        (ok (equal '(:scalar "range-failed")
+                   (field-of (first (second shapes)) "kind"))))))
+  (testing "and a case-wrapped postcondition is still not failure-shape data"
+    ;; cl-spec/tests/function-cases-test.lisp:829 asserts this literal.
+    (multiple-value-bind (node issues)
+        (project-record '(:case :a :return-value :postcondition (:post-form 0))
+                        :signature)
+      (ok (null issues))
+      (ok (eq :array (first node)))))
+  (testing "every other form cl-spec builds stays a flat array of leaves"
+    (dolist (signature '((:missing-condition)
+                         (:target-signal cl-user::boom)
+                         (:contract-error cl-user::boom)
+                         (:state-postcondition 0)
+                         (:state-post 0 :contract-error cl-user::boom)
+                         (:case-selection :case-guard-error :a)
+                         (:property-false)
+                         (:property-condition cl-user::boom)))
+      (multiple-value-bind (node issues) (project-record signature :signature)
+        (ok (eq :array (first node)))
+        (ok (null issues))))))
+
+(deftest an-absent-record-is-null-and-an-empty-collection-is-not
+  ;; RESULT-DATA (cl-spec/src/property-runner.lisp:255-276) is one
+  ;; unconditional APPEND, so every key is emitted on every run, and
+  ;; OBSERVATION-DATA answers NIL (property-runner.lisp:216,225) whenever
+  ;; there is no failure evidence -- which is every passing run.  Projected as
+  ;; {}, that reads as a failure observation whose every field happens to be
+  ;; missing, which is not what cl-spec said.
+  (multiple-value-bind (report status)
+      (project-core-record *passing-result* :result-data)
+    (ok (eq :ok status))
+    (let ((data (getf report :data)))
+      (testing "an absent observation is null, not an empty record"
+        (ok (equal '(:scalar nil) (field-of data "failure")))
+        (ok (equal '(:scalar nil) (field-of data "shrunk_failure"))))
+      (testing "and an empty collection keeps its brackets, because it was
+measured empty"
+        (ok (equal '(:array nil) (field-of data "counterexample"))))))
+  (testing "a NIL explanation inside an observation is null too"
+    (let ((node (project-record '(:status :failed :explanation nil)
+                                '(:ref :observation))))
+      (ok (equal '(:scalar nil) (field-of node "explanation"))))))
+
+(deftest a-seed-is-decimal-text-even-inside-the-safe-range
+  ;; Design 6.2.3: a seed is ALWAYS a decimal string, data.seed included.  A
+  ;; cl-spec seed is a fixnum reaching 2^62, a rounded seed cannot reproduce a
+  ;; run, and data.seed reading 1 beside the top-level alias reading "1" is
+  ;; two representations of one fact.  Only the wide seed was pinned, and a
+  ;; wide one is text under the plain integer rule anyway -- so the rule this
+  ;; field actually needs was never tested.
+  (let ((report (project-core-record
+                 (append (remove-from-plist-once *passing-result* :seed)
+                         '(:seed 1))
+                 :result-data)))
+    (ok (equal '(:scalar "1") (field-of (getf report :data) "seed"))))
+  (testing "and a wide one is still text"
+    (let ((report (project-core-record *passing-result* :result-data)))
+      (ok (equal '(:scalar "4611686018427387903")
+                 (field-of (getf report :data) "seed")))))
+  (testing "while an ordinary counter stays a number"
+    (let ((report (project-core-record *passing-result* :result-data)))
+      (ok (equal '(:scalar 2) (field-of (getf report :data) "trials"))))))
+
+(deftest a-leaf-string-is-bounded-and-the-cut-is-reported
+  ;; :CONDITION-REPORT is (PRINC-TO-STRING condition) at four cl-spec sites
+  ;; (explain.lisp:212,565,614 and execution.lisp:288) and is declared :LEAF
+  ;; in six places, and PROJECT-VALUE's string branch returned it whole --
+  ;; MAX-CHARS reached EXTERNALIZE-VALUE and nothing else.
+  ;;
+  ;; Reported as a PROJECTION.ISSUES entry rather than a sibling flag: :DATA
+  ;; is a mirror of cl-spec's record and carries no key cl-mcp added.
+  (multiple-value-bind (node issues)
+      (project-record (list :kind :type-failed
+                            :condition-report (make-string 3000
+                                                           :initial-element #\x))
+                      '(:ref :error-datum)
+                      :max-chars 40)
+    (ok (= 40 (length (second (field-of node "condition_report")))))
+    (ok (= 1 (length issues)))
+    (let ((issue (first issues)))
+      (ok (eq :char-limit (getf issue :reason)))
+      (ok (equal '("condition_report") (getf issue :path)))
+      (ok (= 2960 (getf issue :omitted-items)))
+      (ok (eq t (getf issue :omitted-items-exact-p))))))
+
+(deftest the-two-explanation-keys-cl-spec-emits-are-declared
+  ;; Both were undeclared, so both landed in UNKNOWN-KEYS with their values
+  ;; dropped -- and for a :MISSING-CONDITION failure that key IS the whole
+  ;; explanation.
+  (testing ":expected carries a real EXPECTED-DESCRIPTOR, not a dropped key"
+    ;; (list :expected (expected-descriptor signal-spec)),
+    ;; cl-spec/src/function-spec.lisp:1419-1420.
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:expected (:type cl-user::my-error))
+                        '(:ref :explanation))
+      (ok (null issues))
+      (ok (null unknown))
+      (let ((expected (field-of node "expected")))
+        (ok (eq :array (first expected)))
+        (ok (equal '(:scalar "type") (first (second expected)))))))
+  (testing ":post-form names which :post form did not hold"
+    ;; (list :post-form index), cl-spec/src/function-spec.lisp:1437-1441.
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:post-form 2) '(:ref :explanation))
+      (ok (null issues))
+      (ok (null unknown))
+      (ok (equal '(:scalar 2) (field-of node "post_form"))))))
+
+(deftest the-two-error-datum-keys-cl-spec-emits-are-declared
+  (testing ":observed-tag is value-derived, so it is externalized not worded"
+    ;; cl-spec/src/explain.lisp:618, asserted by
+    ;; cl-spec/tests/tagged-union-test.lisp:77.  The tag reader may answer any
+    ;; object, so this is :OPAQUE rather than a leaf.
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:kind :no-branch :observed-tag :circle
+                          :known-tags (:square :triangle))
+                        '(:ref :error-datum))
+      (ok (null issues))
+      (ok (null unknown))
+      (ok (eq :value (first (field-of node "observed_tag"))))))
+  (testing ":first-index is where a duplicate element was first seen"
+    ;; cl-spec/src/explain.lisp:327-328, asserted by
+    ;; cl-spec/tests/collection-constraints-test.lisp:73.
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:kind :duplicate-element :first-index 1)
+                        '(:ref :error-datum))
+      (ok (null issues))
+      (ok (null unknown))
+      (ok (equal '(:scalar 1) (field-of node "first_index"))))))
+
+(deftest a-declared-boolean-has-two-values-and-neither-is-a-symbol
+  ;; T is not a keyword, so PROJECT-VALUE renders it the way it renders every
+  ;; other symbol: a measured true arrived as {"package": "COMMON-LISP",
+  ;; "name": "T"} beside a measured false that arrived as null -- two shapes
+  ;; for one two-valued fact, and the false one indistinguishable from an
+  ;; absence.  Declared per field, because NIL is also the empty list and also
+  ;; the absence of a phase, and both of those stay JSON null.
+  (testing "a digest that covered everything, and one that did not"
+    (let ((complete (project-core-record *passing-result* :result-data))
+          (partial (project-core-record
+                    (append (remove-from-plist-once
+                             *passing-result* :definition-digest-complete)
+                            '(:definition-digest-complete nil))
+                    :result-data)))
+      (ok (equal '(:bool t)
+                 (field-of (getf complete :data) "definition_digest_complete")))
+      (ok (equal '(:bool nil)
+                 (field-of (getf partial :data)
+                           "definition_digest_complete")))))
+  (testing "while a NIL that is an absence stays null"
+    ;; :FAILURE-PHASE NIL is an ordinary target observation with no special
+    ;; phase, and it is a :LEAF, not a boolean.
+    (let ((report (project-core-record *passing-result* :result-data)))
+      (ok (equal '(:scalar nil)
+                 (field-of (getf report :data) "failure_phase")))))
+  (testing "and an explanation's :valid is the other declared boolean"
+    (let ((node (project-record '(:valid nil :errors nil)
+                                '(:ref :explanation))))
+      (ok (equal '(:bool nil) (field-of node "valid"))))))
+
 (deftest expected-descriptor-is-a-recursive-array-not-a-plist
   ;; EXPECTED-DESCRIPTOR builds a flat, positionally tagged list for most
   ;; spec kinds -- the leading keyword is a tag, not a key.  Read as
