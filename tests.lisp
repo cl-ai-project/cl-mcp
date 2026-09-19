@@ -64,6 +64,7 @@
   (:import-from #:cl-mcp/tests/pool-init-config-test)
   (:import-from #:cl-mcp/tests/project-scaffold-test)
   (:import-from #:cl-mcp/tests/spec-adapter-core-test)
+  (:import-from #:cl-mcp/tests/spec-core-record-test)
   (:import-from #:cl-mcp/tests/spec-adapter-report-test)
   (:import-from #:cl-mcp/tests/spec-response-builders-test)
   (:import-from #:cl-mcp/tests/spec-tools-test)
