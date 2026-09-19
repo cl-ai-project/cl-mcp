@@ -179,7 +179,7 @@ sentinel を使う。
 
 | 出現位置 | 意味 | 扱い |
 |---|---|---|
-| `failure.outcome` | **target を一度も呼んでいない**（§6.1） | semantic value。`target_outcome.kind = "not-collected"` として保持 |
+| `failure.outcome` | **target を一度も呼んでいない**（§6.1） | semantic value。`outcome.kind = "not-collected"` として保持 |
 | `provenance.collection_states.target_revision` | その項目を収集しなかった | semantic value。そのまま保持 |
 | `shrink_report` / `generation_report` / `case_report`（top-level） | backend がレポートを作らなかった | availability sentinel |
 | `digest_omissions` / `digest_exclusions`（top-level） | `result-data` が明示的に埋める（`(getf metadata field :not-collected)`） | availability sentinel |
@@ -632,13 +632,21 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:reason` | `reason` | keyword→string |
 | `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.5） |
 | `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
-| `:outcome` | `target_outcome` | **構造化オブジェクト**（後述） |
-| `:value` | `primary_value` | `externalize-value` |
-| `:case` | `selected_case` | keyword→string |
+| `:outcome` | `outcome` | **構造化オブジェクト**（後述） |
+| `:value` | `value` | `externalize-value` |
+| `:case` | `case` | keyword→string |
 | `:condition-report` | `condition_report` | 文字列（有界） |
 | `:state` | `state`（下記） | — |
 
-### 6.1 `target_outcome` は keyword ではない
+### 6.1 `outcome` は keyword ではない
+
+**キー名は cl-spec の綴りのまま**である。`target_outcome` / `primary_value` /
+`selected_case` という読みやすい別名は採らない — §3.1 と §5 が `data` を
+cl-spec の record の純粋な写像と規定しており、改名は §2 原則 2 が禁じる
+「cl-mcp の中に第二の cl-spec スキーマを作る」ことにあたる。読みやすい語は
+テキスト描画（§7）が担う。判定内容は変わらない:
+`outcome.kind != "not-collected"` が「target が呼ばれた」である。
+
 
 実測（target が呼ばれた失敗）:
 
@@ -657,10 +665,10 @@ signal した場合は `(:KIND :SIGNALED :CONDITION-TYPE ... :CONDITION-REPORT .
 export されていない**（実測で確認）ので、この plist を読む以外の経路は無い。
 
 ```json
-"target_outcome": { "kind": "returned", "values": [...] }
-"target_outcome": { "kind": "signaled",
+"outcome": { "kind": "returned", "values": [...] }
+"outcome": { "kind": "signaled",
                     "condition_type": "...", "condition_report": "..." }
-"target_outcome": { "kind": "not-collected" }
+"outcome": { "kind": "not-collected" }
 ```
 
 投影規則: `values[]` は各値を `externalize-value`、`condition_type` は
@@ -698,7 +706,7 @@ framework が target-call evidence を記録しないだけであって、何も
 
 ```
 failure_phase   = state-post
-target_outcome.kind = returned
+outcome.kind = returned
 ```
 
 から「target は正常に返り、状態契約だけが失敗した」が機械的に決まる。
@@ -769,7 +777,7 @@ application / user の葉の cons -> externalize-value
 | `result-data` root | object |
 | `failure` / `shrunk_failure`（observation） | object |
 | `counterexample` / `shrunk_counterexample` | `[{variable, value}]`（既存 `%named-values`） |
-| `target_outcome` | object。`values[]` は各要素 `externalize-value` |
+| `outcome` | object。`values[]` は各要素 `externalize-value` |
 | `state` / `state.capture` / `state.state_post` | object |
 | `state.capture.declared` | `symbol_data[]` |
 | `state.capture.values` | `[{name, value}]`。`name` は `symbol_data`、`value` は `externalize-value`、ただし §6.3 の opaque marker はそのまま通す |
@@ -995,7 +1003,7 @@ case-selection error も failure observation を持ち、そのとき target は
 
 - `counterexample_status` は従来どおり「反例の値が取れたか」だけを言う
 - 「target が呼ばれたか」は **contract run について**
-  `core_result.data.failure.target_outcome.kind` が `not-collected` でない
+  `core_result.data.failure.outcome.kind` が `not-collected` でない
   ことで答える（§6.1。core の事実であって adapter の推論ではない）。
   property run にこの判定を適用しない — そちらの `not-collected` は
   「target-call evidence が無い」であって「実行されなかった」ではない
@@ -1072,9 +1080,9 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
    到達しないように走らせる。`status` / `case_report` / 到達した case /
    `never_called` が保たれ、完全な case coverage を示唆しないこと。
 2. **state-post 失敗** — `:capture` + 正常復帰 + `:state-post` を持つ契約で、
-   target は成功復帰しつつ状態を誤って変更する。`target_outcome` /
+   target は成功復帰しつつ状態を誤って変更する。`outcome` /
    捕捉値 / state-post 失敗 / `failure_phase: state-post` / `failure_reason` /
-   該当すれば `selected_case` が保たれること。
+   該当すれば `case` が保たれること。
 3. **case-selection error** — guard が重複または欠落した契約。target が
    呼ばれていないこと、`failure_phase: case-selection`、構造化された
    case-selection 証拠が保たれること、応答が「target 実装が失敗した」と
@@ -1103,7 +1111,7 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 10. **live condition object の維持** — 現行 cl-spec 経路でも既存の
     `condition.object_id` が失われないこと（§2 の補助 reader 例外）。
 11. **`:NOT-COLLECTED` の field 固有性** — `failure.outcome` が
-    `:NOT-COLLECTED` のとき、`target_outcome.kind = "not-collected"` として
+    `:NOT-COLLECTED` のとき、`outcome.kind = "not-collected"` として
     残り、`field_availability` へ誤変換されないこと。
     `provenance.collection_states.target_revision` も同様。§3.3 の回帰テスト。
 12. **未知の schema version** — `schema-version 2` の record に対して
@@ -1113,7 +1121,7 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
     ネストしたオブジェクトの配列として残り、`signature` が配列として残ること
     （§6.2 / §6.2.5）。
 14. **通常 Property の outcome semantics** — Property body が 1 回実行されて
-    失敗した run で `failure.target_outcome.kind = "not-collected"` になり、
+    失敗した run で `failure.outcome.kind = "not-collected"` になり、
     かつテキストが「target was not called」と**言わない**こと。
     `not-collected = Function Spec の target evidence が無い` と
     `何も実行されていない` の混同を防ぐ、§6.1 の回帰テスト。

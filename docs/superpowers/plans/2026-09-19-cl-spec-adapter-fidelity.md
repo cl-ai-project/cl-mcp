@@ -902,7 +902,7 @@ Append to `tests/spec-core-record-test.lisp` (extend `:import-from` with
                         :outcome (:kind :returned :values (0)) :value 0
                         :case :insufficient :condition-report nil))
          (node (project-record observation '(:ref :observation)))
-         (outcome (field-of node "target_outcome")))
+         (outcome (field-of node "outcome")))
     (ok (equal '(:scalar "returned") (field-of outcome "kind")))
     (ok (eq :array (first (field-of outcome "values"))))))
 
@@ -2869,7 +2869,7 @@ Add to `tests/spec-integration-test.lisp`, each guarded by
             (ok (equal "state-postcondition" (gethash "failure_reason" record)))
             (testing "the target returned normally and that is visible"
               (ok (equal "returned"
-                         (gethash "kind" (gethash "target_outcome" failure)))))
+                         (gethash "kind" (gethash "outcome" failure)))))
             (testing "the captured pre-state survives"
               (ok (plusp (length (gethash "values"
                                           (gethash "capture"
@@ -2897,7 +2897,7 @@ Add to `tests/spec-integration-test.lisp`, each guarded by
           (ok (equal "case-selection" (gethash "failure_phase" record)))
           (testing "the target was never called"
             (ok (equal "not-collected"
-                       (gethash "kind" (gethash "target_outcome"
+                       (gethash "kind" (gethash "outcome"
                                                 (gethash "failure" record))))))
           (testing "the structured selection evidence is preserved"
             (ok (eql 1 (gethash "case_selection_errors"
@@ -3017,7 +3017,7 @@ Add under the `spec-check` bullets:
     observation. `projection.issues` names every place a long or deep value was
     cut, so a short list can be told from a truncated one.
   - `data.failure` and `data.shrunk_failure` are the observations. Their
-    `target_outcome.kind` is `returned`, `signaled` or `not-collected`; for a
+    `outcome.kind` is `returned`, `signaled` or `not-collected`; for a
     **contract** `not-collected` means the target was never called, and for a
     **property** it only means no target outcome was recorded — a property body
     runs without one. `state.capture` and `state.state_post` keep their own
@@ -3084,7 +3084,7 @@ spec-tools-test checks it against the code's gap list, so the five new values
 had to be written there rather than only here.
 
 Two distinctions are spelled out because getting them wrong is the failure this
-change was made to prevent: target_outcome.kind not-collected means the target
+change was made to prevent: outcome.kind not-collected means the target
 was not called for a contract and only that no target outcome was recorded for
 a property, and a shrink termination is reported as given rather than sorted
 into complete or incomplete -- there is no completed value to contrast with."
