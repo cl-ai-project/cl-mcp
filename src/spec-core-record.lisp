@@ -193,6 +193,21 @@ declares this key and cl-mcp already publishes it outside :DATA, so
 WALK-OBJECT names it in neither NODE nor UNKNOWN-KEYS -- a declared omission,
 not an unrecognized one.
 
+A container descriptor is chosen by what cl-spec's own accessor is documented
+to build, never guessed from the cons cells in front of it.  Two of them
+produce the same {name, value} JSON from different Lisp shapes, which is
+exactly the trap that rule exists to prevent: (:ALIST D) reads
+((NAME . VALUE) ...) -- dotted pairs, CAR and CDR apart -- the shape
+CAPTURE-EVIDENCE's :VALUES is measured as, e.g. ((BALANCE-BEFORE . 30)).
+(:PAIRS D) reads a flat (NAME VALUE NAME VALUE ...) plist two at a time --
+cl-spec's own NAME-ARGUMENTS shape -- the shape a counterexample is measured
+as, e.g. (BALANCE 5 AMOUNT 5).  Pointing a plist field at (:ALIST D) calls CAR
+and CDR on a bare argument-value symbol and signals a TYPE-ERROR; pointing an
+alist field at (:PAIRS D) reads a dotted pair's CDR as the next NAME.  Neither
+mistake is caught by a record that happens to carry NIL there, which is why
+this pairing is named here rather than left to be rediscovered from a
+production failure.
+
 PATH is the position reached so far, for the entries of ISSUES and
 UNKNOWN-KEYS.  MAX-CHARS bounds every value this projects, leaf or opaque, the
 same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
@@ -243,10 +258,25 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                             (walk-list value :leaf path depth)))))
                ((not (consp descriptor))
                 (project-value value :max-chars max-chars))
+               ;; A container descriptor paired with a non-NIL atom cannot be
+               ;; decomposed.  cl-spec's own :NOT-COLLECTED sentinel reaching
+               ;; an :OBSERVATION's :OUTCOME this way is exactly this case --
+               ;; kept out of +SENTINEL-FIELDS+ on purpose (see its
+               ;; docstring): the target really was never called, which is an
+               ;; answer, not an absence to blank to JSON null.  Projecting
+               ;; the atom itself preserves that fact instead of crashing on
+               ;; CAR, CDR or NTHCDR of something that was never a list --
+               ;; the same guard every container shape needs, not only
+               ;; :OBJECT's.
+               ((and value (not (consp value))
+                     (member (first descriptor) '(:array :alist :pairs :object)))
+                (project-value value :max-chars max-chars))
                ((eq :array (first descriptor))
                 (list :array (walk-list value (second descriptor) path depth)))
                ((eq :alist (first descriptor))
                 (list :array (walk-alist value (second descriptor) path depth)))
+               ((eq :pairs (first descriptor))
+                (list :array (walk-pairs value (second descriptor) path depth)))
                ((eq :object (first descriptor))
                 (walk-object value (rest descriptor) path depth))
                (t (project-value value :max-chars max-chars)))))
@@ -281,6 +311,22 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                        (list (cons "name" (project-value (car entry)))
                              (cons "value"
                                    (walk (cdr entry) descriptor
+                                         (cons index path) (1+ depth)))))))
+         (walk-pairs (plist descriptor path depth)
+           ;; PLIST is a flat (NAME VALUE NAME VALUE ...) run -- cl-spec's
+           ;; own NAME-ARGUMENTS shape for a counterexample, not an alist of
+           ;; dotted pairs.  UNIT 2 for the same reason WALK-OBJECT's BOUNDED
+           ;; call is: the cut must fall on a pair boundary, not split one
+           ;; and orphan its value.  The {name, value} object built here is
+           ;; identical to WALK-ALIST's, so a client cannot tell which Lisp
+           ;; shape supplied it.
+           (loop for (name value) on (bounded plist path 2) by #'cddr
+                 for index from 0
+                 collect
+                 (list :object
+                       (list (cons "name" (project-value name))
+                             (cons "value"
+                                   (walk value descriptor
                                          (cons index path) (1+ depth)))))))
          (walk-object (plist fields path depth)
            (let ((entries '()))
@@ -522,9 +568,16 @@ rather than by whatever reads it next."
        '(:object (:kind . :leaf) (:path . (:array :leaf)) (:target . :leaf)
                  (:reason . :leaf))
        :counterexample
-       ;; cl-spec names the arguments before it stores them, so this is a
-       ;; {variable value} plist rather than a raw argument list.
-       '(:alist :opaque)
+       ;; cl-spec's NAME-ARGUMENTS (PROPERTY-NAMED-ARGUMENTS) zips each
+       ;; argument variable with its value as a flat {variable value} PLIST
+       ;; -- (BALANCE 5 AMOUNT 5), confirmed against
+       ;; cl-spec/tests/rest-function-test.lisp's own
+       ;; (equal '(head 1 tail (2 3)) (property-named-arguments ...)) -- not
+       ;; an alist of dotted pairs.  :PAIRS reads it two at a time; :ALIST
+       ;; would call CAR/CDR on a bare argument-value symbol and signal a
+       ;; TYPE-ERROR on the first one, which a passing run's NIL
+       ;; counterexample never exercises.
+       '(:pairs :opaque)
        :result-data
        '(:object (:schema-version . :leaf) (:record-kind . :leaf)
                  (:entity-kind . :leaf) (:definition-digest . :leaf)

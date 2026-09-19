@@ -168,11 +168,13 @@ list itself rather than to the value cl-spec said it could not freeze"
         (ok (not (eq :value (first (cdr pair)))))))))
 
 (deftest a-second-opaque-field-keeps-the-marker-too
-  ;; Generality check: :COUNTEREXAMPLE is another (:ALIST :OPAQUE) field, a
+  ;; Generality check: :COUNTEREXAMPLE is another (:PAIRS :OPAQUE) field, a
   ;; sibling to capture values rather than a special case wired in on its own.
+  ;; The fixture is a flat plist, not an alist -- see
+  ;; A-COUNTEREXAMPLE-PLIST-PROJECTS-AS-NAME-VALUE-PAIRS for why.
   (let* ((node (project-record
-                (list (cons 'cl-user::a (list :unavailable :reason :opaque-value
-                                              :type :hash-table)))
+                (list 'cl-user::a (list :unavailable :reason :opaque-value
+                                        :type :hash-table))
                 '(:ref :counterexample)))
          (entry (first (second node)))
          (value (cdr (assoc "value" (second entry) :test #'equal))))
@@ -407,6 +409,57 @@ list itself rather than to the value cl-spec said it could not freeze"
          (outcome (field-of node "outcome")))
     (ok (equal '(:scalar "returned") (field-of outcome "kind")))
     (ok (eq :array (first (field-of outcome "values"))))))
+
+(deftest a-counterexample-plist-projects-as-name-value-pairs
+  ;; The regression this guards: cl-spec's NAME-ARGUMENTS (measured via
+  ;; PROPERTY-NAMED-ARGUMENTS in cl-spec/tests/rest-function-test.lisp) builds
+  ;; a flat {variable value} PLIST for a counterexample -- (BALANCE 5
+  ;; AMOUNT 5) -- not an alist of dotted pairs.  A descriptor of
+  ;; (:ALIST :OPAQUE) calls CAR/CDR on the bare argument-value 5 here and
+  ;; signals a TYPE-ERROR; this must fail against that descriptor and pass
+  ;; only against (:PAIRS :OPAQUE), which :COUNTEREXAMPLE now uses.
+  (let* ((record (append (list :counterexample '(balance 5 amount 5))
+                         (remove-from-plist-once *passing-result*
+                                                 :counterexample)))
+         (node (project-record record '(:ref :result-data)))
+         (counterexample (field-of node "counterexample")))
+    (ok (eq :array (first counterexample)))
+    (let ((entries (second counterexample)))
+      (ok (= 2 (length entries)))
+      (testing "each entry pairs the variable's name with its value"
+        (ok (equal "BALANCE"
+                   (getf (second (field-of (first entries) "name")) :name)))
+        (ok (equal "AMOUNT"
+                   (getf (second (field-of (second entries) "name")) :name)))
+        ;; The value side is :OPAQUE, the same descriptor CAPTURE-EVIDENCE's
+        ;; :VALUES uses -- EXTERNALIZE-VALUE's own {printed, type, object_id}
+        ;; shape, matching what %NAMED-VALUES already renders for the alias
+        ;; beside this field, not PROJECT-VALUE's bare (:SCALAR n).
+        (let ((value-node (field-of (first entries) "value")))
+          (ok (eq :value (first value-node)))
+          (ok (equal "5" (getf (second value-node) :printed)))
+          (ok (equal "integer" (getf (second value-node) :type))))))))
+
+(deftest a-not-collected-outcome-does-not-crash-the-walk
+  ;; A second regression, found while auditing every :OPAQUE-adjacent shape
+  ;; entry per the review that caught the counterexample bug above, and
+  ;; confirmed against a real cl-spec run
+  ;; (CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE::CLAMP-IS-WRONG-ON-PURPOSE): a plain
+  ;; property's failing trial-observation carries :OUTCOME :NOT-COLLECTED --
+  ;; OBSERVED-OUTCOME-DATA's own answer for "the target was never classified"
+  ;; -- not only a function-spec's capture/case-selection error.  :OUTCOME is
+  ;; deliberately excluded from +SENTINEL-FIELDS+ (see its docstring: this is
+  ;; real data, not an absence to blank out), so the guard has to live in
+  ;; WALK itself: a container descriptor (:OBJECT here, via :TARGET-OUTCOME)
+  ;; paired with a bare atom must project the atom, not call CAR/CDR/NTHCDR
+  ;; on it.
+  (let* ((observation '(:arguments (4) :status :failed :reason :predicate-false
+                        :signature (:property-false) :explanation nil
+                        :outcome :not-collected :value nil
+                        :case nil :condition-report nil))
+         (node (project-record observation '(:ref :observation)))
+         (outcome (field-of node "outcome")))
+    (ok (equal '(:scalar "not-collected") outcome))))
 
 (deftest a-signature-keeps-its-shapes-inside-an-array
   (let ((node (project-record '(:return-value :return-spec ((:kind :range-failed)))
