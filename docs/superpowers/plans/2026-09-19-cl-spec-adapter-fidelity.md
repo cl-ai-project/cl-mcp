@@ -1150,6 +1150,7 @@ visible there rather than silently shorter inside :DATA."
                      :schema-version reason
                      :field-availability nil
                      :unknown-keys nil
+                     :source nil
                      :projection (list :complete t :issues nil)
                      :data nil)
                :unsupported-schema
@@ -1160,6 +1161,13 @@ visible there rather than silently shorter inside :DATA."
          (values (list :availability :collected
                        :schema-supported t
                        :schema-version 1
+                       ;; The record as cl-spec gave it, kept for the adapter's
+                       ;; own reading.  The verdict logic asks questions like
+                       ;; "was any declared case never reached", and answering
+                       ;; them off :DATA would mean re-parsing projected JSON
+                       ;; nodes to recover keywords this already has.  Never
+                       ;; rendered: :DATA is what reaches the client.
+                       :source record
                        :field-availability
                        (loop for (key . nil) in (rest (%resolve-descriptor
                                                        (list :ref shape-name)))
@@ -2244,11 +2252,10 @@ reinterpreted: `results[].status` keeps the value cl-spec gave.
                 (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
 ```
 
-Note the tests read `:source` off the core record: Task 7 keeps the raw record
-plist there beside `:data` so the gap logic reads keywords rather than
-re-parsing projected JSON nodes. Add `:source core-data` to the record plist
-`project-core-record` builds in Task 4 (`:source record` on the `:ok` branch,
-`NIL` otherwise) — it is adapter-internal and is never rendered.
+The tests read `:source` off the core record — the raw cl-spec plist
+`project-core-record` keeps beside `:data` (Task 4), so the verdict logic reads
+keywords instead of re-parsing projected JSON nodes. It is adapter-internal and
+`%core-record-ht` does not render it.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -2281,6 +2288,19 @@ and add to the returned plist, on both branches:
               :declares-cases (if (getf data :case-selection) t nil)
 ```
 with `:declares-cases :unknown` in the `error` branch.
+
+**Then carry it onto the result.** `%CONTRACT-FACTS` returns the facts plist,
+and the gap predicates read the *result*. `%RESULT-PLIST` already receives
+`facts`, so add one entry to the plist it returns, beside `:kind`:
+
+```lisp
+          ;; From the contract facts, because the verdict is about this run of
+          ;; that contract.  A property run has no cases and answers NIL.
+          :declares-cases (getf facts :declares-cases)
+```
+
+Without this the two predicates below read NIL for every result and neither
+`case-coverage-unknown` nor `contract-schema-unsupported` can ever fire.
 
 - [ ] **Step 4: Extend the gap vocabulary and the two predicates**
 
