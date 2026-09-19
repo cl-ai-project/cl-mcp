@@ -681,7 +681,7 @@ Returns an alist like extract-toplevel-form, or NIL."
                                   (member form-type form-types :test
                                           #'string-equal))
                             (let ((result
-                                   (list (cons :file (namestring filepath))
+                                   (list (cons :file filepath)
                                          (cons :line line-number)
                                          (cons :match line)
                                          (cons :package (or package "UNKNOWN"))
@@ -732,7 +732,12 @@ Returns an alist like extract-toplevel-form, or NIL."
      :limit            - Maximum number of results to return. If NIL, return all.
 
    Returns a list of alists, each containing:
-     :file            - File path
+     :file            - The file's PATHNAME, not a namestring. Callers that
+                        show it to a user convert it there; converting here
+                        would make every caller parse a string back into the
+                        pathname it started as, and NAMESTRING escapes [ and ]
+                        for the pathname reader, so that round trip does not
+                        survive a directory named demo[old]/
      :line            - Line number of the match
      :match           - The matching line text
      :package         - Package name active at that line

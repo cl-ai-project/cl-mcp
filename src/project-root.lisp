@@ -15,7 +15,11 @@
 (defparameter *project-root*
   (let ((env-root (uiop/os:getenv "MCP_PROJECT_ROOT")))
     (when env-root
-      (uiop/pathname:ensure-directory-pathname env-root)))
+      ;; PARSE-UNIX-NAMESTRING, not ENSURE-DIRECTORY-PATHNAME: the latter reads
+      ;; the string with the CL pathname reader, where [ and ] are wildcard
+      ;; syntax, and signals on the wild result -- here, while loading the file,
+      ;; so a root named project[old]/ would take the whole image down.
+      (uiop:parse-unix-namestring env-root :ensure-directory t)))
   "Absolute pathname of the project root.
 Set via MCP_PROJECT_ROOT environment variable or fs-set-project-root tool.")
 

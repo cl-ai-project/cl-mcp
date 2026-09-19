@@ -34,6 +34,8 @@
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:bordeaux-threads
                 #:make-thread
                 #:join-thread
@@ -2655,6 +2657,39 @@ valid file, leaves it parseable"
          (ok (search "without the readtable argument" text)
              "pointing instead at the step that settles it"))))))
 
+(deftest a-guard-round-trips-through-a-directory-named-with-brackets
+  (testing "the snapshot's abs_path and the resolved path agree on such a file"
+    ;; [ and ] are wild in this implementation's pathname syntax, so NAMESTRING
+    ;; escaped them and the guard carried an abs_path naming nothing on disk --
+    ;; while the path the edit resolved spelled it the other way, so check 2
+    ;; could never match.
+    ;; Built natively on purpose: MERGE-PATHNAMES on a string with brackets
+    ;; parses them as wild, which is the same confusion under test.
+    (let* ((dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/guard[br]/"
+                         (native-path-namestring
+                          cl-mcp/src/project-root:*project-root*))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "target.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out "(defun target () :old)~%"))
+             (let* ((path (native-path-namestring (truename file)))
+                    (guard (%edit-guard-for path "defun" "target")))
+               (ok (search "guard[br]" path)
+                   "the path cl-mcp works with is the one on disk")
+               (ok (search "guard[br]" (gethash "abs_path" guard))
+                   "and so is the one the guard records")
+               (multiple-value-bind (kind payload)
+                   (%guarded-edit-outcome path "target" guard)
+                 (declare (ignore payload))
+                 (ok (eq :ok kind)
+                     "so a guarded edit of a file under such a directory goes through"))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))
+
 (defun %guarded-edit-outcome (path form-name guard)
   "Call LISP-EDIT-FORM on PATH for the `defun' named FORM-NAME with GUARD and
 classify how the call ended.  Returns (VALUES KIND PAYLOAD): :CONFLICT with the
@@ -3188,3 +3223,33 @@ loser's text disappearing with no conflict reported anywhere."
           (if verdict
               (format nil "round ~S: ~A" (first verdict) (rest verdict))
               "every round: one winner, one edit_guard conflict, a file that parses")))))
+
+(deftest recovery-instruction-names-a-path-fs-write-file-resolves
+  (testing "a broken file under a bracketed directory is given a usable path"
+    ;; The instruction is fs-write-file's path argument, and fs-write-file
+    ;; resolves its argument natively.  NAMESTRING escaped [ and ] for the
+    ;; pathname reader, so the sentence named a path that tool would resolve to
+    ;; a differently-named directory -- the one round trip this text exists to
+    ;; start.
+    (let* ((root (system-source-directory :cl-mcp))
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/recovedit[br]/" (uiop:native-namestring root))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "broken.lisp") dir))
+           (text (format nil "(defun a ()~%  (list 1)~%")))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (write-string text out))
+             (let* ((cl-mcp/src/project-root:*project-root* root)
+                    (cause (handler-case
+                               (progn (cl-mcp/src/cst:parse-top-level-forms text) nil)
+                             (error (e) e)))
+                    (message (file-unparseable-message
+                              (make-file-unparseable-condition (truename file) text cause))))
+               (ok (search "fs-write-file (path=\"tests/tmp/recovedit[br]/broken.lisp\""
+                           message)
+                   (format nil "the path must be the one on disk; message was ~S" message))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))

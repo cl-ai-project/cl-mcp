@@ -1144,3 +1144,25 @@ writes) rather than raw with-open-file."
                (ok (and caught-message (search marker caught-message))
                    "error message includes child stderr marker"))
           (ignore-errors (delete-file script-path)))))))
+
+(deftest worker-build-env-writes-a-root-the-worker-can-parse-back
+  (testing "MCP_PROJECT_ROOT survives the parent-to-worker handoff with brackets"
+    ;; The parent writes this variable and the worker reads it: one protocol,
+    ;; two files.  It used to be NAMESTRING out and ENSURE-DIRECTORY-PATHNAME
+    ;; back, which cancelled only because both went through the pathname
+    ;; reader.  This pins the pair, so changing one side alone fails here
+    ;; instead of leaving a literal backslash in the worker's root.
+    (let* ((dir (uiop:parse-native-namestring "/tmp/cl-mcp-envroot[br]/"
+                                              :ensure-directory t))
+           (cl-mcp/src/project-root:*project-root* dir)
+           (env (cl-mcp/src/worker-client::%build-environment "s" 1))
+           (entry (find-if (lambda (e) (uiop:string-prefix-p "MCP_PROJECT_ROOT=" e)) env)))
+      (ok entry "the variable is set at all")
+      (let* ((sent (subseq entry (length "MCP_PROJECT_ROOT=")))
+             ;; Exactly what %SETUP-PROJECT-ROOT does with it.
+             (parsed (uiop:parse-unix-namestring sent :ensure-directory t)))
+        (ok (not (find #\\ sent))
+            (format nil "the value must not be reader-escaped, got ~S" sent))
+        (ok (equal (uiop:native-namestring parsed) (uiop:native-namestring dir))
+            (format nil "the worker must land on the same directory, got ~S"
+                    (uiop:native-namestring parsed)))))))

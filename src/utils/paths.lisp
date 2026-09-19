@@ -14,6 +14,7 @@
            #:ensure-write-path
            #:resolve-path-in-project
            #:resolve-readable-path
+           #:native-path-namestring
            #:normalize-path-for-display
            #:broad-root-p))
 
@@ -204,8 +205,28 @@ against *broad-root-deny-list* to prevent symlink bypass."
         (return-from broad-root-p t)))
     nil))
 
+(defun native-path-namestring (pathname)
+  "Return PATHNAME as a filesystem path string, or NIL for NIL.
+
+NAMESTRING is not one.  It escapes the characters this implementation's
+pathname syntax treats as wild -- [ and ] among them on SBCL -- so what it
+returns round-trips through the pathname READER, not through the filesystem:
+a file under demo[old]/ comes back as demo\\[old]/, which names nothing on
+disk.  Every path cl-mcp hands a caller is one the caller may hand back, and
+uiop parses an incoming path natively, so the two only agree if what goes out
+is native too.
+
+Falls back to NAMESTRING for a genuinely wild pathname, which has no native
+form at all -- better a path that cannot be opened than an error from a
+function whose job is to describe one."
+  (when pathname
+    (handler-case (uiop:native-namestring pathname)
+      (error () (namestring pathname)))))
+
 (defun normalize-path-for-display (pathname)
-  "Return a namestring for PATHNAME, relative to *project-root* when possible.
+  "Return a native path string for PATHNAME, relative to *project-root* when
+possible.  Native (NATIVE-PATH-NAMESTRING) because this is the path a caller
+reads and then passes back to another tool.
 Falls back to CWD, then cl-mcp system source directory, else absolute.
 Logical pathnames are translated to physical before processing.  Returns NIL,
 without signaling, when PATHNAME is a logical pathname with no registered
@@ -221,8 +242,8 @@ appear this way in xref source locations."
                                    (uiop/os:getcwd)
                                    (ignore-errors
                                     (asdf/system:system-source-directory :cl-mcp))))))
-          (dolist (base bases (namestring pn))
+          (dolist (base bases (native-path-namestring pn))
             (when (uiop/pathname:subpathp pn base)
               (return
-               (namestring
+               (native-path-namestring
                 (uiop/pathname:enough-pathname pn base))))))))))

@@ -28,6 +28,8 @@
                 #:format-overwrite-recovery)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/fs
                 #:*lisp-file-unparseable-hook*
                 #:*fs-read-max-bytes*
@@ -507,9 +509,17 @@ instruction naming it has to give."
                (ensure-directory-pathname
                 (truename (ensure-directory-pathname *project-root*))))))
     (and root
-         (subpathp (pathname path) root)
+         ;; ENSURE-PATHNAME, not PATHNAME: callers pass a namestring, and
+         ;; PATHNAME would read [ and ] as wildcard syntax, so the SUBPATHP
+         ;; below saw a wild pathname and signalled instead of answering.
+         (subpathp (uiop:ensure-pathname path) root)
+         ;; Native: this is handed to the caller as fs-write-file's path
+         ;; argument, and fs-write-file resolves it natively. NAMESTRING
+         ;; escaped [ and ] for the pathname reader, so the instruction named
+         ;; a path that tool would resolve to a differently-named directory.
          (ignore-errors
-          (namestring (enough-pathname (pathname path) root))))))
+          (native-path-namestring
+           (enough-pathname (uiop:ensure-pathname path) root))))))
 
 (defun %rewrite-whole-file-instruction (path)
   "Return the sentence telling a caller how to rewrite PATH wholesale, or why
@@ -688,7 +698,7 @@ place the classification is made: %LOCATE-TARGET-FORM signals the condition
 through SIGNAL-FILE-UNPARSEABLE, and lisp-read-file renders its message under
 the forms it could still show."
   (make-condition 'file-unparseable-error
-                  :path (namestring abs)
+                  :path (native-path-namestring abs)
                   :readtable readtable
                   :editable-prefix editable-prefix
                   :diagnosis (if readtable
@@ -1127,7 +1137,7 @@ Returns eight values:
         (if guard
             (multiple-value-bind (snap failure) (read-source-snapshot abs)
               (when (null snap)
-                (error "Cannot read ~A to verify guard: ~A" (namestring abs)
+                (error "Cannot read ~A to verify guard: ~A" (native-path-namestring abs)
                        (if (eq failure :denied)
                            "read not permitted for this path"
                            failure)))
@@ -1141,7 +1151,7 @@ Returns eight values:
                           lisp-edit-form and lisp-patch-form cannot edit files ~
                           this large, and fs-write-file will not overwrite it ~
                           either. Split the file or edit it outside cl-mcp."
-                         (namestring abs) (length text)))
+                         (native-path-namestring abs) (length text)))
                 ;; The snapshot decodes an invalid byte to #\? (its :TEXT is
                 ;; what would be written back), so a file that is not valid
                 ;; UTF-8 must be refused outright: the unguarded path's
@@ -1155,7 +1165,7 @@ Returns eight values:
                           with #\\?, and writing the file back would destroy that byte. ~
                           lisp-edit-form and lisp-patch-form cannot edit this file; ~
                           fix its encoding first."
-                         (namestring abs)))
+                         (native-path-namestring abs)))
                 (setf snapshot snap
                       original text)
                 ;; Guard checks 1-4 (design doc section 4.2) need only the
@@ -1165,7 +1175,7 @@ Returns eight values:
                 ;; the parse or the form lookup below fails first -- that
                 ;; change is precisely what the guard exists to catch.
                 (multiple-value-bind (ok-p conflict)
-                    (%check-edit-guard-pre-parse guard (namestring abs) snapshot)
+                    (%check-edit-guard-pre-parse guard (native-path-namestring abs) snapshot)
                   (unless ok-p
                     (error 'edit-guard-conflict-error :conflict conflict)))))
             (multiple-value-bind (text truncated file-length) (fs-read-file abs)
@@ -1175,7 +1185,7 @@ Returns eight values:
                         and fs-write-file will not overwrite it either (a truncated read ~
                         cannot prove the file is broken). Split the file or edit it ~
                         outside cl-mcp."
-                       (namestring abs) file-length (length text)))
+                       (native-path-namestring abs) file-length (length text)))
               (setf original text)))
         (multiple-value-bind (nodes swallowed)
             (handler-case
@@ -1193,10 +1203,10 @@ Returns eight values:
                                         :readtable readtable
                                         :editable-prefix (and nodes t)))
               (error "Form ~A ~A not found in ~A" form-type form-name
-                     (namestring abs)))
+                     (native-path-namestring abs)))
             (when guard
               (multiple-value-bind (ok-p conflict)
-                  (check-edit-guard guard (namestring abs) snapshot target)
+                  (check-edit-guard guard (native-path-namestring abs) snapshot target)
                 (unless ok-p
                   (error 'edit-guard-conflict-error :conflict conflict))))
             (let ((target-snippet (subseq original

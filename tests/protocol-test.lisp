@@ -12,6 +12,8 @@
                 #:make-ht)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -479,3 +481,40 @@
                     "should preserve string ID including \\b and \\f")
                 (ok (gethash "error" obj) "should have error object"))))
         (setf (fdefinition sanitize-fn-sym) orig-fn)))))
+
+(deftest initialize-syncs-a-root-whose-name-holds-brackets
+  (testing "a rootPath with [ ] is applied, not silently dropped"
+    ;; handle-initialize resolved rootPath with ENSURE-DIRECTORY-PATHNAME, which
+    ;; reads [ and ] as wildcard syntax and then signals.  Its handler-case
+    ;; turned that into one log line and let initialize succeed, so a client
+    ;; rooted at project[old]/ was answered normally while cl-mcp quietly kept
+    ;; its own root -- the failure mode was invisible from the wire.
+    (let* ((original-root *project-root*)
+           (original-cwd (ignore-errors (uiop:getcwd)))
+           ;; handle-initialize moves this too, and the cleanup below deletes
+           ;; the directory it would be left pointing at.
+           (original-defaults *default-pathname-defaults*)
+           (base (uiop:ensure-directory-pathname
+                  (asdf:system-source-directory :cl-mcp)))
+           ;; Built natively on purpose: MERGE-PATHNAMES on a bracketed string
+           ;; parses them as wild, which is the confusion under test.
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/initroot[br]/" (uiop:native-namestring base))
+                 :ensure-directory t)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (let* ((req (concatenate 'string
+                                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                                    "\"params\":{\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"},"
+                                    "\"rootPath\":\"" (uiop:native-namestring dir) "\"}}"))
+                  (resp (process-json-line req))
+                  (obj (parse resp)))
+             (ok (gethash "result" obj) "initialize still succeeds")
+             (ok (equal (uiop:native-namestring *project-root*)
+                        (uiop:native-namestring dir))
+                 (format nil "the root must actually be applied; it is ~S"
+                         (and *project-root* (uiop:native-namestring *project-root*)))))
+        (setf *project-root* original-root
+              *default-pathname-defaults* original-defaults)
+        (when original-cwd (ignore-errors (uiop:chdir original-cwd)))
+        (ignore-errors (uiop:delete-empty-directory dir))))))

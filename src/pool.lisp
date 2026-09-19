@@ -1584,8 +1584,12 @@ individual workers are logged but do not propagate."
     (bt:with-lock-held (*pool-lock*)
       (setf workers (copy-list *all-workers*)))
     (when workers
+      ;; NATIVE-NAMESTRING, paired with the worker's PARSE-UNIX-NAMESTRING in
+      ;; %HANDLE-SET-PROJECT-ROOT: NAMESTRING escapes [ and ] for the pathname
+      ;; reader, which only cancelled while the worker read it back with that
+      ;; same reader. The two sides are one protocol and move together.
       (let ((path-string (if (pathnamep path)
-                             (namestring path)
+                             (uiop:native-namestring path)
                              path)))
         (log-event :info "pool.broadcast-root"
                    "path" path-string
@@ -1629,8 +1633,10 @@ Failures are logged but do not propagate."
                      (eq :bound (worker-state entry)))
             (setf worker entry))))
       (when worker
+        ;; NATIVE-NAMESTRING: see BROADCAST-ROOT-TO-WORKERS above -- the
+        ;; worker parses this natively, so it must not be reader-escaped.
         (let ((path-string (if (pathnamep path)
-                               (namestring path)
+                               (uiop:native-namestring path)
                                path)))
           (let ((params (make-hash-table :test 'equal)))
             (setf (gethash "path" params) path-string)

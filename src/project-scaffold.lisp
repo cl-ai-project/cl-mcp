@@ -28,6 +28,7 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
+                #:native-path-namestring
                 #:path-inside-p)
   (:export #:project-scaffold
            #:write-scaffold))
@@ -47,13 +48,17 @@ renames rather than a recursive delete. Both share one random suffix so
 that leftovers from a crashed run are traceable to the same call, and so
 that concurrent calls never collide."
   (let* ((suffix (%uuid-suffix))
+         ;; PARSE-UNIX-NAMESTRING on the two caller-supplied strings:
+         ;; ENSURE-DIRECTORY-PATHNAME reads them with the CL pathname reader,
+         ;; so a destination such as "demo[old]" became a wild pathname rather
+         ;; than a directory of that name.
          (dest-dir (uiop:ensure-directory-pathname
                     (merge-pathnames
-                     (uiop:ensure-directory-pathname destination)
+                     (uiop:parse-unix-namestring destination :ensure-directory t)
                      root)))
          (target-dir (uiop:ensure-directory-pathname
                       (merge-pathnames
-                       (uiop:ensure-directory-pathname name)
+                       (uiop:parse-unix-namestring name :ensure-directory t)
                        dest-dir)))
          (temp-dir (uiop:ensure-directory-pathname
                     (merge-pathnames
@@ -102,7 +107,7 @@ INVALID-ARGUMENT-ERROR."
                  (path-inside-p resolved-ancestor resolved-root))
       (error 'invalid-argument-error
              :field "destination"
-             :value (namestring pathname)
+             :value (native-path-namestring pathname)
              :reason "resolves outside project root"))))
 
 (defun %write-files-to-temp (temp-dir name plan)
@@ -117,7 +122,12 @@ recognizable as cl-mcp-owned and therefore still deletable by
 %DELETE-SCAFFOLD-TREE. Caller cleans up TEMP-DIR if any intermediate
 write fails."
   (ensure-directories-exist temp-dir)
-  (let ((temp-relative (enough-namestring temp-dir *project-root*)))
+  ;; Native: this prefix is concatenated into fs-write-file's path argument,
+  ;; and fs-write-file resolves that natively. ENOUGH-NAMESTRING escapes [ and
+  ;; ] for the pathname reader, so under a bracketed project root every file
+  ;; would be written to a directory whose name carries a literal backslash.
+  (let ((temp-relative (native-path-namestring
+                        (uiop:enough-pathname temp-dir *project-root*))))
     (fs-write-file (concatenate 'string temp-relative *scaffold-marker-file*)
                    (scaffold-marker-content name (mapcar #'car plan)))
     (dolist (entry plan)
@@ -178,9 +188,9 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
       (unless (safe-to-delete-p directory)
         (error 'invalid-argument-error
                :field "overwrite"
-               :value (namestring directory)
+               :value (native-path-namestring directory)
                :reason (format nil "refusing to delete ~A: not a cl-mcp-generated scaffold"
-                               (namestring directory))))
+                               (native-path-namestring directory))))
       (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
 
 (defun write-scaffold (&key name description author license destination overwrite
@@ -226,13 +236,13 @@ underlying error after cleaning up the temp directory."
         (error 'invalid-argument-error
                :field "name" :value name
                :reason (format nil "target directory already exists: ~A"
-                               (namestring target-dir))))
+                               (native-path-namestring target-dir))))
       (when (and target-exists (not (%scaffold-owned-p target-dir)))
         (error 'invalid-argument-error
                :field "overwrite" :value name
                :reason (format nil "refusing to overwrite ~A: not a cl-mcp-generated ~
                                     scaffold; delete it manually"
-                               (namestring target-dir))))
+                               (native-path-namestring target-dir))))
       (let ((plan (plan-scaffold :name name
                                  :description (or description "")
                                  :author (or author "")
@@ -265,7 +275,10 @@ underlying error after cleaning up the temp directory."
                  (unless (ignore-errors (%delete-scaffold-tree backup-dir) t)
                    (setf leftover-backup backup-dir)))
                (list :target-dir target-dir
-                     :relative-path (enough-namestring target-dir *project-root*)
+                     ;; Native: reported as the tool's "path" and quoted in
+                     ;; next_steps, both of which a caller feeds back.
+                     :relative-path (native-path-namestring
+                                     (uiop:enough-pathname target-dir *project-root*))
                      :files (mapcar #'car plan)
                      :framework framework
                      :leftover-backup leftover-backup))
@@ -341,6 +354,15 @@ file). Any other existing directory is refused, never deleted."))
              (framework-name (string-downcase
                               (symbol-name (getf result-plist :framework))))
              (leftover (getf result-plist :leftover-backup))
+             ;; NAMESTRING on purpose, against the rule the rest of this file
+             ;; follows. This string is not a tool's path argument: it is
+             ;; embedded with ~S into (asdf:load-asd ~S) for the caller to run
+             ;; through repl-eval, so it is read back by the CL reader and
+             ;; handed to LOAD-ASD, which takes a pathname designator.
+             ;; Reader-escaping is what survives that trip; the native form
+             ;; reads back as a wild pathname. For /tmp/demo[old]/x.asd:
+             ;;   namestring -> "...demo\\[old]..." -> /tmp/demo[old]/x.asd
+             ;;   native     -> "...demo[old]..."   -> WILD, load-asd fails
              (abs-asd (namestring
                        (merge-pathnames (format nil "~A.asd" name) target-dir)))
              (next-steps
@@ -373,11 +395,11 @@ file). Any other existing directory is refused, never deleted."))
                            ASDF's tree scan reaches it, so FIND-SYSTEM may ~
                            resolve ~A to that stale copy -- delete it before ~
                            loading."
-                          (namestring leftover) name)))
+                          (native-path-namestring leftover) name)))
                (ht (make-ht
                     "created" t
                     "path" relative
-                    "absolute_path" (namestring target-dir)
+                    "absolute_path" (native-path-namestring target-dir)
                     "files" (coerce files 'vector)
                     "framework" framework-name
                     "next_steps" next-steps
@@ -387,7 +409,7 @@ file). Any other existing directory is refused, never deleted."))
                              "Scaffolded ~A at ~A (~D files, ~A tests)~%~
                               Path: ~A~%~{~A~%~}~@[~%⚠ ~A~%~]"
                              name relative (length files) framework-name
-                             (namestring target-dir)
+                             (native-path-namestring target-dir)
                              (coerce next-steps 'list)
                              warning)))))
           (when warning (setf (gethash "warning" ht) warning))

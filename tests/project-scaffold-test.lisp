@@ -938,3 +938,38 @@ path, and signals rather than silently doing nothing when the call is absent."
         (testing "and nothing is written for the rejected call"
           (ok (null (uiop:directory-exists-p
                      (uiop:merge-pathnames* "scaffolds/bad-fw/" root)))))))))
+
+(deftest scaffold-works-under-a-destination-whose-name-holds-brackets
+  (testing "the scaffold lands on disk and reports a path a caller can reuse"
+    ;; Two reader round trips met here.  %ABSOLUTE-SCAFFOLD-PATHS read the
+    ;; caller's destination with the pathname reader, making "demo[old]" a wild
+    ;; pathname rather than a directory of that name; and the reported
+    ;; relative-path came from ENOUGH-NAMESTRING, which escapes the brackets
+    ;; again for that same reader, so the tool's "path" and next_steps named
+    ;; something fs-write-file would resolve elsewhere.
+    (let* ((original-root cl-mcp/src/project-root:*project-root*)
+           (base (uiop:ensure-directory-pathname
+                  (asdf:system-source-directory :cl-mcp)))
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/scaf[br]/" (uiop:native-namestring base))
+                 :ensure-directory t)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (setf cl-mcp/src/project-root:*project-root* base)
+             (let* ((plist (cl-mcp/src/project-scaffold:write-scaffold
+                            :name "scafproj" :description "d" :author "a"
+                            :license "MIT" :destination "tests/tmp/scaf[br]"))
+                    (relative (getf plist :relative-path)))
+               (ok (uiop:directory-exists-p (getf plist :target-dir))
+                   "the project is really written to the bracketed destination")
+               (ok (search "scaf[br]" relative)
+                   (format nil "the reported path keeps its brackets, got ~S" relative))
+               (ok (not (find #\\ relative))
+                   (format nil "and is not escaped for the reader, got ~S" relative))
+               (ok (uiop:directory-exists-p (merge-pathnames
+                                             (uiop:parse-native-namestring relative)
+                                             base))
+                   "the reported path resolves back to the directory just created")))
+        (setf cl-mcp/src/project-root:*project-root* original-root)
+        (ignore-errors (uiop:delete-directory-tree dir :validate t))))))

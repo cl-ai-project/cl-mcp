@@ -29,6 +29,7 @@
                 #:fs-read-source-text)
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path
+                #:native-path-namestring
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
@@ -587,7 +588,11 @@ JSON-ready hash-table:
   truncated_at    MAX-SITES when collection stopped there, else null
   skipped_reason  why nothing was scanned, else null"
   (let ((name (target-name-from-designator designator))
-        (root-truename (and root (ignore-errors (namestring (truename root)))))
+        ;; A pathname for the work, a string only for the report.  Handing the
+        ;; string back to COLLECT-TARGET-FILES, which calls TRUENAME on it,
+        ;; would parse it with the pathname reader again -- and a root named
+        ;; project[old]/ became a wild pathname TRUENAME refuses outright.
+        (root-pathname (and root (ignore-errors (truename root))))
         (forms '())
         (failures '())
         (scanned-files '())
@@ -598,7 +603,7 @@ JSON-ready hash-table:
         (truncated nil))
     (flet ((report (&optional skipped)
              (make-ht "target_name" name
-                      "root" root-truename
+                      "root" (and root-pathname (native-path-namestring root-pathname))
                       "files_scanned" scanned
                       "files_matched" matched
                       "files_denied" denied
@@ -615,9 +620,9 @@ JSON-ready hash-table:
       (let ((skipped (cond
                        ((or (null root) (null *project-root*))
                         "project root is not set")
-                       ((null root-truename)
+                       ((null root-pathname)
                         "project root is not readable")
-                       ((null (%readable-path root-truename))
+                       ((null (%readable-path root-pathname))
                         (concatenate 'string
                                      "root is outside the readable paths "
                                      "(project root and registered ASDF system sources)")))))
@@ -627,12 +632,17 @@ JSON-ready hash-table:
       ;; looking for that package's definition across the project; one table
       ;; for the whole loop makes that one walk per package, not per file.
       (let ((*package-spec-discovery-cache* (make-hash-table :test #'equal)))
-        (dolist (file (collect-target-files root-truename))
+        (dolist (file (collect-target-files root-pathname))
           (let ((readable (%readable-path file)))
             (if (null readable)
                 (incf denied)
-                (let ((abs-path (or (ignore-errors (namestring (truename file)))
-                                    (namestring file))))
+                ;; Native, and for two reasons: this string is compared with
+                ;; CODE-CORE's %TRUENAME-STRING to decide whether a file was
+                ;; scanned, so the two must spell a path the same way, and it
+                ;; is also what a caller sees and may paste back.
+                (let ((abs-path (or (ignore-errors
+                                     (native-path-namestring (truename file)))
+                                    (native-path-namestring file))))
                   (incf scanned)
                   (push abs-path scanned-files)
                   (unless truncated

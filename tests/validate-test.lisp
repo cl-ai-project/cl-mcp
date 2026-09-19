@@ -4,6 +4,10 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok #:ng)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/validate
                 #:lisp-check-parens
                 #:*check-parens-max-bytes*))
@@ -665,3 +669,31 @@ then delete the file."
     (let ((res (lisp-check-parens :code "(+ 1 2)")))
       (ok (%ok? res))
       (ok (null (gethash "likely_fixes" res))))))
+
+(deftest recovery-guidance-names-a-path-fs-write-file-would-accept
+  (testing "a broken file under a bracketed directory is told a usable path"
+    ;; The guidance is the argument for fs-read-file and fs-write-file, so the
+    ;; path in it has to be one they accept.  NAMESTRING escaped the brackets
+    ;; for the pathname reader, which is the very round trip this text exists
+    ;; to start.
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/recov[br]/"
+                         (native-path-namestring *project-root*))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "broken.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out "(defun broken ()~%  (list 1~%"))
+             (let* ((result (lisp-check-parens
+                             :path (native-path-namestring (truename file))))
+                    (guidance (or (gethash "diagnosis_text" result) "")))
+               (ok (plusp (length guidance)) "the broken file gets recovery guidance")
+               (ok (search "recov[br]" guidance)
+                   "the recovery path shows the brackets as they are on disk")
+               (ok (not (search "\\[" guidance))
+                   "and not escaped for the pathname reader")))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))

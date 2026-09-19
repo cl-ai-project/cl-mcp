@@ -21,6 +21,7 @@
                 #:resolve-path-in-project
                 #:resolve-readable-path
                 #:broad-root-p
+                #:native-path-namestring
                 #:normalize-path-for-display))
 
 (in-package #:cl-mcp/tests/utils-paths-test)
@@ -182,3 +183,49 @@
           (format nil "must not signal a condition; got ~A"
                   (and signaled (list (type-of signaled) signaled))))
       (ok (null result) "must return NIL for an untranslatable logical pathname"))))
+
+(deftest native-path-namestring-does-not-escape-for-the-pathname-reader
+  (testing "a path holding the reader's wild characters comes back usable"
+    ;; NAMESTRING escapes [ and ] so its result round-trips through the
+    ;; pathname READER; what a caller needs is a path that opens.  The escaped
+    ;; form names nothing on disk, and cl-mcp printed it, compared against it
+    ;; and tried to read it.
+    (let ((pn (uiop:parse-native-namestring "/tmp/demo[old]/x.lisp")))
+      (ok (search "demo[old]" (native-path-namestring pn))
+          "the brackets survive unescaped")
+      (ok (not (find #\\ (native-path-namestring pn)))
+          "and nothing was escaped into the path")))
+  (testing "NIL in, NIL out"
+    (ok (null (native-path-namestring nil))))
+  (testing "a genuinely wild pathname falls back instead of signalling"
+    ;; It has no native form at all, and a function whose job is to describe a
+    ;; path should not turn that into an error.
+    (let ((wild (make-pathname :name :wild :type "lisp" :directory '(:absolute "tmp"))))
+      (ok (stringp (native-path-namestring wild))))))
+
+(deftest normalize-path-for-display-returns-a-path-that-can-be-read-back
+  (testing "the displayed path is one the read policy accepts"
+    ;; A path cl-mcp prints is a path a caller hands back, so the two have to
+    ;; agree; under the old NAMESTRING they did not for a bracketed directory.
+    ;; Bound explicitly: this asks whether the read policy accepts the path,
+    ;; so the root it is judged against must be this suite's, not whatever a
+    ;; previously-run suite happened to leave behind.
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           ;; Built natively on purpose: MERGE-PATHNAMES on a string with
+           ;; brackets parses them as wild, the same confusion under test.
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/disp[br]/"
+                         (native-path-namestring *project-root*))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "x.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (write-string "(defun x () 1)" out))
+             (let ((shown (normalize-path-for-display (truename file))))
+               (ok (search "disp[br]" shown) "the brackets are shown as they are")
+               (ok (allowed-read-path shown)
+                   "and the shown path is accepted by the read policy")))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))
