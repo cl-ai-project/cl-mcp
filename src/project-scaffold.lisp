@@ -354,6 +354,15 @@ file). Any other existing directory is refused, never deleted."))
              (framework-name (string-downcase
                               (symbol-name (getf result-plist :framework))))
              (leftover (getf result-plist :leftover-backup))
+             ;; NAMESTRING on purpose, against the rule the rest of this file
+             ;; follows. This string is not a tool's path argument: it is
+             ;; embedded with ~S into (asdf:load-asd ~S) for the caller to run
+             ;; through repl-eval, so it is read back by the CL reader and
+             ;; handed to LOAD-ASD, which takes a pathname designator.
+             ;; Reader-escaping is what survives that trip; the native form
+             ;; reads back as a wild pathname. For /tmp/demo[old]/x.asd:
+             ;;   namestring -> "...demo\\[old]..." -> /tmp/demo[old]/x.asd
+             ;;   native     -> "...demo[old]..."   -> WILD, load-asd fails
              (abs-asd (namestring
                        (merge-pathnames (format nil "~A.asd" name) target-dir)))
              (next-steps
