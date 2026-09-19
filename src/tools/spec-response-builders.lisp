@@ -547,6 +547,11 @@ externalized-value plist by looking for one of their keys."
   (when node
     (ecase (first node)
       (:scalar (second node))
+      ;; The record layer names no JSON library, so it tags a two-valued
+      ;; field and this turns the tag into whatever false is here.  A scalar
+      ;; NIL is JSON null -- the empty list, or the absence of a phase -- and
+      ;; a (:BOOL NIL) is JSON false, which is a measurement.
+      (:bool (json-bool (second node)))
       (:symbol (%symbol-ht (second node)))
       (:value (%value-ht (second node)))
       (:array (coerce (mapcar #'%projected-ht (second node)) 'vector))

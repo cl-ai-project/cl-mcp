@@ -180,10 +180,17 @@ point: (:AT-LEAST :AT-MOST) is two case names and (:KIND :RANGE) is a plist,
 and no test on the conses tells them apart, so a projector that guessed would
 publish a key/value relation cl-spec never declared.
 
-NODE is one of (:SCALAR x), (:SYMBOL plist), (:VALUE plist),
-(:OBJECT ((key . NODE) ...)) or (:ARRAY (NODE ...)).  ISSUES records every
+NODE is one of (:SCALAR x), (:BOOL boolean), (:SYMBOL plist), (:VALUE plist),
+(:OBJECT ((key . NODE) ...)) or (:ARRAY (NODE ...)).  NIL under an (:OBJECT
+...) descriptor is (:SCALAR NIL), JSON null: the absence cl-spec reported, not
+an empty record it never described.  (:ARRAY ...) and (:PAIRS ...) keep [] for
+an empty collection, which is what they measured.
+
+ISSUES records every
 place the projection was cut, as (:PATH path :REASON reason [:OMITTED-ITEMS n
-:OMITTED-ITEMS-EXACT-P boolean]).  OMITTED-ITEMS is exact when EXACT-P is
+:OMITTED-ITEMS-EXACT-P boolean]).  :LENGTH-LIMIT and :CHAR-LIMIT both carry
+OMITTED-ITEMS, counting list elements for the first and characters for the
+second.  OMITTED-ITEMS is exact when EXACT-P is
 true; otherwise it is only how far %TAIL-UNIT-COUNT got before giving up, not
 the value's true excess, because counting that exactly could mean walking
 however long an untrusted value turns out to be.  UNKNOWN-KEYS names the keys
@@ -211,9 +218,9 @@ production failure.
 :EXPECTED-DESCRIPTOR is the same treatment applied to a third confusable shape:
 cl-spec's own EXPECTED-DESCRIPTOR returns a flat, positionally tagged list for
 most spec kinds -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- where
-the leading keyword is a tag, not a key, and only a few kinds (a bare SPEC,
-PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC) return a
-:KIND-keyed plist instead.
+the leading keyword is a tag, not a key, and only six of its twenty methods
+(a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC,
+CALL-ARGUMENTS-SPEC) return a :KIND-keyed plist instead.
 Reading either one as (:OBJECT ...) invents a key/value relation cl-spec never
 declared, exactly as an :ALIST/:PAIRS mismatch would; :EXPECTED-DESCRIPTOR
 projects every element by position into an array instead, recursing into a
@@ -221,9 +228,19 @@ cons element under the same descriptor so a nested spec such as :AND's
 children stays structured, and treats a :KIND-keyed plist the same way rather
 than guessing at an object shape only some of its callers use.
 
+:DECIMAL-STRING is a leaf whose integer is always published as text, never as
+a JSON number.  Only a seed uses it, and only because a cl-spec seed exceeds
+what a JSON consumer holds exactly and a rounded seed cannot reproduce a run.
+
+:BOOLEAN is a leaf whose T and NIL are the two values of one two-valued fact.
+It is declared per field and never inferred: NIL is also the empty list and
+also the absence of a phase, both of which are JSON null in this same record,
+so only the descriptor can say which a given NIL is.
+
 PATH is the position reached so far, for the entries of ISSUES and
 UNKNOWN-KEYS.  MAX-CHARS bounds every value this projects, leaf or opaque, the
-same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
+same way EXTERNALIZE-VALUE's own :MAX-CHARS does -- including a leaf string,
+which PROJECT-VALUE on its own returns whole (see LEAF-NODE)."
   (let ((issues '())
         (unknown '()))
     (labels
@@ -231,7 +248,35 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
            (let ((descriptor (%resolve-descriptor descriptor)))
              (cond
                ((eq :leaf descriptor)
-                (project-value value :max-chars max-chars))
+                (leaf-node value path))
+               ;; A seed is always a decimal string, even when it happens to
+               ;; fit the JSON-safe range (design 6.2.3).  A cl-spec seed is a
+               ;; fixnum reaching 2^62, a rounded seed cannot reproduce a run,
+               ;; and one fact must not arrive as a number here and as a
+               ;; string in the top-level alias built from the same record.
+               ;; T and NIL as the booleans cl-spec means them as.  Under
+               ;; :LEAF, T is not a keyword and PROJECT-VALUE renders every
+               ;; other symbol as a symbol node, so a measured true arrived as
+               ;; {"package": "COMMON-LISP", "name": "T"} beside a measured
+               ;; false that arrived as null -- two shapes for one two-valued
+               ;; fact, and the false one indistinguishable from an absence.
+               ;; The descriptor is what says a field is two-valued; the
+               ;; value's own shape must not, because NIL is also the empty
+               ;; list and also the absence of a phase, and both of those are
+               ;; JSON null elsewhere in this same record.
+               ;; (:BOOL x) rather than (:SCALAR x): JSON false is a value
+               ;; this module must not name, since nothing here knows the
+               ;; JSON library.  The renderer turns the tag into whatever
+               ;; false is on its side, exactly as it already does for
+               ;; (:SYMBOL ...) and (:VALUE ...).
+               ((eq :boolean descriptor)
+                (if (or (eq t value) (null value))
+                    (list :bool value)
+                    (leaf-node value path)))
+               ((eq :decimal-string descriptor)
+                (if (integerp value)
+                    (list :scalar (format nil "~D" value))
+                    (leaf-node value path)))
                ((eq :opaque descriptor)
                 ;; Marker-first: :OPAQUE is WALK's route for a value from the
                 ;; code under test, exactly where cl-spec's own
@@ -253,28 +298,18 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                ((eq :word-list descriptor)
                 (list :array (walk-list value :leaf path depth)))
                ((eq :signature descriptor)
-                ;; FAILURE-SIGNATURE builds (:RETURN-VALUE :RETURN-SPEC shapes)
-                ;; and (:CONDITION-SPEC type shapes); every other form is a flat
-                ;; run of tags.  Only the trailing shapes of those two are
-                ;; structured, and the leading keyword stays a tag, never a key.
-                (let ((shaped (and (consp value)
-                                   (member (first value)
-                                           '(:return-value :condition-spec))
-                                   (= 3 (length value)))))
-                  (list :array
-                        (if shaped
-                            (list (project-value (first value))
-                                  (project-value (second value))
-                                  (walk (third value)
-                                        '(:array (:ref :error-datum))
-                                        (cons 2 path) (1+ depth)))
-                            (walk-list value :leaf path depth)))))
+                (walk-signature value path depth))
                ((eq :expected-descriptor descriptor)
                 ;; EXPECTED-DESCRIPTOR builds a flat, positionally tagged list
                 ;; -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- for
-                ;; thirteen of its eighteen methods, and a :KIND-keyed plist
-                ;; for the other five (SPEC's own default, PLIST-SPEC,
-                ;; KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC).  Reading
+                ;; fourteen of its twenty methods, and a :KIND-keyed plist for
+                ;; the other six (SPEC's own default, PLIST-SPEC,
+                ;; KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC and
+                ;; CALL-ARGUMENTS-SPEC).  Eighteen of the twenty are in
+                ;; cl-spec/src/explain.lisp:101-169 and the last two --
+                ;; RETURN-VALUES-SPEC, which is positional, and
+                ;; CALL-ARGUMENTS-SPEC -- in call-validation.lisp:32,71.
+                ;; Reading
                 ;; either shape as an
                 ;; :OBJECT invents a key/value relation cl-spec never declared:
                 ;; walked as a plist, (:RANGE :MIN 0 :MAX 100) desyncs at
@@ -289,7 +324,7 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                 ;; the two shapes apart instead of this module guessing.
                 (list :array (walk-expected-descriptor value path depth)))
                ((not (consp descriptor))
-                (project-value value :max-chars max-chars))
+                (leaf-node value path))
                ;; A container descriptor paired with a non-NIL atom cannot be
                ;; decomposed.  cl-spec's own :NOT-COLLECTED sentinel reaching
                ;; an :OBSERVATION's :OUTCOME this way is exactly this case --
@@ -316,16 +351,52 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                 (unless (eq :not-collected value)
                   (push (list :path (reverse path) :reason :atom-for-container)
                         issues))
-                (project-value value :max-chars max-chars))
+                (leaf-node value path))
                ((eq :array (first descriptor))
                 (list :array (walk-list value (second descriptor) path depth)))
                ((eq :alist (first descriptor))
                 (list :array (walk-alist value (second descriptor) path depth)))
                ((eq :pairs (first descriptor))
                 (list :array (walk-pairs value (second descriptor) path depth)))
+               ;; NIL under an :OBJECT descriptor is JSON null, not {}.
+               ;; RESULT-DATA (cl-spec/src/property-runner.lisp:255-276) is one
+               ;; unconditional APPEND, so every key is always emitted and
+               ;; OBSERVATION-DATA answers NIL (property-runner.lisp:216,225)
+               ;; whenever there is no failure evidence -- which is every
+               ;; passing run.  An empty object is a claim that a record exists
+               ;; with nothing in it; "a failure observation whose every field
+               ;; is missing" is not what cl-spec said, and null is.  Only
+               ;; :OBJECT: [] for an empty (:ARRAY ...) or (:PAIRS ...) really
+               ;; is an empty collection.
                ((eq :object (first descriptor))
-                (walk-object value (rest descriptor) path depth))
-               (t (project-value value :max-chars max-chars)))))
+                (if (null value)
+                    (list :scalar nil)
+                    (walk-object value (rest descriptor) path depth)))
+               (t (leaf-node value path)))))
+         (leaf-node (value path)
+           ;; Every leaf goes through here, and the only reason it is not
+           ;; PROJECT-VALUE itself is the cut.  PROJECT-VALUE's string branch
+           ;; returns the string whole: MAX-CHARS reaches EXTERNALIZE-VALUE
+           ;; and nothing else, so a :CONDITION-REPORT -- (PRINC-TO-STRING
+           ;; condition) at cl-spec/src/explain.lisp:212,565,614 and
+           ;; execution.lisp:288 -- or an author's :DOCUMENTATION arrived at
+           ;; whatever length it had, against design section 10's bound on
+           ;; output.
+           ;;
+           ;; Cut here rather than inside PROJECT-VALUE because the cut has to
+           ;; be reported and :DATA may carry no key cl-mcp added: it is a
+           ;; mirror of cl-spec's record, so a sibling _complete flag is not
+           ;; available and an ISSUES entry is.  :CHAR-LIMIT rather than
+           ;; :LENGTH-LIMIT names the unit, since :OMITTED-ITEMS counts
+           ;; characters here and list elements everywhere else.
+           (if (and (stringp value) (> (length value) max-chars))
+               (progn
+                 (push (list :path (reverse path) :reason :char-limit
+                             :omitted-items (- (length value) max-chars)
+                             :omitted-items-exact-p t)
+                       issues)
+                 (list :scalar (subseq value 0 max-chars)))
+               (project-value value :max-chars max-chars)))
          (bounded (items path &optional (unit 1))
            ;; Cut here rather than in each caller, so the entry that records
            ;; the cut cannot be forgotten in one of them.  Never call LENGTH:
@@ -349,6 +420,69 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
            (loop for item in (bounded items path)
                  for index from 0
                  collect (walk item descriptor (cons index path) (1+ depth))))
+         (signature-shapes-p (value)
+           ;; The only two signature grammars whose third element is a list of
+           ;; FAILURE-SHAPE plists, read off cl-spec's own validator --
+           ;; VALID-SIGNATURE-SHAPE-P, cl-spec/src/counterexample.lisp:95-104
+           ;; -- rather than inferred from the conses:
+           ;;
+           ;;   (:RETURN-VALUE|:RETURN-VALUES :RETURN-SPEC <failure-shapes>)
+           ;;   (:CONDITION-SPEC <condition-type> <failure-shapes>)
+           ;;
+           ;; :RETURN-VALUES is the same grammar under a rewritten head, for a
+           ;; (VALUES ...) return spec (cl-spec/src/function-spec.lisp:1400).
+           ;;
+           ;; The second element decides for a :RETURN-VALUE head, and that is
+           ;; the whole point: FAILURE-SIGNATURE builds
+           ;; (:RETURN-VALUE :POSTCONDITION <explanation>) at the same length
+           ;; and under the same head (function-spec.lisp:1335), where the
+           ;; explanation is (:POST-FORM <index>) or NIL -- not failure data.
+           ;; Matching on the head alone walked (:POST-FORM 0)'s two atoms
+           ;; under an (:OBJECT ...) descriptor and pushed two
+           ;; :ATOM-FOR-CONTAINER issues on every ordinary postcondition
+           ;; failure, which is the commonest contract failure there is.
+           ;;
+           ;; CDDDR rather than LENGTH: VALUE came from outside this module
+           ;; and LENGTH does not return on a circular one.
+           (and (consp value) (consp (cdr value)) (consp (cddr value))
+                (null (cdddr value))
+                (if (member (first value) '(:return-value :return-values))
+                    (eq :return-spec (second value))
+                    (eq :condition-spec (first value)))))
+         (walk-signature (value path depth)
+           ;; A case-carrying contract failure wraps the established identity
+           ;; as (:CASE NAME . INNER) -- cl-spec/src/function-spec.lisp:1572
+           ;; builds it and CASE-SIGNATURE-PARTS
+           ;; (cl-spec/src/counterexample.lisp:76-84) is its own unwrapper.
+           ;; Peeled here so the inner grammar is recognized instead of
+           ;; flattening the nested failure shapes to one externalized string,
+           ;; and the wrapper's two elements keep their positions in the array,
+           ;; so the projection stays lossless and a reader still tells the
+           ;; shapes apart by the leading element.
+           ;;
+           ;; Every other form cl-spec builds -- (:MISSING-CONDITION),
+           ;; (:TARGET-SIGNAL TYPE), (:CONTRACT-ERROR TYPE),
+           ;; (:STATE-POSTCONDITION INDEX), (:STATE-POST INDEX :CONTRACT-ERROR
+           ;; TYPE), (:CASE-SELECTION KIND), (:PROPERTY-FALSE),
+           ;; (:PROPERTY-CONDITION TYPE) -- is a flat run of leaves, and an
+           ;; array of leaves is exactly right for it.
+           (multiple-value-bind (prefix inner offset)
+               (if (and (consp value) (eq :case (first value))
+                        (consp (cdr value)) (consp (cddr value)))
+                   (values (list (leaf-node (first value) (cons 0 path))
+                                 (leaf-node (second value) (cons 1 path)))
+                           (cddr value)
+                           2)
+                   (values '() value 0))
+             (list :array
+                   (append
+                    prefix
+                    (if (signature-shapes-p inner)
+                        (list (leaf-node (first inner) (cons offset path))
+                              (leaf-node (second inner) (cons (1+ offset) path))
+                              (walk (third inner) '(:array (:ref :error-datum))
+                                    (cons (+ offset 2) path) (1+ depth)))
+                        (walk-list inner :leaf path depth))))))
          (walk-expected-descriptor (items path depth)
            ;; ITEMS is one EXPECTED-DESCRIPTOR return value.  The leading
            ;; keyword is a tag, never a key, so each element is walked by
@@ -361,13 +495,14 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                  collect (if (consp item)
                              (walk item :expected-descriptor
                                    (cons index path) (1+ depth))
-                             (project-value item :max-chars max-chars))))
+                             (leaf-node item (cons index path)))))
          (walk-alist (entries descriptor path depth)
            (loop for entry in (bounded entries path)
                  for index from 0
                  collect
                  (list :object
-                       (list (cons "name" (project-value (car entry)))
+                       (list (cons "name"
+                                   (leaf-node (car entry) (cons index path)))
                              (cons "value"
                                    (walk (cdr entry) descriptor
                                          (cons index path) (1+ depth)))))))
@@ -383,7 +518,8 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                  for index from 0
                  collect
                  (list :object
-                       (list (cons "name" (project-value name))
+                       (list (cons "name"
+                                   (leaf-node name (cons index path)))
                              (cons "value"
                                    (walk value descriptor
                                          (cons index path) (1+ depth)))))))
@@ -522,18 +658,14 @@ rather than by whatever reads it next."
        ;; spec-derived and stays structured -- but it is not a plist to read
        ;; by key.  EXPECTED-DESCRIPTOR returns a flat, positionally tagged
        ;; list for most spec kinds, e.g. (:RANGE :MIN 0 :MAX 100), where the
-       ;; leading keyword is a tag, and a genuine :KIND-keyed plist only for a
-       ;; few (a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC,
-       ;; TAGGED-UNION-SPEC).  :EXPECTED-DESCRIPTOR (see PROJECT-RECORD's
+       ;; leading keyword is a tag, and a genuine :KIND-keyed plist only for
+       ;; six of its twenty methods (a bare SPEC, PLIST-SPEC,
+       ;; KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC,
+       ;; CALL-ARGUMENTS-SPEC).  :EXPECTED-DESCRIPTOR (see PROJECT-RECORD's
        ;; WALK) projects either shape as a recursive array instead of
        ;; guessing which one a given field holds.
        :expected
        :expected-descriptor
-       :field-expectation
-       ;; :KEY is a key name out of the value under test, so it is value-derived
-       ;; -- cl-spec's own *FAILURE-SHAPE-KEYS* docstring classifies it that way.
-       '(:object (:key . :opaque) (:required . :leaf)
-                 (:expected . (:ref :expected)))
        ;; One EXPLAIN-DATA error datum.  :ACTUAL and :ACTUAL-LENGTH come off the
        ;; value, :EXPECTED and the bounds off the spec, and the three container
        ;; keys hold more error datums -- which is cl-spec's own classification
@@ -548,6 +680,13 @@ rather than by whatever reads it next."
                  (:expected-length . :leaf) (:minimum-length . :leaf)
                  (:maximum-length . :leaf) (:actual-length . :leaf)
                  (:status . :leaf) (:branch . :leaf)
+                 ;; The tag READ-UNION-TAG actually read off the value
+                 ;; (cl-spec/src/explain.lisp:618), so it is value-derived and
+                 ;; :OPAQUE -- the tag reader may answer any object.
+                 (:observed-tag . :opaque)
+                 ;; Where a duplicate element was first seen
+                 ;; (cl-spec/src/explain.lisp:327-328): an index, not a value.
+                 (:first-index . :leaf)
                  (:branch-path . (:array :leaf)) (:known-tags . :word-list)
                  (:errors . (:array (:ref :error-datum)))
                  (:branches . (:array (:ref :error-datum)))
@@ -556,12 +695,24 @@ rather than by whatever reads it next."
        ;; for a spec violation, and the :KIND plists a case-selection error, a
        ;; capture error and a state-post violation record.
        :explanation
-       '(:object (:valid . :leaf) (:spec . :leaf) (:value . :opaque)
+       '(:object (:valid . :boolean) (:spec . :leaf) (:value . :opaque)
                  (:path . (:array :leaf))
                  (:errors . (:array (:ref :error-datum)))
                  (:kind . :leaf) (:case-error . :leaf) (:function . :leaf)
                  (:cases . :word-list) (:case . :leaf) (:index . :leaf)
-                 (:form . :leaf) (:binding . :leaf) (:captured . (:alist :opaque))
+                 (:form . :leaf) (:binding . :leaf)
+                 ;; A :MISSING-CONDITION failure's whole explanation is
+                 ;; (:EXPECTED <descriptor>) -- cl-spec/src/function-spec.lisp:
+                 ;; 1419-1420 -- and the descriptor is a real
+                 ;; EXPECTED-DESCRIPTOR, so it gets the same positional
+                 ;; treatment as an error datum's own :EXPECTED rather than
+                 ;; being dropped into UNKNOWN-KEYS with its value discarded.
+                 (:expected . (:ref :expected))
+                 ;; A :POSTCONDITION failure's explanation is
+                 ;; (:POST-FORM <index>) or NIL
+                 ;; (cl-spec/src/function-spec.lisp:1437-1441): which of the
+                 ;; contract's :POST forms was the one that did not hold.
+                 (:post-form . :leaf)
                  (:condition-type . :leaf) (:condition-report . :leaf))
        :target-outcome
        '(:object (:kind . :leaf) (:values . (:array :opaque))
@@ -641,14 +792,19 @@ rather than by whatever reads it next."
        :result-data
        '(:object (:schema-version . :leaf) (:record-kind . :leaf)
                  (:entity-kind . :leaf) (:definition-digest . :leaf)
-                 (:definition-digest-complete . :leaf)
+                 (:definition-digest-complete . :boolean)
                  (:definition-digest-covers . :leaf)
                  (:digest-omissions . (:array (:ref :digest-omission)))
                  (:digest-exclusions . :word-list)
                  (:capabilities . (:ref :capabilities))
                  (:state-constraints . :leaf)
                  (:name . :leaf) (:status . :leaf) (:trials . :leaf)
-                 (:budget . :leaf) (:rejected . :leaf) (:seed . :leaf)
+                 (:budget . :leaf) (:rejected . :leaf)
+                 ;; Never a JSON number, even inside the safe range: design
+                 ;; 6.2.3 makes a seed a decimal string everywhere, and
+                 ;; data.seed reading 1 beside a top-level alias reading "1"
+                 ;; is two representations of one fact.
+                 (:seed . :decimal-string)
                  (:profile . :leaf)
                  ;; cl-spec v1 does not publish the shape of caller options.
                  (:options . :opaque)
@@ -666,7 +822,7 @@ rather than by whatever reads it next."
        :function-spec-data
        '(:object (:schema-version . :leaf) (:record-kind . :leaf)
                  (:entity-kind . :leaf) (:definition-digest . :leaf)
-                 (:definition-digest-complete . :leaf)
+                 (:definition-digest-complete . :boolean)
                  (:definition-digest-covers . :leaf)
                  (:digest-omissions . (:array (:ref :digest-omission)))
                  (:digest-exclusions . :word-list)
