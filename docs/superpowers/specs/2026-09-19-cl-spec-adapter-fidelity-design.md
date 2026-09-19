@@ -85,7 +85,7 @@ versioned record (result-data / function-spec-data) の値
 |---|---|
 | `collected` | cl-spec が実測値を返した |
 | `not-collected` | cl-spec が明示的に `:NOT-COLLECTED` を返した |
-| `absent` | この cl-spec の `result-data` にその key が無い |
+| `absent` | record にその key が無い（**構文的事実のみ**。意味は §3.2.1 で field ごとに決める） |
 | `unavailable` | この cl-spec に `result-data` 自体が無い。問うことができなかった |
 
 ### 3.1 形
@@ -97,11 +97,15 @@ key は一つも入らない。
 ```json
 "core_result": {
   "availability": "collected",
+  "schema_supported": true,
+  "schema_version": 1,
   "field_availability": {
     "failure_phase": "collected",
     "shrink_report": "not-collected",
     "case_report": "collected"
   },
+  "unknown_keys": [],
+  "projection": {"complete": true, "issues": []},
   "data": {
     "status": "passed",
     "failure_phase": null,
@@ -109,6 +113,17 @@ key は一つも入らない。
     "case_report": { "declared_cases": [...], "never_called": [...] }
   }
 }
+```
+
+`availability` / `schema_supported` / `schema_version` /
+`field_availability` / `unknown_keys` / `projection` は **cl-mcp の transport
+metadata** であり、`data` の外に置く。`data` に MCP が足した key を一つも
+混ぜないための境界であって、切り詰め記録（§6.2.4）も未知 key の通知も
+この外側に出す。
+
+```
+data                    = cl-spec semantic data
+それ以外の core_result  = cl-mcp transport metadata
 ```
 
 サブレコードごとに wrapper を付けることはしない。`shrink_report` が
@@ -133,6 +148,27 @@ sentinel を使う。
 
 これは §3 で掲げた区別を scalar フィールドでも実際に成立させるための要件で
 あって、飾りではない。回帰テストを 1 件立てる（§12）。
+
+### 3.2.1 `absent` の意味は field ごとに決める
+
+`absent` は「この revision が新しい key を知らない」とは限らない。**現行 v1
+でも、意味的に不要だから key を省略する**フィールドがある。
+
+| field | v1 で absent のとき | 根拠 |
+|---|---|---|
+| `metadata :state-constraints` | state 制約なし | `(when state (list :state-constraints state))` |
+| `function-spec-data :cases` | case 未宣言 | `(when (function-spec-cases contract) ...)` |
+| `function-spec-data :capture` | capture 未宣言 | 同上の `when` |
+| `function-spec-data :state-post` | state-post 未宣言 | 同上 |
+| `function-spec-data :post-value-variables` | `:primary`（既定） | `(unless (eq :primary ...))` |
+| `arguments[].kind` | `:required` | `(unless (eq :required ...))` |
+| `arguments[].supplied-p` | required 引数なので無い | 同上 |
+| `arguments[].keyword` | `&key` 引数ではない | `(when (eq :key ...))` |
+| 上記以外の v1 field | **この revision では取得不能の可能性** | — |
+
+`arguments[].kind` の absent を `required` と読む規則（§4）は例外ではなく、
+この一般則の一例である。`absent` という availability 値は構文的事実だけを
+伝え、意味は field ごとの表で決める。
 
 ### 3.3 `:NOT-COLLECTED` は場所によってはデータそのもの
 
@@ -170,6 +206,27 @@ availability を 5 値に増やさず、独立した真偽値で表す。
 }
 ```
 
+**unsupported な core schema は verification evidence にしない。**
+
+```
+schema_supported: false
+  -> verified = false
+  -> verification_gaps += core-schema-unsupported
+```
+
+そのうえで、**同じ semantic fact について legacy reader へ fallback しない**。
+これをしないと「`result-data` は v2 で adapter は読めない → legacy reader から
+`status = passed` を取って `verified = true`」という状態が起きる。legacy
+reader を使う場合も display-only の診断に限り、verification evidence には
+使わない。
+
+**`%contract-facts` にも同じ gate が要る。** `spec-describe`（Task A）だけでなく、
+`spec-check` が内部で呼ぶ `%contract-facts` も `function-spec-data` から
+`:cases` と `:preconditions` を `getf` している。v2 の Function Spec を v1 だと
+思って読んではならない。schema が unsupported なら `:known nil` 相当として
+扱い、`case-coverage-unknown` の判定（§5.5）も「case があるか分からない」側に
+倒す。
+
 **v2 に対して v1 の absence 規則を適用しない。** §4 の
 「`:kind` の欠落は `:required`」は v1 についての規則であって、v2 の欠落が
 同じ意味だと仮定してはならない。`schema-info` が v1 について
@@ -184,11 +241,22 @@ availability を 5 値に増やさず、独立した真偽値で表す。
 |---|---|
 | `RESULT-DATA` シンボルが無い / fbound でない | `availability: unavailable` + legacy fallback |
 | シンボルはあり、呼んだら condition が飛んだ | **`internal-error`。legacy fallback しない** |
-| 正常 return したが `NIL` / proper plist でない / `:schema-version` が無い | **`internal-error`（incompatible-core-record）。legacy fallback しない** |
+| 正常 return したが `NIL` / proper plist でない | **`internal-error`（incompatible-core-record）。legacy fallback しない** |
+| `:schema-version` が無い | 同上 |
+| `:schema-version` が 1 なのに v1 の required metadata が欠けている | 同上 |
+| `record-kind` が期待と食い違う（`result-data` なのに `:definition` 等） | 同上 |
 
 `result-data` は必ず `:schema-version` を含む（captured metadata が無くても
 既定の plist が `:schema-version 1` を入れる）ので、それが無い record は
 壊れている。
+
+v1 の required metadata は `schema-info` が明示している 7 つ
+（`:schema-version` `:record-kind` `:entity-kind` `:definition-digest`
+`:definition-digest-complete` `:definition-digest-covers` `:capabilities`）で、
+`:schema-version` が 1 なのにこのどれかが欠けている record は
+`field_availability: absent` として続行するより壊れていると見るべきである。
+`record-kind` も検証してよい — 実測で `result-data` は `:RESULT`、
+`function-spec-data` は `:DEFINITION` を返す。
 
 後 2 者を `unavailable` にしたり legacy へ落としたりしてはならない。
 「問うことができなかった」のではなく「問えたが versioned API が壊れていた」
@@ -486,6 +554,7 @@ counterexample」と描画しない。両者は別のことを言っている。
   | `cases-never-called` | `field_availability.case_report` が `collected` かつ `never_called` が非空 |
   | `case-coverage-unknown` | 契約が `:cases` を宣言している（`%contract-facts` が `function-spec-data` から読めた）のに `field_availability.case_report` が `collected` でない |
   | `generation-incomplete` | `data.failure_phase` が `generation` |
+  | `core-schema-unsupported` | `core_result.schema_supported` が false（§3.4）。legacy reader の値を verification evidence にしない |
 
   `cases-never-called` と `case-coverage-unknown` は contract 実行にのみ
   適用する。property 実行には case も `case_report` も無いので出さない。
@@ -495,7 +564,15 @@ counterexample」と描画しない。両者は別のことを言っている。
   **gap にしないもの**: `generation_report.exhaustion_phase = shrinking` と
   `shrink_report.termination`（値を問わず）。前者は反例が確立済みで未完了なのは
   縮小だけであり（§5.2）、後者はそもそも `completed` という値が存在せず、
-  それ単独で verification gap を決められない（§5.3）。テキストには
+  それ単独で verification gap を決められない（§5.3）。
+
+  **テキストの言い回しも termination 一般には広げない。**
+  「failure established, shrinking incomplete」と書けるのは、本当に未完了だと
+  分かる場合 — `generation_report.exhaustion_phase = shrinking` や
+  `shrink_report.termination` が `generation-budget-exhausted` などのとき —
+  に限る。`exhausted` は探索を尽くした成功側、`disabled` / `no-shrinker` は
+  機構が無い、未知値は分類しない。termination 一般の描画は §5.3 の
+  termination 別の規則に従う。テキストには
   「failure established, shrinking incomplete」として出すが、
   `verification_gaps` には入れないし `verified` も動かさない。
 
@@ -519,7 +596,7 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:arguments` | `arguments[]` | 各値 `externalize-value` |
 | `:status` | `status` | keyword→string |
 | `:reason` | `reason` | keyword→string |
-| `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.4） |
+| `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.5） |
 | `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
 | `:outcome` | `target_outcome` | **構造化オブジェクト**（後述） |
 | `:value` | `primary_value` | `externalize-value` |
@@ -591,48 +668,91 @@ target_outcome.kind = returned
 | keyword | 文字列（lower-case） |
 | その他のシンボル | `symbol_data` オブジェクト |
 | 文字列 | 文字列 |
-| 整数 | §6.2.2 の safe integer 規則 |
+| 整数 | §6.2.3 の safe integer 規則 |
 | その他の数・文字 | `externalize-value` |
 | cons | **既定では配列**。オブジェクトになるのは §6.2.1 の既知位置だけ |
 | それ以外（実際のユーザ値、CLOS インスタンス等） | `externalize-value` |
 
-### 6.2.1 オブジェクト化は schema で分かる位置だけ
+### 6.2.1 既定は `externalize-value`。構造化するのは schema で分かる位置だけ
 
-**「長さが偶数で偶数位置が keyword なら plist」という形からの推測は採らない。**
-この設計書自身に反例がある。`:CASES (:AT-LEAST :AT-MOST)` は case 名 2 個の
-リストだが、長さ 2・先頭が keyword なので、その規則では
-`{"at-least": "at-most"}` になる。これはまさに
-「cl-spec が宣言していない key/value 関係を adapter が発明する」ことであり、
-`signature` について禁じたのと同じ誤りが任意の list に残ってしまう。
+**任意の cons を配列にするのも危険である。** 形からの plist 推測をやめても、
+「cons はとりあえず配列」ではまだ足りない。`explain-data` の error datum が
+その例で、同じ cons が key によって意味が逆になる。
 
-したがって **cl-spec の schema からオブジェクトだと分かる位置だけ**を
-オブジェクトに投影する。
+```lisp
+(:kind ... :path ... :actual <ユーザ値> :expected <expected-descriptor> ...)
+```
+
+`:actual` はユーザ値なので、`(1 2 3)` であっても `[1, 2, 3]` と構造化しては
+ならず、`externalize-value` の対象である。`:expected` は
+`expected-descriptor` が組んだ cl-spec 自身の構造なので、構造のまま保ちたい。
+
+state evidence の `:values` はさらに極端で、実測は
+
+```lisp
+((BALANCE-BEFORE . 30) (ID-BEFORE . 7))
+```
+
+という alist である。dotted pair は proper list ですらないので、汎用の
+「cons → 配列」では扱いが定義できない。
+
+したがって**既定を反転する**。
+
+```
+schema で構造だと分かる cons  -> structured projector（再帰）
+application / user の葉の cons -> externalize-value
+未知の cons                    -> externalize-value
+```
+
+### 6.2.2 構造化する位置の一覧
 
 | 位置 | JSON |
 |---|---|
 | `result-data` root | object |
 | `failure` / `shrunk_failure`（observation） | object |
+| `counterexample` / `shrunk_counterexample` | `[{variable, value}]`（既存 `%named-values`） |
+| `target_outcome` | object。`values[]` は各要素 `externalize-value` |
 | `state` / `state.capture` / `state.state_post` | object |
+| `state.capture.declared` | `symbol_data[]` |
+| `state.capture.values` | `[{name, value}]`。`name` は `symbol_data`、`value` は `externalize-value`、ただし §6.3 の opaque marker はそのまま通す |
+| `state.capture.error` | object |
 | `case_report` | object |
 | `case_report.cases[]` | object[] |
-| `generation_report` | object |
-| `generation_report.phases` / `.phases.generation` / `.phases.shrinking` | object |
+| `case_report.declared_cases` / `.never_called` | 文字列配列 |
+| `generation_report` / `.phases` / `.phases.generation` / `.phases.shrinking` | object |
 | `shrink_report` | object |
-| `provenance` / `provenance.collection_states` | object |
+| `provenance` / `.collection_states` | object |
 | `capabilities` | object |
-| `digest_omissions[]`（`(:kind :path :target :reason)` の plist） | object[] |
+| `digest_exclusions` | 文字列配列 |
+| `digest_omissions[]`（`(:kind :path :target :reason)`） | object[]。`:path` は配列 |
 | `explanation` root | object |
-| `explanation` の `:errors` / `:branches` / `:conjuncts` | object[] |
-| **上記以外のあらゆる cons** | **array** |
+| `explanation` の `:errors` / `:branches` / `:conjuncts` | error datum object[] |
+| error datum の `:expected` | expected-descriptor projector（object。その `:fields` / `:branches` は object[]） |
+| error datum の `:path` / `:tuple-path` / `:field-path` / `:known-tags` | 配列 |
+| error datum の `:actual` / `:key` | **`externalize-value`** |
+| error datum の `:actual-length` / `:expected-length` / `:violated-bound` | §6.2.3 の整数規則 |
+| error datum の `:condition-report` | 文字列（有界） |
+| `signature` | §6.2.5 |
+| **上記以外のすべて** | **`externalize-value`** |
 
-`:errors` / `:branches` / `:conjuncts` の 3 つは cl-spec 自身が
-`*failure-shape-containers*` として「error 形式の plist のリスト」と分類して
-いる（`src/function-spec.lisp`）ので、schema 由来の位置である。
+`options` と `state_constraints` は cl-spec が形を公開していないので
+`externalize-value` に入る。`:errors` / `:branches` / `:conjuncts` の 3 つは
+cl-spec 自身が `*failure-shape-containers*` として分類しているので schema 由来
+である。`:actual` / `:key` / `:actual-length` / `:path` /
+`:condition-report` が値由来だという分類も cl-spec 自身のもので、
+`*failure-shape-keys*` の docstring がそう書いている。
 
-`options` と `state_constraints` は cl-spec が形を定義していないので array
-側に入る。
+葉の型規則:
 
-### 6.2.2 整数と JSON の安全範囲
+| Lisp | JSON |
+|---|---|
+| keyword | 文字列（lower-case） |
+| その他のシンボル | `symbol_data` オブジェクト |
+| 文字列 | 文字列 |
+| 整数 | §6.2.3 の safe integer 規則 |
+| それ以外 | `externalize-value` |
+
+### 6.2.3 整数と JSON の安全範囲
 
 **fixnum をそのまま JSON number にしない。** 64bit SBCL の fixnum は
 2^62 付近まであり、JSON / JavaScript の safe integer（±(2^53 − 1)）より
@@ -647,26 +767,35 @@ target_outcome.kind = returned
 | trials / budget / rejected / candidates / attempts 等のカウンタ | safe 範囲なら数値 |
 | 任意のユーザ整数（`counterexample` の値など） | `externalize-value` |
 
-### 6.2.3 切り詰めたことを消費側に伝える
+### 6.2.4 切り詰めたことを消費側に伝える
 
 深さと要素数には `*value-print-level*` / `*value-print-length*` と同じ上限を
 掛ける。ただし**切ったことが分からない切り方はしない**。
 
-- 長さで切った場合: 先頭 N 件を残し、その field の兄弟に
-  `<field>_complete: false` と `<field>_omitted_items: <N>` を出す。
-  既存の `body_complete` / `body_omitted_chars` と同じ思想で、単位が
-  文字数ではなく要素数になっただけ。
-- 深さで切った場合: その部分木を
-  `{"unavailable": "depth-limit", "type": "<lisp type>"}` に置き換える。
-  どこで切れたかが構造自身に残るので、`<field>_complete` も false になる。
+切り詰めの記録は `core_result.data` の**外**に置く（§3.1）。`data` は
+cl-spec の record の写像であって、MCP が足した key を混ぜない。
+
+```json
+"projection": {
+  "complete": false,
+  "issues": [
+    {"path": ["failure", "explanation", "errors"],
+     "reason": "length-limit", "omitted_items": 5},
+    {"path": ["options", 3], "reason": "depth-limit"}
+  ]
+}
+```
+
+- 長さで切った場合: 先頭 N 件を残し、`issues` にそのパスと
+  `omitted_items` を記録する。
+- 深さで切った場合: その位置には **`externalize-value` の plist** を置く。
+  これは `data` の中で任意の Lisp 値を表すのに既に使っている標準形なので、
+  新しい key の発明にはならない。パスは `issues` に記録する。
 
 error が 10 個あるのに JSON には 5 個しか無く、5 個しか無いように見える、
 という状態を作らない。
 
-既存の `contract.explanation`（`property-result-explanation` の選択値を有界
-印字した文字列）はそのまま残す。§8 のとおり別の問いに答えるフィールドである。
-
-### 6.2.4 `signature` — 構造化するが、オブジェクトにはしない
+### 6.2.5 `signature` — 構造化するが、オブジェクトにはしない
 
 `signature` も文字列に潰さず、**同じ再帰 projector** を通す。ただし
 **flat array にはならないし、オブジェクトにもしない。**
@@ -687,9 +816,20 @@ key/value 関係を adapter が発明したことになる。また `:return-spe
 signature は `failure-shape` の plist を入れ子に持つので、スカラーの
 flat array でも表せない。
 
-`signature` は既定どおり **array** に投影される（§6.2.1 の既知位置では
-ないので、明示的な強制すら要らない）。
-再帰的に配列として投影する。
+`signature` のトップレベルは **array** に投影する。ただし
+「既定は `externalize-value`」に倒すと内側の `failure-shape` plist まで
+潰れてしまうので、`failure-signature` が実際に組む文法を 2 つだけ持たせる。
+
+```
+(:return-value :return-spec <failure-shapes>)
+(:condition-spec <condition-type> <failure-shapes>)
+```
+
+この `<failure-shapes>` の位置だけ **failure-shape の object[]**（error datum
+と同じ projector）として投影し、それ以外の要素は葉の型規則に従う。
+他の形（`(:missing-condition)`、`(:target-signal TYPE)`、
+`(:case :sufficient-funds :state-postcondition 0)`）はすべて葉の並びなので、
+配列のままで過不足ない。
 
 ```json
 "signature": ["case", "sufficient-funds", "state-postcondition", 0]
@@ -908,17 +1048,28 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
     （`:kind` 欠落 → required 等）が適用されないこと（§3.4）。
 13. **explanation / signature が文字列にならない** — `:errors` が
     ネストしたオブジェクトの配列として残り、`signature` が配列として残ること
-    （§6.2 / §6.2.4）。
-14. **keyword の list を plist と誤認しない** — `:CASES (:AT-LEAST :AT-MOST)`
+    （§6.2 / §6.2.5）。
+14. **`:actual` と `:expected` の非対称** — error datum の `:expected` が
+    構造のまま残り、`:actual` が `externalize-value` の形になること。
+    同じ cons でも扱いが逆になることの回帰テスト（§6.2.1）。
+15. **alist の捕捉値** — `state.capture.values` の `(NAME . VALUE)` が
+    `[{name, value}]` になること（§6.2.2）。
+16. **transport metadata が `data` に混ざらない** — 切り詰めが起きても
+    `core_result.data` に `_complete` / `_omitted_items` 等が現れず、
+    `core_result.projection.issues` に出ること（§3.1 / §6.2.4）。
+17. **unsupported schema の verdict** — `schema_supported: false` のとき
+    legacy reader が `passed` を返しても `verified: false` になり、
+    `core-schema-unsupported` が gap に入ること（§3.4 / §5.5）。
+18. **keyword の list を plist と誤認しない** — `:CASES (:AT-LEAST :AT-MOST)`
     が JSON 配列になり、`{"at-least": "at-most"}` にならないこと（§6.2.1）。
     projector の根幹の回帰テスト。
-15. **大きな整数の精度** — 2^60 相当の値が JSON number として丸められず、
+19. **大きな整数の精度** — 2^60 相当の値が JSON number として丸められず、
     10 進文字列で出ること。seed が `core_result.data` でも文字列であること
-    （§6.2.2）。
-16. **malformed な `result-data`** — API が `NIL` や `:schema-version` の
+    （§6.2.3）。
+20. **malformed な `result-data`** — API が `NIL` や `:schema-version` の
     無い値を返したとき、legacy fallback せず `internal-error` になること
     （§3.5）。
-17. **不透明な捕捉値** — cl-spec が
+21. **不透明な捕捉値** — cl-spec が
     `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...)` を返したとき、
     `object_id` を付けず unavailable のまま通ること（§6.3）。
 
@@ -926,12 +1077,12 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 
 テキストと JSON の不一致を禁止するアサーション（§7 の 3 パターン）に加えて:
 
-18. **shrinking 中の生成予算枯渇** — 反例は確立済みで
+22. **shrinking 中の生成予算枯渇** — 反例は確立済みで
     `generation_report.termination = budget-exhausted` /
     `exhaustion_phase = shrinking` のとき、「verification incomplete」と
     表示せず「failure established, shrinking incomplete」と表示すること。
     `verification_gaps` にも入らないこと（§5.2 / §5.5）。
-19. **未知の shrink termination** — 知らない termination 値を
+23. **未知の shrink termination** — 知らない termination 値を
     `complete` / `incomplete` に分類せず、値そのものを表示すること。
     `exhausted` を「縮小が不完全」と表示しないこと（§5.3）。
 
