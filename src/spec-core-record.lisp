@@ -25,6 +25,10 @@
   (:export #:safe-json-integer-p
            #:project-value
            #:project-record
+           #:validate-versioned-record
+           #:field-availability
+           #:+v1-required-metadata+
+           #:+sentinel-fields+
            #:*projection-max-depth*
            #:*projection-max-length*
            #:*record-shapes*))
@@ -224,3 +228,101 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
              (list :object (nreverse entries)))))
       (let ((node (walk value descriptor (reverse path) 0)))
         (values node (nreverse issues) (nreverse unknown))))))
+
+(defparameter +v1-required-metadata+
+  '(:schema-version :record-kind :entity-kind :definition-digest
+    :definition-digest-complete :definition-digest-covers :capabilities)
+  "The metadata keys cl-spec's SCHEMA-INFO declares required for version 1.
+
+A record claiming version 1 without one of them is broken, not old.  Reporting
+it as a field that happens to be absent would let a malformed answer from the
+versioned API read as an older revision -- which is the one confusion this
+module's availability states exist to prevent.")
+
+(defparameter +sentinel-fields+
+  '(:shrink-report :generation-report :case-report
+    :digest-omissions :digest-exclusions)
+  "The fields whose :NOT-COLLECTED value means availability rather than data.
+
+:NOT-COLLECTED is not a sentinel wherever it appears.  On an observation's
+:OUTCOME it means the Function Spec target was never called, and inside
+provenance's :COLLECTION-STATES it names an item nobody collected -- both are
+the answer, not the absence of one.  Converting either would delete a fact.")
+
+(defparameter *plist-scan-limit* 4096
+  "How far a plist is walked before it is refused as malformed.
+
+A bound rather than a proper-list test, so a circular or improper answer from a
+future revision is refused instead of hanging the worker.")
+
+(defun %proper-plist-p (value)
+  "Return true when VALUE is a bounded plist with keyword indicators."
+  (loop with tail = value
+        for count from 0 below *plist-scan-limit*
+        do (cond ((null tail) (return t))
+                 ((not (consp tail)) (return nil))
+                 ((not (keywordp (car tail))) (return nil))
+                 ((not (consp (cdr tail))) (return nil))
+                 (t (setf tail (cddr tail))))
+        finally (return nil)))
+
+(defun field-availability (record key)
+  "Return :COLLECTED, :NOT-COLLECTED or :ABSENT for KEY in RECORD.
+
+GET-PROPERTIES rather than GETF, and that is the whole point: GETF answers NIL
+both for a key that is not there and for a key whose value is NIL, and
+:FAILURE-PHASE NIL is a measurement -- an ordinary target observation with no
+special phase -- not an absence.
+
+:NOT-COLLECTED counts as availability only for +SENTINEL-FIELDS+; anywhere else
+it is the value cl-spec meant to give."
+  (multiple-value-bind (indicator value tail) (get-properties record (list key))
+    (declare (ignore indicator))
+    (cond ((null tail) :absent)
+          ((and (eq :not-collected value) (member key +sentinel-fields+))
+           :not-collected)
+          (t :collected))))
+
+(defun validate-versioned-record (record &key expected-record-kind
+                                              expected-entity-kind)
+  "Return (values STATUS REASON) for one versioned record.
+
+STATUS is :OK, :UNSUPPORTED-SCHEMA when the record declares a version this
+adapter does not know, or :MALFORMED.  REASON is the declared version for
+:UNSUPPORTED-SCHEMA and a sentence for :MALFORMED.
+
+A malformed answer from a versioned API is reported rather than quietly
+replaced by an older reader: falling back would hide a signature mismatch
+behind a response that looked fine.  The same judgement %DESCRIBE-FUNCTION-SPEC
+already makes when FUNCTION-SPEC-DATA answers NIL.
+
+EXPECTED-RECORD-KIND and EXPECTED-ENTITY-KIND are checked when supplied --
+RESULT-DATA answers :RESULT and FUNCTION-SPEC-DATA answers :DEFINITION with
+:FUNCTION-SPEC -- so a record projected under the wrong reader is caught here
+rather than by whatever reads it next."
+  (flet ((bad (reason) (return-from validate-versioned-record
+                         (values :malformed reason))))
+    (unless record (bad "the versioned reader returned NIL"))
+    (unless (%proper-plist-p record)
+      (bad "the versioned reader returned something that is not a plist"))
+    (when (eq :absent (field-availability record :schema-version))
+      (bad "the record carries no :schema-version"))
+    (let ((version (getf record :schema-version)))
+      (unless (eql 1 version)
+        (return-from validate-versioned-record
+          (values :unsupported-schema version)))
+      (dolist (key +v1-required-metadata+)
+        (when (eq :absent (field-availability record key))
+          (bad (format nil "a version 1 record is missing required metadata ~A"
+                       (%json-key key)))))
+      (when (and expected-record-kind
+                 (not (eq expected-record-kind (getf record :record-kind))))
+        (bad (format nil "expected a ~A record and got ~A"
+                     (%json-key expected-record-kind)
+                     (%json-key (getf record :record-kind)))))
+      (when (and expected-entity-kind
+                 (not (eq expected-entity-kind (getf record :entity-kind))))
+        (bad (format nil "expected a ~A record and got ~A"
+                     (%json-key expected-entity-kind)
+                     (%json-key (getf record :entity-kind)))))
+      :ok)))

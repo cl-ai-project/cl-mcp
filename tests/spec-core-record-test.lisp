@@ -13,6 +13,8 @@
                 #:safe-json-integer-p
                 #:project-value
                 #:project-record
+                #:validate-versioned-record
+                #:field-availability
                 #:*projection-max-depth*
                 #:*projection-max-length*))
 
@@ -185,3 +187,64 @@
     (ok (eq :value (first inner)))
     (ok (= 5 (length (getf (second inner) :printed))))
     (ok (null (getf (second inner) :printed-complete)))))
+
+(defun remove-from-plist-once (plist key)
+  "Return PLIST without KEY and its value."
+  (loop for (indicator value) on plist by #'cddr
+        unless (eq indicator key)
+          append (list indicator value)))
+
+(defparameter *v1-metadata*
+  '(:schema-version 1 :record-kind :result :entity-kind :function-spec
+    :definition-digest "abc" :definition-digest-complete t
+    :definition-digest-covers :declaration-and-registered-dependencies
+    :capabilities (:generation :available :shrinking :none))
+  "A minimal well-formed v1 result envelope, shared by the validation cases.")
+
+(deftest a-well-formed-v1-record-validates
+  (ok (eq :ok (validate-versioned-record *v1-metadata*
+                                         :expected-record-kind :result))))
+
+(deftest a-future-schema-is-unsupported-not-malformed
+  (let ((record (list* :schema-version 2 (cddr *v1-metadata*))))
+    (multiple-value-bind (status reason) (validate-versioned-record record)
+      (ok (eq :unsupported-schema status))
+      ;; The version travels so the response can name it rather than saying
+      ;; only that something was wrong.
+      (ok (eql 2 reason)))))
+
+(deftest a-v1-record-missing-required-metadata-is-malformed
+  ;; schema-info declares these seven required.  Continuing with
+  ;; field_availability :absent would treat a broken record as an old one.
+  (let ((record (remove-from-plist-once *v1-metadata* :record-kind)))
+    (ok (eq :malformed (validate-versioned-record record)))))
+
+(deftest a-record-kind-mismatch-is-malformed
+  (ok (eq :malformed
+          (validate-versioned-record *v1-metadata*
+                                     :expected-record-kind :definition))))
+
+(deftest nil-and-non-plists-are-malformed
+  (ok (eq :malformed (validate-versioned-record nil)))
+  (ok (eq :malformed (validate-versioned-record '(:schema-version))))
+  (ok (eq :malformed (validate-versioned-record '("not" "a" "plist" 1)))))
+
+(deftest present-nil-is-not-absent
+  ;; The most important regression in this file.  GETF answers NIL for both.
+  (let ((present (append *v1-metadata* '(:failure-phase nil)))
+        (missing *v1-metadata*))
+    (ok (eq :collected (field-availability present :failure-phase)))
+    (ok (eq :absent (field-availability missing :failure-phase)))))
+
+(deftest not-collected-is-a-sentinel-only-where-the-schema-says-so
+  (testing "a top-level report field uses it as an availability sentinel"
+    (ok (eq :not-collected
+            (field-availability '(:shrink-report :not-collected) :shrink-report))))
+  (testing "a field whose :NOT-COLLECTED is data keeps it"
+    ;; failure.outcome :NOT-COLLECTED means the Function Spec target was never
+    ;; called, and provenance records it for an item nobody collected.  Neither
+    ;; is an availability marker.
+    (ok (eq :collected (field-availability '(:outcome :not-collected) :outcome)))
+    (ok (eq :collected
+            (field-availability '(:target-revision :not-collected)
+                                :target-revision)))))
