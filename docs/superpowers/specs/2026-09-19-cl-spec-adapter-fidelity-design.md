@@ -220,6 +220,24 @@ schema_supported: false
 reader を使う場合も display-only の診断に限り、verification evidence には
 使わない。
 
+**契約宣言の schema が unsupported なら `verified` も false にする（設計判断）。**
+`result-data` が v1 で読めていても、`function-spec-data` が v2 で読めない場合、
+現状の記述だけでは `status = passed` / `case_report = not-collected` で
+`verified = true` になる余地がある。
+
+```
+Function Spec definition schema unsupported
+  -> verification_gaps += contract-schema-unsupported
+  -> verified = false
+```
+
+より緩い定義（「cl-spec 自身が pass と判定し result schema は理解できている
+のだから verified は許す。ただし契約宣言の詳細は unknown」）も論理的には
+成立するが、**採らない**。cl-mcp が契約宣言そのものを理解できていない状態で
+`✓ VERIFIED` という強い見出しを出すのは、このプロジェクトが
+`%evaluated-p` の時点から採ってきた「unknown は証拠ではない」という判断と
+食い違う。
+
 **`%contract-facts` にも同じ gate が要る。** `spec-describe`（Task A）だけでなく、
 `spec-check` が内部で呼ぶ `%contract-facts` も `function-spec-data` から
 `:cases` と `:preconditions` を `getf` している。v2 の Function Spec を v1 だと
@@ -250,13 +268,28 @@ reader を使う場合も display-only の診断に限り、verification evidenc
 既定の plist が `:schema-version 1` を入れる）ので、それが無い record は
 壊れている。
 
+**検証は 1 か所にまとめ、`function-spec-data` にも同じものを掛ける。**
+
+```
+validate-versioned-record(record, expected-record-kind, expected-entity-kind)
+```
+
+| 呼び出し元 | expected-record-kind | expected-entity-kind |
+|---|---|---|
+| `result-data` | `:result` | — |
+| `function-spec-data` | `:definition` | `:function-spec` |
+
 v1 の required metadata は `schema-info` が明示している 7 つ
 （`:schema-version` `:record-kind` `:entity-kind` `:definition-digest`
 `:definition-digest-complete` `:definition-digest-covers` `:capabilities`）で、
 `:schema-version` が 1 なのにこのどれかが欠けている record は
 `field_availability: absent` として続行するより壊れていると見るべきである。
-`record-kind` も検証してよい — 実測で `result-data` は `:RESULT`、
-`function-spec-data` は `:DEFINITION` を返す。
+`record-kind` も検証する — 実測で `result-data` は `:RESULT`、
+`function-spec-data` は `:DEFINITION` / `:ENTITY-KIND :FUNCTION-SPEC` を返す。
+
+Task A（`spec-describe kind=function-spec`）も同じ validator を通す。schema
+gate だけ掛けて required metadata を見ないと、v1 を名乗る壊れた record が
+`spec-describe` 側からだけ通ってしまう。
 
 後 2 者を `unavailable` にしたり legacy へ落としたりしてはならない。
 「問うことができなかった」のではなく「問えたが versioned API が壊れていた」
@@ -408,9 +441,9 @@ unknown future field  = 存在を通知するが、意図的に解釈しない
 | `capabilities` | `(:GENERATION :AVAILABLE :SHRINKING :NONE :INSTRUMENTATION :UNAVAILABLE)` | `{"generation": "available", "shrinking": "none", "instrumentation": "unavailable"}` |
 | `digest_exclusions` | `(:TARGET-IMPLEMENTATION ...)` | `["target-implementation", ...]` |
 | `digest_omissions` | `NIL` / 省略記録のリスト | `[]` / 各要素を §6.2 の再帰 projector で |
-| `options` | 呼び出し側 plist | §6.2 の再帰 projector（任意の Lisp 値を含みうる） |
+| `options` | 呼び出し側 plist | **`externalize-value`**。cl-spec v1 は options の内部構造を公開していない |
 | `provenance` | plist、`collection_states` はネスト plist | オブジェクト。`:not-collected` は §3.3 のとおり値として保持 |
-| `state_constraints` | 実装依存 | §6.2 の再帰 projector |
+| `state_constraints` | `:PRESENT` のみ（`(when (state-observing-contract-p contract) :present)`） | 文字列 `"present"` |
 
 上表の右列を cl-spec の綴りのまま snake_case にした写像であり、既存の `results[].status` / `.trials.budget` / `.seed` /
 `contract.rejected` / `contract.failure_reason` などは**互換 alias**として残り、
@@ -555,6 +588,7 @@ counterexample」と描画しない。両者は別のことを言っている。
   | `case-coverage-unknown` | 契約が `:cases` を宣言している（`%contract-facts` が `function-spec-data` から読めた）のに `field_availability.case_report` が `collected` でない |
   | `generation-incomplete` | `data.failure_phase` が `generation` |
   | `core-schema-unsupported` | `core_result.schema_supported` が false（§3.4）。legacy reader の値を verification evidence にしない |
+  | `contract-schema-unsupported` | contract run で `function-spec-data` の schema が unsupported（§3.4 の `%contract-facts` gate） |
 
   `cases-never-called` と `case-coverage-unknown` は contract 実行にのみ
   適用する。property 実行には case も `case_report` も無いので出さない。
@@ -634,9 +668,33 @@ export されていない**（実測で確認）ので、この plist を読む�
 `kind` は keyword→string。`:NOT-COLLECTED` は §3.3 のとおり
 **この field 自身の semantic value** であり、availability へ変換しない。
 
-**これが今回もっとも保存したい情報である。** `kind` が `not-collected` で
-ないことが「target が実際に呼ばれた」ことの**核となる事実**であり、
-adapter 側の推論ではない。したがって
+**この判定は `entity_kind = function-spec` のときだけ有効である。**
+
+通常 Property の `evaluate-trial` は 6 値しか返さない。
+
+```lisp
+;; src/execution.lisp:271
+(values :passed nil nil nil nil value)   ; 第 7 値 outcome は NIL
+;; src/execution.lisp:302
+((null outcome) :not-collected)          ; NIL -> :NOT-COLLECTED
+```
+
+つまり **Property 本体は実行されているのに `:NOT-COLLECTED` になる**。
+framework が target-call evidence を記録しないだけであって、何も実行され
+なかったという意味ではない。
+
+| entity_kind | `kind = returned` / `signaled` | `kind = not-collected` |
+|---|---|---|
+| `function-spec` | function target が呼ばれた | **function target は呼ばれていない** |
+| `property` | （起きない） | target-call evidence を持たないだけ。**Property body が実行されなかったことを意味しない** |
+
+将来 property の結果に同じ renderer を通したときに
+「target was not called」と誤って描画しないよう、この分岐は renderer にも
+入れる。テストで固定する（§12）。
+
+**これが Function Spec についてもっとも保存したい情報である。** contract run で
+`kind` が `not-collected` でないことが「target が実際に呼ばれた」ことの
+**核となる事実**であり、adapter 側の推論ではない。したがって
 
 ```
 failure_phase   = state-post
@@ -735,8 +793,11 @@ application / user の葉の cons -> externalize-value
 | `signature` | §6.2.5 |
 | **上記以外のすべて** | **`externalize-value`** |
 
-`options` と `state_constraints` は cl-spec が形を公開していないので
-`externalize-value` に入る。`:errors` / `:branches` / `:conjuncts` の 3 つは
+`options` は cl-spec v1 が内部構造を公開していないので `externalize-value`
+に入る。将来 `:generation-budget` や `:target-revision` を structured に
+したくなったら、cl-spec 側で options schema を正式に定義してからでよい。
+`state_constraints` は現行実装では `:PRESENT` しか返さないので、keyword
+として文字列化するだけでよく、再帰 projector は要らない。`:errors` / `:branches` / `:conjuncts` の 3 つは
 cl-spec 自身が `*failure-shape-containers*` として分類しているので schema 由来
 である。`:actual` / `:key` / `:actual-length` / `:path` /
 `:condition-report` が値由来だという分類も cl-spec 自身のもので、
@@ -933,9 +994,11 @@ case-selection error も failure observation を持ち、そのとき target は
 している誤編集につながる。したがって
 
 - `counterexample_status` は従来どおり「反例の値が取れたか」だけを言う
-- 「target が呼ばれたか」は `core_result.data.failure.target_outcome.kind`
-  が `not-collected` でないことで答える（§6.1。core の事実であって
-  adapter の推論ではない）
+- 「target が呼ばれたか」は **contract run について**
+  `core_result.data.failure.target_outcome.kind` が `not-collected` でない
+  ことで答える（§6.1。core の事実であって adapter の推論ではない）。
+  property run にこの判定を適用しない — そちらの `not-collected` は
+  「target-call evidence が無い」であって「実行されなかった」ではない
 - テキストは `failure phase:` 行でどちらなのかを明示する（§7）
 
 ③（陳腐化・削除可）に分類したものは無い。互換性のための fallback を整理目的で
@@ -1049,27 +1112,32 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 13. **explanation / signature が文字列にならない** — `:errors` が
     ネストしたオブジェクトの配列として残り、`signature` が配列として残ること
     （§6.2 / §6.2.5）。
-14. **`:actual` と `:expected` の非対称** — error datum の `:expected` が
+14. **通常 Property の outcome semantics** — Property body が 1 回実行されて
+    失敗した run で `failure.target_outcome.kind = "not-collected"` になり、
+    かつテキストが「target was not called」と**言わない**こと。
+    `not-collected = Function Spec の target evidence が無い` と
+    `何も実行されていない` の混同を防ぐ、§6.1 の回帰テスト。
+15. **`:actual` と `:expected` の非対称** — error datum の `:expected` が
     構造のまま残り、`:actual` が `externalize-value` の形になること。
     同じ cons でも扱いが逆になることの回帰テスト（§6.2.1）。
-15. **alist の捕捉値** — `state.capture.values` の `(NAME . VALUE)` が
+16. **alist の捕捉値** — `state.capture.values` の `(NAME . VALUE)` が
     `[{name, value}]` になること（§6.2.2）。
-16. **transport metadata が `data` に混ざらない** — 切り詰めが起きても
+17. **transport metadata が `data` に混ざらない** — 切り詰めが起きても
     `core_result.data` に `_complete` / `_omitted_items` 等が現れず、
     `core_result.projection.issues` に出ること（§3.1 / §6.2.4）。
-17. **unsupported schema の verdict** — `schema_supported: false` のとき
+18. **unsupported schema の verdict** — `schema_supported: false` のとき
     legacy reader が `passed` を返しても `verified: false` になり、
     `core-schema-unsupported` が gap に入ること（§3.4 / §5.5）。
-18. **keyword の list を plist と誤認しない** — `:CASES (:AT-LEAST :AT-MOST)`
+19. **keyword の list を plist と誤認しない** — `:CASES (:AT-LEAST :AT-MOST)`
     が JSON 配列になり、`{"at-least": "at-most"}` にならないこと（§6.2.1）。
     projector の根幹の回帰テスト。
-19. **大きな整数の精度** — 2^60 相当の値が JSON number として丸められず、
+20. **大きな整数の精度** — 2^60 相当の値が JSON number として丸められず、
     10 進文字列で出ること。seed が `core_result.data` でも文字列であること
     （§6.2.3）。
-20. **malformed な `result-data`** — API が `NIL` や `:schema-version` の
+21. **malformed な `result-data`** — API が `NIL` や `:schema-version` の
     無い値を返したとき、legacy fallback せず `internal-error` になること
     （§3.5）。
-21. **不透明な捕捉値** — cl-spec が
+22. **不透明な捕捉値** — cl-spec が
     `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...)` を返したとき、
     `object_id` を付けず unavailable のまま通ること（§6.3）。
 
@@ -1077,12 +1145,12 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 
 テキストと JSON の不一致を禁止するアサーション（§7 の 3 パターン）に加えて:
 
-22. **shrinking 中の生成予算枯渇** — 反例は確立済みで
+23. **shrinking 中の生成予算枯渇** — 反例は確立済みで
     `generation_report.termination = budget-exhausted` /
     `exhaustion_phase = shrinking` のとき、「verification incomplete」と
     表示せず「failure established, shrinking incomplete」と表示すること。
     `verification_gaps` にも入らないこと（§5.2 / §5.5）。
-23. **未知の shrink termination** — 知らない termination 値を
+24. **未知の shrink termination** — 知らない termination 値を
     `complete` / `incomplete` に分類せず、値そのものを表示すること。
     `exhausted` を「縮小が不完全」と表示しないこと（§5.3）。
 
