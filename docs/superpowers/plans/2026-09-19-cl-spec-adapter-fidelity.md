@@ -1619,7 +1619,7 @@ Add to `tests/spec-response-builders-test.lisp`:
         (ok (equal "amount" (gethash "keyword" argument)))
         (ok (equal "AMOUNT-P" (gethash "name" (gethash "supplied_p" argument))))))
     (testing "the text shows them too -- a client renders only this"
-      (ok (search "cases:" text))
+      (ok (search "cases (exclusive selection):" text))
       (ok (search "sufficient-funds" text))
       (ok (search "insufficient-funds" text))
       (ok (search "capture:" text))
