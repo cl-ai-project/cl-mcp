@@ -350,7 +350,14 @@ not only that the adapter's report carries them"
         (ok (equal '(:scalar "Withdraw.")
                    (cdr (assoc "documentation" fields :test #'string=))))
         (ok (equal '(:scalar "exclusive")
-                   (cdr (assoc "case_selection" fields :test #'string=))))))))
+                   (cdr (assoc "case_selection" fields :test #'string=))))))
+    (testing "the six keys %spec-tree renders are declared elsewhere, not unknown"
+      ;; :arguments, :argument-schema, :returns, :signals, :cases and
+      ;; :source-location are real keys of every function-spec-data record,
+      ;; and this adapter renders all six through %SPEC-TREE/%CONTRACT-*.  A
+      ;; nonempty unknown-keys here would mean core-record's own projection
+      ;; disagrees with what the rest of this report already understands.
+      (ok (null (getf (getf report :core-record) :unknown-keys))))))
 
 (deftest describe-keeps-cases-capture-and-state-post
   (let* ((api (%stub-api :function-spec-data

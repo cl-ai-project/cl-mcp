@@ -160,7 +160,10 @@ true; otherwise it is only how far %TAIL-UNIT-COUNT got before giving up, not
 the value's true excess, because counting that exactly could mean walking
 however long an untrusted value turns out to be.  UNKNOWN-KEYS names the keys
 no descriptor covers: their existence is reported and their meaning is
-deliberately not guessed.
+deliberately not guessed.  A field descriptor of :ELSEWHERE means the record
+declares this key and cl-mcp already publishes it outside :DATA, so
+WALK-OBJECT names it in neither NODE nor UNKNOWN-KEYS -- a declared omission,
+not an unrecognized one.
 
 PATH is the position reached so far, for the entries of ISSUES and
 UNKNOWN-KEYS.  MAX-CHARS bounds every value this projects, leaf or opaque, the
@@ -258,6 +261,13 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                               (eq :not-collected raw))
                          (push (cons (%json-key key) (list :scalar nil))
                                entries))
+                        ;; :ELSEWHERE is declared, not unknown, and not
+                        ;; projected here: cl-mcp names it deliberately
+                        ;; because it already publishes this key outside
+                        ;; :DATA (see PROJECT-RECORD's docstring), so it must
+                        ;; not fall through to the UNKNOWN-KEYS branch below.
+                        ((and field (eq :elsewhere (cdr field)))
+                         nil)
                         (field
                          (push (cons (%json-key key)
                                      (walk raw (cdr field)
@@ -520,7 +530,19 @@ rather than by whatever reads it next."
                  (:state-post . (:array :leaf))
                  (:case-selection . :leaf)
                  (:source-form . :leaf)
-                 (:metadata . :opaque))))
+                 (:metadata . :opaque)
+                 ;; Declared by the record and published at the top level of the
+                 ;; describe response through %SPEC-TREE, which projects an IR
+                 ;; node.  Named here so they are not reported as keys this
+                 ;; adapter does not understand -- it understands all six and
+                 ;; renders them -- and so a reader of this shape can see that
+                 ;; the omission is deliberate rather than an oversight.
+                 (:arguments . :elsewhere)
+                 (:argument-schema . :elsewhere)
+                 (:returns . :elsewhere)
+                 (:signals . :elsewhere)
+                 (:cases . :elsewhere)
+                 (:source-location . :elsewhere))))
 
 (defun project-core-record (record shape-name &key expected-record-kind
                                                    expected-entity-kind)

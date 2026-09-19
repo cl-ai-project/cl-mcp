@@ -68,6 +68,25 @@
         (ok (equal '("surprise") unknown))
         (ok (null (assoc "surprise" (second node) :test #'equal)))))))
 
+(deftest object-descriptor-elsewhere-field-is-declared-not-unknown
+  ;; :ELSEWHERE says the record declares this key and cl-mcp already
+  ;; publishes it outside :DATA (spec-adapter-report's %SPEC-TREE, for the
+  ;; six Function Spec keys this exists for) -- it must not land in either
+  ;; half of the ordinary two-way split project-record otherwise makes.
+  (let ((shape '(:object (:kind . :leaf) (:arguments . :elsewhere))))
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:kind :function-spec :arguments (1 2) :surprise 7)
+                         shape)
+      (ok (null issues))
+      (testing "a declared :elsewhere key is projected into neither half"
+        (ok (null (assoc "arguments" (second node) :test #'equal)))
+        (ok (not (member "arguments" unknown :test #'equal))))
+      (testing "an ordinary declared key is still projected"
+        (ok (equal '(:scalar "function-spec")
+                   (cdr (assoc "kind" (second node) :test #'equal)))))
+      (testing "an undeclared key beside it still reaches unknown-keys"
+        (ok (equal '("surprise") unknown))))))
+
 (deftest a-keyword-list-is-an-array-not-an-object
   ;; §6.2.1's own counterexample.  (:AT-LEAST :AT-MOST) is two case names;
   ;; read as a plist it becomes {"at-least": "at-most"}, a relation cl-spec
