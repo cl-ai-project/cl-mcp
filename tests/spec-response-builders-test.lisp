@@ -362,6 +362,226 @@ PURPOSE: an ordinary property's failing observation carries a bare :OUTCOME
                         :errored 0 :timed-out 0 :not-run 0)
           :environment *environment*)))
 
+(defun %case-selection-check-report ()
+  "Return a completed contract report whose case selection was ambiguous, so
+the target was never called.
+
+Measured shape: a real cl-spec checkout's SRC/FUNCTION-SPEC.LISP
+FUNCTION-CASE-SELECT signals :AMBIGUOUS-CASE when more than one case's guard
+matches -- exactly TESTS/FIXTURES/SPEC-FIXTURE-CONTRACTS.LISP's
+OVERLAPPING-BALANCE contract with equal :BALANCE/:AMOUNT args, the scenario
+Task 10's REAL-CASE-SELECTION-ERROR-DOES-NOT-BLAME-THE-TARGET exercises for
+real.  CASE-SELECTION-ERROR-DATA (SRC/CONDITIONS.LISP) fixes the explanation
+shape; OBSERVE-TRIAL never assigns a target outcome for a selection failure,
+so OBSERVED-OUTCOME-DATA's answer is the bare :NOT-COLLECTED keyword."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-overlapping-balance"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'overlapping-balance :status :error
+                 :trials 1 :budget 1 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil :shrink-report :not-collected
+                 :generation-report :not-collected
+                 :failure-phase :case-selection :failure-reason :contract-error
+                 :case-report
+                 (list :selection :exclusive :unit :normal-trials
+                       :declared-cases '(:at-least :at-most)
+                       :cases (list (list :name :at-least :documentation nil
+                                          :called 0 :passed 0 :failed 0
+                                          :error 0)
+                                    (list :name :at-most :documentation nil
+                                          :called 0 :passed 0 :failed 0
+                                          :error 0))
+                       :case-selection-errors 1 :capture-errors 0
+                       :never-called '(:at-least :at-most))
+                 :failure
+                 (list :arguments (list 5 5) :status :error
+                       :reason :contract-error
+                       :signature (list :case-selection :ambiguous-case)
+                       :explanation
+                       (list :kind :case-selection-error
+                             :case-error :ambiguous-case
+                             :function 'overlapping-balance
+                             :cases '(:at-least :at-most)
+                             :case nil :condition-type nil
+                             :condition-report nil)
+                       :outcome :not-collected :value nil :case nil
+                       :condition-report nil)
+                 :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE" "OVERLAPPING-BALANCE"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE" "OVERLAPPING-BALANCE")
+                      :kind :contract
+                      :status :error
+                      :trials (list :executed 1 :budget 1
+                                    :budget-source "requested")
+                      :seed "1"
+                      :declares-cases t
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 0
+                        :errored 1 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %unknown-shrink-termination-check-report ()
+  "Return a completed property report whose shrink termination is
+:VALIDATION-ERROR.
+
++SHRINK-TERMINATIONS+ is deliberately open, not a closed enumeration.
+:VALIDATION-ERROR is a real cl-spec shrink termination
+(SRC/BACKENDS/CHECK-IT.LISP's shrink-custom-arguments, re-validating a
+shrunk candidate against the whole spec) that this adapter's wording table
+does not carry, on purpose -- this exercises the \"printed as itself\"
+fallback rather than a table hit."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result :entity-kind :property
+                 :definition-digest "digest-shrink-unknown-termination"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'clamp-is-wrong-on-purpose :status :failed
+                 :trials 3 :budget 20 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil
+                 :shrink-report (list :candidates 2 :budget 50
+                                       :termination :validation-error)
+                 :generation-report :not-collected
+                 :failure-phase nil :failure-reason :predicate-false
+                 :case-report :not-collected
+                 :failure
+                 (list :arguments '(4) :status :failed
+                       :reason :predicate-false
+                       :signature '(:property-false) :explanation nil
+                       :outcome :not-collected :value nil :case nil
+                       :condition-report nil)
+                 :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE"
+                                              "CLAMP-IS-WRONG-ON-PURPOSE"))
+                :source "explicit property argument"
+                :coverage "Only the property named.")
+          :results
+          (list (list :property (%symbol-data "PROBE"
+                                              "CLAMP-IS-WRONG-ON-PURPOSE")
+                      :kind :property
+                      :status :failed
+                      :trials (list :executed 3 :budget 20
+                                    :budget-source "profile default")
+                      :seed "1"
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %signals-with-state-post-check-report ()
+  "Return a completed contract report whose :SIGNALS case signalled correctly
+and whose :STATE-POST clause still failed.
+
+Measured shape: cl-spec's DSL explicitly allows a :SIGNALS case to carry a
+:STATE-POST clause (SRC/DSL.LISP: \"a :state-post is a separate clause and is
+allowed here\"), and CLASSIFY-TARGET-OUTCOME (SRC/FUNCTION-SPEC.LISP) passes
+a matched :SIGNALS case through to CLASSIFY-STATE-POST the same as a
+:RETURNS case.  OBSERVED-OUTCOME-DATA's outcome for that trial is therefore
+(:KIND :SIGNALED ...), never :RETURNED -- the case this adapter's
+failure-phase gloss must not contradict."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-withdraw-with-audit"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'withdraw-with-audit! :status :failed
+                 :trials 1 :budget 1 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil
+                 :shrink-report (list :candidates 0 :budget 200 :termination
+                                       :state-restoration-unavailable)
+                 :generation-report :not-collected
+                 :failure-phase :state-post
+                 :failure-reason :state-postcondition
+                 :case-report
+                 (list :selection :exclusive :unit :normal-trials
+                       :declared-cases '(:insufficient-funds)
+                       :cases (list (list :name :insufficient-funds
+                                          :documentation nil :called 1
+                                          :passed 0 :failed 1 :error 0))
+                       :case-selection-errors 0 :capture-errors 0
+                       :never-called nil)
+                 :failure
+                 (list :arguments (list 100 200) :status :failed
+                       :reason :state-postcondition
+                       :signature (list :case :insufficient-funds
+                                        :state-postcondition 0)
+                       :explanation
+                       (list :kind :state-postcondition
+                             :function 'withdraw-with-audit!
+                             :case :insufficient-funds :index 0
+                             :form '(= audit-count (1+ audit-count-before)))
+                       :outcome (list :kind :signaled
+                                      :condition-type 'insufficient-funds
+                                      :condition-report
+                                      "Cannot withdraw 200 from 100.")
+                       :value nil :case :insufficient-funds
+                       :condition-report nil
+                       :state
+                       (list :capture
+                             (list :status :completed
+                                   :declared '(audit-count-before)
+                                   :values (list (cons 'audit-count-before 3))
+                                   :error nil)
+                             :state-post
+                             (list :status :violation :reason nil
+                                   :case :insufficient-funds :index 0
+                                   :form '(= audit-count
+                                           (1+ audit-count-before))
+                                   :condition-type nil)))
+                 :shrunk-failure nil :elapsed 0.02))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE"
+                                              "WITHDRAW-WITH-AUDIT!"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE" "WITHDRAW-WITH-AUDIT!")
+                      :kind :contract
+                      :status :failed
+                      :trials (list :executed 1 :budget 1
+                                    :budget-source "requested")
+                      :seed "1"
+                      :declares-cases t
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
 (deftest not-loaded-response-says-what-to-load
   (testing "the cl-spec-not-loaded answer is actionable in the text itself"
     (let* ((response (build-spec-symbol-response
@@ -1380,12 +1600,18 @@ the result says which."
 
 (deftest the-headline-names-a-case-nobody-reached
   (let* ((report (%contract-check-report-with-cases))
-         (text (first-text (build-spec-check-response report))))
-    (ok (search "NOT VERIFIED" text))
-    (ok (search "insufficient-funds" text))
-    (ok (search "NEVER CALLED" text))
-    ;; The forbidden rendering: a clean verdict beside an unreached branch.
-    (ok (not (search "✓ VERIFIED" text)))))
+         (text (first-text (build-spec-check-response report)))
+         (headline (%headline report)))
+    (testing "the per-case evidence line names which case, and how"
+      (ok (search "insufficient-funds" text))
+      (ok (search "NEVER CALLED" text)))
+    (testing "and Step 5's own deliverable -- the headline clause -- carries \
+the gap, not only the body a reader may never reach"
+      (ok (search "NOT VERIFIED" headline))
+      (ok (search "1 declared case never reached: insufficient-funds"
+                  headline))
+      ;; The forbidden rendering: a clean verdict beside an unreached branch.
+      (ok (not (search "✓ VERIFIED" headline))))))
 
 (deftest shrinking-that-could-not-run-does-not-read-as-shrinking-that-found-nothing
   (let* ((report (%state-post-check-report))
@@ -1417,7 +1643,42 @@ the result says which."
 (deftest an-ordinary-property-is-never-told-its-body-was-not-called
   ;; §12 case 14.  A property's observation records no target outcome, so
   ;; :NOT-COLLECTED there means "no target evidence", not "nothing ran".
+  ;; The renderer only ever emits the literal "target: not called" -- assert
+  ;; that exact phrase's absence, not a phrase (with "was") it never writes.
   (let* ((report (%property-check-report-with-not-collected-outcome))
          (text (first-text (build-spec-check-response report))))
-    (ok (not (search "target was not called" text)))
-    (ok (not (search "target WAS called" text)))))
+    (ok (not (search "target: not called" text)))))
+
+(deftest a-case-selection-failure-says-the-target-was-not-called
+  ;; The CONTRACT-P guard's other polarity: the identical :NOT-COLLECTED
+  ;; outcome, but on a contract whose case selection was ambiguous, so the
+  ;; target really was never called -- "target: not called" must print.
+  (let* ((report (%case-selection-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "target: not called" text))
+    (ok (search "failure phase: case-selection" text))))
+
+(deftest an-unknown-shrink-termination-prints-itself-without-a-verdict
+  ;; +SHRINK-TERMINATIONS+ is deliberately open: :VALIDATION-ERROR is a real
+  ;; cl-spec shrink termination this adapter's wording table does not carry,
+  ;; and "printed as itself" is what the fallback branch means in practice.
+  (let* ((report (%unknown-shrink-termination-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "shrinking: validation-error" text))
+    ;; Not sorted into complete or incomplete: no :COMPLETED termination
+    ;; exists to contrast with, so neither word belongs here.
+    (ok (not (search "complete" text)))))
+
+(deftest a-signalling-case-with-a-state-post-violation-does-not-contradict-itself
+  ;; A :SIGNALS case may carry :STATE-POST (cl-spec's DSL explicitly allows
+  ;; it), and its target outcome is :SIGNALED, never :RETURNED.  The
+  ;; failure-phase gloss must not claim "and returned" two lines above a
+  ;; target: line that says "signalled".
+  (let* ((report (%signals-with-state-post-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "failure phase: state-post" text))
+    (ok (search "the target WAS called; the contract's" text))
+    (ok (search "target: signalled INSUFFICIENT-FUNDS" text))
+    (ok (search "state-post: violation" text))
+    ;; The forbidden self-contradiction this fixture exists to catch.
+    (ok (not (search "WAS called and returned" text)))))

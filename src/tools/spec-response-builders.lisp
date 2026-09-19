@@ -885,10 +885,15 @@ signals a TYPE-ERROR."
                   phase
                   (case phase
                     (:state-post
+                     ;; Not "... and returned": a :signals case may carry a
+                     ;; :state-post clause too (cl-spec's DSL explicitly
+                     ;; allows it), and for one whose target signalled as
+                     ;; expected this gloss would contradict the target:
+                     ;; line two rows down.  The gloss's job is the phase;
+                     ;; how the call finished is the target: line's job.
                      (concatenate 'string
-                                  "the target WAS called and returned; the "
-                                  "contract's state-post clause is what "
-                                  "failed"))
+                                  "the target WAS called; the contract's "
+                                  "state-post clause is what failed"))
                     (:case-selection
                      (concatenate 'string
                                   "the target was NOT called; choosing which "
