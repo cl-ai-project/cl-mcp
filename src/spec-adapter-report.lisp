@@ -2249,7 +2249,7 @@ the run's own machinery."
 A result status that is not a verdict is pushed into the list as itself, and
 those are documented through +RESULT-STATUSES+.  These are the rest, kept here
 for the same reason the status lists are: the tool description is the only
-documentation a model ever sees, this set has grown four times in one branch,
+documentation a model ever sees, this set has grown five times in one branch,
 and a value the code can emit that the description does not name is a value the
 caller has to guess at.")
 
@@ -2436,9 +2436,11 @@ establish -- read full coverage for a function whose contract never ran."
 (defun %verified-p (results)
   "Return true only when RESULTS are evidence that every property held.
 
-Three conditions, not one: something was selected, every result is :PASSED,
-and every one of them evaluated at least one trial.  Dropping the third would
-let a property budgeted zero trials report itself verified."
+Something was selected, and every result clears six conditions: :PASSED; at
+least one trial evaluated; no declared case left never-called; case coverage
+not unknown; :DECLARES-CASES not :UNKNOWN (the contract's own declaration was
+read); and a result schema this adapter supports.  Dropping any one of them
+lets the shortfall it guards against pass silently as verified."
   (and results
        (every (lambda (result)
                 (and (eq :passed (getf result :status))

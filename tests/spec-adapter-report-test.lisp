@@ -1490,3 +1490,49 @@ listing functions are not -- the shape the blanket listing guard refused."
     (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
     (ok (member :core-schema-unsupported
                 (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest an-unreadable-contract-declaration-is-its-own-gap
+  ;; :DECLARES-CASES :UNKNOWN means %CONTRACT-FACTS could not validate the
+  ;; Function Spec record at all -- a different failure from the result's own
+  ;; schema being unsupported, which CORE-SCHEMA-UNSUPPORTED already covers.
+  (let ((results (list (list :status :passed :kind :contract
+                             :declares-cases :unknown
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             '(:availability :unavailable :schema-supported nil
+                               :field-availability nil :source nil)))))
+    (ok (member :contract-schema-unsupported
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest verified-p-fails-closed-on-each-new-conjunct-in-isolation
+  ;; Each new conjunct is exercised on its own: one field changes from a
+  ;; baseline that is otherwise perfectly passing (:PASSED, an evaluated
+  ;; trial, no never-called case, a readable schema on both sides), so a
+  ;; failure here can only be the conjunct meant to be tested and not some
+  ;; other gap this task also added.
+  (flet ((passing-contract-result (&rest overrides)
+           ;; OVERRIDES come first in the plist, so GETF finds them before
+           ;; the baseline fields they are meant to replace.
+           (append overrides
+                   (list :status :passed :kind :contract
+                         :declares-cases t
+                         :contract '(:effective-trials 2 :rejected-usable t)
+                         :trials '(:executed 2)
+                         :core-record
+                         '(:availability :collected :schema-supported t
+                           :field-availability (:case-report :collected)
+                           :source (:case-report (:never-called nil)))))))
+    (testing "the baseline itself verifies, so the isolation below means something"
+      (ok (cl-mcp/src/spec-adapter-report::%verified-p
+           (list (passing-contract-result)))))
+    (testing "case coverage unknown alone is enough to refuse verified"
+      (let ((results (list (passing-contract-result
+                            :core-record
+                            '(:availability :collected :schema-supported t
+                              :field-availability (:case-report :not-collected)
+                              :source nil)))))
+        (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))))
+    (testing "an unreadable contract declaration alone is enough to refuse verified"
+      (let ((results (list (passing-contract-result :declares-cases :unknown))))
+        (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))))))
