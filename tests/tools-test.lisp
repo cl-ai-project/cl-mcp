@@ -1076,11 +1076,13 @@
                (matches (gethash "matches" result)))
           (ok (string= (gethash "jsonrpc" obj) "2.0"))
           (ok (arrayp matches))
-          ;; With recursive=false, should only find files directly in src/, not in subdirs
+          ;; With recursive=false, should only find files directly in src/, not in subdirs.
+          ;; "file" is relative to the project root, so it really does start with
+          ;; "src/" and a hit one level down shows a second separator after it.
           (ok (every (lambda (m)
                        (let ((file (gethash "file" m)))
-                         ;; File should not contain additional path separators after src/
-                         (not (search "/" file :start2 (1+ (or (search "src/" file) 0))))))
+                         (and (uiop:string-prefix-p "src/" file)
+                              (not (find #\/ file :start (length "src/"))))))
                      (coerce matches 'list))
               "recursive=false should only search top-level directory"))))))
 

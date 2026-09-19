@@ -6,6 +6,7 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
                 #:native-path-namestring
+                #:normalize-path-for-display
                 #:resolve-readable-path)
   (:import-from #:cl-mcp/src/utils/hash
                 #:alist-to-hash-table)
@@ -24,13 +25,18 @@
 ;; which accepts registered ASDF system source directories as well as the
 ;; project root (clgrep-search is read-only, same policy as the read tools).
 
-(defun %normalize-result (result base-path)
-  "Normalize a single search result, making file paths relative to BASE-PATH."
+(defun %normalize-result (result)
+  "Replace RESULT's :FILE pathname with the path string a caller hands back.
+
+NORMALIZE-PATH-FOR-DISPLAY, not a path relative to the search root: the two
+differ whenever PATH is not the project root, and only the former can be
+passed straight to lisp-read-file.  A search rooted at src/ used to report
+src/http.lisp as \"http.lisp\", which names a file at the project root that
+does not exist; and a hit under demo[old]/ came back escaped for the pathname
+reader, which names nothing at all."
   (let ((file (cdr (assoc :file result))))
     (when file
-      (let ((relative (enough-namestring (pathname file)
-                                         (uiop:ensure-directory-pathname base-path))))
-        (setf (cdr (assoc :file result)) relative))))
+      (setf (cdr (assoc :file result)) (normalize-path-for-display file))))
   result)
 
 (defun %parse-form-types (form-types)
@@ -59,7 +65,10 @@ Arguments:
   INCLUDE-FORM     - If true, include full form text in results (default: NIL)
 
 Returns a list of alists, each containing:
-  :file            - File path (relative to the search root PATH)
+  :file            - File path, relative to the project root (not to PATH), or
+                     absolute when the file lives outside it, as every other
+                     tool reports a path. It can be passed straight to
+                     lisp-read-file
   :line            - Line number of the match
   :match           - The matching line text
   :package         - Package name active at that line
@@ -87,7 +96,7 @@ Returns a list of alists, each containing:
                "limit" limit
                "include-form" include-form
                "matches" (length results))
-    (mapcar (lambda (r) (%normalize-result r search-path)) results)))
+    (mapcar #'%normalize-result results)))
 
 (defun %format-clgrep-results (results)
   "Convert clgrep results (list of alists) to a vector of hash tables.
@@ -167,6 +176,10 @@ Use 'include_form: true' to get complete form text when needed.
 A file that does not parse (a form left open to the end of the file) is still
 searched: matches inside the unclosed form are listed one per line, attributed
 to that form, and a NOTE names the file and the line where it opens.
+
+Each match's 'file' is relative to the project root -- not to 'path' -- or
+absolute when the file lives outside it, so it can be passed straight to
+lisp-read-file however the search was rooted.
 
 Recommended workflow:
 1. clgrep-search to locate functions/usages across the project

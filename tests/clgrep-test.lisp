@@ -9,6 +9,8 @@
                 #:signals)
   (:import-from #:cl-mcp/src/fs
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/clgrep
                 #:clgrep-search))
 
@@ -281,7 +283,11 @@ return (VALUES text payload): the rendered summary and the result hash."
         (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text)
             "the line inside the unterminated form gets its own line in the text"))
       (testing "the note names the file and the line where the unclosed form opens"
-        (ok (search "NOTE: broken.lisp does not parse: a form opened at line 6" text))
+        ;; Project-relative, not bare: the note's own advice is to run
+        ;; lisp-check-parens on this file, so the name has to be one that tool
+        ;; accepts.  "broken.lisp" would send it to the project root.
+        (ok (search "NOTE: tests/tmp/clgrep-broken/broken.lisp does not parse" text))
+        (ok (search "a form opened at line 6" text))
         (ok (search "form type and signature are those of the unclosed form" text))
         (ok (search "lisp-check-parens" text)))
       (testing "the payload carries the same facts"
@@ -300,7 +306,7 @@ return (VALUES text payload): the rendered summary and the result hash."
                         "form_types" (vector "defmacro"))
         (ok (= 1 (gethash "count" payload)))
         (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
-        (ok (search "NOTE: broken.lisp does not parse" text))
+        (ok (search "NOTE: tests/tmp/clgrep-broken-types/broken.lisp does not parse" text))
         (ok (search "regardless of any form_types filter" text)
             "the note says the filter did not decide this match")
         (ok (search "form type and signature are those of the unclosed form" text))))
@@ -309,7 +315,7 @@ return (VALUES text payload): the rendered summary and the result hash."
           (%call-clgrep "defmacro tokenize" "path" "tests/tmp/clgrep-broken-types/")
         (ok (= 1 (gethash "count" payload)))
         (ok (search "broken.lisp:9 [defun] (matching-closer ch)" text))
-        (ok (search "NOTE: broken.lisp does not parse" text))))
+        (ok (search "NOTE: tests/tmp/clgrep-broken-types/broken.lisp does not parse" text))))
     (testing "a healthy file is still filtered out by form_types, with no note"
       (multiple-value-bind (text payload)
           (%call-clgrep "defun healthy-one" "path" "tests/tmp/clgrep-broken-types/"
@@ -340,3 +346,46 @@ return (VALUES text payload): the rendered summary and the result hash."
       (ok (= 1 (/ (length (cl-ppcre:all-matches "NOTE:" text)) 2))
           "exactly one note, for the one broken file")
       (ok (= 1 (length (gethash "notes" payload)))))))
+
+(deftest clgrep-search-file-field-can-be-handed-to-a-read-tool
+  (testing "a hit under a search root is named relative to the project root"
+    ;; The workflow this tool exists for is clgrep-search -> lisp-read-file, so
+    ;; its :file has to be what that tool takes.  Relative to the SEARCH ROOT it
+    ;; is not: searching src/ reported src/http.lisp as "http.lisp", which names
+    ;; a file at the project root that does not exist.
+    (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+      (let ((results (clgrep-search "defun" :path "src/" :recursive nil :limit 5)))
+        (ok (plusp (length results)) "the search must find something to judge")
+        (dolist (r results)
+          (let ((file (cdr (assoc :file r))))
+            (ok (uiop:string-prefix-p "src/" file)
+                (format nil "expected a project-relative path, got ~S" file))
+            (ok (probe-file (merge-pathnames file *project-root*))
+                (format nil "~S must name a file that exists" file)))))))
+  (testing "a hit under a bracketed directory is not escaped for the pathname reader"
+    ;; NAMESTRING wrote cg[br]/x.lisp as cg\[br]/x.lisp, so the path the tool
+    ;; displayed named nothing on disk and could not be read back.
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/cgsearch[br]/"
+                         (native-path-namestring *project-root*))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "x.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out "(defun cgsearch-probe () 42)~%"))
+             (let ((results (clgrep-search "cgsearch-probe" :path "tests/tmp/"
+                                           :recursive t :limit 5)))
+               (ok (plusp (length results)) "the bracketed file must be searched at all")
+               (let ((found (cdr (assoc :file (first results)))))
+                 (ok (search "cgsearch[br]" found)
+                     (format nil "the brackets must survive unescaped, got ~S" found))
+                 (ok (not (find #\\ found))
+                     (format nil "nothing may be escaped into it, got ~S" found))
+                 (ok (probe-file (merge-pathnames
+                                  (uiop:parse-native-namestring found) *project-root*))
+                     (format nil "~S must name the file on disk" found)))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))

@@ -15,7 +15,13 @@ a file the way `lisp-read-file` and `lisp-edit-form` expect to receive it, an `e
 name a path `fs-write-file` accepts. The same holds for the paths a tool echoes back rather than
 discovers: `fs-get-project-info`'s `project_root` and `cwd`, `fs-set-project-root`'s
 `project_root` and `previous_root`, and `project-scaffold`'s `absolute_path` are all directly
-re-usable as another call's argument.
+re-usable as another call's argument. `clgrep-search`'s `file` is relative to the project root
+rather than to the `path` the search was rooted at, for the same reason: a search under `src/`
+that reported `http.lisp` named a file at the project root that does not exist.
+
+The rule runs in both directions. A tool that takes a path parses it as a POSIX path, never with
+the Common Lisp pathname reader, so `fs-set-project-root` accepts the `project_root` that
+`fs-get-project-info` just printed even when it holds a `[`.
 
 Internally a path stays a pathname; the conversion happens only where a string crosses to the
 caller. Passing the string back into cl-mcp's own internals instead is the same mistake in

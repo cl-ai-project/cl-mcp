@@ -654,7 +654,12 @@ Returns a hash-table with updated path information:
   (when (string= (string-trim '(#\Space #\Tab) path) "")
     (error "path must not be empty"))
   (let* ((prev-root *project-root*)
-         (requested (uiop/pathname:ensure-directory-pathname path))
+         ;; PARSE-UNIX-NAMESTRING, not ENSURE-DIRECTORY-PATHNAME: the latter
+         ;; hands a string to the CL pathname reader, which reads [ and ] as
+         ;; wildcard syntax, so the very path this tool returns for a root
+         ;; named project[old]/ came back as a wild pathname it then refused.
+         ;; The wire protocol carries POSIX paths; parse them as such.
+         (requested (uiop:parse-unix-namestring path :ensure-directory t))
          (base (ignore-errors (uiop/os:getcwd)))
          (temp-root
           (if (uiop/pathname:absolute-pathname-p requested)

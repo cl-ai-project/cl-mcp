@@ -964,3 +964,34 @@ see the dotimes below.")
             (if bad
                 (format nil "round ~S: ~S" (first bad) (rest bad))
                 "every round left exactly one side's decision on disk, and the file agrees"))))))
+
+(deftest project-root-survives-a-round-trip-through-its-own-reported-path
+  (testing "the path fs-get-project-info reports is one fs-set-project-root takes"
+    ;; This is the most direct round trip cl-mcp offers, and it was broken for a
+    ;; root holding [ or ]: the tool returned a native path, while its input side
+    ;; still handed the string to the CL pathname reader, which read [br] as
+    ;; wildcard syntax and rejected the result as a wild pathname.
+    (let* ((original-root cl-mcp/src/project-root:*project-root*)
+           (original-cwd (ignore-errors (getcwd)))
+           (base (ensure-directory-pathname (system-source-directory "cl-mcp")))
+           ;; Built natively: MERGE-PATHNAMES on a string with brackets parses
+           ;; them as wild, which is the confusion under test.
+           (dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/fsroot[br]/" (native-namestring base))
+                 :ensure-directory t)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (ok (fs-set-project-root (native-namestring dir))
+                 "the bracketed root is accepted at all")
+             (let ((reported (gethash "project_root" (fs-get-project-info))))
+               (ok (search "fsroot[br]" reported)
+                   (format nil "the reported root keeps its brackets, got ~S" reported))
+               (ok (not (find #\\ reported))
+                   (format nil "and is not escaped for the reader, got ~S" reported))
+               (let ((again (fs-set-project-root reported)))
+                 (ok (string= (gethash "project_root" again) reported)
+                     "feeding the reported root back in lands on the same root"))))
+        (setf cl-mcp/src/project-root:*project-root* original-root)
+        (when original-cwd (ignore-errors (uiop:chdir original-cwd)))
+        (ignore-errors (uiop:delete-empty-directory dir))))))
