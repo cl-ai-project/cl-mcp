@@ -1869,6 +1869,21 @@ cl-spec that does not export the reader."
     (handler-case (funcall (api-fn api :check-budget) result)
       (error () nil))))
 
+(defun %core-fact (record key legacy)
+  "Return one fact by the precedence rule: the record first, then the reader.
+
+RECORD is the parsed core record's :DATA source plist, or NIL when this cl-spec
+has none.  LEGACY is a thunk calling the public reader.
+
+The rule is about which reader is CALLED, not about comparing two answers.
+When the record is there it is the only thing read, so the two can never
+disagree; when it is not, the reader is all there is.  That is also what makes
+the existing top-level fields safe as compatibility aliases -- they are built
+from this, not beside it."
+  (if record
+      (getf record key)
+      (funcall legacy)))
+
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
   "Return the per-property plist for a cl-spec RESULT.
@@ -1878,91 +1893,165 @@ property that generates no arguments and fails has a counterexample that is
 legitimately empty, and cl-spec reports it as NIL -- exactly what a run that
 never reached a verdict also reports.  Reading one as the other is how a
 consumer ends up believing a timeout produced a counterexample with no
-arguments, or that a failure was somehow argument-free."
-  (let* ((core-data (when (api-has-p api :result-data)
-                      (funcall (api-fn api :result-data) result)))
-         (core-schema (core-schema-data core-data))
-         (digest (if core-data
-                     (multiple-value-bind (value complete)
-                         (definition-digest api name nil :property core-data)
-                       (list :value value :complete complete :covers (getf digest :covers)))
-                     digest))
-         (status (funcall (api-fn api :result-status) result))
-         (counterexample (funcall (api-fn api :result-counterexample) result))
-         (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
-         (condition (funcall (api-fn api :result-condition) result))
-         (seed (funcall (api-fn api :result-seed) result))
-         (argument-count (getf facts :argument-count))
-         (zero-argument-property (eql 0 argument-count))
-         (executed (funcall (api-fn api :result-trials) result))
-         (verdict (member status '(:failed :error))))
-    (list :core-schema core-schema
-          :property (symbol-data name)
-          :kind kind
-          :contract (when (eq kind :contract)
-                      (%contract-plist api result executed max-value-chars
-                                       (getf facts :precondition-p)))
-          :status status
-          ;; The recorded budget wins over the derived one, and takes the
-          ;; derivation note off with it: the note says cl-spec does not
-          ;; expose the resolved budget, which is false of a contract result
-          ;; that carries it.
-          :trials (let ((recorded (and (eq kind :contract)
-                                       (%recorded-budget api result))))
-                    ;; Prepended, not substituted.  GETF finds the first
-                    ;; occurrence, so the recorded budget wins while the
-                    ;; derived plist keeps the keys it alone carries --
-                    ;; :BACKEND-DEFAULT among them, which a caller compares
-                    ;; against exactly when a trials= was in play.
-                    (append (list :executed executed)
-                            (when recorded
-                              (list :budget recorded
-                                    :budget-source "cl-spec result"
-                                    :budget-derivation nil))
-                            trials))
-          ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
-          ;; consumer holding it as a number would round it, which turns a
-          ;; reproducible failure into one that cannot be reproduced.
-          :seed (when seed (format nil "~D" seed))
-          ;; NIL for a contract, which has no profile.  CHECK-FUNCTION takes
-          ;; none; :NORMAL appears on the result only because RUN-PROPERTY
-          ;; defaults it on the synthetic property cl-spec builds underneath.
-          ;; Publishing that is the same mis-report profile= is refused for.
-          :profile (unless (eq kind :contract)
-                     (funcall (api-fn api :result-profile) result))
-          :counterexample (%named-values counterexample max-value-chars)
-          :counterexample-status
-          (cond ((not verdict) :not-applicable)
-                (counterexample :present)
-                (zero-argument-property :present)
-                ((null argument-count) :unknown)
-                (t :none))
-          :counterexample-unavailable-reason
-          (when (and verdict (null counterexample) (null argument-count))
-            "the property's argument list could not be read, so an empty
+arguments, or that a failure was somehow argument-free.
+
+Every fact besides the exception below follows one precedence rule, run
+through %CORE-FACT: read cl-spec's versioned RESULT-DATA record when this
+cl-spec has one, and fall back to the individual reader only when it does not.
+A RESULT-DATA that exists and then signals is reported as an adapter fault
+rather than silently replaced by the legacy readers, which would publish a
+healthy-looking response built while the versioned API was broken -- and the
+same is true of a record RESULT-DATA hands back that this adapter cannot
+read."
+  (let* ((raw (when (api-has-p api :result-data)
+                (handler-case (list :ok (funcall (api-fn api :result-data) result))
+                  (error (condition) (list :failed condition)))))
+         (core-status (first raw))
+         (core-data (when (eq :ok core-status) (second raw)))
+         (core-schema (core-schema-data core-data)))
+    ;; A versioned reader that exists and then breaks is a fault to report.
+    ;; Falling back here would publish a healthy-looking response built from
+    ;; the older readers while the new API was broken -- which is the failure
+    ;; this adapter's status vocabulary exists to keep visible.
+    (when (eq :failed core-status)
+      (return-from %result-plist
+        (list :property (symbol-data name) :kind kind :status :internal-error
+              :trials trials :counterexample-status :unavailable
+              :shrink-status :unavailable
+              :message (format nil "cl-spec's result-data signalled while this ~
+adapter read the result: ~A. The legacy readers are not used in its place, ~
+because that would hide a broken versioned API behind a response that looked ~
+complete." (princ-to-string (second raw))))))
+    (multiple-value-bind (core-record core-record-status core-record-reason)
+        (if core-data
+            (project-core-record core-data :result-data
+                                 :expected-record-kind :result)
+            (values (list :availability :unavailable :schema-supported nil
+                          :schema-version nil :field-availability nil
+                          :unknown-keys nil
+                          :projection (list :complete t :issues nil)
+                          :data nil)
+                    :unavailable nil))
+      (when (eq :malformed core-record-status)
+        (return-from %result-plist
+          (list :property (symbol-data name) :kind kind :status :internal-error
+                :trials trials :counterexample-status :unavailable
+                :shrink-status :unavailable
+                :message (format nil "cl-spec's result-data returned a record ~
+this adapter cannot read: ~A." core-record-reason))))
+      (let* ((source (when (eq :ok core-record-status) core-data))
+             (status (%core-fact source :status
+                                 (lambda () (funcall (api-fn api :result-status)
+                                                     result))))
+             (executed (%core-fact source :trials
+                                   (lambda () (funcall (api-fn api :result-trials)
+                                                       result))))
+             (seed (%core-fact source :seed
+                               (lambda () (funcall (api-fn api :result-seed)
+                                                   result))))
+             (counterexample
+               (%core-fact source :counterexample
+                           (lambda ()
+                             (funcall (api-fn api :result-counterexample) result))))
+             (shrunk (%core-fact source :shrunk-counterexample
+                                 (lambda ()
+                                   (funcall (api-fn api :result-shrunk-counterexample)
+                                            result))))
+             (elapsed (%core-fact source :elapsed
+                                  (lambda () (funcall (api-fn api :result-elapsed)
+                                                      result))))
+             ;; Kept as a reader on purpose.  result-data carries
+             ;; :CONDITION-REPORT, which is text, and no :CONDITION key at all,
+             ;; so this is the only route to the object inspect-object drills
+             ;; into.  It adds what the record does not carry and reclassifies
+             ;; nothing the record does.
+             (condition (funcall (api-fn api :result-condition) result))
+             (digest (if core-data
+                         (multiple-value-bind (value complete)
+                             (definition-digest api name nil :property core-data)
+                           (list :value value :complete complete
+                                 :covers (getf digest :covers)))
+                         digest))
+             (argument-count (getf facts :argument-count))
+             (zero-argument-property (eql 0 argument-count))
+             (verdict (member status '(:failed :error))))
+        (list :core-schema core-schema
+              :core-record core-record
+              :property (symbol-data name)
+              :kind kind
+              :contract (when (eq kind :contract)
+                          (%contract-plist api result executed max-value-chars
+                                           (getf facts :precondition-p)))
+              :status status
+              ;; The recorded budget wins over the derived one, and takes the
+              ;; derivation note off with it: the note says cl-spec does not
+              ;; expose the resolved budget, which is false of a contract
+              ;; result that carries it.
+              :trials (let ((recorded
+                              (and (eq kind :contract)
+                                   (%core-fact source :budget
+                                               (lambda ()
+                                                 (%recorded-budget api result))))))
+                        ;; Prepended, not substituted.  GETF finds the first
+                        ;; occurrence, so the recorded budget wins while the
+                        ;; derived plist keeps the keys it alone carries --
+                        ;; :BACKEND-DEFAULT among them, which a caller
+                        ;; compares against exactly when a trials= was in
+                        ;; play.
+                        (append (list :executed executed)
+                                (when recorded
+                                  (list :budget recorded
+                                        :budget-source "cl-spec result"
+                                        :budget-derivation nil))
+                                trials))
+              ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
+              ;; consumer holding it as a number would round it, which turns a
+              ;; reproducible failure into one that cannot be reproduced.
+              :seed (when seed (format nil "~D" seed))
+              ;; NIL for a contract, which has no profile.  CHECK-FUNCTION
+              ;; takes none; :NORMAL appears on the result only because
+              ;; RUN-PROPERTY defaults it on the synthetic property cl-spec
+              ;; builds underneath.  Publishing that is the same mis-report
+              ;; profile= is refused for.
+              :profile (unless (eq kind :contract)
+                         (%core-fact source :profile
+                                     (lambda ()
+                                       (funcall (api-fn api :result-profile)
+                                               result))))
+              :counterexample (%named-values counterexample max-value-chars)
+              :counterexample-status
+              (cond ((not verdict) :not-applicable)
+                    (counterexample :present)
+                    (zero-argument-property :present)
+                    ((null argument-count) :unknown)
+                    (t :none))
+              :counterexample-unavailable-reason
+              (when (and verdict (null counterexample) (null argument-count))
+                "the property's argument list could not be read, so an empty
 counterexample cannot be told from a missing one")
-          :shrunk-counterexample (%named-values shrunk max-value-chars)
-          :shrink-status
-          (cond ((not verdict) :not-applicable)
-                ((not (getf facts :shrink-enabled)) :disabled)
-                (shrunk :present)
-                (zero-argument-property :present)
-                (t :none))
-          :shrink-note (when (and verdict (getf facts :shrink-enabled))
-                         +shrink-note+)
-          :condition (when condition (%condition-data condition))
-          :elapsed (funcall (api-fn api :result-elapsed) result)
-          :definition-digest (getf digest :value)
-          :definition-digest-complete (getf digest :complete)
-          ;; What the digest is a digest OF.  It covers the definition
-          ;; cl-spec holds and the specs reachable from it -- which for a
-          ;; property is the thing that ran, and for a contract is not: the
-          ;; code under test is the function, and nothing here reads a
-          ;; function body.  Editing TRANSFER and replaying its contract from
-          ;; the same seed is faithful by this digest and is not a
-          ;; reproduction, so the field has to say which it measured.
-          :definition-digest-covers (getf digest :covers)
-          :definition-match (%definition-match digest expected-digest))))
+              :shrunk-counterexample (%named-values shrunk max-value-chars)
+              :shrink-status
+              (cond ((not verdict) :not-applicable)
+                    ((not (getf facts :shrink-enabled)) :disabled)
+                    (shrunk :present)
+                    (zero-argument-property :present)
+                    (t :none))
+              :shrink-note (when (and verdict (getf facts :shrink-enabled))
+                             +shrink-note+)
+              :condition (when condition (%condition-data condition))
+              :elapsed elapsed
+              :definition-digest (getf digest :value)
+              :definition-digest-complete (getf digest :complete)
+              ;; What the digest is a digest OF.  It covers the definition
+              ;; cl-spec holds and the specs reachable from it -- which for a
+              ;; property is the thing that ran, and for a contract is not:
+              ;; the code under test is the function, and nothing here reads
+              ;; a function body.  Editing TRANSFER and replaying its
+              ;; contract from the same seed is faithful by this digest and
+              ;; is not a reproduction, so the field has to say which it
+              ;; measured.
+              :definition-digest-covers (getf digest :covers)
+              :definition-match (%definition-match digest expected-digest))))))
 
 (defun %definition-match (digest expected)
   "Return how DIGEST compares to EXPECTED: one of four answers, not two.

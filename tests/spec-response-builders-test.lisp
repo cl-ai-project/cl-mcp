@@ -12,6 +12,8 @@
                 #:deftest #:testing #:ok)
   (:import-from #:yason
                 #:false)
+  (:import-from #:cl-mcp/src/spec-core-record
+                #:project-core-record)
   (:import-from #:cl-mcp/src/tools/spec-response-builders
                 #:build-spec-list-response
                 #:build-spec-symbol-response
@@ -1066,3 +1068,51 @@ the result says which."
       (ok (search "BALANCE-BEFORE" text))
       (ok (search "state-post:" text))
       (ok (search "&key" text)))))
+
+(deftest check-response-marks-an-opaque-captured-value-without-an-object-id
+  ;; Deferred from Task 6's %OPAQUE-MARKER-NODE work: that test needed
+  ;; CORE_RESULT to exist to assert on, which is what Task 7 wires up.
+  ;; cl-spec's own could-not-freeze-this marker for a :capture value must
+  ;; render as plain text, with no object id handed out for the marker cons
+  ;; cell itself.
+  (let* ((record '(:schema-version 1 :record-kind :result :entity-kind :property
+                   :definition-digest "abc" :definition-digest-complete t
+                   :definition-digest-covers :declaration-and-registered-dependencies
+                   :capabilities (:generation :available :shrinking :none
+                                  :instrumentation :unavailable)
+                   :name widen :status :failed :trials 3 :budget 3 :rejected 0
+                   :seed 7 :profile :normal :options nil :counterexample nil
+                   :shrunk-counterexample nil :shrunk-outcome nil
+                   :shrink-report :not-collected :generation-report :not-collected
+                   :failure-phase :target :failure-reason :state-post
+                   :case-report :not-collected
+                   :failure (:state
+                             (:capture
+                              (:values ((balance . (:unavailable
+                                                     :reason :opaque-value
+                                                     :type :hash-table))))))
+                   :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result))
+         (report (list :status :completed
+                       :selection (list :mode "explicit" :count 1
+                                        :selected (list (%symbol-data "PROBE" "WIDEN"))
+                                        :source "explicit property argument"
+                                        :coverage "Only the property named.")
+                       :results
+                       (list (list :property (%symbol-data "PROBE" "WIDEN")
+                                   :status :failed
+                                   :core-record core-record))
+                       :counts (list :selected 1 :passed 0 :failed 1
+                                     :errored 0 :timed-out 0 :not-run 0)
+                       :environment *environment*))
+         (response (build-spec-check-response report))
+         (result (aref (gethash "results" response) 0))
+         (data (gethash "data" (gethash "core_result" result)))
+         (values-array (gethash "values"
+                                (gethash "capture" (gethash "state"
+                                                            (gethash "failure" data)))))
+         (value (gethash "value" (aref values-array 0))))
+    (ok (equal "opaque-value" (gethash "reason" value)))
+    (ok (equal "hash-table" (gethash "type" value)))
+    (ok (null (nth-value 1 (gethash "object_id" value))))))

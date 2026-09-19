@@ -26,7 +26,10 @@
 
 (deftest result-digest-uses-captured-core-metadata
   (let* ((data '(:schema-version 1 :record-kind :result :entity-kind :property
-                 :definition-digest "captured" :definition-digest-complete t))
+                 :definition-digest "captured" :definition-digest-complete t
+                 :definition-digest-covers :declaration-and-registered-dependencies
+                 :capabilities (:generation :available :shrinking :none
+                                :instrumentation :unavailable)))
          (api (make-cl-spec-api
                :functions
                (list :result-data (constantly data)
@@ -164,6 +167,126 @@ GETF readers is a complete substitute and no cl-spec class is needed."
           :package (package-name (symbol-package symbol))
           :spec nil :function-spec nil :property nil
           :properties-about (list (%sym "ADD-COMMUTES") (%sym "ADD-COMMUTES")))))
+
+(defparameter *passing-result*
+  '(:schema-version 1 :record-kind :result :entity-kind :function-spec
+    :definition-digest "abc" :definition-digest-complete t
+    :definition-digest-covers :declaration-and-registered-dependencies
+    :capabilities (:generation :available :shrinking :none
+                   :instrumentation :unavailable)
+    :name add :status :passed :trials 2
+    :budget 2 :rejected 0 :seed 4611686018427387903 :profile :normal
+    :options nil :counterexample nil :shrunk-counterexample nil
+    :shrunk-outcome nil
+    :shrink-report (:candidates 4 :budget 8 :termination :completed)
+    :generation-report (:scope :request :termination :completed
+                        :attempts 2 :rejections 0)
+    :failure-phase nil :failure-reason nil
+    :case-report (:selection :exclusive :unit :normal-trials
+                  :declared-cases (:sufficient-funds :insufficient-funds)
+                  :cases ((:name :sufficient-funds :documentation nil
+                           :called 2 :passed 2 :failed 0 :error 0)
+                          (:name :insufficient-funds :documentation nil
+                           :called 0 :passed 0 :failed 0 :error 0))
+                  :case-selection-errors 0 :capture-errors 0
+                  :never-called (:insufficient-funds))
+    :provenance (:backend :check-it :lisp-implementation-type "SBCL"
+                :lisp-implementation-version "2.4.0"
+                :cl-spec-version "0.1.0" :target-revision nil
+                :collection-states nil)
+    :failure nil :shrunk-failure nil :elapsed 0.005)
+  "A measured v1 result carrying every field %RESULT-PLIST used to drop.
+
+Its :SHRINK-REPORT is a collected form, not :NOT-COLLECTED -- :CANDIDATES /
+:BUDGET / :TERMINATION -- which spec-core-record-test.lisp's own passing
+fixture never exercised.")
+
+(deftest result-record-crosses-the-boundary-whole
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :passed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (record (getf report :core-record))
+         (data (getf record :data)))
+    (ok (eq :collected (getf record :availability)))
+    (testing "the twelve fields that never crossed now do"
+      (dolist (key '("budget" "rejected" "options" "provenance" "shrunk_outcome"
+                     "shrink_report" "generation_report" "failure_phase"
+                     "failure_reason" "case_report" "failure" "shrunk_failure"))
+        (ok (assoc key (second data) :test #'equal))))
+    (testing "the aliases agree with the record because they come from it"
+      (ok (eq :passed (getf report :status)))
+      ;; A seed is text on both sides; a JSON consumer would round the number.
+      (ok (equal "4611686018427387903" (getf report :seed))))))
+
+(deftest an-old-cl-spec-still-answers-through-the-legacy-readers
+  ;; Section 12 case 6.  No RESULT-DATA handle at all.
+  (let* ((api (%stub-api :result-status (constantly :failed)
+                         :result-trials (constantly 30)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly '(a 1))
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.1)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 30)
+                  '(:value nil :complete nil :covers :property) nil 2000
+                  '(:argument-count 1 :shrink-enabled t :known t)))
+         (record (getf report :core-record)))
+    (ok (eq :failed (getf report :status)))
+    (ok (eq :unavailable (getf record :availability)))
+    (ok (null (getf record :data)))
+    ;; Not reported as measured zeros for counters nothing kept.
+    (ok (null (getf record :field-availability)))))
+
+(deftest a-result-data-that-signals-is-an-adapter-fault
+  ;; Section 12 case 21.  The name resolved and the call broke: falling back
+  ;; to the legacy readers would hide a signature mismatch behind a healthy
+  ;; response.
+  (let* ((api (%stub-api :result-data (lambda (result)
+                                        (declare (ignore result))
+                                        (error "boom"))
+                         :result-status (constantly :passed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 2)
+                  '(:value nil :complete nil :covers :property) nil 2000 nil)))
+    (ok (eq :internal-error (getf report :status)))
+    (ok (search "result-data" (string-downcase (getf report :message))))))
+
+(deftest a-live-condition-keeps-its-object-id
+  ;; Section 12 case 10.  RESULT-DATA has no :condition key -- measured -- so
+  ;; this is the auxiliary reader the core rule allows.
+  (let* ((condition (make-condition 'simple-error
+                                    :format-control "gone" :format-arguments nil))
+         (api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :error)
+                         :result-trials (constantly 1)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly condition)
+                         :result-elapsed (constantly 0)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 1)
+                  '(:value nil :complete nil :covers :property) nil 2000 nil)))
+    (ok (integerp (getf (getf report :condition) :object-id)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Environment and availability

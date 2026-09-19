@@ -797,6 +797,7 @@ not be read."
            "timeout_seconds" (getf result :timeout-seconds)
            "thread_leaked" (json-bool (getf result :thread-leaked))
            "core_schema" (%core-schema-ht (getf result :core-schema))
+           "core_result" (%core-record-ht (getf result :core-record))
            "definition_digest" (getf result :definition-digest)
            "definition_digest_covers" (%keyword-string
                                        (getf result :definition-digest-covers))
