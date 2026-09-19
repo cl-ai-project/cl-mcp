@@ -50,6 +50,27 @@ publishes a number.")
   (and (integerp value)
        (<= (- +max-safe-json-integer+) value +max-safe-json-integer+)))
 
+(defun %opaque-marker-node (value)
+  "Return cl-spec's unfreezable-value marker as a node, or NIL when VALUE is not one.
+
+cl-spec publishes (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>) in place of a
+captured value it could not freeze as evidence.  Externalizing that list registers
+an object id for the marker itself, so the response would offer an inspection of
+the very object cl-spec had just declined to keep -- and would report its type as
+CONS, the marker's own type, rather than the type cl-spec named.
+
+Called from both PROJECT-VALUE's own fall-through and PROJECT-RECORD's WALK for
+an :OPAQUE field: the marker can appear anywhere a captured value can, and
+:OPAQUE is exactly WALK's route for a value cl-spec did not describe -- the two
+hooks share this one recognizer so they cannot drift apart."
+  (when (and (consp value)
+             (eq :unavailable (first value))
+             (eq :opaque-value (getf (rest value) :reason)))
+    (list :object
+          (list (cons "unavailable" (list :scalar t))
+                (cons "reason" (list :scalar "opaque-value"))
+                (cons "type" (project-value (getf (rest value) :type)))))))
+
 (defun project-value (value &key (max-chars 2000))
   "Return VALUE as a tagged projection node, decided by its type.
 
@@ -71,28 +92,19 @@ a CLOS instance, a structure, a hash table, a function, a value from the code
 under test -- goes through EXTERNALIZE-VALUE, which prints it bounded and
 offers an object id instead of pretending the text is the object.
 
-One shape of cons is the exception: cl-spec's own (:UNAVAILABLE :REASON
-:OPAQUE-VALUE :TYPE type) marker, its statement that a value could not be
-frozen as evidence, is kept as that statement rather than handed to
-EXTERNALIZE-VALUE, which would register an object id for the marker list
-itself instead of for the value cl-spec declined to keep."
+One shape of cons is the exception: %OPAQUE-MARKER-NODE recognizes cl-spec's
+own (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE type) marker, its statement that
+a value could not be frozen as evidence, and this keeps that statement rather
+than handing it to EXTERNALIZE-VALUE, which would register an object id for
+the marker list itself instead of for the value cl-spec declined to keep."
   (cond ((keywordp value) (list :scalar (string-downcase (symbol-name value))))
         ((null value) (list :scalar nil))
         ((symbolp value) (list :symbol (symbol-data value)))
         ((stringp value) (list :scalar value))
         ((safe-json-integer-p value) (list :scalar value))
         ((integerp value) (list :scalar (format nil "~D" value)))
-        ;; cl-spec's own statement that a value could not be frozen as
-        ;; evidence.  Passed through as it is: externalizing it would register
-        ;; an object id for the marker and publish an inspection cl-spec had
-        ;; just declined to support.
-        ((and (consp value) (eq :unavailable (first value))
-              (eq :opaque-value (getf (rest value) :reason)))
-         (list :object
-               (list (cons "unavailable" (list :scalar t))
-                     (cons "reason" (list :scalar "opaque-value"))
-                     (cons "type" (project-value (getf (rest value) :type))))))
-        (t (list :value (externalize-value value :max-chars max-chars)))))
+        (t (or (%opaque-marker-node value)
+               (list :value (externalize-value value :max-chars max-chars))))))
 
 (defparameter *projection-max-depth* 12
   "How deep a record projection descends before it externalizes the rest.
@@ -193,7 +205,17 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                ((eq :leaf descriptor)
                 (project-value value :max-chars max-chars))
                ((eq :opaque descriptor)
-                (list :value (externalize-value value :max-chars max-chars)))
+                ;; Marker-first: :OPAQUE is WALK's route for a value from the
+                ;; code under test, exactly where cl-spec's own
+                ;; could-not-freeze-this marker appears, and this branch used
+                ;; to hand it straight to EXTERNALIZE-VALUE -- which reached
+                ;; every :OPAQUE field in *RECORD-SHAPES* (capture and
+                ;; counterexample values, an error datum's :ACTUAL/:KEY, an
+                ;; observation's :ARGUMENTS/:VALUE, and more), each one a
+                ;; place an object id could be registered for the marker
+                ;; itself instead of the value cl-spec declined to keep.
+                (or (%opaque-marker-node value)
+                    (list :value (externalize-value value :max-chars max-chars))))
                ;; >= rather than >: DEPTH counts containers already opened on
                ;; the way here, so the container that would be the (n+1)th is
                ;; the one cut, not one further past it.

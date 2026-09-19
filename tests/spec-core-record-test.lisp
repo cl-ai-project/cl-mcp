@@ -136,6 +136,50 @@ list itself rather than to the value cl-spec said it could not freeze"
                (getf (second (cdr (assoc "name" fields :test #'equal))) :name)))
     (ok (eq :value (first (cdr (assoc "value" fields :test #'equal)))))))
 
+(deftest an-opaque-value-marker-survives-the-walk-path-not-only-project-value
+  ;; The bug this closes: WALK's :OPAQUE branch used to hand a captured value
+  ;; straight to EXTERNALIZE-VALUE, bypassing PROJECT-VALUE's own marker case
+  ;; entirely -- so a capture value cl-spec could not freeze still got an
+  ;; object id, and its type read "cons" (the marker list's own type) rather
+  ;; than the type cl-spec named.  A test that only calls PROJECT-VALUE
+  ;; directly cannot see this: it never goes through WALK/:OPAQUE at all.
+  (let* ((node (project-record
+                (list :status :ok :declared '(:balance-before)
+                      :values (list (cons :balance-before
+                                          (list :unavailable :reason :opaque-value
+                                                :type :hash-table))))
+                '(:ref :capture-evidence)))
+         (values-node (cdr (assoc "values" (second node) :test #'equal)))
+         (entry (first (second values-node)))
+         (value (cdr (assoc "value" (second entry) :test #'equal))))
+    (testing "the marker is kept as an object, not externalized"
+      (ok (eq :object (first value)))
+      (let ((fields (second value)))
+        (ok (equal '(:scalar t)
+                   (cdr (assoc "unavailable" fields :test #'equal))))
+        (ok (equal '(:scalar "opaque-value")
+                   (cdr (assoc "reason" fields :test #'equal))))
+        (ok (equal '(:scalar "hash-table")
+                   (cdr (assoc "type" fields :test #'equal))))))
+    (testing "no field of the marker is an externalized-value node"
+      ;; Only a (:VALUE plist) node ever carries :OBJECT-ID.  Every field
+      ;; here is a plain :SCALAR, so none of them could hold one.
+      (dolist (pair (second value))
+        (ok (not (eq :value (first (cdr pair)))))))))
+
+(deftest a-second-opaque-field-keeps-the-marker-too
+  ;; Generality check: :COUNTEREXAMPLE is another (:ALIST :OPAQUE) field, a
+  ;; sibling to capture values rather than a special case wired in on its own.
+  (let* ((node (project-record
+                (list (cons 'cl-user::a (list :unavailable :reason :opaque-value
+                                              :type :hash-table)))
+                '(:ref :counterexample)))
+         (entry (first (second node)))
+         (value (cdr (assoc "value" (second entry) :test #'equal))))
+    (ok (eq :object (first value)))
+    (ok (equal '(:scalar "hash-table")
+               (cdr (assoc "type" (second value) :test #'equal))))))
+
 (deftest a-length-cut-is-reported-not-hidden
   (let ((*projection-max-length* 2))
     (multiple-value-bind (node issues)
