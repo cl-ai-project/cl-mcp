@@ -990,7 +990,8 @@ with no arguments and no :returns." reason)))))
                   :core-record (project-core-record
                                 data :function-spec-data
                                 :expected-record-kind :definition
-                                :expected-entity-kind :function-spec)
+                                :expected-entity-kind :function-spec
+                                :max-chars max-chars)
                   :status :ok
                   :kind "function-spec"
                   :name (symbol-data name)
@@ -1994,7 +1995,8 @@ complete." (princ-to-string (second raw))))))
     (multiple-value-bind (core-record core-record-status core-record-reason)
         (if core-data
             (project-core-record core-data :result-data
-                                 :expected-record-kind :result)
+                                 :expected-record-kind :result
+                                 :max-chars max-value-chars)
             (values (list :availability :unavailable :schema-supported nil
                           :schema-version nil :field-availability nil
                           :unknown-keys nil

@@ -16,7 +16,8 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/spec-adapter-core
-                #:externalize-value)
+                #:externalize-value
+                #:print-form-bounded)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
                 #:listing-kind-wanted-p)
@@ -589,10 +590,24 @@ externalized-value plist by looking for one of their keys."
                  table)))))
 
 (defun %projection-issue-ht (issue)
-  "Render one projection loss: where it happened, why, and how much was dropped."
-  (make-ht "path" (coerce (mapcar #'princ-to-string (getf issue :path)) 'vector)
-           "reason" (%keyword-string (getf issue :reason))
-           "omitted_items" (getf issue :omitted-items)))
+  "Render one projection loss: where it happened, why, and how much was dropped.
+
+OMITTED_ITEMS_EXACT travels with OMITTED_ITEMS and only with it.  The record
+layer reports OMITTED-ITEMS as a lower bound when it refused to walk a value
+long enough to count the excess exactly (see %TAIL-UNIT-COUNT), and dropping
+that flag published 201 for a 500-element list as though it were the count.
+It is JSON false there, never null: false is a measurement and absence is not.
+An issue with no omitted count -- a depth cut -- carries neither key rather
+than an exactness flag about a count that does not exist."
+  (let ((table (make-ht "path" (coerce (mapcar #'princ-to-string
+                                              (getf issue :path))
+                                       'vector)
+                        "reason" (%keyword-string (getf issue :reason)))))
+    (when (get-properties issue '(:omitted-items))
+      (setf (gethash "omitted_items" table) (getf issue :omitted-items)
+            (gethash "omitted_items_exact" table)
+            (json-bool (getf issue :omitted-items-exact-p))))
+    table))
 
 (defun %core-record-ht (report)
   "Render a versioned cl-spec record and what cl-mcp knows about carrying it.
@@ -885,6 +900,64 @@ reads as the whole value."
 core_result.data)"
                 (getf data :printed) (getf data :omitted-chars)))))
 
+(defparameter +evidence-form-chars+ 200
+  "How much of one evidence source form a summary line carries.
+
+The state-post line names the form that did not hold; 200 characters is
+enough to recognise it, and the whole bounded form is in
+core_result.data beside the line.")
+
+(defun %bounded-form-text (form)
+  "Return FORM printed for one evidence line, bounded and marked when cut.
+
+A state-post :FORM is a source form from the contract under test, and this
+block is built by a bare WITH-OUTPUT-TO-STRING with no printer bindings of its
+own -- a raw PRINC-TO-STRING on it ignores every output bound, and a circular
+or shared form does not return at all.  PRINT-FORM-BOUNDED is the printer the
+describe path already uses for exactly this kind of form: it caps depth,
+length and characters, terminates on circular structure, and never reads or
+evaluates the form.  A cut says so rather than handing back a prefix that
+reads as the whole form."
+  (multiple-value-bind (text complete omitted)
+      (print-form-bounded form +evidence-form-chars+)
+    (if complete
+        text
+        (format nil "~A... (~D more character~:P; the whole form is in ~
+core_result.data)"
+                text omitted))))
+
+(defun %diagnostic-type-text (type)
+  "Return cl-spec's diagnostic :TYPE rendered for one evidence line.
+
+cl-spec v1's DIAGNOSTIC-TYPE-DATA answers ordinary data: a named type symbol,
+(:KIND :ANONYMOUS-CLASS :METACLASS NAME) for a class with no name, or the
+:UNKNOWN fallback.  Never a live class object, so nothing here needs a printer
+bound -- only the three cases the record can carry."
+  (cond
+    ((and (consp type) (eq :kind (first type)))
+     (format nil "anonymous class (metaclass ~A)"
+             (getf type :metaclass)))
+    ((eq :unknown type) "unknown")
+    ((null type) "unknown")
+    (t (princ-to-string type))))
+
+(defun %capture-value-text (record)
+  "Return one line for one cl-spec v1 capture-value RECORD.
+
+The record is a tagged availability union, and :AVAILABILITY -- not the shape
+of anything -- decides how it reads.  A :COLLECTED record's :VALUE is
+application data and goes through %EVIDENCE-VALUE; an :UNAVAILABLE record
+carries :REASON and :TYPE instead, so there is no application value to print
+and the line says so.  A value shaped like cl-spec's own old marker is
+:COLLECTED application data here like any other."
+  (let ((name (getf record :name)))
+    (if (eq :collected (getf record :availability))
+        (format nil "~A = ~A" name (%evidence-value (getf record :value)))
+        (format nil "~A = UNAVAILABLE -- ~A (type ~A)"
+                name
+                (or (%keyword-string (getf record :reason)) "unknown")
+                (%diagnostic-type-text (getf record :type))))))
+
 (defparameter +shrink-terminations+
   (list (cons :state-restoration-unavailable
               (concatenate 'string
@@ -1023,16 +1096,13 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
         (let ((capture (getf state :capture)))
           (when (getf capture :values)
             (format stream "~&    captured: ~{~A~^, ~}"
-                    (mapcar (lambda (entry)
-                              (format nil "~A = ~A" (car entry)
-                                      (%evidence-value (cdr entry))))
-                            (getf capture :values)))))
+                    (mapcar #'%capture-value-text (getf capture :values)))))
         (let ((post (getf state :state-post)))
           (when (member (getf post :status) '(:violation :error))
             (format stream "~&    state-post: ~(~A~) at form ~A~@[ -- ~A~]"
                     (getf post :status) (getf post :index)
                     (when (getf post :form)
-                      (princ-to-string (getf post :form)))))))
+                      (%bounded-form-text (getf post :form)))))))
       (let ((generation (getf source :generation-report)))
         (when (and generation (not (eq :not-collected generation))
                    (not (eq :completed (getf generation :termination))))

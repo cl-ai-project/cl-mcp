@@ -50,27 +50,6 @@ publishes a number.")
   (and (integerp value)
        (<= (- +max-safe-json-integer+) value +max-safe-json-integer+)))
 
-(defun %opaque-marker-node (value)
-  "Return cl-spec's unfreezable-value marker as a node, or NIL when VALUE is not one.
-
-cl-spec publishes (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>) in place of a
-captured value it could not freeze as evidence.  Externalizing that list registers
-an object id for the marker itself, so the response would offer an inspection of
-the very object cl-spec had just declined to keep -- and would report its type as
-CONS, the marker's own type, rather than the type cl-spec named.
-
-Called from both PROJECT-VALUE's own fall-through and PROJECT-RECORD's WALK for
-an :OPAQUE field: the marker can appear anywhere a captured value can, and
-:OPAQUE is exactly WALK's route for a value cl-spec did not describe -- the two
-hooks share this one recognizer so they cannot drift apart."
-  (when (and (consp value)
-             (eq :unavailable (first value))
-             (eq :opaque-value (getf (rest value) :reason)))
-    (list :object
-          (list (cons "unavailable" (list :scalar t))
-                (cons "reason" (list :scalar "opaque-value"))
-                (cons "type" (project-value (getf (rest value) :type)))))))
-
 (defun project-value (value &key (max-chars 2000))
   "Return VALUE as a tagged projection node, decided by its type.
 
@@ -92,19 +71,20 @@ a CLOS instance, a structure, a hash table, a function, a value from the code
 under test -- goes through EXTERNALIZE-VALUE, which prints it bounded and
 offers an object id instead of pretending the text is the object.
 
-One shape of cons is the exception: %OPAQUE-MARKER-NODE recognizes cl-spec's
-own (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE type) marker, its statement that
-a value could not be frozen as evidence, and this keeps that statement rather
-than handing it to EXTERNALIZE-VALUE, which would register an object id for
-the marker list itself instead of for the value cl-spec declined to keep."
+No value's shape is inspected here, and none may be.  cl-spec v1 states a
+capture's availability in the record around the value, never in the value: a
+legal application value that happens to look like cl-spec's own metadata --
+including the pre-release (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...) plist
+-- is application data and is externalized like any other.  A caller that
+knows a field holds cl-spec metadata projects it under a descriptor; this
+function never guesses."
   (cond ((keywordp value) (list :scalar (string-downcase (symbol-name value))))
         ((null value) (list :scalar nil))
         ((symbolp value) (list :symbol (symbol-data value)))
         ((stringp value) (list :scalar value))
         ((safe-json-integer-p value) (list :scalar value))
         ((integerp value) (list :scalar (format nil "~D" value)))
-        (t (or (%opaque-marker-node value)
-               (list :value (externalize-value value :max-chars max-chars))))))
+        (t (list :value (externalize-value value :max-chars max-chars)))))
 
 (defparameter *projection-max-depth* 12
   "How deep a record projection descends before it externalizes the rest.
@@ -201,19 +181,18 @@ WALK-OBJECT names it in neither NODE nor UNKNOWN-KEYS -- a declared omission,
 not an unrecognized one.
 
 A container descriptor is chosen by what cl-spec's own accessor is documented
-to build, never guessed from the cons cells in front of it.  Two of them
-produce the same {name, value} JSON from different Lisp shapes, which is
-exactly the trap that rule exists to prevent: (:ALIST D) reads
-((NAME . VALUE) ...) -- dotted pairs, CAR and CDR apart -- the shape
-CAPTURE-EVIDENCE's :VALUES is measured as, e.g. ((BALANCE-BEFORE . 30)).
-(:PAIRS D) reads a flat (NAME VALUE NAME VALUE ...) plist two at a time --
-cl-spec's own NAME-ARGUMENTS shape -- the shape a counterexample is measured
-as, e.g. (BALANCE 5 AMOUNT 5).  Pointing a plist field at (:ALIST D) calls CAR
-and CDR on a bare argument-value symbol and signals a TYPE-ERROR; pointing an
-alist field at (:PAIRS D) reads a dotted pair's CDR as the next NAME.  Neither
-mistake is caught by a record that happens to carry NIL there, which is why
-this pairing is named here rather than left to be rediscovered from a
+to build, never guessed from the cons cells in front of it.  (:PAIRS D) reads
+a flat (NAME VALUE NAME VALUE ...) plist two at a time -- cl-spec's own
+NAME-ARGUMENTS shape -- the shape a counterexample is measured as, e.g.
+(BALANCE 5 AMOUNT 5).  Pointing a plist field at a dotted-pair reader, or the
+reverse, is not caught by a record that happens to carry NIL there, which is
+why the pairing is named here rather than left to be rediscovered from a
 production failure.
+
+cl-spec v1's capture evidence is neither: each binding is a tagged record with
+its own descriptor (:REF :CAPTURE-VALUE-RECORD), because :VALUE and
+:AVAILABILITY mean different things there and only a per-key descriptor can
+say which is application data.
 
 :EXPECTED-DESCRIPTOR is the same treatment applied to a third confusable shape:
 cl-spec's own EXPECTED-DESCRIPTOR returns a flat, positionally tagged list for
@@ -222,7 +201,7 @@ the leading keyword is a tag, not a key, and only six of its twenty methods
 (a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC,
 CALL-ARGUMENTS-SPEC) return a :KIND-keyed plist instead.
 Reading either one as (:OBJECT ...) invents a key/value relation cl-spec never
-declared, exactly as an :ALIST/:PAIRS mismatch would; :EXPECTED-DESCRIPTOR
+declared, exactly as a plist/dotted-pair mismatch would; :EXPECTED-DESCRIPTOR
 projects every element by position into an array instead, recursing into a
 cons element under the same descriptor so a nested spec such as :AND's
 children stays structured, and treats a :KIND-keyed plist the same way rather
@@ -278,17 +257,30 @@ which PROJECT-VALUE on its own returns whole (see LEAF-NODE)."
                     (list :scalar (format nil "~D" value))
                     (leaf-node value path)))
                ((eq :opaque descriptor)
-                ;; Marker-first: :OPAQUE is WALK's route for a value from the
-                ;; code under test, exactly where cl-spec's own
-                ;; could-not-freeze-this marker appears, and this branch used
-                ;; to hand it straight to EXTERNALIZE-VALUE -- which reached
-                ;; every :OPAQUE field in *RECORD-SHAPES* (capture and
-                ;; counterexample values, an error datum's :ACTUAL/:KEY, an
-                ;; observation's :ARGUMENTS/:VALUE, and more), each one a
-                ;; place an object id could be registered for the marker
-                ;; itself instead of the value cl-spec declined to keep.
-                (or (%opaque-marker-node value)
-                    (list :value (externalize-value value :max-chars max-chars))))
+                ;; :OPAQUE is WALK's route for a value from the code under
+                ;; test, and that value is application data whatever it looks
+                ;; like.  Nothing here recognizes cl-spec metadata by shape:
+                ;; a record that means "unavailable" says so in its
+                ;; :AVAILABILITY key (see :CAPTURE-VALUE-RECORD), and any
+                ;; other (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...) cons
+                ;; is a legal application value this externalizes like any
+                ;; other -- object id and all.
+                (list :value (externalize-value value :max-chars max-chars)))
+               ((eq :capture-diagnostic-type descriptor)
+                ;; cl-spec's diagnostic :TYPE is a tagged union in schema v1:
+                ;; a named type symbol, (:KIND :ANONYMOUS-CLASS :METACLASS
+                ;; NAME) for a class with no name, or the :UNKNOWN fallback
+                ;; (cl-spec's DIAGNOSTIC-TYPE-DATA).  The field schema says
+                ;; which union this is, so reading the :KIND plist as an
+                ;; object is not shape-guessing: a cons under this descriptor
+                ;; has exactly one legal meaning.  A named type is ordinary
+                ;; symbol metadata, so it goes through LEAF-NODE and never
+                ;; through EXTERNALIZE-VALUE -- no live class object can
+                ;; appear here to externalize.
+                (if (and (consp value) (eq :kind (first value)))
+                    (walk-object value '((:kind . :leaf) (:metaclass . :leaf))
+                                 path depth)
+                    (leaf-node value path)))
                ;; >= rather than >: DEPTH counts containers already opened on
                ;; the way here, so the container that would be the (n+1)th is
                ;; the one cut, not one further past it.
@@ -347,15 +339,13 @@ which PROJECT-VALUE on its own returns whole (see LEAF-NODE)."
                ;; shape bugs; a silent atom here would mean the next one goes
                ;; unnoticed too.
                ((and value (not (consp value))
-                     (member (first descriptor) '(:array :alist :pairs :object)))
+                     (member (first descriptor) '(:array :pairs :object)))
                 (unless (eq :not-collected value)
                   (push (list :path (reverse path) :reason :atom-for-container)
                         issues))
                 (leaf-node value path))
                ((eq :array (first descriptor))
                 (list :array (walk-list value (second descriptor) path depth)))
-               ((eq :alist (first descriptor))
-                (list :array (walk-alist value (second descriptor) path depth)))
                ((eq :pairs (first descriptor))
                 (list :array (walk-pairs value (second descriptor) path depth)))
                ;; NIL under an :OBJECT descriptor is JSON null, not {}.
@@ -496,24 +486,12 @@ which PROJECT-VALUE on its own returns whole (see LEAF-NODE)."
                              (walk item :expected-descriptor
                                    (cons index path) (1+ depth))
                              (leaf-node item (cons index path)))))
-         (walk-alist (entries descriptor path depth)
-           (loop for entry in (bounded entries path)
-                 for index from 0
-                 collect
-                 (list :object
-                       (list (cons "name"
-                                   (leaf-node (car entry) (cons index path)))
-                             (cons "value"
-                                   (walk (cdr entry) descriptor
-                                         (cons index path) (1+ depth)))))))
          (walk-pairs (plist descriptor path depth)
            ;; PLIST is a flat (NAME VALUE NAME VALUE ...) run -- cl-spec's
            ;; own NAME-ARGUMENTS shape for a counterexample, not an alist of
            ;; dotted pairs.  UNIT 2 for the same reason WALK-OBJECT's BOUNDED
            ;; call is: the cut must fall on a pair boundary, not split one
-           ;; and orphan its value.  The {name, value} object built here is
-           ;; identical to WALK-ALIST's, so a client cannot tell which Lisp
-           ;; shape supplied it.
+           ;; and orphan its value.
            (loop for (name value) on (bounded plist path 2) by #'cddr
                  for index from 0
                  collect
@@ -524,42 +502,57 @@ which PROJECT-VALUE on its own returns whole (see LEAF-NODE)."
                                    (walk value descriptor
                                          (cons index path) (1+ depth)))))))
          (walk-object (plist fields path depth)
-           (let ((entries '()))
+           ;; Duplicate indicators are canonicalized to their FIRST
+           ;; occurrence.  cl-spec's records are open plists read with
+           ;; ordinary plist semantics, where GETF answers the first
+           ;; occurrence, so that is the one interpretation of one record.  A
+           ;; projection that walked every occurrence would publish both keys
+           ;; and let a JSON hash-table renderer keep the last, and then the
+           ;; compatibility aliases (built with GETF) and core_result.data
+           ;; could report different answers for one run.  Later occurrences
+           ;; are ignored entirely -- neither projected nor counted as
+           ;; unknown keys -- which is what keeps the two paths in agreement.
+           ;; Nested schema-known objects walk through here too, so the same
+           ;; rule covers them.
+           (let ((entries '())
+                 (seen '()))
              (loop for (key raw) on (bounded plist path 2) by #'cddr
                    for field = (assoc key fields)
-                   do (cond
-                        ;; A +SENTINEL-FIELDS+ key whose raw value is the bare
-                        ;; :NOT-COLLECTED keyword carries no substructure to
-                        ;; walk -- FIELD-AVAILABILITY already reports this as
-                        ;; availability, not data, and walking the literal
-                        ;; keyword under this key's container descriptor would
-                        ;; either crash (BOUNDED expects a list) or publish a
-                        ;; scalar word where every other record publishes an
-                        ;; object.  Project it as JSON null instead.
-                        ((and (member key +sentinel-fields+)
-                              (eq :not-collected raw))
-                         (push (cons (%json-key key) (list :scalar nil))
-                               entries))
-                        ;; :ELSEWHERE is declared, not unknown, and not
-                        ;; projected here: cl-mcp names it deliberately
-                        ;; because it already publishes this key outside
-                        ;; :DATA (see PROJECT-RECORD's docstring), so it must
-                        ;; not fall through to the UNKNOWN-KEYS branch below.
-                        ((and field (eq :elsewhere (cdr field)))
-                         nil)
-                        (field
-                         (push (cons (%json-key key)
-                                     (walk raw (cdr field)
-                                           (cons (%json-key key) path)
-                                           (1+ depth)))
-                               entries))
-                        (t
-                         ;; Named, not interpreted.  A future key's meaning is
-                         ;; cl-spec's to define, and publishing a guess at it
-                         ;; is the one thing this module must not do.
-                         (push (%dotted-path
-                                (reverse (cons (%json-key key) path)))
-                               unknown))))
+                   do (unless (member key seen)
+                        (push key seen)
+                        (cond
+                          ;; A +SENTINEL-FIELDS+ key whose raw value is the bare
+                          ;; :NOT-COLLECTED keyword carries no substructure to
+                          ;; walk -- FIELD-AVAILABILITY already reports this as
+                          ;; availability, not data, and walking the literal
+                          ;; keyword under this key's container descriptor would
+                          ;; either crash (BOUNDED expects a list) or publish a
+                          ;; scalar word where every other record publishes an
+                          ;; object.  Project it as JSON null instead.
+                          ((and (member key +sentinel-fields+)
+                                (eq :not-collected raw))
+                           (push (cons (%json-key key) (list :scalar nil))
+                                 entries))
+                          ;; :ELSEWHERE is declared, not unknown, and not
+                          ;; projected here: cl-mcp names it deliberately
+                          ;; because it already publishes this key outside
+                          ;; :DATA (see PROJECT-RECORD's docstring), so it must
+                          ;; not fall through to the UNKNOWN-KEYS branch below.
+                          ((and field (eq :elsewhere (cdr field)))
+                           nil)
+                          (field
+                           (push (cons (%json-key key)
+                                       (walk raw (cdr field)
+                                             (cons (%json-key key) path)
+                                             (1+ depth)))
+                                 entries))
+                          (t
+                           ;; Named, not interpreted.  A future key's meaning is
+                           ;; cl-spec's to define, and publishing a guess at it
+                           ;; is the one thing this module must not do.
+                           (push (%dotted-path
+                                  (reverse (cons (%json-key key) path)))
+                                 unknown)))))
              (list :object (nreverse entries)))))
       (let ((node (walk value descriptor (reverse path) 0)))
         (values node (nreverse issues) (nreverse unknown))))))
@@ -717,12 +710,25 @@ rather than by whatever reads it next."
        :target-outcome
        '(:object (:kind . :leaf) (:values . (:array :opaque))
                  (:condition-type . :leaf) (:condition-report . :leaf))
+       ;; One cl-spec v1 capture binding, as its SCHEMA-INFO describes it: an
+       ;; explicit availability record, not a (NAME . VALUE) pair.  The record
+       ;; is (:NAME NAME :AVAILABILITY :COLLECTED :VALUE VALUE) or (:NAME NAME
+       ;; :AVAILABILITY :UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE TYPE), so
+       ;; :AVAILABILITY is what decides whether :VALUE is application data --
+       ;; never the value's own shape.  A collected NIL is a :VALUE of NIL
+       ;; rather than an absent key, and an unavailable record carries no
+       ;; :VALUE at all, so it can invent neither a value nor an object id.
+       :capture-value-record
+       '(:object (:name . :leaf)
+                 (:availability . :leaf)
+                 (:value . :opaque)
+                 (:reason . :leaf)
+                 (:type . :capture-diagnostic-type))
        :capture-evidence
        '(:object (:status . :leaf) (:declared . (:array :leaf))
-                 ;; Measured as ((NAME . VALUE) ...); dotted pairs are not
-                 ;; proper lists, so they get their own descriptor rather than
-                 ;; an array rule that has nothing to say about them.
-                 (:values . (:alist :opaque))
+                 ;; An ordered array of tagged records, not an alist of dotted
+                 ;; pairs: cl-spec's CAPTURE-EVIDENCE says so.
+                 (:values . (:array (:ref :capture-value-record)))
                  (:error . (:object (:binding . :leaf) (:index . :leaf)
                                     (:condition-type . :leaf))))
        :state
@@ -852,7 +858,8 @@ rather than by whatever reads it next."
                  (:source-location . :elsewhere))))
 
 (defun project-core-record (record shape-name &key expected-record-kind
-                                                   expected-entity-kind)
+                                                   expected-entity-kind
+                                                   (max-chars 2000))
   "Return (values REPORT STATUS REASON) for one versioned cl-spec RECORD.
 
 STATUS is :OK, :UNSUPPORTED-SCHEMA or :MALFORMED.  A malformed record yields no
@@ -863,7 +870,13 @@ REPORT separates what cl-mcp knows about the transport from what cl-spec said.
 :DATA is the record and carries no key cl-mcp added; :AVAILABILITY,
 :SCHEMA-SUPPORTED, :FIELD-AVAILABILITY, :UNKNOWN-KEYS and :PROJECTION are the
 transport metadata, and they live outside it.  A truncated projection is
-visible there rather than silently shorter inside :DATA."
+visible there rather than silently shorter inside :DATA.
+
+MAX-CHARS is the caller's output bound and reaches every value this projects,
+including the ones inside :DATA.  It is a keyword rather than a defaulted
+projector constant because a caller that asked for a smaller bound must get it
+on every path of the response: publishing 2000 characters of core_result.data
+beside a 10-character compatibility alias is one call with two answers."
   (multiple-value-bind (status reason)
       (validate-versioned-record record
                                  :expected-record-kind expected-record-kind
@@ -883,7 +896,7 @@ visible there rather than silently shorter inside :DATA."
                reason))
       (t
        (multiple-value-bind (node issues unknown)
-           (project-record record (list :ref shape-name))
+           (project-record record (list :ref shape-name) :max-chars max-chars)
          (values (list :availability :collected
                        :schema-supported t
                        :schema-version 1
