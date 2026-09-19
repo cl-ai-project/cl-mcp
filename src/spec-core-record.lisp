@@ -212,7 +212,8 @@ production failure.
 cl-spec's own EXPECTED-DESCRIPTOR returns a flat, positionally tagged list for
 most spec kinds -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- where
 the leading keyword is a tag, not a key, and only a few kinds (a bare SPEC,
-PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC) return a :KIND-keyed plist instead.
+PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC) return a
+:KIND-keyed plist instead.
 Reading either one as (:OBJECT ...) invents a key/value relation cl-spec never
 declared, exactly as an :ALIST/:PAIRS mismatch would; :EXPECTED-DESCRIPTOR
 projects every element by position into an array instead, recursing into a
@@ -271,9 +272,10 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                ((eq :expected-descriptor descriptor)
                 ;; EXPECTED-DESCRIPTOR builds a flat, positionally tagged list
                 ;; -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- for
-                ;; thirteen of its seventeen methods, and a :KIND-keyed plist
-                ;; for the other four (SPEC's own default, PLIST-SPEC,
-                ;; KEYED-FIELD-SPEC, OBJECT-SPEC).  Reading either shape as an
+                ;; thirteen of its eighteen methods, and a :KIND-keyed plist
+                ;; for the other five (SPEC's own default, PLIST-SPEC,
+                ;; KEYED-FIELD-SPEC, OBJECT-SPEC, TAGGED-UNION-SPEC).  Reading
+                ;; either shape as an
                 ;; :OBJECT invents a key/value relation cl-spec never declared:
                 ;; walked as a plist, (:RANGE :MIN 0 :MAX 100) desyncs at
                 ;; :RANGE -> :MIN, then hands the integer 0 to %JSON-KEY as a
@@ -297,9 +299,23 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                ;; the atom itself preserves that fact instead of crashing on
                ;; CAR, CDR or NTHCDR of something that was never a list --
                ;; the same guard every container shape needs, not only
-               ;; :OBJECT's.
+               ;; :OBJECT's.  :NOT-COLLECTED is the one atom cl-spec documents
+               ;; landing here, so it costs no ISSUES entry -- recording one
+               ;; would make PROJECTION.COMPLETE read false on every run whose
+               ;; target was never called, which is ordinary, not a loss.  Any
+               ;; other atom under a container is a shape this descriptor did
+               ;; not predict: still projected rather than crashed on, so a
+               ;; hostile or drifted record cannot take the response down, but
+               ;; pushed to ISSUES so a reader can see the descriptor and the
+               ;; library disagreed.  Substituting silently here is exactly
+               ;; the mechanism that hid the :EXPECTED and :COUNTEREXAMPLE
+               ;; shape bugs; a silent atom here would mean the next one goes
+               ;; unnoticed too.
                ((and value (not (consp value))
                      (member (first descriptor) '(:array :alist :pairs :object)))
+                (unless (eq :not-collected value)
+                  (push (list :path (reverse path) :reason :atom-for-container)
+                        issues))
                 (project-value value :max-chars max-chars))
                ((eq :array (first descriptor))
                 (list :array (walk-list value (second descriptor) path depth)))
@@ -507,10 +523,10 @@ rather than by whatever reads it next."
        ;; by key.  EXPECTED-DESCRIPTOR returns a flat, positionally tagged
        ;; list for most spec kinds, e.g. (:RANGE :MIN 0 :MAX 100), where the
        ;; leading keyword is a tag, and a genuine :KIND-keyed plist only for a
-       ;; few (a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC).
-       ;; :EXPECTED-DESCRIPTOR (see PROJECT-RECORD's WALK) projects either
-       ;; shape as a recursive array instead of guessing which one a given
-       ;; field holds.
+       ;; few (a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC,
+       ;; TAGGED-UNION-SPEC).  :EXPECTED-DESCRIPTOR (see PROJECT-RECORD's
+       ;; WALK) projects either shape as a recursive array instead of
+       ;; guessing which one a given field holds.
        :expected
        :expected-descriptor
        :field-expectation

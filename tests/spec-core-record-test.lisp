@@ -453,13 +453,41 @@ list itself rather than to the value cl-spec said it could not freeze"
   ;; WALK itself: a container descriptor (:OBJECT here, via :TARGET-OUTCOME)
   ;; paired with a bare atom must project the atom, not call CAR/CDR/NTHCDR
   ;; on it.
-  (let* ((observation '(:arguments (4) :status :failed :reason :predicate-false
-                        :signature (:property-false) :explanation nil
-                        :outcome :not-collected :value nil
-                        :case nil :condition-report nil))
-         (node (project-record observation '(:ref :observation)))
-         (outcome (field-of node "outcome")))
-    (ok (equal '(:scalar "not-collected") outcome))))
+  (let ((observation '(:arguments (4) :status :failed :reason :predicate-false
+                       :signature (:property-false) :explanation nil
+                       :outcome :not-collected :value nil
+                       :case nil :condition-report nil)))
+    (multiple-value-bind (node issues) (project-record observation '(:ref :observation))
+      (let ((outcome (field-of node "outcome")))
+        (ok (equal '(:scalar "not-collected") outcome)))
+      (testing ":not-collected is a documented cl-spec value, not a shape miss"
+        ;; The other half of this guard, in AN-UNPREDICTED-ATOM-..., pushes an
+        ;; :atom-for-container issue for an atom the descriptor did not
+        ;; predict.  :not-collected is predicted -- recording an issue for it
+        ;; would make projection.complete read false on every run whose
+        ;; target was never called, which is ordinary, not a loss.
+        (ok (null issues))))))
+
+(deftest an-unpredicted-atom-under-a-container-is-recorded-as-an-issue
+  ;; The other half of the guard above.  :NOT-COLLECTED is the one atom
+  ;; cl-spec documents landing under a container descriptor; any other atom
+  ;; there is a shape this descriptor did not predict.  WALK still projects
+  ;; it as a scalar rather than crashing on CAR/CDR/NTHCDR of something that
+  ;; was never a list, but a silent substitution here is exactly the
+  ;; mechanism that hid the :EXPECTED and :COUNTEREXAMPLE shape bugs, so this
+  ;; one must be recorded in ISSUES rather than degrading quietly.
+  (let ((observation '(:arguments (4) :status :failed :reason :predicate-false
+                       :signature (:property-false) :explanation nil
+                       :outcome :some-unpredicted-atom :value nil
+                       :case nil :condition-report nil)))
+    (multiple-value-bind (node issues) (project-record observation '(:ref :observation))
+      (testing "the atom is still projected, never crashed on"
+        (ok (equal '(:scalar "some-unpredicted-atom") (field-of node "outcome"))))
+      (testing "but this time it is recorded as an issue, not silently absorbed"
+        (ok (= 1 (length issues)))
+        (let ((issue (first issues)))
+          (ok (eq :atom-for-container (getf issue :reason)))
+          (ok (equal '("outcome") (getf issue :path))))))))
 
 (deftest a-signature-keeps-its-shapes-inside-an-array
   (let ((node (project-record '(:return-value :return-spec ((:kind :range-failed)))

@@ -867,9 +867,9 @@ error が 10 個あるのに JSON には 5 個しか無く、5 個しか無い�
 ### 6.2.5 `expected` も位置的タグ付きリストである
 
 当初この表は `:expected` を「object」と書いていた。`explain.lisp` の
-`expected-descriptor` メソッドのうち plist を返す 4 つ（`spec` / `plist-spec` /
-`keyed-field-spec` / `object-spec`）だけを読んだ誤りで、**17 中 13 は位置的な
-タグ付きリスト**である。
+`expected-descriptor` メソッドのうち plist を返す 5 つ（`spec` / `plist-spec` /
+`keyed-field-spec` / `object-spec` / `tagged-union-spec`）だけを読んだ誤りで、
+**18 中 13 は位置的なタグ付きリスト**である。
 
 ```lisp
 (list :range :min N :max M)                       ; タグ + plist 尾部
@@ -892,7 +892,7 @@ cl-spec が宣言していない関係の発明になる。入れ子の `expecte
 （`:and` / `:or` / `:tuple` / `:list-of` / `:nullable` / `:not` の内側）は
 再帰的に同じ規則で投影する。
 
-`:kind` で始まる 4 つの形も配列になる。無損失であり、`data` を読む側は
+`:kind` で始まる 5 つの形（`tagged-union-spec` を含む）も配列になる。無損失であり、`data` を読む側は
 先頭要素でどの形かを判別できる。object にする分岐を設けないのは、
 「形から役割を推測しない」という §6.2.1 の規則そのものである。
 
