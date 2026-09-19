@@ -208,6 +208,18 @@ mistake is caught by a record that happens to carry NIL there, which is why
 this pairing is named here rather than left to be rediscovered from a
 production failure.
 
+:EXPECTED-DESCRIPTOR is the same treatment applied to a third confusable shape:
+cl-spec's own EXPECTED-DESCRIPTOR returns a flat, positionally tagged list for
+most spec kinds -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- where
+the leading keyword is a tag, not a key, and only a few kinds (a bare SPEC,
+PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC) return a :KIND-keyed plist instead.
+Reading either one as (:OBJECT ...) invents a key/value relation cl-spec never
+declared, exactly as an :ALIST/:PAIRS mismatch would; :EXPECTED-DESCRIPTOR
+projects every element by position into an array instead, recursing into a
+cons element under the same descriptor so a nested spec such as :AND's
+children stays structured, and treats a :KIND-keyed plist the same way rather
+than guessing at an object shape only some of its callers use.
+
 PATH is the position reached so far, for the entries of ISSUES and
 UNKNOWN-KEYS.  MAX-CHARS bounds every value this projects, leaf or opaque, the
 same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
@@ -256,6 +268,24 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                                         '(:array (:ref :error-datum))
                                         (cons 2 path) (1+ depth)))
                             (walk-list value :leaf path depth)))))
+               ((eq :expected-descriptor descriptor)
+                ;; EXPECTED-DESCRIPTOR builds a flat, positionally tagged list
+                ;; -- (:TYPE X), (:RANGE :MIN N :MAX M), (:AND d1 d2 ...) -- for
+                ;; thirteen of its seventeen methods, and a :KIND-keyed plist
+                ;; for the other four (SPEC's own default, PLIST-SPEC,
+                ;; KEYED-FIELD-SPEC, OBJECT-SPEC).  Reading either shape as an
+                ;; :OBJECT invents a key/value relation cl-spec never declared:
+                ;; walked as a plist, (:RANGE :MIN 0 :MAX 100) desyncs at
+                ;; :RANGE -> :MIN, then hands the integer 0 to %JSON-KEY as a
+                ;; key.  Every element is walked by position instead, exactly
+                ;; as :SIGNATURE already treats its own leading tag: a cons
+                ;; element is itself a nested descriptor and recurses under
+                ;; this same tag, so (:AND (:TYPE INTEGER) (:RANGE ...)) stays
+                ;; structured rather than flattening its children to text; a
+                ;; :KIND-keyed plist becomes an array the same way, on
+                ;; purpose, so a consumer reads its leading element to tell
+                ;; the two shapes apart instead of this module guessing.
+                (list :array (walk-expected-descriptor value path depth)))
                ((not (consp descriptor))
                 (project-value value :max-chars max-chars))
                ;; A container descriptor paired with a non-NIL atom cannot be
@@ -303,6 +333,19 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
            (loop for item in (bounded items path)
                  for index from 0
                  collect (walk item descriptor (cons index path) (1+ depth))))
+         (walk-expected-descriptor (items path depth)
+           ;; ITEMS is one EXPECTED-DESCRIPTOR return value.  The leading
+           ;; keyword is a tag, never a key, so each element is walked by
+           ;; position: a cons element is itself a nested descriptor and
+           ;; recurses under :EXPECTED-DESCRIPTOR so it stays structured;
+           ;; anything else -- a keyword tag, a type specifier, a number --
+           ;; is a leaf.
+           (loop for item in (bounded items path)
+                 for index from 0
+                 collect (if (consp item)
+                             (walk item :expected-descriptor
+                                   (cons index path) (1+ depth))
+                             (project-value item :max-chars max-chars))))
          (walk-alist (entries descriptor path depth)
            (loop for entry in (bounded entries path)
                  for index from 0
@@ -460,15 +503,16 @@ rather than by whatever reads it next."
 (setf *record-shapes*
       (list
        ;; An EXPECTED descriptor is what cl-spec says the spec required; it is
-       ;; spec-derived and stays structured.  :TYPE holds a type specifier,
-       ;; which is a form and reaches EXTERNALIZE-VALUE through :LEAF.
+       ;; spec-derived and stays structured -- but it is not a plist to read
+       ;; by key.  EXPECTED-DESCRIPTOR returns a flat, positionally tagged
+       ;; list for most spec kinds, e.g. (:RANGE :MIN 0 :MAX 100), where the
+       ;; leading keyword is a tag, and a genuine :KIND-keyed plist only for a
+       ;; few (a bare SPEC, PLIST-SPEC, KEYED-FIELD-SPEC, OBJECT-SPEC).
+       ;; :EXPECTED-DESCRIPTOR (see PROJECT-RECORD's WALK) projects either
+       ;; shape as a recursive array instead of guessing which one a given
+       ;; field holds.
        :expected
-       '(:object (:kind . :leaf) (:type . :leaf) (:satisfies . :leaf)
-                 (:closed . :leaf) (:test . :leaf) (:class . :leaf)
-                 (:tag-reader . :leaf)
-                 (:fields . (:array (:ref :field-expectation)))
-                 (:branches . (:array (:object (:name . :leaf)
-                                               (:expected . (:ref :expected))))))
+       :expected-descriptor
        :field-expectation
        ;; :KEY is a key name out of the value under test, so it is value-derived
        ;; -- cl-spec's own *FAILURE-SHAPE-KEYS* docstring classifies it that way.

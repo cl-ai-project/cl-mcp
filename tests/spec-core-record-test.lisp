@@ -471,3 +471,50 @@ list itself rather than to the value cl-spec said it could not freeze"
         (ok (eq :array (first shapes)))
         (ok (equal '(:scalar "range-failed")
                    (field-of (first (second shapes)) "kind")))))))
+
+(deftest expected-descriptor-is-a-recursive-array-not-a-plist
+  ;; EXPECTED-DESCRIPTOR builds a flat, positionally tagged list for most
+  ;; spec kinds -- the leading keyword is a tag, not a key.  Read as
+  ;; (:OBJECT ...), (:RANGE :MIN 0 :MAX 100) desyncs at :RANGE -> :MIN, then
+  ;; hands the integer 0 to %JSON-KEY as a key and signals a TYPE-ERROR --
+  ;; the crash every WIDEN test whose :RETURNS is a range spec hit under the
+  ;; old declaration.  Each case here must fail against that old (:OBJECT
+  ;; (:kind . :leaf) ...) descriptor -- the range one by crashing, so this
+  ;; asserts on the projected value rather than on the absence of a crash.
+  (testing "a range spec stays a flat array, not a desynced plist"
+    (let* ((node (project-record '(:kind :type-failed :expected (:range :min 0 :max 100))
+                                 '(:ref :error-datum)))
+           (expected (field-of node "expected")))
+      (ok (eq :array (first expected)))
+      (ok (equal '((:scalar "range") (:scalar "min") (:scalar 0)
+                   (:scalar "max") (:scalar 100))
+                 (second expected)))))
+  (testing "a nested descriptor inside :and recurses, staying structured"
+    (let* ((node (project-record '(:kind :type-failed
+                                    :expected (:and (:type integer)
+                                                     (:range :min 0 :max 100)))
+                                 '(:ref :error-datum)))
+           (expected (field-of node "expected"))
+           (elements (second expected)))
+      (ok (eq :array (first expected)))
+      (ok (equal '(:scalar "and") (first elements)))
+      (testing "the :type child is its own array, not externalized text"
+        (let ((type-child (second elements)))
+          (ok (eq :array (first type-child)))
+          (ok (equal '(:scalar "type") (first (second type-child))))
+          (ok (eq :symbol (first (second (second type-child)))))))
+      (testing "the :range child recurses the same way, sibling to :type"
+        (let ((range-child (third elements)))
+          (ok (eq :array (first range-child)))
+          (ok (equal '((:scalar "range") (:scalar "min") (:scalar 0)
+                       (:scalar "max") (:scalar 100))
+                     (second range-child)))))))
+  (testing "a :kind-keyed form becomes an array too, by design"
+    (let* ((node (project-record '(:kind :type-failed
+                                    :expected (:kind :plist :closed nil :fields nil))
+                                 '(:ref :error-datum)))
+           (expected (field-of node "expected")))
+      (ok (eq :array (first expected)))
+      (ok (equal '((:scalar "kind") (:scalar "plist") (:scalar "closed")
+                   (:scalar nil) (:scalar "fields") (:scalar nil))
+                 (second expected))))))
