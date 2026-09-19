@@ -25,6 +25,7 @@
   (:export #:safe-json-integer-p
            #:project-value
            #:project-record
+           #:project-core-record
            #:validate-versioned-record
            #:field-availability
            #:+v1-required-metadata+
@@ -129,6 +130,20 @@ and not a total it never reached, and EXACT-P is NIL."
         (values cap t)
         (values cap nil))))
 
+(defparameter +sentinel-fields+
+  '(:shrink-report :generation-report :case-report
+    :digest-omissions :digest-exclusions)
+  "The fields whose :NOT-COLLECTED value means availability rather than data.
+
+:NOT-COLLECTED is not a sentinel wherever it appears.  On an observation's
+:OUTCOME it means the Function Spec target was never called, and inside
+provenance's :COLLECTION-STATES it names an item nobody collected -- both are
+the answer, not the absence of one.  Converting either would delete a fact.
+
+Declared ahead of PROJECT-RECORD, which now reads this list too: WALK-OBJECT
+projects a sentinel field's bare :NOT-COLLECTED value as JSON null rather than
+walking it under the field's own container descriptor.")
+
 (defun project-record (value descriptor &key path (max-chars 2000))
   "Project VALUE under DESCRIPTOR and return (values NODE ISSUES UNKNOWN-KEYS).
 
@@ -168,6 +183,23 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
                 (list :value (externalize-value value :max-chars max-chars)))
                ((eq :word-list descriptor)
                 (list :array (walk-list value :leaf path depth)))
+               ((eq :signature descriptor)
+                ;; FAILURE-SIGNATURE builds (:RETURN-VALUE :RETURN-SPEC shapes)
+                ;; and (:CONDITION-SPEC type shapes); every other form is a flat
+                ;; run of tags.  Only the trailing shapes of those two are
+                ;; structured, and the leading keyword stays a tag, never a key.
+                (let ((shaped (and (consp value)
+                                   (member (first value)
+                                           '(:return-value :condition-spec))
+                                   (= 3 (length value)))))
+                  (list :array
+                        (if shaped
+                            (list (project-value (first value))
+                                  (project-value (second value))
+                                  (walk (third value)
+                                        '(:array (:ref :error-datum))
+                                        (cons 2 path) (1+ depth)))
+                            (walk-list value :leaf path depth)))))
                ((not (consp descriptor))
                 (project-value value :max-chars max-chars))
                ((eq :array (first descriptor))
@@ -213,18 +245,32 @@ same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
            (let ((entries '()))
              (loop for (key raw) on (bounded plist path 2) by #'cddr
                    for field = (assoc key fields)
-                   do (if field
-                          (push (cons (%json-key key)
-                                      (walk raw (cdr field)
-                                            (cons (%json-key key) path)
-                                            (1+ depth)))
-                                entries)
-                          ;; Named, not interpreted.  A future key's meaning is
-                          ;; cl-spec's to define, and publishing a guess at it
-                          ;; is the one thing this module must not do.
-                          (push (%dotted-path
-                                 (reverse (cons (%json-key key) path)))
-                                unknown)))
+                   do (cond
+                        ;; A +SENTINEL-FIELDS+ key whose raw value is the bare
+                        ;; :NOT-COLLECTED keyword carries no substructure to
+                        ;; walk -- FIELD-AVAILABILITY already reports this as
+                        ;; availability, not data, and walking the literal
+                        ;; keyword under this key's container descriptor would
+                        ;; either crash (BOUNDED expects a list) or publish a
+                        ;; scalar word where every other record publishes an
+                        ;; object.  Project it as JSON null instead.
+                        ((and (member key +sentinel-fields+)
+                              (eq :not-collected raw))
+                         (push (cons (%json-key key) (list :scalar nil))
+                               entries))
+                        (field
+                         (push (cons (%json-key key)
+                                     (walk raw (cdr field)
+                                           (cons (%json-key key) path)
+                                           (1+ depth)))
+                               entries))
+                        (t
+                         ;; Named, not interpreted.  A future key's meaning is
+                         ;; cl-spec's to define, and publishing a guess at it
+                         ;; is the one thing this module must not do.
+                         (push (%dotted-path
+                                (reverse (cons (%json-key key) path)))
+                               unknown))))
              (list :object (nreverse entries)))))
       (let ((node (walk value descriptor (reverse path) 0)))
         (values node (nreverse issues) (nreverse unknown))))))
@@ -238,16 +284,6 @@ A record claiming version 1 without one of them is broken, not old.  Reporting
 it as a field that happens to be absent would let a malformed answer from the
 versioned API read as an older revision -- which is the one confusion this
 module's availability states exist to prevent.")
-
-(defparameter +sentinel-fields+
-  '(:shrink-report :generation-report :case-report
-    :digest-omissions :digest-exclusions)
-  "The fields whose :NOT-COLLECTED value means availability rather than data.
-
-:NOT-COLLECTED is not a sentinel wherever it appears.  On an observation's
-:OUTCOME it means the Function Spec target was never called, and inside
-provenance's :COLLECTION-STATES it names an item nobody collected -- both are
-the answer, not the absence of one.  Converting either would delete a fact.")
 
 (defparameter *plist-scan-limit* 4096
   "How far a plist is walked before it is refused as malformed.
@@ -326,3 +362,215 @@ rather than by whatever reads it next."
                      (%json-key expected-entity-kind)
                      (%json-key (getf record :entity-kind)))))
       :ok)))
+
+(setf *record-shapes*
+      (list
+       ;; An EXPECTED descriptor is what cl-spec says the spec required; it is
+       ;; spec-derived and stays structured.  :TYPE holds a type specifier,
+       ;; which is a form and reaches EXTERNALIZE-VALUE through :LEAF.
+       :expected
+       '(:object (:kind . :leaf) (:type . :leaf) (:satisfies . :leaf)
+                 (:closed . :leaf) (:test . :leaf) (:class . :leaf)
+                 (:tag-reader . :leaf)
+                 (:fields . (:array (:ref :field-expectation)))
+                 (:branches . (:array (:object (:name . :leaf)
+                                               (:expected . (:ref :expected))))))
+       :field-expectation
+       ;; :KEY is a key name out of the value under test, so it is value-derived
+       ;; -- cl-spec's own *FAILURE-SHAPE-KEYS* docstring classifies it that way.
+       '(:object (:key . :opaque) (:required . :leaf)
+                 (:expected . (:ref :expected)))
+       ;; One EXPLAIN-DATA error datum.  :ACTUAL and :ACTUAL-LENGTH come off the
+       ;; value, :EXPECTED and the bounds off the spec, and the three container
+       ;; keys hold more error datums -- which is cl-spec's own classification
+       ;; in *FAILURE-SHAPE-KEYS* and *FAILURE-SHAPE-CONTAINERS*.
+       :error-datum
+       '(:object (:kind . :leaf) (:path . (:array :leaf))
+                 (:tuple-path . (:array :leaf)) (:field-path . (:array :leaf))
+                 (:actual . :opaque) (:actual-test . :opaque)
+                 (:key . :opaque) (:expected . (:ref :expected))
+                 (:violated-bound . :leaf) (:predicate . :leaf)
+                 (:condition-type . :leaf) (:condition-report . :leaf)
+                 (:expected-length . :leaf) (:minimum-length . :leaf)
+                 (:maximum-length . :leaf) (:actual-length . :leaf)
+                 (:status . :leaf) (:branch . :leaf)
+                 (:branch-path . (:array :leaf)) (:known-tags . :word-list)
+                 (:errors . (:array (:ref :error-datum)))
+                 (:branches . (:array (:ref :error-datum)))
+                 (:conjuncts . (:array (:ref :error-datum))))
+       ;; The union of every explanation cl-spec builds: an EXPLAIN-DATA root
+       ;; for a spec violation, and the :KIND plists a case-selection error, a
+       ;; capture error and a state-post violation record.
+       :explanation
+       '(:object (:valid . :leaf) (:spec . :leaf) (:value . :opaque)
+                 (:path . (:array :leaf))
+                 (:errors . (:array (:ref :error-datum)))
+                 (:kind . :leaf) (:case-error . :leaf) (:function . :leaf)
+                 (:cases . :word-list) (:case . :leaf) (:index . :leaf)
+                 (:form . :leaf) (:binding . :leaf) (:captured . (:alist :opaque))
+                 (:condition-type . :leaf) (:condition-report . :leaf))
+       :target-outcome
+       '(:object (:kind . :leaf) (:values . (:array :opaque))
+                 (:condition-type . :leaf) (:condition-report . :leaf))
+       :capture-evidence
+       '(:object (:status . :leaf) (:declared . (:array :leaf))
+                 ;; Measured as ((NAME . VALUE) ...); dotted pairs are not
+                 ;; proper lists, so they get their own descriptor rather than
+                 ;; an array rule that has nothing to say about them.
+                 (:values . (:alist :opaque))
+                 (:error . (:object (:binding . :leaf) (:index . :leaf)
+                                    (:condition-type . :leaf))))
+       :state
+       '(:object (:capture . (:ref :capture-evidence))
+                 (:state-post . (:object (:status . :leaf) (:reason . :leaf)
+                                         (:case . :leaf) (:index . :leaf)
+                                         (:form . :leaf)
+                                         (:condition-type . :leaf))))
+       :observation
+       '(:object (:arguments . (:array :opaque)) (:status . :leaf)
+                 (:reason . :leaf) (:signature . :signature)
+                 (:explanation . (:ref :explanation))
+                 (:outcome . (:ref :target-outcome)) (:value . :opaque)
+                 (:case . :leaf) (:condition-report . :leaf)
+                 (:state . (:ref :state)))
+       :case-report
+       '(:object (:selection . :leaf) (:unit . :leaf)
+                 (:declared-cases . :word-list)
+                 (:cases . (:array (:object (:name . :leaf)
+                                            (:documentation . :leaf)
+                                            (:called . :leaf) (:passed . :leaf)
+                                            (:failed . :leaf) (:error . :leaf))))
+                 (:case-selection-errors . :leaf) (:capture-errors . :leaf)
+                 (:never-called . :word-list))
+       :generation-report
+       '(:object (:scope . :leaf) (:unit . :leaf) (:policy . :leaf)
+                 (:budget . :leaf) (:budget-source . :leaf)
+                 (:default-coefficient . :leaf) (:requested-values . :leaf)
+                 (:generated-values . :leaf) (:attempts . :leaf)
+                 (:rejections . :leaf)
+                 (:phases . (:object
+                             (:generation . (:object (:attempts . :leaf)
+                                                     (:rejections . :leaf)))
+                             (:shrinking . (:object (:attempts . :leaf)
+                                                    (:rejections . :leaf)))))
+                 (:termination . :leaf) (:exhaustion-phase . :leaf)
+                 (:exhausted-at . :leaf))
+       :shrink-report
+       '(:object (:candidates . :leaf) (:budget . :leaf) (:termination . :leaf))
+       :provenance
+       '(:object (:backend . :leaf) (:lisp-implementation-type . :leaf)
+                 (:lisp-implementation-version . :leaf)
+                 (:cl-spec-version . :leaf) (:target-revision . :leaf)
+                 (:collection-states
+                  . (:object (:backend . :leaf)
+                             (:lisp-implementation-type . :leaf)
+                             (:lisp-implementation-version . :leaf)
+                             (:cl-spec-version . :leaf)
+                             (:target-revision . :leaf))))
+       :capabilities
+       '(:object (:generation . :leaf) (:shrinking . :leaf)
+                 (:instrumentation . :leaf))
+       :digest-omission
+       '(:object (:kind . :leaf) (:path . (:array :leaf)) (:target . :leaf)
+                 (:reason . :leaf))
+       :counterexample
+       ;; cl-spec names the arguments before it stores them, so this is a
+       ;; {variable value} plist rather than a raw argument list.
+       '(:alist :opaque)
+       :result-data
+       '(:object (:schema-version . :leaf) (:record-kind . :leaf)
+                 (:entity-kind . :leaf) (:definition-digest . :leaf)
+                 (:definition-digest-complete . :leaf)
+                 (:definition-digest-covers . :leaf)
+                 (:digest-omissions . (:array (:ref :digest-omission)))
+                 (:digest-exclusions . :word-list)
+                 (:capabilities . (:ref :capabilities))
+                 (:state-constraints . :leaf)
+                 (:name . :leaf) (:status . :leaf) (:trials . :leaf)
+                 (:budget . :leaf) (:rejected . :leaf) (:seed . :leaf)
+                 (:profile . :leaf)
+                 ;; cl-spec v1 does not publish the shape of caller options.
+                 (:options . :opaque)
+                 (:provenance . (:ref :provenance))
+                 (:counterexample . (:ref :counterexample))
+                 (:shrunk-counterexample . (:ref :counterexample))
+                 (:shrunk-outcome . :leaf)
+                 (:shrink-report . (:ref :shrink-report))
+                 (:generation-report . (:ref :generation-report))
+                 (:failure-phase . :leaf) (:failure-reason . :leaf)
+                 (:case-report . (:ref :case-report))
+                 (:failure . (:ref :observation))
+                 (:shrunk-failure . (:ref :observation))
+                 (:elapsed . :leaf))
+       :function-spec-data
+       '(:object (:schema-version . :leaf) (:record-kind . :leaf)
+                 (:entity-kind . :leaf) (:definition-digest . :leaf)
+                 (:definition-digest-complete . :leaf)
+                 (:definition-digest-covers . :leaf)
+                 (:digest-omissions . (:array (:ref :digest-omission)))
+                 (:digest-exclusions . :word-list)
+                 (:capabilities . (:ref :capabilities))
+                 (:state-constraints . :leaf)
+                 (:name . :leaf) (:kind . :leaf) (:documentation . :leaf)
+                 (:argument-generator . :leaf)
+                 (:preconditions . (:array :leaf))
+                 (:postconditions . (:array :leaf))
+                 (:post-value-variables . (:array :leaf))
+                 (:capture . (:array (:object (:name . :leaf) (:form . :leaf))))
+                 (:state-post . (:array :leaf))
+                 (:case-selection . :leaf)
+                 (:source-form . :leaf)
+                 (:metadata . :opaque))))
+
+(defun project-core-record (record shape-name &key expected-record-kind
+                                                   expected-entity-kind)
+  "Return (values REPORT STATUS REASON) for one versioned cl-spec RECORD.
+
+STATUS is :OK, :UNSUPPORTED-SCHEMA or :MALFORMED.  A malformed record yields no
+REPORT: the caller reports it as an adapter-visible fault rather than falling
+back to a legacy reader, which would hide it.
+
+REPORT separates what cl-mcp knows about the transport from what cl-spec said.
+:DATA is the record and carries no key cl-mcp added; :AVAILABILITY,
+:SCHEMA-SUPPORTED, :FIELD-AVAILABILITY, :UNKNOWN-KEYS and :PROJECTION are the
+transport metadata, and they live outside it.  A truncated projection is
+visible there rather than silently shorter inside :DATA."
+  (multiple-value-bind (status reason)
+      (validate-versioned-record record
+                                 :expected-record-kind expected-record-kind
+                                 :expected-entity-kind expected-entity-kind)
+    (case status
+      (:malformed (values nil :malformed reason))
+      (:unsupported-schema
+       (values (list :availability :collected
+                     :schema-supported nil
+                     :schema-version reason
+                     :field-availability nil
+                     :unknown-keys nil
+                     :source nil
+                     :projection (list :complete t :issues nil)
+                     :data nil)
+               :unsupported-schema
+               reason))
+      (t
+       (multiple-value-bind (node issues unknown)
+           (project-record record (list :ref shape-name))
+         (values (list :availability :collected
+                       :schema-supported t
+                       :schema-version 1
+                       ;; The record as cl-spec gave it, kept for the adapter's
+                       ;; own reading.  The verdict logic asks questions like
+                       ;; "was any declared case never reached", and answering
+                       ;; them off :DATA would mean re-parsing projected JSON
+                       ;; nodes to recover keywords this already has.  Never
+                       ;; rendered: :DATA is what reaches the client.
+                       :source record
+                       :field-availability
+                       (loop for (key . nil) in (rest (%resolve-descriptor
+                                                       (list :ref shape-name)))
+                             append (list key (field-availability record key)))
+                       :unknown-keys unknown
+                       :projection (list :complete (null issues) :issues issues)
+                       :data node)
+                 :ok
+                 nil))))))

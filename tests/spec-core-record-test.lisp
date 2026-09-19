@@ -15,6 +15,7 @@
                 #:project-record
                 #:validate-versioned-record
                 #:field-availability
+                #:project-core-record
                 #:*projection-max-depth*
                 #:*projection-max-length*))
 
@@ -248,3 +249,96 @@
     (ok (eq :collected
             (field-availability '(:target-revision :not-collected)
                                 :target-revision)))))
+
+(defparameter *passing-result*
+  (append *v1-metadata*
+          '(:name cl-user::widen :status :passed :trials 2 :budget 2
+            :rejected 0 :seed 4611686018427387903 :profile :normal
+            :options nil :counterexample nil :shrunk-counterexample nil
+            :shrunk-outcome nil :shrink-report :not-collected
+            :generation-report (:scope :request :termination :completed
+                                :attempts 0 :rejections 0)
+            :failure-phase nil :failure-reason nil
+            :case-report (:selection :exclusive :unit :normal-trials
+                          :declared-cases (:success :insufficient)
+                          :cases ((:name :success :documentation nil
+                                   :called 2 :passed 2 :failed 0 :error 0)
+                                  (:name :insufficient :documentation nil
+                                   :called 0 :passed 0 :failed 0 :error 0))
+                          :case-selection-errors 0 :capture-errors 0
+                          :never-called (:insufficient))
+            :failure nil :shrunk-failure nil :elapsed 0.005))
+  "A measured v1 result whose second case was never reached.")
+
+(defun field-of (node key)
+  "Return the child NODE holds under the JSON key KEY."
+  (cdr (assoc key (second node) :test #'equal)))
+
+(deftest a-result-record-projects-its-whole-envelope
+  (multiple-value-bind (report status) (project-core-record *passing-result*
+                                                            :result-data)
+    (ok (eq :ok status))
+    (ok (eq :collected (getf report :availability)))
+    (ok (getf report :schema-supported))
+    (testing "the envelope keys are in data, not only in the core_schema alias"
+      (let ((data (getf report :data)))
+        (ok (equal '(:scalar 1) (field-of data "schema_version")))
+        (ok (equal '(:scalar "result") (field-of data "record_kind")))
+        (ok (equal '(:scalar "abc") (field-of data "definition_digest")))))
+    (testing "a seed is text even here"
+      (ok (equal '(:scalar "4611686018427387903")
+                 (field-of (getf report :data) "seed"))))
+    (testing "the never-called case survives as a word"
+      (let* ((report-node (field-of (getf report :data) "case_report"))
+             (never (field-of report-node "never_called")))
+        (ok (equal '((:scalar "insufficient")) (second never)))))
+    (testing "an uncollected report is availability, not a projected value"
+      (ok (eq :not-collected
+              (getf (getf report :field-availability) :shrink-report)))
+      (ok (eq :collected
+              (getf (getf report :field-availability) :generation-report))))
+    (testing "a present NIL is collected"
+      (ok (eq :collected
+              (getf (getf report :field-availability) :failure-phase))))))
+
+(deftest an-unsupported-schema-projects-nothing
+  (multiple-value-bind (report status)
+      (project-core-record (list* :schema-version 2 (cddr *passing-result*))
+                           :result-data)
+    (ok (eq :unsupported-schema status))
+    (ok (not (getf report :schema-supported)))
+    (ok (eql 2 (getf report :schema-version)))
+    ;; No v1 field rules may run over a record this adapter cannot read.
+    (ok (null (getf report :data)))))
+
+(deftest a-malformed-record-is-not-projected-at-all
+  (multiple-value-bind (report status reason)
+      (project-core-record '(:schema-version 1 :record-kind :result) :result-data)
+    (ok (null report))
+    (ok (eq :malformed status))
+    (ok (search "required metadata" reason))))
+
+(deftest an-outcome-keeps-its-kind-and-values
+  ;; core_result.data is a pure mirror of cl-spec's own record: the field
+  ;; stays "outcome", cl-spec's own name, not a cl-mcp word for it.  The
+  ;; shape's internal name in *RECORD-SHAPES* is still :TARGET-OUTCOME --
+  ;; that is this project's name for the shape, never a published key.
+  (let* ((observation '(:arguments (2 10) :status :failed :reason :missing-condition
+                        :signature (:missing-condition) :explanation nil
+                        :outcome (:kind :returned :values (0)) :value 0
+                        :case :insufficient :condition-report nil))
+         (node (project-record observation '(:ref :observation)))
+         (outcome (field-of node "outcome")))
+    (ok (equal '(:scalar "returned") (field-of outcome "kind")))
+    (ok (eq :array (first (field-of outcome "values"))))))
+
+(deftest a-signature-keeps-its-shapes-inside-an-array
+  (let ((node (project-record '(:return-value :return-spec ((:kind :range-failed)))
+                              :signature)))
+    (ok (eq :array (first node)))
+    (ok (equal '(:scalar "return-value") (first (second node))))
+    (testing "the trailing failure shapes are objects, not flattened words"
+      (let ((shapes (third (second node))))
+        (ok (eq :array (first shapes)))
+        (ok (equal '(:scalar "range-failed")
+                   (field-of (first (second shapes)) "kind")))))))
