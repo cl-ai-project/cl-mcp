@@ -816,6 +816,145 @@ not be read."
                               (getf (getf entry :value) :printed)))
                     entries))))
 
+(defparameter +shrink-terminations+
+  (list (cons :state-restoration-unavailable
+              (concatenate 'string
+                           "not attempted -- this contract observes state, "
+                           "which nothing restores, so no candidate may call "
+                           "the target again"))
+        (cons :not-a-target-failure
+              (concatenate 'string
+                           "not attempted -- the failure happened before the "
+                           "target was called"))
+        (cons :disabled
+              "not attempted -- shrinking is off for this definition")
+        (cons :no-shrinker "not attempted -- this generator has no shrinker")
+        (cons :mutation "stopped -- the target changed its arguments")
+        (cons :generation-budget-exhausted
+              (concatenate 'string
+                           "stopped -- the generation budget ran out while "
+                           "shrinking. The failure above still stands; only "
+                           "the reduction is unfinished"))
+        (cons :budget-exhausted "stopped -- the shrink budget ran out")
+        (cons :shrinker-error "stopped -- the shrinker signalled")
+        (cons :exhausted
+              "ran to exhaustion -- no smaller failing input was found"))
+  "How to word each shrink termination cl-spec is known to record.
+
+Not a closed enumeration: cl-spec publishes none, and there is no :COMPLETED
+at all -- :EXHAUSTED is the successful search.  A value absent from this table
+is printed as itself rather than sorted into complete or incomplete, because
+sorting it would be this adapter deciding a meaning cl-spec has not stated.")
+
+(defun %format-core-evidence (stream result)
+  "Write the evidence cl-spec recorded for RESULT to STREAM.
+
+Only what the record actually carries.  Every line here is keyed on a field of
+the versioned record, so the text cannot claim something the JSON beside it
+does not say.  :CASE-REPORT, :GENERATION-REPORT and :SHRINK-REPORT are each
+guarded against cl-spec's own :NOT-COLLECTED sentinel before any GETF reads a
+sub-key of them -- calling GETF on that bare keyword, rather than on a plist,
+signals a TYPE-ERROR."
+  (let* ((record (getf result :core-record))
+         (source (getf record :source))
+         (contract-p (eq :contract (getf result :kind))))
+    (when source
+      (let ((case-report (getf source :case-report)))
+        (when (and case-report (not (eq :not-collected case-report)))
+          (let ((cases (getf case-report :cases))
+                (never (getf case-report :never-called)))
+            (when cases
+              (format stream "~&    cases: ~{~A~^ | ~}"
+                      (mapcar (lambda (entry)
+                                (if (zerop (getf entry :called))
+                                    (format nil "~(~A~) NEVER CALLED"
+                                            (getf entry :name))
+                                    (format nil "~(~A~) ~D called (~D passed)"
+                                            (getf entry :name)
+                                            (getf entry :called)
+                                            (getf entry :passed))))
+                              cases)))
+            (when never
+              (format stream "~&      ~D declared case~:P ~
+~:*~[~;was~:;were~] never reached, so this run says nothing about ~
+~:*~[~;it~:;them~]."
+                      (length never))))))
+      (let ((phase (getf source :failure-phase)))
+        (when phase
+          (format stream "~&    failure phase: ~(~A~) -- ~A"
+                  phase
+                  (case phase
+                    (:state-post
+                     (concatenate 'string
+                                  "the target WAS called and returned; the "
+                                  "contract's state-post clause is what "
+                                  "failed"))
+                    (:case-selection
+                     (concatenate 'string
+                                  "the target was NOT called; choosing which "
+                                  "case applies is what failed"))
+                    (:capture
+                     (concatenate 'string
+                                  "the target was NOT called; a :capture "
+                                  "form signalled before it"))
+                    (:generation
+                     (concatenate 'string
+                                  "the run stopped in generation and never "
+                                  "reached a verdict -- verification did NOT "
+                                  "complete, and this is not a finding about "
+                                  "the code under test"))
+                    (t "see failure_phase in the payload")))))
+      ;; Only for a contract.  A property's observation records no target
+      ;; outcome at all, so :NOT-COLLECTED there means "no target evidence
+      ;; was kept", not "the body never ran" -- and saying the latter would
+      ;; be a false statement about code that executed.
+      (when contract-p
+        (let ((outcome (getf (getf source :failure) :outcome)))
+          (cond ((eq :not-collected outcome)
+                 (format stream "~&    target: not called"))
+                ((eq :returned (getf outcome :kind))
+                 (format stream "~&    target: returned ~{~A~^, ~}"
+                         (mapcar #'princ-to-string (getf outcome :values))))
+                ((eq :signaled (getf outcome :kind))
+                 (format stream "~&    target: signalled ~A"
+                         (getf outcome :condition-type))))))
+      (let ((state (getf (getf source :failure) :state)))
+        (let ((capture (getf state :capture)))
+          (when (getf capture :values)
+            (format stream "~&    captured: ~{~A~^, ~}"
+                    (mapcar (lambda (entry)
+                              (format nil "~A = ~A" (car entry) (cdr entry)))
+                            (getf capture :values)))))
+        (let ((post (getf state :state-post)))
+          (when (member (getf post :status) '(:violation :error))
+            (format stream "~&    state-post: ~(~A~) at form ~A~@[ -- ~A~]"
+                    (getf post :status) (getf post :index)
+                    (when (getf post :form)
+                      (princ-to-string (getf post :form)))))))
+      (let ((generation (getf source :generation-report)))
+        (when (and generation (not (eq :not-collected generation))
+                   (not (eq :completed (getf generation :termination))))
+          (format stream "~&    generation: ~(~A~)~@[ in the ~(~A~) phase~] ~
+(~D of ~D candidates)~@[ -- ~A~]"
+                  (getf generation :termination)
+                  (getf generation :exhaustion-phase)
+                  (getf generation :attempts) (getf generation :budget)
+                  (when (eq :shrinking (getf generation :exhaustion-phase))
+                    (concatenate 'string
+                                 "the failure above still stands; only the "
+                                 "reduction is unfinished")))))
+      (let ((shrink (getf source :shrink-report)))
+        (when (and shrink (not (eq :not-collected shrink)))
+          (let ((wording (cdr (assoc (getf shrink :termination)
+                                      +shrink-terminations+))))
+            (format stream "~&    shrinking: ~(~A~) -- ~A"
+                    (getf shrink :termination)
+                    (or wording
+                        (concatenate 'string
+                                     "this cl-mcp does not know that "
+                                     "termination; it is reported as "
+                                     "cl-spec gave it")))))))))
+
 (defun %format-counterexample (stream result)
   "Write RESULT's counterexample and shrinking lines to STREAM.
 
@@ -856,8 +995,12 @@ whether anything was learned."
        (format stream "~&    shrunk counterexample: not attempted -- this ~
 property is defined with (:shrink nil)"))
       (:none
-       (format stream "~&    shrunk counterexample: shrinking was enabled but ~
-returned no smaller input"))
+       ;; Silent when a shrink report exists: "shrinking was enabled but
+       ;; returned no smaller input" is a claim about a search, and
+       ;; state-restoration-unavailable means no search happened.
+       (unless (getf (getf (getf result :core-record) :source) :shrink-report)
+         (format stream "~&    shrunk counterexample: shrinking was enabled ~
+but returned no smaller input")))
       (:unavailable
        (format stream "~&    shrunk counterexample: UNAVAILABLE -- the run did ~
 not reach a verdict"))
@@ -961,6 +1104,7 @@ a finding about the function"))))
             (or (getf trials :budget) "unknown")
             (or (getf trials :budget-source) "unknown")))
   (%format-contract stream result)
+  (%format-core-evidence stream result)
   (%format-counterexample stream result)
   (let ((condition (getf result :condition)))
     (when condition
@@ -1089,8 +1233,25 @@ claiming what the run did not establish."
          (properties (append (getf selection :properties-not-run)
                              (let ((own (getf selection :own-property-not-run)))
                                (when own (list own)))))
+         ;; Guarded the same way %FORMAT-CORE-EVIDENCE guards it: cl-spec's
+         ;; own :NOT-COLLECTED sentinel for an uncollected case report is a
+         ;; bare keyword, and GETF on it (rather than on a plist) signals a
+         ;; TYPE-ERROR.
+         (never-called
+           (remove-duplicates
+            (loop for result in (getf report :results)
+                  for case-report
+                    = (getf (getf (getf result :core-record) :source)
+                            :case-report)
+                  when (and case-report (not (eq :not-collected case-report)))
+                    append (getf case-report :never-called))))
          (coverage
            (cond
+             ;; First: the headline is where a reader stops, and a declared
+             ;; case nobody reached is exactly the gap a bare verdict hides.
+             (never-called
+              (format nil "~D declared case~:P never reached: ~{~(~A~)~^, ~}"
+                      (length never-called) never-called))
              (contract
               (format nil "properties only -- the function spec for ~A was NOT run"
                       (getf contract :qualified)))

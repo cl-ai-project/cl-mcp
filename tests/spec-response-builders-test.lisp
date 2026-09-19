@@ -101,6 +101,267 @@
                       :errored 0 :timed-out 0 :not-run 0)
         :environment *environment*))
 
+(defun %contract-check-report-with-cases ()
+  "Return a completed contract report whose second declared case was never
+reached.
+
+Measured shape: cl-spec's CASE-RUN-REPORT records every declared case, so a
+run that exercises only one of two marks the other :NEVER-CALLED rather than
+omitting it -- the same shape TESTS/SPEC-CORE-RECORD-TEST.LISP's own
+*PASSING-RESULT* fixture uses."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-remaining-balance"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'remaining-balance :status :passed :trials 2 :budget 2
+                 :rejected 0 :seed 1 :profile :normal :options nil
+                 :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil :shrink-report :not-collected
+                 :generation-report :not-collected
+                 :failure-phase nil :failure-reason nil
+                 :case-report
+                 (list :selection :exclusive :unit :normal-trials
+                       :declared-cases '(:sufficient-funds :insufficient-funds)
+                       :cases
+                       (list (list :name :sufficient-funds :documentation nil
+                                   :called 2 :passed 2 :failed 0 :error 0)
+                             (list :name :insufficient-funds :documentation nil
+                                   :called 0 :passed 0 :failed 0 :error 0))
+                       :case-selection-errors 0 :capture-errors 0
+                       :never-called '(:insufficient-funds))
+                 :failure nil :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE" "REMAINING-BALANCE"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE" "REMAINING-BALANCE")
+                      :kind :contract
+                      :status :passed
+                      :trials (list :executed 2 :budget 2
+                                    :budget-source "requested")
+                      :seed "1"
+                      :declares-cases t
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 1 :failed 0
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %state-post-check-report ()
+  "Return a completed contract report whose target returned and left state
+wrong.
+
+Measured shape: a real cl-spec checkout's SRC/FUNCTION-SPEC.LISP records
+:STATE-STATUS :VIOLATION on a failed state-post, never :VIOLATED, and
+CAPTURE-EVIDENCE's :VALUES is an alist of (NAME . VALUE) pairs.  The
+shrink-report's :STATE-RESTORATION-UNAVAILABLE termination and its
+:CANDIDATES 0 come from SRC/BACKENDS/CHECK-IT.LISP's shrink suppression for a
+state-observing contract.  The outer result's :SHRINK-STATUS :NONE stands for
+what a reading made without the record would have reported -- exactly the
+contradiction this task exists to stop."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-withdraw-without-recording"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'withdraw-without-recording! :status :failed
+                 :trials 1 :budget 1 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil
+                 :shrink-report (list :candidates 0 :budget 200 :termination
+                                       :state-restoration-unavailable)
+                 :generation-report :not-collected
+                 :failure-phase :state-post
+                 :failure-reason :state-postcondition
+                 :case-report
+                 (list :selection :exclusive :unit :normal-trials
+                       :declared-cases '(:sufficient-funds)
+                       :cases (list (list :name :sufficient-funds
+                                          :documentation nil :called 1
+                                          :passed 0 :failed 1 :error 0))
+                       :case-selection-errors 0 :capture-errors 0
+                       :never-called nil)
+                 :failure
+                 (list :arguments (list 100 30) :status :failed
+                       :reason :state-postcondition
+                       :signature (list :case :sufficient-funds
+                                        :state-postcondition 0)
+                       :explanation
+                       (list :kind :state-postcondition
+                             :function 'withdraw-without-recording!
+                             :case :sufficient-funds :index 0
+                             :form '(= (purse-balance purse)
+                                     (- balance-before amount)))
+                       :outcome (list :kind :returned :values '(100))
+                       :value 100 :case :sufficient-funds
+                       :condition-report nil
+                       :state
+                       (list :capture
+                             (list :status :completed
+                                   :declared '(balance-before id-before)
+                                   :values (list (cons 'balance-before 100)
+                                                 (cons 'id-before 7))
+                                   :error nil)
+                             :state-post
+                             (list :status :violation :reason nil
+                                   :case :sufficient-funds :index 0
+                                   :form '(= (purse-balance purse)
+                                           (- balance-before amount))
+                                   :condition-type nil)))
+                 :shrunk-failure nil :elapsed 0.02))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE"
+                                              "WITHDRAW-WITHOUT-RECORDING!"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE"
+                                              "WITHDRAW-WITHOUT-RECORDING!")
+                      :kind :contract
+                      :status :failed
+                      :trials (list :executed 1 :budget 1
+                                    :budget-source "requested")
+                      :seed "1"
+                      :shrink-status :none
+                      :declares-cases t
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %generation-exhausted-check-report ()
+  "Return a completed contract report whose generation budget ran out.
+
+Measured shape: a real cl-spec checkout's SRC/GENERATION-REQUEST.LISP's
+GENERATION-REQUEST-REPORT and SRC/BACKENDS/CHECK-IT.LISP's generation-
+exhaustion branch, whose outcome carries :FAILURE-PHASE :GENERATION,
+:FAILURE-REASON :GENERATION-BUDGET-EXHAUSTED and no :FAILURE observation at
+all -- the target was never called, so there is nothing here to blame on it."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result
+                 :entity-kind :function-spec
+                 :definition-digest "digest-magnitude-of-impossible"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :unknown :instrumentation :unavailable)
+                 :name 'magnitude-of-impossible :status :error
+                 :trials 0 :budget 50 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil :shrink-report :not-collected
+                 :generation-report
+                 (list :scope :request :unit :bounded-filter-source-call
+                       :policy :and-single-source-v1 :budget 50000
+                       :budget-source :default :default-coefficient 1000
+                       :requested-values 50 :generated-values 0
+                       :attempts 50000 :rejections 50000
+                       :phases
+                       (list :generation
+                             (list :attempts 50000 :rejections 50000)
+                             :shrinking (list :attempts 0 :rejections 0))
+                       :termination :budget-exhausted
+                       :exhaustion-phase :generation :exhausted-at nil)
+                 :failure-phase :generation
+                 :failure-reason :generation-budget-exhausted
+                 :case-report :not-collected
+                 :failure nil :shrunk-failure nil :elapsed 0.9))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE"
+                                              "MAGNITUDE-OF-IMPOSSIBLE"))
+                :source "explicit function argument"
+                :coverage "Only the contract named.")
+          :results
+          (list (list :property (%symbol-data "PROBE"
+                                              "MAGNITUDE-OF-IMPOSSIBLE")
+                      :kind :contract
+                      :status :error
+                      :trials (list :executed 0 :budget 50
+                                    :budget-source "requested")
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 0
+                        :errored 1 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
+(defun %property-check-report-with-not-collected-outcome ()
+  "Return a completed property report whose observation records no target
+outcome.
+
+Measured shape: TESTS/SPEC-CORE-RECORD-TEST.LISP's
+A-NOT-COLLECTED-OUTCOME-DOES-NOT-CRASH-THE-WALK, confirmed there against a
+real cl-spec run of CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE::CLAMP-IS-WRONG-ON-
+PURPOSE: an ordinary property's failing observation carries a bare :OUTCOME
+:NOT-COLLECTED, cl-spec's own answer for \"the target was never classified\"
+-- not evidence that the property body did not run."
+  (let* ((record
+           (list :schema-version 1 :record-kind :result :entity-kind :property
+                 :definition-digest "digest-clamp-is-wrong-on-purpose"
+                 :definition-digest-complete t
+                 :definition-digest-covers
+                 :declaration-and-registered-dependencies
+                 :capabilities (list :generation :available :shrinking
+                                     :available :instrumentation :unavailable)
+                 :name 'clamp-is-wrong-on-purpose :status :failed
+                 :trials 4 :budget 20 :rejected 0 :seed 1 :profile :normal
+                 :options nil :counterexample nil :shrunk-counterexample nil
+                 :shrunk-outcome nil :shrink-report :not-collected
+                 :generation-report :not-collected
+                 :failure-phase nil :failure-reason :predicate-false
+                 :case-report :not-collected
+                 :failure
+                 (list :arguments '(4) :status :failed
+                       :reason :predicate-false
+                       :signature '(:property-false) :explanation nil
+                       :outcome :not-collected :value nil :case nil
+                       :condition-report nil)
+                 :shrunk-failure nil :elapsed 0.01))
+         (core-record (project-core-record record :result-data
+                                            :expected-record-kind :result)))
+    (list :status :completed
+          :verified nil
+          :selection
+          (list :mode "explicit" :count 1
+                :selected (list (%symbol-data "PROBE"
+                                              "CLAMP-IS-WRONG-ON-PURPOSE"))
+                :source "explicit property argument"
+                :coverage "Only the property named.")
+          :results
+          (list (list :property (%symbol-data "PROBE"
+                                              "CLAMP-IS-WRONG-ON-PURPOSE")
+                      :kind :property
+                      :status :failed
+                      :trials (list :executed 4 :budget 20
+                                    :budget-source "profile default")
+                      :seed "1"
+                      :core-record core-record))
+          :counts (list :selected 1 :passed 0 :failed 1
+                        :errored 0 :timed-out 0 :not-run 0)
+          :environment *environment*)))
+
 (deftest not-loaded-response-says-what-to-load
   (testing "the cl-spec-not-loaded answer is actionable in the text itself"
     (let* ((response (build-spec-symbol-response
@@ -1116,3 +1377,47 @@ the result says which."
     (ok (equal "opaque-value" (gethash "reason" value)))
     (ok (equal "hash-table" (gethash "type" value)))
     (ok (null (nth-value 1 (gethash "object_id" value))))))
+
+(deftest the-headline-names-a-case-nobody-reached
+  (let* ((report (%contract-check-report-with-cases))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "NOT VERIFIED" text))
+    (ok (search "insufficient-funds" text))
+    (ok (search "NEVER CALLED" text))
+    ;; The forbidden rendering: a clean verdict beside an unreached branch.
+    (ok (not (search "✓ VERIFIED" text)))))
+
+(deftest shrinking-that-could-not-run-does-not-read-as-shrinking-that-found-nothing
+  (let* ((report (%state-post-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "state-restoration-unavailable" text))
+    (ok (not (search "returned no smaller input" text)))
+    (ok (not (search "no smaller counterexample" text)))))
+
+(deftest a-generation-failure-does-not-read-as-a-target-failure
+  (let* ((report (%generation-exhausted-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "generation" text))
+    (ok (search "did NOT complete" text))
+    ;; Nothing was learned about the function, and the text has to say so.
+    (ok (not (search "the function" text)))))
+
+(deftest a-state-post-violation-says-the-target-returned
+  (let* ((report (%state-post-check-report))
+         (text (first-text (build-spec-check-response report))))
+    (ok (search "failure phase: state-post" text))
+    (ok (search "target WAS called" text))
+    (ok (search "captured:" text))
+    (ok (search "BALANCE-BEFORE" text))
+    ;; cl-spec's real STATE-POST-EVIDENCE records :STATE-STATUS :VIOLATION
+    ;; (src/function-spec.lisp), never :VIOLATED -- confirmed against a real
+    ;; cl-spec checkout.
+    (ok (search "state-post: violation" text))))
+
+(deftest an-ordinary-property-is-never-told-its-body-was-not-called
+  ;; §12 case 14.  A property's observation records no target outcome, so
+  ;; :NOT-COLLECTED there means "no target evidence", not "nothing ran".
+  (let* ((report (%property-check-report-with-not-collected-outcome))
+         (text (first-text (build-spec-check-response report))))
+    (ok (not (search "target was not called" text)))
+    (ok (not (search "target WAS called" text)))))
