@@ -1592,6 +1592,13 @@ here rather than things read off a definition."
         ;; input passed, a usable refusal count, an effective trial count --
         ;; and a verified verdict resting on them.
         (unless data (error 'unreadable-projection))
+        (let ((schema (validate-versioned-record
+                       data :expected-record-kind :definition
+                            :expected-entity-kind :function-spec)))
+          ;; A v2 contract record must not have v1's keys read off it: an
+          ;; absent :KIND means :REQUIRED in v1 and may mean anything later,
+          ;; and the same holds for :CASES and :PRECONDITIONS.
+          (unless (eq :ok schema) (error 'unreadable-projection)))
         (list :argument-count (length (getf data :arguments))
               :kind :contract
               :shrink-enabled t
@@ -1600,11 +1607,17 @@ here rather than things read off a definition."
               ;; :PRE refuses nothing, and saying so is different from having
               ;; failed to read whether it has one.
               :precondition-p (and (getf data :preconditions) t)
+              ;; Three answers, not two.  "This contract declares no cases" and
+              ;; "whether it declares any could not be read" lead to different
+              ;; verdicts, and %VERIFICATION-GAPS must not guess that cases
+              ;; exist in order to report their coverage unknown.
+              :declares-cases (if (getf data :case-selection) t nil)
               :data data
               :known t))
     (error ()
       (list :argument-count nil :kind :contract :shrink-enabled t
-            :trials-table nil :precondition-p :unknown :data nil :known nil))))
+            :trials-table nil :precondition-p :unknown :declares-cases :unknown
+            :data nil :known nil))))
 
 (defun %digest-facts (api name registry facts)
   "Return (:value <string-or-nil> :complete <boolean>) for NAME's digest.
@@ -2015,6 +2028,9 @@ this adapter cannot read: ~A." core-record-reason))))
               :core-record core-record
               :property (symbol-data name)
               :kind kind
+              ;; From the contract facts, because the verdict is about this run
+              ;; of that contract.  A property run has no cases and answers NIL.
+              :declares-cases (getf facts :declares-cases)
               :contract (when (eq kind :contract)
                           (%contract-plist api result executed max-value-chars
                                            source (getf facts :precondition-p)))
@@ -2225,7 +2241,9 @@ the run's own machinery."
 (defparameter +verification-gap-values+
   '(:zero-trials :effective-trials-unknown :rejection-counts-unmeasured
     :input-coverage-unmeasured :contract-not-run :properties-not-run
-    :related-properties-unknown :no-properties-selected)
+    :related-properties-unknown :no-properties-selected
+    :cases-never-called :case-coverage-unknown :generation-incomplete
+    :core-schema-unsupported :contract-schema-unsupported)
   "Every verification_gaps value that is not a per-result status.
 
 A result status that is not a verdict is pushed into the list as itself, and
@@ -2299,6 +2317,45 @@ counted more refusals than trials."
   (let ((contract (getf result :contract)))
     (and contract (not (integerp (getf contract :effective-trials))))))
 
+(defun %core-source (result)
+  "Return the raw cl-spec record behind RESULT, or NIL."
+  (getf (getf result :core-record) :source))
+
+(defun %never-called-cases (result)
+  "Return the declared cases this run never reached, or NIL.
+
+Only a measured case report answers.  A report that did not come back says
+nothing about coverage, which is a different shortfall and has its own gap."
+  (when (eq :collected (getf (getf (getf result :core-record) :field-availability)
+                             :case-report))
+    (getf (getf (%core-source result) :case-report) :never-called)))
+
+(defun %case-coverage-unknown-p (result)
+  "Return true when cases are declared and their run report is missing.
+
+Keyed on :DECLARES-CASES being exactly T.  :UNKNOWN means the contract record
+could not be read, and claiming a coverage gap there would be this adapter
+asserting that cases exist -- which is what it could not find out."
+  (and (eq t (getf result :declares-cases))
+       (not (eq :collected
+                (getf (getf (getf result :core-record) :field-availability)
+                      :case-report)))))
+
+(defun %schema-unsupported-p (result)
+  "Return true when the result record declares a schema version this adapter
+does not know.  Its fields are then unread, so nothing in it is evidence."
+  (let ((record (getf result :core-record)))
+    (and (eq :collected (getf record :availability))
+         (not (getf record :schema-supported)))))
+
+(defun %generation-incomplete-p (result)
+  "Return true when the run stopped in generation rather than on the target.
+
+cl-spec's own :FAILURE-PHASE decides, not the generation report's termination.
+An exhaustion in the shrinking phase leaves the failure established and only
+the reduction unfinished, so it is not a verification shortfall."
+  (eq :generation (getf (%core-source result) :failure-phase)))
+
 (defun %verification-gaps (results &optional selection)
   "Return the reasons RESULTS fall short of a complete verification.
 
@@ -2358,7 +2415,13 @@ establish -- read full coverage for a function whose contract never ran."
       ;; whose count could not be derived is the case where it is least known,
       ;; and the docs promise the gap is there whenever it is unknown.
       (when (%effective-unknown-p result)
-        (pushnew :effective-trials-unknown gaps)))
+        (pushnew :effective-trials-unknown gaps))
+      (when (%never-called-cases result) (pushnew :cases-never-called gaps))
+      (when (%case-coverage-unknown-p result) (pushnew :case-coverage-unknown gaps))
+      (when (%generation-incomplete-p result) (pushnew :generation-incomplete gaps))
+      (when (%schema-unsupported-p result) (pushnew :core-schema-unsupported gaps))
+      (when (eq :unknown (getf result :declares-cases))
+        (pushnew :contract-schema-unsupported gaps)))
     (append (nreverse gaps)
             (when (getf selection :contract-not-run) (list :contract-not-run))
             (when (or (getf selection :properties-not-run)
@@ -2379,7 +2442,18 @@ let a property budgeted zero trials report itself verified."
   (and results
        (every (lambda (result)
                 (and (eq :passed (getf result :status))
-                     (%evaluated-p result)))
+                     (%evaluated-p result)
+                     ;; A declared case nobody reached is a branch of the
+                     ;; contract this run says nothing about.  cl-spec's
+                     ;; :PASSED is untouched; what is refused is calling it
+                     ;; evidence about the whole contract.
+                     (null (%never-called-cases result))
+                     (not (%case-coverage-unknown-p result))
+                     ;; Reading the contract is a precondition for judging its
+                     ;; coverage.  VERIFIED over a declaration this adapter
+                     ;; could not parse would be a verdict about nothing.
+                     (not (eq :unknown (getf result :declares-cases)))
+                     (not (%schema-unsupported-p result))))
               results)
        t))
 

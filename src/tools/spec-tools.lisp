@@ -270,6 +270,16 @@ verification_gaps names what the run could not establish. Values:
   related-properties-unknown  whether any property is registered about the
                               symbol could not be read at all.
   no-properties-selected      the selection was empty. Nothing ran.
+  cases-never-called          a Function Spec declares named cases and at
+                              least one was never reached. status stays
+                              passed -- cl-spec judged the trials that ran --
+                              but the unreached branch was not verified.
+  case-coverage-unknown       cases are declared and no case report came back.
+  generation-incomplete       the run stopped in generation and never reached
+                              a verdict. NOT a finding about the code.
+  core-schema-unsupported     the result record declares a schema version this
+                              cl-mcp cannot read, so nothing in it is evidence.
+  contract-schema-unsupported the same, for the Function Spec declaration.
 A result status that is not a verdict appears here as itself: skipped,
 pending, timeout, not-run, generator-error, backend-error, not-registered,
 undefined-function, unsupported, internal-error. Only passed, failed and error

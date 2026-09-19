@@ -1416,3 +1416,77 @@ listing functions are not -- the shape the blanket listing guard refused."
                    :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
                    :expect-definition-digest "0000000000000000")))
       (ok (eq :false (getf report :reproduction-faithful))))))
+
+(deftest an-unreached-case-is-not-a-verified-contract
+  ;; §12 scenario 1, at the report layer.  cl-spec says :PASSED and that stays;
+  ;; what changes is whether cl-mcp calls it evidence.
+  (let ((results (list (list :status :passed :kind :contract
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             (list :availability :collected :schema-supported t
+                                   :field-availability '(:case-report :collected)
+                                   :source '(:case-report
+                                             (:never-called (:insufficient))))))))
+    (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
+    (ok (member :cases-never-called
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest an-unreadable-case-report-is-unknown-only-when-cases-are-declared
+  (testing "cases are declared and the report did not come back"
+    (let ((results (list (list :status :passed :kind :contract
+                               :declares-cases t
+                               :contract '(:effective-trials 2 :rejected-usable t)
+                               :trials '(:executed 2)
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:case-report :not-collected)
+                                 :source nil)))))
+      (ok (member :case-coverage-unknown
+                  (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+  (testing "whether cases exist could not be read -- do not guess that they do"
+    (let ((results (list (list :status :passed :kind :contract
+                               :declares-cases :unknown
+                               :contract '(:effective-trials 2 :rejected-usable t)
+                               :trials '(:executed 2)
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:case-report :not-collected)
+                                 :source nil)))))
+      (ok (not (member :case-coverage-unknown
+                       (cl-mcp/src/spec-adapter-report::%verification-gaps
+                        results)))))))
+
+(deftest generation-and-shrinking-incompleteness-are-different
+  (testing "the run stopped in generation -- verification did not complete"
+    (let ((results (list (list :status :error :kind :contract
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:failure-phase :collected)
+                                 :source (:failure-phase :generation))))))
+      (ok (member :generation-incomplete
+                  (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+  (testing "the budget ran out while shrinking -- the failure still stands"
+    (let ((results (list (list :status :failed :kind :contract
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:failure-phase :collected)
+                                 :source (:failure-phase nil
+                                          :generation-report
+                                          (:termination :budget-exhausted
+                                           :exhaustion-phase :shrinking)))))))
+      (ok (not (member :generation-incomplete
+                       (cl-mcp/src/spec-adapter-report::%verification-gaps
+                        results)))))))
+
+(deftest a-schema-this-adapter-cannot-read-is-not-a-pass
+  (let ((results (list (list :status :passed :kind :contract
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             '(:availability :collected :schema-supported nil
+                               :schema-version 2 :field-availability nil
+                               :source nil)))))
+    (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
+    (ok (member :core-schema-unsupported
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
