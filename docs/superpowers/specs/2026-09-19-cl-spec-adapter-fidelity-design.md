@@ -630,7 +630,7 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:arguments` | `arguments[]` | 各値 `externalize-value` |
 | `:status` | `status` | keyword→string |
 | `:reason` | `reason` | keyword→string |
-| `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.5） |
+| `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.6） |
 | `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
 | `:outcome` | `outcome` | **構造化オブジェクト**（後述） |
 | `:value` | `value` | `externalize-value` |
@@ -793,7 +793,7 @@ application / user の葉の cons -> externalize-value
 | `digest_omissions[]`（`(:kind :path :target :reason)`） | object[]。`:path` は配列 |
 | `explanation` root | object |
 | `explanation` の `:errors` / `:branches` / `:conjuncts` | error datum object[] |
-| error datum の `:expected` | expected-descriptor projector（object。その `:fields` / `:branches` は object[]） |
+| error datum の `:expected` | **再帰配列**（§6.2.6）。`signature` と同じ扱い |
 | error datum の `:path` / `:tuple-path` / `:field-path` / `:known-tags` | 配列 |
 | error datum の `:actual` / `:key` | **`externalize-value`** |
 | error datum の `:actual-length` / `:expected-length` / `:violated-bound` | §6.2.3 の整数規則 |
@@ -864,7 +864,39 @@ cl-spec の record の写像であって、MCP が足した key を混ぜない�
 error が 10 個あるのに JSON には 5 個しか無く、5 個しか無いように見える、
 という状態を作らない。
 
-### 6.2.5 `signature` — 構造化するが、オブジェクトにはしない
+### 6.2.5 `expected` も位置的タグ付きリストである
+
+当初この表は `:expected` を「object」と書いていた。`explain.lisp` の
+`expected-descriptor` メソッドのうち plist を返す 4 つ（`spec` / `plist-spec` /
+`keyed-field-spec` / `object-spec`）だけを読んだ誤りで、**17 中 13 は位置的な
+タグ付きリスト**である。
+
+```lisp
+(list :range :min N :max M)                       ; タグ + plist 尾部
+(list* :member VALUES)                            ; タグ + 任意個の値
+(list* :and (mapcar #'expected-descriptor ...))   ; タグ + 入れ子 descriptor
+(list :nullable (expected-descriptor ...))
+(list :type X) (list :satisfies P) (list :spec TARGET)
+(list :instance-of C) (list :not D)
+(list* :tuple ...) (list* :list-of D . constraints) (list* :vector-of ...)
+(list* :or ...)
+```
+
+object として walk すると `(:range :min 0 :max 100)` は key 位置に `0` を置き、
+`%json-key` が `symbol-name` を整数に呼んで落ちる。実測で統合テスト 8 件が
+これで落ちた。
+
+したがって `:expected` は **§6.2.5 の `signature` と同じ扱い** — 再帰的な配列に
+投影する。先頭のキーワードは key ではなく tag であり、key として読めば
+cl-spec が宣言していない関係の発明になる。入れ子の `expected-descriptor`
+（`:and` / `:or` / `:tuple` / `:list-of` / `:nullable` / `:not` の内側）は
+再帰的に同じ規則で投影する。
+
+`:kind` で始まる 4 つの形も配列になる。無損失であり、`data` を読む側は
+先頭要素でどの形かを判別できる。object にする分岐を設けないのは、
+「形から役割を推測しない」という §6.2.1 の規則そのものである。
+
+### 6.2.6 `signature` — 構造化するが、オブジェクトにはしない
 
 `signature` も文字列に潰さず、**同じ再帰 projector** を通す。ただし
 **flat array にはならないし、オブジェクトにもしない。**
@@ -1119,7 +1151,7 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
     （`:kind` 欠落 → required 等）が適用されないこと（§3.4）。
 13. **explanation / signature が文字列にならない** — `:errors` が
     ネストしたオブジェクトの配列として残り、`signature` が配列として残ること
-    （§6.2 / §6.2.5）。
+    （§6.2 / §6.2.6）。
 14. **通常 Property の outcome semantics** — Property body が 1 回実行されて
     失敗した run で `failure.outcome.kind = "not-collected"` になり、
     かつテキストが「target was not called」と**言わない**こと。
