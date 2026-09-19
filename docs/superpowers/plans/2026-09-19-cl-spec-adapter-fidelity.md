@@ -2386,12 +2386,40 @@ In `%verified-p`, extend the per-result predicate:
               results)
 ```
 
-- [ ] **Step 5: Run tests, lint, commit**
+- [ ] **Step 5: Document the five new gaps in the tool description**
+
+`tests/spec-tools-test.lisp:297` asserts that **every** value in
+`+verification-gap-values+` appears in the `spec-check` tool description. Adding
+a gap value without describing it turns that suite red, so the description is
+part of this task, not of Task 11.
+
+Add to the `verification_gaps` block in `src/tools/spec-tools.lisp`, in the same
+style as the entries already there:
+
+```text
+  cases-never-called          a Function Spec declares named cases and at
+                              least one was never reached. status stays
+                              passed -- cl-spec judged the trials that ran --
+                              but the unreached branch was not verified.
+  case-coverage-unknown       cases are declared and no case report came back.
+  generation-incomplete       the run stopped in generation and never reached
+                              a verdict. NOT a finding about the code.
+  core-schema-unsupported     the result record declares a schema version this
+                              cl-mcp cannot read, so nothing in it is evidence.
+  contract-schema-unsupported the same, for the Function Spec declaration.
+```
+
+Run `rove tests/spec-tools-test.lisp` and confirm it is green before committing.
+
+- [ ] **Step 6: Run tests, lint, commit**
 
 ```bash
 rove tests/spec-adapter-report-test.lisp
-mallet src/spec-adapter-report.lisp tests/spec-adapter-report-test.lisp
-git add src/spec-adapter-report.lisp tests/spec-adapter-report-test.lisp
+rove tests/spec-tools-test.lisp
+mallet src/spec-adapter-report.lisp src/tools/spec-tools.lisp \
+       tests/spec-adapter-report-test.lisp
+git add src/spec-adapter-report.lisp src/tools/spec-tools.lisp \
+        tests/spec-adapter-report-test.lisp
 git commit -m "feat(spec): a declared case nobody reached is not a verification
 
 cl-spec's :PASSED keeps its meaning and its place in results[].status.  What
@@ -2985,25 +3013,12 @@ does not reach the state under test makes its test green for the wrong reason."
   that test fails.
 - Modify: `docs/cl-spec-adapter-feedback.md` — a closing note
 
-- [ ] **Step 1: Document the new gap values**
+The five new `verification_gaps` values were documented in Task 8, because
+`tests/spec-tools-test.lisp` pins the description to `+verification-gap-values+`
+and a gap added without a description turns that suite red in the task that adds
+it. What remains here is the prose that no test pins.
 
-Add to the `spec-check` description's `verification_gaps` block in
-`src/tools/spec-tools.lisp`, in the same style as the existing entries:
-
-```text
-  cases-never-called          a Function Spec declares named cases and at
-                              least one was never reached. status stays
-                              passed -- cl-spec judged the trials that ran --
-                              but the unreached branch was not verified.
-  case-coverage-unknown       cases are declared and no case report came back.
-  generation-incomplete       the run stopped in generation and never reached
-                              a verdict. NOT a finding about the code.
-  core-schema-unsupported     the result record declares a schema version this
-                              cl-mcp cannot read, so nothing in it is evidence.
-  contract-schema-unsupported the same, for the Function Spec declaration.
-```
-
-- [ ] **Step 2: Document `core_result` in `docs/tools.md`**
+- [ ] **Step 1: Document `core_result` in `docs/tools.md`**
 
 Add under the `spec-check` bullets:
 
@@ -3046,7 +3061,7 @@ And under `spec-describe`:
     no `:pre`, no capture form, no case guard, no post form.
 ```
 
-- [ ] **Step 3: Run every check**
+- [ ] **Step 2: Run every check**
 
 ```bash
 # Cold compile, to catch warnings from all changed files
@@ -3063,7 +3078,7 @@ For `rove cl-mcp.asd`, count the `;; testing '` lines against the number of test
 packages: the final Summary covers only the last package, and a load failure
 still exits 0. Two `×` are the expected baseline for this repo.
 
-- [ ] **Step 4: Close the feedback note**
+- [ ] **Step 3: Close the feedback note**
 
 Append a dated section to `docs/cl-spec-adapter-feedback.md` recording which of
 its 2026-03 P1 items current cl-spec has since answered — 1.1 (`:budget` and
@@ -3073,7 +3088,7 @@ remain. Name what still cannot be exposed: `call-outcome`'s readers are not
 exported, so the target outcome is readable only through `observation-data`'s
 plist, and `check-call` is deferred with its reasons in §11 of the design note.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add docs/ src/tools/spec-tools.lisp
