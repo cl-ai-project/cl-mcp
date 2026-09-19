@@ -11,7 +11,10 @@
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/spec-core-record
                 #:safe-json-integer-p
-                #:project-value))
+                #:project-value
+                #:project-record
+                #:*projection-max-depth*
+                #:*projection-max-length*))
 
 (in-package #:cl-mcp/tests/spec-core-record-test)
 
@@ -47,3 +50,77 @@
       (ok (eq :value (first node)))
       (ok (stringp (getf (second node) :printed)))
       (ok (equal "hash-table" (getf (second node) :type))))))
+
+(deftest object-descriptor-projects-only-declared-keys
+  (let ((shape '(:object (:kind . :leaf) (:index . :leaf))))
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:kind :state-postcondition :index 0 :surprise 7) shape)
+      (ok (null issues))
+      (testing "declared keys are projected under snake_case names"
+        (ok (equal '(:scalar "state-postcondition")
+                   (cdr (assoc "kind" (second node) :test #'equal))))
+        (ok (equal '(:scalar 0)
+                   (cdr (assoc "index" (second node) :test #'equal)))))
+      (testing "an undeclared key is named and its value is not interpreted"
+        (ok (equal '("surprise") unknown))
+        (ok (null (assoc "surprise" (second node) :test #'equal)))))))
+
+(deftest a-keyword-list-is-an-array-not-an-object
+  ;; §6.2.1's own counterexample.  (:AT-LEAST :AT-MOST) is two case names;
+  ;; read as a plist it becomes {"at-least": "at-most"}, a relation cl-spec
+  ;; never declared.
+  (let ((node (project-record '(:at-least :at-most) :word-list)))
+    (ok (eq :array (first node)))
+    (ok (equal '((:scalar "at-least") (:scalar "at-most")) (second node)))))
+
+(deftest actual-and-expected-are-projected-differently
+  ;; The same cons under two keys of one error datum: :ACTUAL is a value from
+  ;; the code under test, :EXPECTED is a descriptor cl-spec built.
+  (let* ((shape '(:object (:actual . :opaque) (:expected . (:object (:kind . :leaf)))))
+         (node (project-record '(:actual (1 2 3) :expected (:kind :range)) shape))
+         (fields (second node)))
+    (testing ":actual is externalized, never structured"
+      (let ((actual (cdr (assoc "actual" fields :test #'equal))))
+        (ok (eq :value (first actual)))
+        (ok (search "1 2 3" (getf (second actual) :printed)))))
+    (testing ":expected keeps its structure"
+      (let ((expected (cdr (assoc "expected" fields :test #'equal))))
+        (ok (eq :object (first expected)))
+        (ok (equal '(:scalar "range")
+                   (cdr (assoc "kind" (second expected) :test #'equal))))))))
+
+(deftest an-alist-of-capture-values-becomes-name-value-pairs
+  ;; Measured shape: ((BALANCE-BEFORE . 30) (ID-BEFORE . 7)).  Dotted pairs are
+  ;; not proper lists, so an array rule has nothing to say about them.
+  (let* ((node (project-record (list (cons 'cl-user::balance-before 30))
+                               '(:alist :opaque)))
+         (entry (first (second node)))
+         (fields (second entry)))
+    (ok (eq :array (first node)))
+    (ok (equal "BALANCE-BEFORE"
+               (getf (second (cdr (assoc "name" fields :test #'equal))) :name)))
+    (ok (eq :value (first (cdr (assoc "value" fields :test #'equal)))))))
+
+(deftest a-length-cut-is-reported-not-hidden
+  (let ((*projection-max-length* 2))
+    (multiple-value-bind (node issues)
+        (project-record '(:a :b :c :d :e) :word-list '("failure" "cases"))
+      (ok (= 2 (length (second node))))
+      (ok (= 1 (length issues)))
+      (let ((issue (first issues)))
+        (ok (equal '("failure" "cases") (getf issue :path)))
+        (ok (eq :length-limit (getf issue :reason)))
+        ;; Five errors must not arrive as two that look complete.
+        (ok (eql 3 (getf issue :omitted-items)))))))
+
+(deftest a-depth-cut-leaves-the-standard-value-node
+  (let ((*projection-max-depth* 1)
+        (shape '(:object (:inner . (:object (:deeper . :leaf))))))
+    (multiple-value-bind (node issues)
+        (project-record '(:inner (:deeper 1)) shape)
+      (let ((inner (cdr (assoc "inner" (second node) :test #'equal))))
+        ;; Not a marker invented for this: the externalized-value plist is what
+        ;; already represents any Lisp value everywhere else in the record.
+        (ok (eq :value (first inner))))
+      (ok (eq :depth-limit (getf (first issues) :reason)))
+      (ok (equal '("inner") (getf (first issues) :path))))))
