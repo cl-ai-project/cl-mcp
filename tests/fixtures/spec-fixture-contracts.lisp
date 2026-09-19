@@ -38,3 +38,53 @@
   "The magnitude is never negative, and has no upper bound worth naming."
   (:args (value small-int))
   (:returns (range integer 0 *)))
+
+(cl-spec:defgenerator scripted-arguments ()
+  "Return the next scripted argument list, so a test controls its inputs."
+  (pop *scripted-arguments*))
+
+(cl-spec:defspec-function remaining-balance
+  "Require the remainder when the balance suffices, and the named error when
+it does not."
+  (:args (balance (range integer 0 1000)) (amount (range integer 1 1000)))
+  (:args-generator scripted-arguments)
+  (:cases
+    (:sufficient-funds
+      "The amount fits: return the remaining balance."
+      (:when (<= amount balance))
+      (:returns (range integer 0 *))
+      (:post (= result (- balance amount))))
+    (:insufficient-funds
+      "The amount does not fit: signal the named error."
+      (:when (> amount balance))
+      (:signals (type insufficient-funds)))))
+
+(cl-spec:defspec-function overlapping-balance
+  "Two guards that both hold when the amounts are equal."
+  (:args (balance (range integer 0 1000)) (amount (range integer 1 1000)))
+  (:args-generator scripted-arguments)
+  (:cases
+    (:at-least (:when (>= balance amount)) (:returns (range integer 0 *)))
+    (:at-most (:when (<= balance amount)) (:returns (range integer 0 *)))))
+
+(cl-spec:defspec-function withdraw-without-recording!
+  "A successful call must reduce the stored balance, which this target does not."
+  (:args (purse (satisfies purse-p)) (amount (range integer 1 100)))
+  (:args-generator scripted-arguments)
+  (:capture
+    (balance-before (purse-balance purse))
+    (id-before (purse-id purse)))
+  (:cases
+    (:sufficient-funds
+      (:when (<= amount balance-before))
+      (:returns (type integer))
+      (:state-post (= (purse-balance purse) (- balance-before amount))
+                   (eql (purse-id purse) id-before)))))
+
+(cl-spec:defspec impossible-int (and (range integer 0 100)
+                                     (satisfies never-satisfied-p)))
+
+(cl-spec:defspec-function magnitude-of-impossible
+  "A contract whose argument spec no generated candidate satisfies."
+  (:args (value impossible-int))
+  (:returns (range integer 0 *)))

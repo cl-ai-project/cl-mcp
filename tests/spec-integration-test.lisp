@@ -517,3 +517,140 @@ reached the caller."
                      (gethash "function_specs" (gethash "counts" response))))
               (ok (search "function specs:" text))
               (ok (search "CLAMP" text))))))))
+
+(deftest real-named-cases-report-the-one-never-reached
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (setf (symbol-value (find-symbol "*SCRIPTED-ARGUMENTS*"
+                                         "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+              (list '(10 2) '(20 5)))
+        (let* ((response (spec-check-response
+                          (make-ht "function" (%fixture-name "REMAINING-BALANCE")
+                                   "trials" 2 "seed" "1")))
+               (result (%first-result response))
+               (record (gethash "data" (gethash "core_result" result)))
+               (cases (gethash "case_report" record))
+               (text (%text response)))
+          (ok (equal "passed" (gethash "status" result)))
+          (testing "the report distinguishes reached from declared"
+            (ok (= 2 (length (gethash "declared_cases" cases))))
+            ;; EQUALP, not EQUAL: EQUAL compares general vectors by EQ, so it
+            ;; never matches a freshly-consed one; EQUALP compares elements.
+            (ok (equalp #("insufficient-funds") (gethash "never_called" cases))))
+          (testing "and the verdict does not read as full coverage"
+            ;; YASON:FALSE is a value, not a function -- (YASON:FALSE) is
+            ;; undefined, and every other use in this file spells it bare.
+            (ok (eq yason:false (gethash "verified" response)))
+            (ok (find "cases-never-called"
+                      (gethash "verification_gaps" response) :test #'equal))
+            (ok (search "NEVER CALLED" text)))))))
+
+(deftest real-state-post-failure-keeps-the-target-outcome
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (let ((purse (funcall (find-symbol "MAKE-PURSE"
+                                           "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")
+                              100 7)))
+          (setf (symbol-value (find-symbol "*SCRIPTED-ARGUMENTS*"
+                                           "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+                (list (list purse 30)))
+          (let* ((response (spec-check-response
+                            (make-ht "function"
+                                     (%fixture-name "WITHDRAW-WITHOUT-RECORDING!")
+                                     "trials" 1 "seed" "1")))
+                 (result (%first-result response))
+                 (record (gethash "data" (gethash "core_result" result)))
+                 (failure (gethash "failure" record))
+                 (text (%text response)))
+            (ok (equal "state-post" (gethash "failure_phase" record)))
+            (ok (equal "state-postcondition" (gethash "failure_reason" record)))
+            (testing "the target returned normally and that is visible"
+              (ok (equal "returned"
+                         (gethash "kind" (gethash "outcome" failure)))))
+            (testing "the captured pre-state survives"
+              (ok (plusp (length (gethash "values"
+                                          (gethash "capture"
+                                                   (gethash "state" failure)))))))
+            (testing "and state-post is reported as violated, not as a target bug"
+              (ok (equal "violation"
+                         (gethash "status" (gethash "state_post"
+                                                    (gethash "state" failure)))))
+              (ok (search "target WAS called" text))
+              (ok (search "state-post: violation" text))))))))
+
+(deftest real-case-selection-error-does-not-blame-the-target
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (setf (symbol-value (find-symbol "*SCRIPTED-ARGUMENTS*"
+                                         "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+              (list '(5 5)))
+        (let* ((response (spec-check-response
+                          (make-ht "function" (%fixture-name "OVERLAPPING-BALANCE")
+                                   "trials" 1 "seed" "1")))
+               (result (%first-result response))
+               (record (gethash "data" (gethash "core_result" result)))
+               (text (%text response)))
+          (ok (equal "case-selection" (gethash "failure_phase" record)))
+          (testing "the target was never called"
+            ;; Not a (:kind ...) object here: cl-spec's raw :OUTCOME on this
+            ;; observation is the bare :NOT-COLLECTED keyword, and
+            ;; PROJECT-RECORD's atom-for-container rule (spec-core-record.lisp)
+            ;; projects an atom landing under an :object-shaped field as the
+            ;; atom itself rather than inventing a {"kind": ...} wrapper --
+            ;; confirmed against a real run before this assertion was written.
+            (ok (equal "not-collected" (gethash "outcome" (gethash "failure" record)))))
+          (testing "the structured selection evidence is preserved"
+            (ok (eql 1 (gethash "case_selection_errors"
+                                (gethash "case_report" record)))))
+          (testing "and the text says which half broke"
+            (ok (search "the target was NOT called" text))
+            ;; A counterexample exists for this run, and it must not read as
+            ;; an input the function failed on.
+            (ok (not (search "the function failed" text))))))))
+
+(deftest real-generation-exhaustion-is-not-a-target-failure
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (let* ((response (spec-check-response
+                          (make-ht "function"
+                                   (%fixture-name "MAGNITUDE-OF-IMPOSSIBLE")
+                                   "trials" 1 "seed" "1")))
+               (result (%first-result response))
+               (record (gethash "data" (gethash "core_result" result)))
+               (generation (gethash "generation_report" record))
+               (text (%text response)))
+          (ok (gethash "termination" generation))
+          (ok (equal "generation" (gethash "failure_phase" record)))
+          (ok (find "generation-incomplete"
+                    (gethash "verification_gaps" response) :test #'equal))
+          (ok (search "did NOT complete" text))))))
+
+(deftest real-state-contract-says-why-it-was-not-shrunk
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (with-fixture-registry
+        (let ((purse (funcall (find-symbol "MAKE-PURSE"
+                                           "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE")
+                              100 7)))
+          (setf (symbol-value (find-symbol "*SCRIPTED-ARGUMENTS*"
+                                           "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+                (list (list purse 30)))
+          (let* ((response (spec-check-response
+                            (make-ht "function"
+                                     (%fixture-name "WITHDRAW-WITHOUT-RECORDING!")
+                                     "trials" 1 "seed" "1")))
+                 (result (%first-result response))
+                 (record (gethash "data" (gethash "core_result" result)))
+                 (shrink (gethash "shrink_report" record))
+                 (text (%text response)))
+            (ok (equal "state-restoration-unavailable"
+                       (gethash "termination" shrink)))
+            (testing "the original evidence is still there"
+              (ok (gethash "failure" record)))
+            (testing "and nothing claims a minimal counterexample"
+              (ok (not (search "no smaller" text)))
+              (ok (search "nothing restores" text))))))))
