@@ -491,6 +491,9 @@
     ;; its own root -- the failure mode was invisible from the wire.
     (let* ((original-root *project-root*)
            (original-cwd (ignore-errors (uiop:getcwd)))
+           ;; handle-initialize moves this too, and the cleanup below deletes
+           ;; the directory it would be left pointing at.
+           (original-defaults *default-pathname-defaults*)
            (base (uiop:ensure-directory-pathname
                   (asdf:system-source-directory :cl-mcp)))
            ;; Built natively on purpose: MERGE-PATHNAMES on a bracketed string
@@ -511,6 +514,7 @@
                         (uiop:native-namestring dir))
                  (format nil "the root must actually be applied; it is ~S"
                          (and *project-root* (uiop:native-namestring *project-root*)))))
-        (setf *project-root* original-root)
+        (setf *project-root* original-root
+              *default-pathname-defaults* original-defaults)
         (when original-cwd (ignore-errors (uiop:chdir original-cwd)))
         (ignore-errors (uiop:delete-empty-directory dir))))))
