@@ -826,7 +826,7 @@ application / user の葉の cons -> externalize-value
 | `outcome` | object。`values[]` は各要素 `externalize-value` |
 | `state` / `state.capture` / `state.state_post` | object |
 | `state.capture.declared` | `symbol_data[]` |
-| `state.capture.values` | `[{name, value}]`。`name` は `symbol_data`、`value` は `externalize-value`、ただし §6.3 の opaque marker はそのまま通す |
+| `state.capture.values` | `[{name, availability, value?, reason?, type?}]`。cl-spec v1 の tagged availability record をそのまま写す。`name` は `symbol_data`、`:collected` の `value` は `externalize-value`、`:unavailable` は `value` を持たず `reason` / `type` を持つ（§6.3） |
 | `state.capture.error` | object |
 | `case_report` | object |
 | `case_report.cases[]` | object[] |
@@ -1045,20 +1045,36 @@ state.state_post = {status, reason, case, index, form, condition_type}
 
 ### 6.3 cl-spec が「凍結できなかった」と言った捕捉値
 
-`project-capture-value` は、スナップショットが同一性で保持してしまう値
-（CLOS インスタンス、構造体、ハッシュテーブル、関数など）を
+> **2026-09-20 改訂（cl-spec PR #34 / merge `08d3ada` 以降）**: この節は当初、
+> cl-spec が捕捉値を `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)` という
+> 素の plist で置き換える、という前提で書かれていた。現在の cl-spec v1 は
+> 捕捉 binding ごとに明示的な availability record を返す:
+>
+> ```lisp
+> (:name NAME :availability :collected :value VALUE)
+> (:name NAME :availability :unavailable :reason :opaque-value :type TYPE)
+> ```
+>
+> したがって availability は**値の形ではなく record の `:availability` キー**で
+> 決まる。`(:unavailable :reason :opaque-value :type :hash-table)` という plist も
+> `:collected` な application value でありうるので、cl-mcp は形によるマーカー
+> 認識を完全に削除した。以下は改訂後の規則。
 
-```lisp
-(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)
-```
+cl-spec の `capture-value-data` は、スナップショットが同一性で保持してしまう値
+（CLOS インスタンス、構造体、ハッシュテーブル、関数など）について
+`:availability :unavailable` を返し、`:reason :opaque-value` と
+`:type <ordinary data>` を添える。「この値は証拠として凍結できなかった」という
+**cl-spec 側の明示的な宣言**であり、`:value` キーは存在しない。
 
-として投影する。これは「この値は証拠として凍結できなかった」という
-**cl-spec 側の明示的な宣言**である。
+cl-mcp はこれを構造的な unavailable evidence として写す。application value が
+無いので `externalize-value` を呼ばず、したがって `object_id` も作らない。
+`:collected` のときだけ `:value` を `externalize-value` にかける。値の形は
+一切見ない。
 
-cl-mcp がこれをさらに `externalize-value` にかけて `object_id` を付けると、
-「そのオブジェクトを証拠として取得できた」ように見えてしまう。マーカーを
-検出して、そのまま unavailable として通す。`object_id` を付けない。
-テストを 1 件立てる（§12）。
+`:type` は v1 では通常の Lisp データ（named type symbol、
+`(:kind :anonymous-class :metaclass NAME)`、`:unknown`）で、live な class object は
+現れない。`schema-info` の `:capture-value-type-forms`
+（`:named` / `:anonymous-class` / `:unknown`）がその domain を宣言している。
 
 これにより
 
@@ -1255,8 +1271,10 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 15. **`:actual` と `:expected` の非対称** — error datum の `:expected` が
     構造のまま残り、`:actual` が `externalize-value` の形になること。
     同じ cons でも扱いが逆になることの回帰テスト（§6.2.1）。
-16. **alist の捕捉値** — `state.capture.values` の `(NAME . VALUE)` が
-    `[{name, value}]` になること（§6.2.2）。
+16. **tagged capture record** — `state.capture.values` の availability record が
+    `[{name, availability, value?|reason?, type?}]` になり、`:collected` の
+    `value` だけが `externalize-value` を通ること。旧 alist `(NAME . VALUE)` の
+    互換経路は持たない（§6.2.2）。
 17. **transport metadata が `data` に混ざらない** — 切り詰めが起きても
     `core_result.data` に `_complete` / `_omitted_items` 等が現れず、
     `core_result.projection.issues` に出ること（§3.1 / §6.2.4）。
@@ -1273,8 +1291,10 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
     無い値を返したとき、legacy fallback せず `internal-error` になること
     （§3.5）。
 22. **不透明な捕捉値** — cl-spec が
-    `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...)` を返したとき、
-    `object_id` を付けず unavailable のまま通ること（§6.3）。
+    `(:name N :availability :unavailable :reason :opaque-value :type T)` を返した
+    とき、`value` も `object_id` も作らず unavailable のまま通ること。
+    逆に `:availability :collected` の値が旧マーカーと同形の plist でも、
+    application value として `externalize-value` されること（§6.3）。
 
 ### builder（`tests/spec-response-builders-test.lisp`）
 
@@ -1325,29 +1345,20 @@ stub fixture（旧 revision 相当）での結果の双方を報告する。
 
 **cl-spec 側の表現について**（`docs/cl-spec-adapter-feedback.md` §7.2 に送付済み）
 
-- 凍結不能値のマーカー `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE X)` は素の
-  plist なので、テスト対象コードから出た同形のドメイン値と区別できない。
-  どんな認識器もパターンマッチであり誤検知しうる。構造体か予約された
-  uninterned マーカーなら消費側が確実に判定できる。
+- 凍結不能値の availability は cl-spec PR #34（merge `08d3ada`）で tagged
+  union になり、値の形による認識は不要になった（旧 P1 は解消）。
 - `CALL-OUTCOME` の reader が `CL-SPEC` から export されていないため、
   observation の target outcome は `OBSERVATION-DATA` の plist 経由でしか
   読めない。
 
 **cl-mcp 側**
 
-- `%format-core-evidence` の state-post 行は宣言された `:form` を
-  `princ-to-string` する。テスト対象コードの値ではなく著者が書いた source form
-  なので C2 とは種類が違うが、`with-display-printing` の `*print-level*` /
-  `*print-length*` を掛ければ `max_chars` を builder に通さずとも非停止の
-  リスクは消える。check テキストで唯一残る無制限印字。
-- `%strings`（`src/tools/spec-response-builders.lisp`）も同じ無防備な形。
-  シンボルや語のリストしか流れないので C2 の実例ではない。
+- `%strings`（`src/tools/spec-response-builders.lisp`）は無防備な
+  `princ-to-string` を使う。シンボルや語のリストしか流れないので実害はない。
 - builder 層の fixture は統合層の `%ok-core-record-read-whole` のような
   実レコード照合を持たない。`%state-post-check-report` の `:shrunk-outcome nil`
   は、実際の `:state-restoration-unavailable` run が記録する `:none` と
   一歩ずれている。
-- alist / pairs の **名前**に `char-limit` が立つと、その値に立ったものと
-  同じ path を報告する。
 
 **このブランチが得た、次のアダプタ作業への規則**
 

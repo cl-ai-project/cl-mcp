@@ -1233,7 +1233,21 @@ construction is supported; it does not guarantee successful draws or reductions.
     long string leaf (a `condition_report`, a docstring) was cut, and
     `atom-for-container` when cl-spec's record did not have the shape this
     adapter's descriptor predicted. `omitted_items` counts list elements for
-    the first and characters for the third.
+    the first and characters for the third. `omitted_items_exact` says whether
+    that count is the true total: `true` for a measured cut, `false` when the
+    value was longer than the adapter will walk to count (the count is then a
+    lower bound, and `false` is JSON `false`, never `null`). An issue with no
+    omitted count — `depth-limit` — carries neither key.
+  - cl-spec v1's `state.capture.values` is an array of tagged availability
+    records, and `data` mirrors them: `{"name": ..., "availability":
+    "collected", "value": ...}` for a value that was frozen, or `{"name": ...,
+    "availability": "unavailable", "reason": "opaque-value", "type": ...}` for
+    one that was not. Only `collected` treats `value` as application data, and
+    an `unavailable` record has no `value` and no `object_id` — the two are
+    decided by the record's own `availability`, never by the shape of a value,
+    so a legal application value that happens to look like cl-spec metadata is
+    still data. A diagnostic `type` is ordinary data: a named type symbol,
+    `{"kind": "anonymous-class", "metaclass": ...}`, or the string `"unknown"`.
   - `data.failure` and `data.shrunk_failure` are observations, themselves a
     projection of cl-spec's own field names. Their `outcome` is **either** an
     object — `{"kind": "returned", "values": [...]}` or `{"kind": "signaled",

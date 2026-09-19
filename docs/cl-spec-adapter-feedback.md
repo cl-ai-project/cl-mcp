@@ -341,7 +341,8 @@ adapter は `find-package` + `find-symbol` で遅延解決し、欠けている�
   `spec-check` に `core_record` / `core_result` を追加し、cl-spec の
   versioned record を transport metadata の外側にそのまま包んで運ぶ改修。
   設計は `docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md`）
-- 対象 cl-spec revision: `4f149e1`（PR #33 `check-call` マージ済み）
+- 対象 cl-spec revision: `08d3ada`（PR #33 `check-call`、PR #34
+  capture-value tagged union マージ済み）
 - 立場: 引き続き **cl-spec の consumer**。cl-spec 側のコードは 1 行も変更していない
 
 ### 7.1 2026-03 の P1 3 件のその後
@@ -380,26 +381,35 @@ adapter は `find-package` + `find-symbol` で遅延解決し、欠けている�
 **原理的に不完全な回避策**に頼っていたが、今回の revision からは
 `result-data`（versioned record）1 本を読むだけで区別がつく。
 
-### 7.2 新規 P1: `:UNAVAILABLE` marker が偶然の同形値と衝突しうる
+### 7.2 解消 — 捕捉値の availability が tagged union になった（PR #34）
 
-cl-spec が凍結できなかった捕捉値の代わりに置くマーカーは
-`(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)` という**素の plist**である
-（実測で確認）。
+以前ここには「cl-spec が凍結できなかった捕捉値のマーカーが素の plist
+`(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)` であり、対象コード側の
+ドメイン値が偶然同じ形を取ると区別できない」という P1 を書いていた。
+cl-spec PR #34（merge `08d3ada`）で解消した。
 
-**consumer への影響**: この形は、対象コード側のドメイン値がたまたま同じ形の
-plist を返した場合と区別できない。cl-mcp 側の認識関数
-（`spec-core-record.lisp` の `%opaque-marker-node`）はこの形の cons を
-見つけたら無条件にマーカーとして扱うが、これは**パターンマッチであって
-証明ではない**。false positive が起きれば、対象コードが実際に返した値を
-「cl-spec が値を凍結できなかった」という cl-spec 側のメタ情報として
-cl-mcp が誤って報告することになる。
+`schema-info` の version は 1 のままだが、`state.capture.values` は
+`(NAME . VALUE)` の alist ではなくなり、捕捉 binding ごとの明示的な
+availability record になった:
 
-**提案**: 区別可能な sentinel にする。候補は (a) 構造体
-（`(defstruct unfreezable-value reason type)` なら `typep` で確実に判定でき
-る）、(b) `cl-spec` パッケージ内で reserved な uninterned symbol を marker
-として使う。いずれも「この値は cl-spec 自身が作った」ことを構造的に保証し、
-consumer 側のパターンマッチを不要にする。これは特定 adapter の要望ではなく、
-**この値の表現そのもの**についての提案である。
+```lisp
+(:name NAME :availability :collected :value VALUE)
+
+(:name NAME :availability :unavailable :reason :opaque-value :type TYPE)
+```
+
+`:availability` は framework metadata、`:value` は application data であり、
+`:value` は `:collected` のときにしか現れない。したがって
+`(:unavailable :reason :opaque-value :type :hash-table)` という**合法な
+アプリケーション値**は `:collected` としてそのまま `:value` に入り、
+availability の判定が値の形に依存することはなくなった。`:type` も通常の
+Lisp データ（named type symbol、`(:kind :anonymous-class :metaclass NAME)`、
+`:unknown`）だけになった。
+
+**consumer 側の対応**: cl-mcp は availability record をそのまま読み、
+`%opaque-marker-node` のような形ベースの認識を完全に削除した。詳細は
+`src/spec-core-record.lisp` の `:capture-value-record` descriptor と
+`docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md` を参照。
 
 ### 7.3 引き続き露出できないもの
 

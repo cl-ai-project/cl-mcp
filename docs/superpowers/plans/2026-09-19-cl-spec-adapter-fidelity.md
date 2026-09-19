@@ -1,5 +1,17 @@
 # cl-spec Adapter Fidelity Implementation Plan
 
+> **2026-09-20 追記（cl-spec PR #34 / merge `08d3ada` 以降）**: この計画は
+> 旧 cl-spec の `state.capture.values = ((NAME . VALUE) ...)` を前提に書かれた
+> 歴史的記録である。現在の cl-spec v1 は binding ごとの tagged availability
+> record（`(:name N :availability :collected :value V)` /
+> `(:name N :availability :unavailable :reason :opaque-value :type T)`）を返す
+> ため、実装は `(:alist :opaque)` ではなく
+> `(:array (:ref :capture-value-record))` を使い、形による opaque marker 認識
+> （`%opaque-marker-node`）は削除された。以下の本文中の該当箇所は当時のまま
+> 残すが、現行の正は
+> `docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md` §6.3 と
+> `src/spec-core-record.lisp` を参照。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Carry cl-spec's versioned contract and execution records through the MCP
