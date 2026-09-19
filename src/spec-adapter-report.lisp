@@ -872,6 +872,30 @@ about version 1 only; the caller refuses any other version before reaching it."
                                     (when name (symbol-data name)))
                       :keyword (getf argument :keyword))))
 
+(defun %clause-text (forms max-chars)
+  "Return (values TEXT COMPLETE-P OMITTED-CHARS) for one clause's FORMS.
+
+A contract clause -- :PRE, :POST, :STATE-POST -- is a list of forms that must
+all hold, and printing the bare list hands a reader something that cannot be
+pasted back: (FORM FORM) reads as a call of the first.  One form prints as
+itself and several print as (AND ...), which is what the clause means and what
+a reader can evaluate.
+
+Every clause is bounded and reports its cut, because a clause silently cut at
+MAX-CHARS reads as the whole condition: a reader takes it for the contract and
+concludes the definition admits inputs it refuses, or requires less than it
+does.
+
+No forms answers COMPLETE-P :NOT-APPLICABLE -- \"this definition has no such
+clause\" -- which is the third answer a boolean cannot give, and distinct from
+a clause that is there and was cut."
+  (if forms
+      (%print-bounded-form (if (null (rest forms))
+                               (first forms)
+                               (cons 'and forms))
+                           max-chars)
+      (values nil :not-applicable nil)))
+
 (defun %contract-capture (bindings max-chars)
   "Return a contract's :CAPTURE declarations, bounded.
 
@@ -890,19 +914,20 @@ this list runs no capture form."
 
 Order is the contract's, because case selection is exclusive and the author
 wrote them in the order they are tried.  Guards and postconditions are the
-source forms; their compiled counterparts are not projected and are not run."
+source forms; their compiled counterparts are not projected and are not run.
+
+:POSTCONDITIONS and :STATE-POST are both clauses and both go through
+%CLAUSE-TEXT, so each arrives as a form a reader can paste back and each
+carries the complete/omitted pair beside it.  A :STATE-POST that was cut with
+no such pair is a clause a reader takes for the whole condition."
   (loop for case in cases
         collect
         (multiple-value-bind (guard guard-complete guard-omitted)
             (%print-bounded-form (getf case :when) max-chars)
-          (let ((post (getf case :postconditions)))
-            (multiple-value-bind (post-text post-complete post-omitted)
-                (if post
-                    (%print-bounded-form (if (null (rest post))
-                                             (first post)
-                                             (cons 'and post))
-                                         max-chars)
-                    (values nil :not-applicable nil))
+          (multiple-value-bind (post-text post-complete post-omitted)
+              (%clause-text (getf case :postconditions) max-chars)
+            (multiple-value-bind (state-text state-complete state-omitted)
+                (%clause-text (getf case :state-post) max-chars)
               (list :name (getf case :name)
                     :documentation (getf case :documentation)
                     :guard guard
@@ -916,9 +941,9 @@ source forms; their compiled counterparts are not projected and are not run."
                     :postconditions-omitted-chars post-omitted
                     :post-value-variables
                     (mapcar #'symbol-data (getf case :post-value-variables))
-                    :state-post
-                    (let ((forms (getf case :state-post)))
-                      (when forms (%print-bounded-form forms max-chars)))))))))
+                    :state-post state-text
+                    :state-post-complete state-complete
+                    :state-post-omitted-chars state-omitted))))))
 
 (defun %describe-function-spec (api name registry max-chars)
   "Return the detail plist for the contract registered for NAME.
@@ -953,17 +978,10 @@ versions." reason))))
 this adapter cannot read: ~A. An empty description would read as a contract ~
 with no arguments and no :returns." reason)))))
     (flet ((clause (forms)
-             (when forms
-               (multiple-value-bind (text complete omitted)
-                   (%print-bounded-form (if (null (rest forms))
-                                            (first forms)
-                                            (cons 'and forms))
-                                        max-chars)
-                 (list text complete omitted))))
-           (form-text (form)
-             (when form (%print-bounded-form form max-chars))))
+             (multiple-value-list (%clause-text forms max-chars))))
       (let ((pre (clause (getf data :preconditions)))
-            (post (clause (getf data :postconditions))))
+            (post (clause (getf data :postconditions)))
+            (state-post (clause (getf data :state-post))))
         (multiple-value-bind (source source-complete source-omitted)
             (%print-bounded-form (getf data :source-form) max-chars)
           (multiple-value-bind (digest complete)
@@ -987,14 +1005,16 @@ with no arguments and no :returns." reason)))))
                   :post-value-variables
                   (mapcar #'symbol-data (getf data :post-value-variables))
                   :capture (%contract-capture (getf data :capture) max-chars)
-                  :state-post (form-text (getf data :state-post))
+                  :state-post (first state-post)
+                  :state-post-complete (second state-post)
+                  :state-post-omitted-chars (third state-post)
                   :case-selection (getf data :case-selection)
                   :cases (%contract-cases (getf data :cases) max-chars)
                   :preconditions (first pre)
-                  :preconditions-complete (if pre (second pre) :not-applicable)
+                  :preconditions-complete (second pre)
                   :preconditions-omitted-chars (third pre)
                   :postconditions (first post)
-                  :postconditions-complete (if post (second post) :not-applicable)
+                  :postconditions-complete (second post)
                   :postconditions-omitted-chars (third post)
                   :source-form source
                   :source-form-complete source-complete

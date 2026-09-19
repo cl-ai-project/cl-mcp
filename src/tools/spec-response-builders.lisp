@@ -15,6 +15,8 @@
                 #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/spec-adapter-core
+                #:externalize-value)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
                 #:listing-kind-wanted-p)
@@ -362,6 +364,14 @@ the :RETURNS spec four lines below showed all three."
         (format stream " [~A, ~A]" (or minimum "*") (or maximum "*")))
       (when base (format stream "  base: ~A" base))
       (when values* (format stream "  values: ~A" values*)))
+    ;; The generator is the reason %SPEC-TREE grew this key (design section 4):
+    ;; a node's declared generator is what decides which inputs a run actually
+    ;; drew, and an argument schema's tuple node is where a contract's
+    ;; :ARGS-GENERATOR lands.  Publishing it in the payload and not here is
+    ;; the same as not publishing it, for a client that renders content[].text.
+    (let ((generator (getf node :generator)))
+      (when generator
+        (format stream "  generator: ~A" (getf generator :qualified))))
     ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
     ;; where :CHILDREN is a list, while the payload carries a vector.  ACROSS
     ;; signalled a type error on the list, and the deadline wrapper above
@@ -433,6 +443,18 @@ to see the rest.~@[ ~A~]"
           (if spec
               (%format-spec-node stream spec 0 name)
               (format stream "~&  ~A" name)))))
+    ;; Which generator actually drew those arguments.  A contract with
+    ;; :ARGS-GENERATOR is checked against whatever that generator hands out,
+    ;; so a reader taking the argument specs above for the input domain is
+    ;; reading a domain the run never used.
+    (let ((generator (getf report :argument-generator)))
+      (when generator
+        (format stream "~&  argument generator: ~A"
+                (getf generator :qualified))))
+    (let ((variables (getf report :post-value-variables)))
+      (when variables
+        (format stream "~&  :post value variables: ~{~A~^, ~}"
+                (mapcar (lambda (variable) (getf variable :name)) variables))))
     ;; Cut and reported, like the body and the source form below.  A silently
     ;; truncated :PRE is worse than either: a reader takes a clause for the
     ;; whole condition and concludes the contract admits inputs it refuses.
@@ -459,7 +481,9 @@ to see the rest.~@[ ~A~]"
         (format stream "~&  ~A = ~A"
                 (getf (getf binding :name) :name) (getf binding :form))))
     (when (getf report :state-post)
-      (format stream "~&~%state-post: ~A" (getf report :state-post)))
+      (format stream "~&~%state-post: ~A" (getf report :state-post))
+      (%report-cut stream report :state-post-complete
+                   :state-post-omitted-chars))
     (when (getf report :cases)
       (format stream "~&~%cases (~A selection):"
               (string-downcase (princ-to-string (getf report :case-selection))))
@@ -475,9 +499,13 @@ to see the rest.~@[ ~A~]"
               (progn (format stream "~&    returns:")
                      (%format-spec-node stream (getf case :returns) 2))))
         (when (getf case :postconditions)
-          (format stream "~&    :post  ~A" (getf case :postconditions)))
+          (format stream "~&    :post  ~A" (getf case :postconditions))
+          (%report-cut stream case :postconditions-complete
+                       :postconditions-omitted-chars :indent 4))
         (when (getf case :state-post)
-          (format stream "~&    state-post: ~A" (getf case :state-post)))))
+          (format stream "~&    state-post: ~A" (getf case :state-post))
+          (%report-cut stream case :state-post-complete
+                       :state-post-omitted-chars :indent 4))))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -607,7 +635,12 @@ apart is what lets a reader ask whether a short list is short or was cut."
            "postconditions_complete" (%optional-bool case :postconditions-complete)
            "postconditions_omitted_chars" (getf case :postconditions-omitted-chars)
            "post_value_variables" (%symbol-hts (getf case :post-value-variables))
-           "state_post" (sanitize-for-json (getf case :state-post))))
+           ;; The companion flags are not optional decoration: a state-post
+           ;; clause cut at max_chars with nothing beside it reads as the whole
+           ;; clause, exactly as guard and postconditions would.
+           "state_post" (sanitize-for-json (getf case :state-post))
+           "state_post_complete" (%optional-bool case :state-post-complete)
+           "state_post_omitted_chars" (getf case :state-post-omitted-chars)))
 
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
@@ -661,6 +694,8 @@ apart is what lets a reader ask whether a short list is short or was cut."
                               (getf report :capture))
                       'vector)
               "state_post" (sanitize-for-json (getf report :state-post))
+              "state_post_complete" (%optional-bool report :state-post-complete)
+              "state_post_omitted_chars" (getf report :state-post-omitted-chars)
               "case_selection" (%keyword-string (getf report :case-selection))
               "cases" (coerce (mapcar #'%case-ht (getf report :cases)) 'vector)
               "core_record" (%core-record-ht (getf report :core-record))
@@ -821,6 +856,35 @@ not be read."
                               (getf (getf entry :value) :printed)))
                     entries))))
 
+(defparameter +evidence-value-chars+ 200
+  "How much of one value from the code under test a summary line carries.
+
+The evidence lines are one-liners in a block a reader skims; the whole
+bounded value is in core_result.data beside them, where EXTERNALIZE-VALUE's
+own max_value_chars budget applies.")
+
+(defun %evidence-value (value)
+  "Return VALUE printed for one evidence line, bounded and marked when cut.
+
+These are values off the code under test, read straight from cl-spec's own
+record -- a target return value or a captured pre-state.  cl-spec's
+SNAPSHOT-VALUE (cl-spec/src/execution.lisp:138) is documented to preserve
+cycles and sharing on purpose, so a circular value reaches the record intact
+and PRINC-TO-STRING on one does not return; a merely large value would put
+however many megabytes it prints as into content[].text.  EXTERNALIZE-VALUE's
+printer is the bound every other value path in this file already goes
+through: *PRINT-CIRCLE*, *VALUE-PRINT-LEVEL*, *VALUE-PRINT-LENGTH* and a sink
+that stops accepting characters at the budget.
+
+A cut says so and says by how much, rather than handing back a prefix that
+reads as the whole value."
+  (let ((data (externalize-value value :max-chars +evidence-value-chars+)))
+    (if (getf data :printed-complete)
+        (getf data :printed)
+        (format nil "~A... (~D more character~:P; the whole value is in ~
+core_result.data)"
+                (getf data :printed) (getf data :omitted-chars)))))
+
 (defparameter +shrink-terminations+
   (list (cons :state-restoration-unavailable
               (concatenate 'string
@@ -851,6 +915,28 @@ at all -- :EXHAUSTED is the successful search.  A value absent from this table
 is printed as itself rather than sorted into complete or incomplete, because
 sorting it would be this adapter deciding a meaning cl-spec has not stated.")
 
+(defparameter +shrunk-outcomes+
+  (list (cons :used
+              (concatenate 'string
+                           "a smaller failing input was found, and it is the "
+                           "shrunk counterexample below"))
+        (cons :none "the search ran and found no smaller failing input")
+        (cons :different-failure
+              (concatenate 'string
+                           "every smaller input that failed, failed "
+                           "differently -- none of them is a reduction of "
+                           "this finding")))
+  "How to word each :SHRUNK-OUTCOME cl-spec records.
+
+The field that answers for ordinary shrinking (design 5.3): the built-in
+shrinker files no shrink report, so this is the only thing a failing run says
+about whether a reduction was attempted and what came of it.
+
+Not a closed enumeration, for the same reason +SHRINK-TERMINATIONS+ is not.
+cl-spec's own VALIDATE-BACKEND-OUTCOME requires one of these three
+(cl-spec/src/generator.lisp:229); a later revision's fourth is printed as
+itself rather than sorted into a verdict this adapter invented.")
+
 (defun %format-core-evidence (stream result)
   "Write the evidence cl-spec recorded for RESULT to STREAM.
 
@@ -859,7 +945,12 @@ the versioned record, so the text cannot claim something the JSON beside it
 does not say.  :CASE-REPORT, :GENERATION-REPORT and :SHRINK-REPORT are each
 guarded against cl-spec's own :NOT-COLLECTED sentinel before any GETF reads a
 sub-key of them -- calling GETF on that bare keyword, rather than on a plist,
-signals a TYPE-ERROR."
+signals a TYPE-ERROR.
+
+Every value that came out of the code under test -- a target return value, a
+captured pre-state -- goes through %EVIDENCE-VALUE rather than the printer's
+defaults.  These are raw values off :SOURCE, and this stream is built by a
+bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
   (let* ((record (getf result :core-record))
          (source (getf record :source))
          (contract-p (eq :contract (getf result :kind))))
@@ -924,7 +1015,7 @@ signals a TYPE-ERROR."
                  (format stream "~&    target: not called"))
                 ((eq :returned (getf outcome :kind))
                  (format stream "~&    target: returned ~{~A~^, ~}"
-                         (mapcar #'princ-to-string (getf outcome :values))))
+                         (mapcar #'%evidence-value (getf outcome :values))))
                 ((eq :signaled (getf outcome :kind))
                  (format stream "~&    target: signalled ~A"
                          (getf outcome :condition-type))))))
@@ -933,7 +1024,8 @@ signals a TYPE-ERROR."
           (when (getf capture :values)
             (format stream "~&    captured: ~{~A~^, ~}"
                     (mapcar (lambda (entry)
-                              (format nil "~A = ~A" (car entry) (cdr entry)))
+                              (format nil "~A = ~A" (car entry)
+                                      (%evidence-value (cdr entry))))
                             (getf capture :values)))))
         (let ((post (getf state :state-post)))
           (when (member (getf post :status) '(:violation :error))
@@ -953,17 +1045,39 @@ signals a TYPE-ERROR."
                     (concatenate 'string
                                  "the failure above still stands; only the "
                                  "reduction is unfinished")))))
+      ;; Two sources for one line, and which one answers depends on whether
+      ;; there is a shrink report at all.  The built-in shrinker files none:
+      ;; RUN-PROPERTY leaves :SHRINK-REPORT at its :NOT-COLLECTED initform
+      ;; (cl-spec/src/property-runner.lisp:63), which is present and not a
+      ;; plist on every ordinary run -- so a line keyed on the report alone
+      ;; said nothing at all about shrinking for the commonest failing run
+      ;; there is.  :SHRUNK-OUTCOME is what answers on that path (design 5.3).
+      ;;
+      ;; It is not a substitute for the report, which is why the report is
+      ;; still read first: cl-spec records :NONE both for a search that came
+      ;; back empty and for a search that was never run at all
+      ;; (cl-spec/src/backends/check-it.lisp:431, under the SHRINK-P guard
+      ;; above it), and only the report's termination tells those apart.
       (let ((shrink (getf source :shrink-report)))
-        (when (and shrink (not (eq :not-collected shrink)))
-          (let ((wording (cdr (assoc (getf shrink :termination)
-                                      +shrink-terminations+))))
-            (format stream "~&    shrinking: ~(~A~) -- ~A"
-                    (getf shrink :termination)
-                    (or wording
-                        (concatenate 'string
-                                     "this cl-mcp does not know that "
-                                     "termination; it is reported as "
-                                     "cl-spec gave it")))))))))
+        (if (and shrink (not (eq :not-collected shrink)))
+            (let ((wording (cdr (assoc (getf shrink :termination)
+                                       +shrink-terminations+))))
+              (format stream "~&    shrinking: ~(~A~) -- ~A"
+                      (getf shrink :termination)
+                      (or wording
+                          (concatenate 'string
+                                       "this cl-mcp does not know that "
+                                       "termination; it is reported as "
+                                       "cl-spec gave it"))))
+            (let ((outcome (getf source :shrunk-outcome)))
+              (when outcome
+                (format stream "~&    shrinking: ~(~A~) -- ~A"
+                        outcome
+                        (or (cdr (assoc outcome +shrunk-outcomes+))
+                            (concatenate 'string
+                                         "this cl-mcp does not know that "
+                                         "outcome; it is reported as cl-spec "
+                                         "gave it"))))))))))
 
 (defun %format-counterexample (stream result)
   "Write RESULT's counterexample and shrinking lines to STREAM.
@@ -1005,12 +1119,28 @@ whether anything was learned."
        (format stream "~&    shrunk counterexample: not attempted -- this ~
 property is defined with (:shrink nil)"))
       (:none
-       ;; Silent when a shrink report exists: "shrinking was enabled but
-       ;; returned no smaller input" is a claim about a search, and
-       ;; state-restoration-unavailable means no search happened.
-       (unless (getf (getf (getf result :core-record) :source) :shrink-report)
-         (format stream "~&    shrunk counterexample: shrinking was enabled ~
-but returned no smaller input")))
+       ;; "shrinking was enabled but returned no smaller input" is a claim
+       ;; about a search, so it is made only where a search is known to have
+       ;; happened.  A shrink report exists exactly where one may not have --
+       ;; a state-observing contract's :STATE-RESTORATION-UNAVAILABLE is the
+       ;; case -- and the shrinking: line above words that one, so this stays
+       ;; silent there.  With no report, :SHRUNK-OUTCOME answers, and :NONE is
+       ;; the one value that says the search came back empty.
+       ;;
+       ;; This used to ask only whether :SHRINK-REPORT was present -- and it
+       ;; always is, as the bare :NOT-COLLECTED keyword whenever the built-in
+       ;; shrinker ran (cl-spec/src/property-runner.lisp:63) -- so the line
+       ;; never printed at all against a modern cl-spec.
+       (let* ((source (getf (getf result :core-record) :source))
+              (report (getf source :shrink-report)))
+         (cond ((and report (not (eq :not-collected report))) nil)
+               ;; No core record to read: the older reading, which prints.
+               ((null source)
+                (format stream "~&    shrunk counterexample: shrinking was ~
+enabled but returned no smaller input"))
+               ((eq :none (getf source :shrunk-outcome))
+                (format stream "~&    shrunk counterexample: shrinking was ~
+enabled but returned no smaller input")))))
       (:unavailable
        (format stream "~&    shrunk counterexample: UNAVAILABLE -- the run did ~
 not reach a verdict"))
