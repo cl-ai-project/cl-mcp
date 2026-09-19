@@ -668,8 +668,14 @@ export されていない**（実測で確認）ので、この plist を読む�
 "outcome": { "kind": "returned", "values": [...] }
 "outcome": { "kind": "signaled",
                     "condition_type": "...", "condition_report": "..." }
-"outcome": { "kind": "not-collected" }
+"outcome": "not-collected"        // オブジェクトではなく素の文字列
 ```
+
+**`:NOT-COLLECTED` だけはオブジェクトにならない。** cl-spec は裸のキーワードを
+返すので、`{"kind": "not-collected"}` に正規化するのは cl-mcp が cl-spec の
+出していない構造を発明することにあたる。§6.2.1 の atom-for-container 規則が
+そのまま働き、素の文字列として投影される（実測で確認）。消費側は
+`outcome` が文字列かオブジェクトかで場合分けする。
 
 投影規則: `values[]` は各値を `externalize-value`、`condition_type` は
 シンボルなので `symbol_data`、`condition_report` は文字列（有界）、
