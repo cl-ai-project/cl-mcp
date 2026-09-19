@@ -28,6 +28,7 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:ensure-project-root
+                #:native-path-namestring
                 #:path-inside-p)
   (:export #:project-scaffold
            #:write-scaffold))
@@ -102,7 +103,7 @@ INVALID-ARGUMENT-ERROR."
                  (path-inside-p resolved-ancestor resolved-root))
       (error 'invalid-argument-error
              :field "destination"
-             :value (namestring pathname)
+             :value (native-path-namestring pathname)
              :reason "resolves outside project root"))))
 
 (defun %write-files-to-temp (temp-dir name plan)
@@ -178,9 +179,9 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
       (unless (safe-to-delete-p directory)
         (error 'invalid-argument-error
                :field "overwrite"
-               :value (namestring directory)
+               :value (native-path-namestring directory)
                :reason (format nil "refusing to delete ~A: not a cl-mcp-generated scaffold"
-                               (namestring directory))))
+                               (native-path-namestring directory))))
       (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
 
 (defun write-scaffold (&key name description author license destination overwrite
@@ -226,13 +227,13 @@ underlying error after cleaning up the temp directory."
         (error 'invalid-argument-error
                :field "name" :value name
                :reason (format nil "target directory already exists: ~A"
-                               (namestring target-dir))))
+                               (native-path-namestring target-dir))))
       (when (and target-exists (not (%scaffold-owned-p target-dir)))
         (error 'invalid-argument-error
                :field "overwrite" :value name
                :reason (format nil "refusing to overwrite ~A: not a cl-mcp-generated ~
                                     scaffold; delete it manually"
-                               (namestring target-dir))))
+                               (native-path-namestring target-dir))))
       (let ((plan (plan-scaffold :name name
                                  :description (or description "")
                                  :author (or author "")
@@ -373,11 +374,11 @@ file). Any other existing directory is refused, never deleted."))
                            ASDF's tree scan reaches it, so FIND-SYSTEM may ~
                            resolve ~A to that stale copy -- delete it before ~
                            loading."
-                          (namestring leftover) name)))
+                          (native-path-namestring leftover) name)))
                (ht (make-ht
                     "created" t
                     "path" relative
-                    "absolute_path" (namestring target-dir)
+                    "absolute_path" (native-path-namestring target-dir)
                     "files" (coerce files 'vector)
                     "framework" framework-name
                     "next_steps" next-steps
@@ -387,7 +388,7 @@ file). Any other existing directory is refused, never deleted."))
                              "Scaffolded ~A at ~A (~D files, ~A tests)~%~
                               Path: ~A~%~{~A~%~}~@[~%⚠ ~A~%~]"
                              name relative (length files) framework-name
-                             (namestring target-dir)
+                             (native-path-namestring target-dir)
                              (coerce next-steps 'list)
                              warning)))))
           (when warning (setf (gethash "warning" ht) warning))

@@ -4,14 +4,23 @@ Detailed input/output schemas and examples for all cl-mcp tools.
 
 ## Paths cl-mcp prints
 
-Every path a tool reports is a **native** filesystem path, so it can be passed straight back to
-another tool. That is not the same as Common Lisp's `namestring`, which escapes the characters
-the pathname reader treats as wild — on SBCL `[` and `]` among them — and therefore describes a
-file under `demo[old]/` as `demo\[old]/`, a name nothing on disk answers to. Source locations
-from the running image are converted before they are reported, compared, or opened, so
-`clos-describe`, `code-find`, `code-find-references` and `clgrep-search` all name such a file the
-way `lisp-read-file` and `lisp-edit-form` expect to receive it, and an `edit_guard`'s `abs_path`
-matches the file the edit resolves.
+Every path a tool reports can be passed straight back to another tool. Paths are POSIX-style,
+and they are **not** escaped for the Common Lisp pathname reader — which is what `namestring`
+produces, escaping the characters that reader treats as wild (on SBCL `[` and `]` among them),
+so that a file under `demo[old]/` is described as `demo\[old]/`, a name nothing on disk answers
+to. Source locations from the running image are converted before they are reported, compared, or
+opened, so `clos-describe`, `code-find`, `code-find-references` and `clgrep-search` all name such
+a file the way `lisp-read-file` and `lisp-edit-form` expect to receive it, an `edit_guard`'s
+`abs_path` matches the file the edit resolves, and the recovery steps `lisp-check-parens` prints
+name a path `fs-write-file` accepts. The same holds for the paths a tool echoes back rather than
+discovers: `fs-get-project-info`'s `project_root` and `cwd`, `fs-set-project-root`'s
+`project_root` and `previous_root`, and `project-scaffold`'s `absolute_path` are all directly
+re-usable as another call's argument.
+
+Internally a path stays a pathname; the conversion happens only where a string crosses to the
+caller. Passing the string back into cl-mcp's own internals instead is the same mistake in
+reverse — a path holding `[` re-read by the pathname reader becomes a wild pathname, which
+`truename` refuses.
 
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.

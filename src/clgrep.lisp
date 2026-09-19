@@ -5,6 +5,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring
                 #:resolve-readable-path)
   (:import-from #:cl-mcp/src/utils/hash
                 #:alist-to-hash-table)
@@ -82,7 +83,7 @@ Returns a list of alists, each containing:
                                  :limit effective-limit)))
     (log-event :info "clgrep.search"
                "pattern" pattern
-               "path" (namestring search-path)
+               "path" (native-path-namestring search-path)
                "limit" limit
                "include-form" include-form
                "matches" (length results))

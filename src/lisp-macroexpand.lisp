@@ -20,6 +20,8 @@
                 #:arg-validation-error #:validation-message #:tool-error)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
                 #:sanitize-error-message)
@@ -366,7 +368,7 @@ call itself as 'code'."
                                         (file-namestring absolute))))
               (multiple-value-bind (entries note)
                   (%sub-form-entries original target sub-form
-                                     (namestring absolute))
+                                     (native-path-namestring absolute))
                 (values entries package-name note)))
             (values (list (cons (format nil "~A ~A (~A line ~D)"
                                         form-type-string form-name

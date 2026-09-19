@@ -22,6 +22,8 @@
                 #:arg-validation-error #:json-bool)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message)
   (:export #:lisp-check-parens
@@ -381,7 +383,11 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                                       broken tail needs the overwrite path)~]: ~A"
                                  editable-prefix
                                  (format-overwrite-recovery
-                                  (namestring
+                                  ;; Native: this path is handed to the caller
+                                  ;; as the argument for fs-read-file and
+                                  ;; fs-write-file, so it has to be one those
+                                  ;; tools accept.
+                                  (native-path-namestring
                                    (uiop:enough-pathname (fs-resolve-read-path path)
                                                          (%project-root-truename)))
                                   :have-fix (and likely-fixes t)

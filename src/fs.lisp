@@ -20,6 +20,7 @@
                 #:allowed-read-path
                 #:canonical-path
                 #:ensure-write-path
+                #:native-path-namestring
                 #:broad-root-p)
   (:import-from #:cl-mcp/src/utils/system
                 #:fd-count)
@@ -598,7 +599,7 @@ listings stay useful."
     (unless pn (error "Read not permitted for path ~A" path))
     (unless (directory-exists-p pn)
       (error "Directory ~A (resolved to ~A) does not exist or is not readable"
-             path (namestring pn)))
+             path (native-path-namestring pn)))
     (let* ((patterns (list #P"*" #P"*.*"))
            (entries
             (loop for pat in patterns
@@ -631,8 +632,8 @@ Returns a hash-table with keys:
         (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
         (h (make-hash-table :test #'equal)))
     (let ((root-source (if env-root "env" "explicit")))
-      (setf (gethash "project_root" h) (namestring *project-root*)
-            (gethash "cwd" h) (and cwd (namestring cwd))
+      (setf (gethash "project_root" h) (native-path-namestring *project-root*)
+            (gethash "cwd" h) (native-path-namestring cwd)
             (gethash "project_root_source" h) root-source)
       (let ((root (uiop:ensure-directory-pathname *project-root*)))
         (when (and cwd (uiop:subpathp cwd root))
@@ -664,7 +665,7 @@ Returns a hash-table with updated path information:
     ;; C2: Reject overly broad roots that would disable the security sandbox.
     (when (broad-root-p temp-root)
       (error "Refusing to set project root to ~A — too broad"
-             (namestring temp-root)))
+             (native-path-namestring temp-root)))
     (let ((new-root (truename temp-root)))
       ;; C3: Atomic multi-step mutation under lock
       (bt:with-lock-held (*project-root-lock*)
@@ -674,21 +675,22 @@ Returns a hash-table with updated path information:
                 (uiop/pathname:ensure-directory-pathname new-root)))
       (log-event :info "fs.set-project-root" "previous"
        (if prev-root
-           (namestring prev-root)
+           (native-path-namestring prev-root)
            "(not set)")
-       "new" (namestring new-root))
+       "new" (native-path-namestring new-root))
       (when *use-worker-pool*
         (ignore-errors
          (send-root-to-session-worker *current-session-id* new-root)))
       (let ((h (make-hash-table :test #'equal)))
-        (setf (gethash "project_root" h) (namestring new-root)
-              (gethash "cwd" h) (namestring (uiop/os:getcwd))
+        (setf (gethash "project_root" h) (native-path-namestring new-root)
+              (gethash "cwd" h) (native-path-namestring (uiop/os:getcwd))
               (gethash "previous_root" h)
                 (if prev-root
-                    (namestring prev-root)
+                    (native-path-namestring prev-root)
                     "(not set)")
               (gethash "status" h)
-                (format nil "Project root set to ~A" (namestring new-root)))
+                (format nil "Project root set to ~A"
+                        (native-path-namestring new-root)))
         h))))
 
 (define-tool "fs-read-file"

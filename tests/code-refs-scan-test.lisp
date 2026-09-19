@@ -14,6 +14,8 @@
   (:import-from #:cl-mcp/src/log
                 #:*log-level*
                 #:*log-stream*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:native-path-namestring)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:target-name-from-designator
                 #:scan-text
@@ -859,3 +861,34 @@ an option value this scanner refuses to guess at -- stays NIL."
                             (digest-string-octets "(defun widget () 1)"))
                      "the range digest covers exactly the CST span the snapshot's text produced"))))
         (ignore-errors (delete-file path))))))
+
+(deftest scan-project-works-when-the-project-root-itself-holds-brackets
+  (testing "a root named with [ ] is scanned, not refused"
+    ;; The root reached COLLECT-TARGET-FILES as a string, which calls TRUENAME
+    ;; on it -- parsing it with the pathname reader again, where [ ] are wild.
+    ;; TRUENAME refuses a wild pathname outright, so the whole scan died with
+    ;; "Can't find the TRUENAME of wild pathname".  Built natively here for the
+    ;; same reason MERGE-PATHNAMES on such a string would not do.
+    (let* ((dir (uiop:parse-native-namestring
+                 (format nil "~Atests/tmp/scanroot[br]/"
+                         (native-path-namestring
+                          (asdf:system-source-directory :cl-mcp)))
+                 :ensure-directory t))
+           (file (merge-pathnames (uiop:parse-native-namestring "thing.lisp") dir)))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (progn
+             (with-open-file (out file :direction :output :if-exists :supersede)
+               (format out "(defun thing () :here)~%"))
+             ;; Nested rather than LET*: SCAN-PROJECT reads the special, so
+             ;; it has to run inside the binding, not alongside it.
+             (let ((*project-root* dir))
+               (let ((report (scan-project "thing" :root dir)))
+                 (ok (null (gethash "skipped_reason" report))
+                     "the scan is not skipped")
+                 (ok (plusp (gethash "files_scanned" report))
+                     "and it actually reached the file")
+                 (ok (search "scanroot[br]" (gethash "root" report))
+                     "the root it reports is the one on disk, unescaped"))))
+        (ignore-errors (delete-file file))
+        (ignore-errors (uiop:delete-empty-directory dir))))))
