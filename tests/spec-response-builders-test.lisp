@@ -18,7 +18,8 @@
                 #:build-spec-list-response
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
-                #:build-spec-check-response))
+                #:build-spec-check-response
+                #:%projection-issue-ht))
 
 (in-package #:cl-mcp/tests/spec-response-builders-test)
 
@@ -189,7 +190,9 @@ wrong.
 
 Measured shape: a real cl-spec checkout's SRC/FUNCTION-SPEC.LISP records
 :STATE-STATUS :VIOLATION on a failed state-post, never :VIOLATED, and
-CAPTURE-EVIDENCE's :VALUES is an alist of (NAME . VALUE) pairs.  The
+CAPTURE-EVIDENCE's :VALUES is an array of tagged availability records
+(:NAME N :AVAILABILITY :COLLECTED :VALUE V) / (... :UNAVAILABLE :REASON ...
+:TYPE ...).  The
 shrink-report's :STATE-RESTORATION-UNAVAILABLE termination and its
 :CANDIDATES 0 come from SRC/BACKENDS/CHECK-IT.LISP's shrink suppression for a
 state-observing contract.  The outer result's :SHRINK-STATUS :NONE stands for
@@ -239,8 +242,13 @@ contradiction this task exists to stop."
                        (list :capture
                              (list :status :completed
                                    :declared '(balance-before id-before)
-                                   :values (list (cons 'balance-before 100)
-                                                 (cons 'id-before 7))
+                                   :values
+                                   (list (list :name 'balance-before
+                                               :availability :collected
+                                               :value 100)
+                                         (list :name 'id-before
+                                               :availability :collected
+                                               :value 7))
                                    :error nil)
                              :state-post
                              (list :status :violation :reason nil
@@ -592,7 +600,9 @@ failure-phase gloss must not contradict."
                        (list :capture
                              (list :status :completed
                                    :declared '(audit-count-before)
-                                   :values (list (cons 'audit-count-before 3))
+                                   :values (list (list :name 'audit-count-before
+                                                       :availability :collected
+                                                       :value 3))
                                    :error nil)
                              :state-post
                              (list :status :violation :reason nil
@@ -753,7 +763,9 @@ structure intact -- a circular value included."
                        (list :capture
                              (list :status :completed
                                    :declared '(ring)
-                                   :values (list (cons 'ring value))
+                                   :values (list (list :name 'ring
+                                                       :availability :collected
+                                                       :value value))
                                    :error nil)
                              :state-post
                              (list :status :violation :reason nil :case nil
@@ -1753,53 +1765,232 @@ the result says which."
       (ok (search "state-post:" text))
       (ok (search "&key" text)))))
 
-(deftest check-response-marks-an-opaque-captured-value-without-an-object-id
-  ;; Deferred from Task 6's %OPAQUE-MARKER-NODE work: that test needed
-  ;; CORE_RESULT to exist to assert on, which is what Task 7 wires up.
-  ;; cl-spec's own could-not-freeze-this marker for a :capture value must
-  ;; render as plain text, with no object id handed out for the marker cons
-  ;; cell itself.
-  (let* ((record '(:schema-version 1 :record-kind :result :entity-kind :property
-                   :definition-digest "abc" :definition-digest-complete t
-                   :definition-digest-covers :declaration-and-registered-dependencies
-                   :capabilities (:generation :available :shrinking :none
-                                  :instrumentation :unavailable)
-                   :name widen :status :failed :trials 3 :budget 3 :rejected 0
-                   :seed 7 :profile :normal :options nil :counterexample nil
-                   :shrunk-counterexample nil :shrunk-outcome nil
-                   :shrink-report :not-collected :generation-report :not-collected
-                   :failure-phase :target :failure-reason :state-post
-                   :case-report :not-collected
-                   :failure (:state
-                             (:capture
-                              (:values ((balance . (:unavailable
-                                                     :reason :opaque-value
-                                                     :type :hash-table))))))
-                   :shrunk-failure nil :elapsed 0.01))
-         (core-record (project-core-record record :result-data
-                                            :expected-record-kind :result))
+(defun %capture-state-record (values &key (state-post-form
+                                           '(= (purse-balance purse) 0)))
+  "Return a minimal v1 result whose failure observation captures VALUES.
+
+VALUES is cl-spec's own list of tagged availability records, spliced in
+verbatim: these tests are about what cl-mcp does with the record cl-spec
+builds, never about a helper's idea of the shape.  STATE-POST-FORM is the
+declared form the state-post line renders, so a test can hand it a large or
+circular one."
+  (list :schema-version 1 :record-kind :result :entity-kind :property
+        :definition-digest "abc" :definition-digest-complete t
+        :definition-digest-covers :declaration-and-registered-dependencies
+        :capabilities '(:generation :available :shrinking :none
+                        :instrumentation :unavailable)
+        :name 'widen :status :failed :trials 3 :budget 3 :rejected 0
+        :seed 7 :profile :normal :options nil :counterexample nil
+        :shrunk-counterexample nil :shrunk-outcome nil
+        :shrink-report :not-collected :generation-report :not-collected
+        :failure-phase :state-post :failure-reason :state-postcondition
+        :case-report :not-collected
+        :failure
+        (list :arguments '(1) :status :failed :reason :state-postcondition
+              :signature '(:state-postcondition 0) :explanation nil
+              :outcome '(:kind :returned :values (1)) :value 1
+              :case nil :condition-report nil
+              :state
+              (list :capture
+                    (list :status :completed
+                          :declared (mapcar (lambda (record)
+                                              (getf record :name))
+                                            values)
+                          :values values
+                          :error nil)
+                    :state-post
+                    (list :status :violation :reason nil :case nil :index 0
+                          :form state-post-form
+                          :condition-type nil)))
+        :shrunk-failure nil :elapsed 0.01))
+
+(defun %capture-check-response (values)
+  "Return the built spec-check response for a run capturing VALUES."
+  (%check-response-for-record (%capture-state-record values)))
+
+(defun %check-response-for-record (record)
+  "Return the built spec-check response for RECORD."
+  (let* ((core-record (project-core-record record :result-data
+                                           :expected-record-kind :result))
          (report (list :status :completed
-                       :selection (list :mode "explicit" :count 1
-                                        :selected (list (%symbol-data "PROBE" "WIDEN"))
-                                        :source "explicit property argument"
-                                        :coverage "Only the property named.")
+                       :selection
+                       (list :mode "explicit" :count 1
+                             :selected (list (%symbol-data "PROBE" "WIDEN"))
+                             :source "explicit property argument"
+                             :coverage "Only the property named.")
                        :results
                        (list (list :property (%symbol-data "PROBE" "WIDEN")
+                                   :kind :contract
                                    :status :failed
                                    :core-record core-record))
                        :counts (list :selected 1 :passed 0 :failed 1
                                      :errored 0 :timed-out 0 :not-run 0)
-                       :environment *environment*))
-         (response (build-spec-check-response report))
+                       :environment *environment*)))
+    (build-spec-check-response report)))
+
+(defun %capture-entries (response)
+  "Return the state.capture.values vector of a built check RESPONSE."
+  (let* ((result (aref (gethash "results" response) 0))
+         (data (gethash "data" (gethash "core_result" result))))
+    (gethash "values"
+             (gethash "capture"
+                      (gethash "state" (gethash "failure" data))))))
+
+(defun %single-capture-entry (values)
+  "Return the one JSON capture entry a run capturing VALUES produced."
+  (aref (%capture-entries (%capture-check-response values)) 0))
+
+(deftest a-collected-capture-value-crosses-as-application-data
+  (testing "a simple collected value keeps its availability and its value"
+    (let ((entry (%single-capture-entry
+                  (list (list :name 'balance-before
+                              :availability :collected
+                              :value 100)))))
+      (ok (equal "collected" (gethash "availability" entry)))
+      (ok (equal "BALANCE-BEFORE" (gethash "name" (gethash "name" entry))))
+      (ok (equal "100" (gethash "printed" (gethash "value" entry))))))
+  (testing "a collected NIL is a value, not an absent key"
+    (let ((entry (%single-capture-entry
+                  (list (list :name 'nothing-before
+                              :availability :collected
+                              :value nil)))))
+      (ok (equal "collected" (gethash "availability" entry)))
+      (ok (equal "NIL" (gethash "printed" (gethash "value" entry)))))))
+
+(deftest a-collected-value-shaped-like-the-old-marker-is-not-reclassified
+  ;; The original P1 review finding, at the public JSON boundary.  cl-spec v1
+  ;; reports this as :COLLECTED with the plist under :VALUE, so cl-mcp must
+  ;; externalize it as application data.  Reporting it as an unavailable
+  ;; object -- or dropping its object id -- is the regression.
+  (let* ((entry (%single-capture-entry
+                 (list (list :name 'diagnostic-before
+                             :availability :collected
+                             :value '(:unavailable :reason :opaque-value
+                                      :type :hash-table)))))
+         (value (gethash "value" entry)))
+    (testing "availability stays collected"
+      (ok (equal "collected" (gethash "availability" entry)))
+      (ok (null (gethash "reason" entry))))
+    (testing "the value is the ordinary externalized application value"
+      (ok (hash-table-p value))
+      (ok (search "UNAVAILABLE" (gethash "printed" value)))
+      (ok (equal "cons" (gethash "type" value)))
+      (testing "and it keeps its inspectable object id"
+        (ok (integerp (gethash "object_id" value)))))))
+
+(deftest an-unavailable-capture-value-claims-no-value-and-no-object-id
+  (let* ((entry (%single-capture-entry
+                 (list (list :name 'account-before
+                             :availability :unavailable
+                             :reason :opaque-value
+                             :type 'cl-user::account))))
+         (type (gethash "type" entry)))
+    (testing "availability, reason and type survive"
+      (ok (equal "unavailable" (gethash "availability" entry)))
+      (ok (equal "opaque-value" (gethash "reason" entry)))
+      (ok (equal "ACCOUNT" (gethash "name" type))))
+    (testing "there is no value and therefore no object id"
+      (ok (null (gethash "value" entry))))))
+
+(deftest a-capture-diagnostic-type-survives-all-three-v1-forms
+  (testing "a named type is symbol metadata"
+    (let* ((entry (%single-capture-entry
+                   (list (list :name 'account-before
+                               :availability :unavailable
+                               :reason :opaque-value
+                               :type 'cl-user::account))))
+           (type (gethash "type" entry)))
+      (ok (equal "COMMON-LISP-USER" (gethash "package" type)))
+      (ok (equal "ACCOUNT" (gethash "name" type)))))
+  (testing "an anonymous class is a schema-known object, never externalized"
+    (let* ((entry (%single-capture-entry
+                   (list (list :name 'x :availability :unavailable
+                               :reason :opaque-value
+                               :type '(:kind :anonymous-class
+                                       :metaclass standard-class)))))
+           (type (gethash "type" entry)))
+      (ok (hash-table-p type))
+      (ok (equal "anonymous-class" (gethash "kind" type)))
+      (ok (equal "STANDARD-CLASS"
+                 (gethash "name" (gethash "metaclass" type))))
+      (ok (null (gethash "object_id" type)))))
+  (testing "the :unknown fallback survives as a word"
+    (let ((entry (%single-capture-entry
+                  (list (list :name 'x :availability :unavailable
+                              :reason :opaque-value :type :unknown)))))
+      (ok (equal "unknown" (gethash "type" entry))))))
+
+(deftest check-response-marks-an-unavailable-captured-value-without-a-value
+  ;; The head of the same run: the projection metadata around the capture
+  ;; evidence says nothing was lost, so a missing value reads as cl-spec's
+  ;; statement rather than as a truncation.
+  (let* ((response (%capture-check-response
+                    (list (list :name 'balance :availability :unavailable
+                                :reason :opaque-value :type :hash-table))))
          (result (aref (gethash "results" response) 0))
-         (data (gethash "data" (gethash "core_result" result)))
-         (values-array (gethash "values"
-                                (gethash "capture" (gethash "state"
-                                                            (gethash "failure" data)))))
-         (value (gethash "value" (aref values-array 0))))
-    (ok (equal "opaque-value" (gethash "reason" value)))
-    (ok (equal "hash-table" (gethash "type" value)))
-    (ok (null (nth-value 1 (gethash "object_id" value))))))
+         (core (gethash "core_result" result)))
+    (ok (eq t (gethash "complete" (gethash "projection" core))))
+    (ok (equalp #() (gethash "unknown_keys" core)))
+    (let ((entry (aref (%capture-entries response) 0)))
+      (ok (equal "unavailable" (gethash "availability" entry)))
+      (ok (equal "opaque-value" (gethash "reason" entry)))
+      (ok (equal "hash-table" (gethash "type" entry)))
+      (ok (null (gethash "value" entry))))))
+
+(defun %remove-from-plist-once (plist key)
+  "Return PLIST without KEY and its value."
+  (loop for (indicator value) on plist by #'cddr
+        unless (eq indicator key)
+          append (list indicator value)))
+
+(deftest a-duplicate-record-key-gives-one-answer-on-both-paths
+  ;; cl-spec's records are open plists read with ordinary plist semantics:
+  ;; GETF answers the first occurrence.  The compatibility alias and
+  ;; core_result.data must say the same thing, so the projection keeps the
+  ;; first occurrence and ignores the later one.
+  (let* ((record (append (%remove-from-plist-once (%capture-state-record nil)
+                                                 :status)
+                         '(:status :passed :status :failed)))
+         (core-record (project-core-record record :result-data
+                                           :expected-record-kind :result))
+         (node (getf core-record :data))
+         (projected (cdr (assoc "status" (second node) :test #'equal))))
+    (testing "the compatibility reader GETF also answers the first occurrence"
+      (ok (eq :passed (getf (getf core-record :source) :status))))
+    (testing "and core_result.data agrees rather than keeping the last"
+      (ok (equal '(:scalar "passed") projected))))
+  (testing "a nested schema-known object follows the same rule"
+    (let ((entry (%single-capture-entry
+                  (list (list :name 'x
+                              :availability :unavailable
+                              :availability :collected
+                              :reason :opaque-value :type :unknown)))))
+      (ok (equal "unavailable" (gethash "availability" entry))))))
+
+(deftest projection-issue-json-keeps-exact-and-inexact-apart
+  ;; A small truncation is exact; one past %TAIL-UNIT-COUNT's scan cap is a
+  ;; lower bound.  The JSON must say which, and false must survive as JSON
+  ;; false rather than collapsing into null or an absent key.
+  (testing "an exact cut publishes a true flag"
+    (let ((table (%projection-issue-ht (list :path '("exclusions")
+                                             :reason :length-limit
+                                             :omitted-items 3
+                                             :omitted-items-exact-p t))))
+      (ok (eql 3 (gethash "omitted_items" table)))
+      (ok (eq t (gethash "omitted_items_exact" table)))))
+  (testing "an inexact cut publishes a false flag, not null"
+    (let ((table (%projection-issue-ht (list :path '("exclusions")
+                                             :reason :length-limit
+                                             :omitted-items 201
+                                             :omitted-items-exact-p nil))))
+      (ok (eql 201 (gethash "omitted_items" table)))
+      (ok (eq yason:false (gethash "omitted_items_exact" table)))
+      (ok (eq t (nth-value 1 (gethash "omitted_items_exact" table))))))
+  (testing "an issue with no omitted count carries neither key"
+    (let ((table (%projection-issue-ht (list :path '("inner")
+                                             :reason :depth-limit))))
+      (ok (null (nth-value 1 (gethash "omitted_items" table))))
+      (ok (null (nth-value 1 (gethash "omitted_items_exact" table)))))))
 
 (deftest the-headline-names-a-case-nobody-reached
   (let* ((report (%contract-check-report-with-cases))
@@ -2001,3 +2192,57 @@ the gap, not only the body a reader may never reach"
     (ok (search "the whole value is in core_result.data" text))
     (testing "and the line is bounded, not the value's own length"
       (ok (< (length text) 4000)))))
+
+(deftest a-long-collection-publishes-its-inexact-count-as-inexact
+  ;; %TAIL-UNIT-COUNT caps its scan, so a collection past the cap reports a
+  ;; lower bound.  The public JSON must say so: omitted_items_exact false, not
+  ;; null and not absent.  A small cut is exact and stays true.
+  (flet ((issues-for (exclusions)
+           (let* ((record (append (%capture-state-record nil)
+                                  (list :digest-exclusions exclusions)))
+                  (response (%check-response-for-record record))
+                  (result (aref (gethash "results" response) 0)))
+             (gethash "issues"
+                      (gethash "projection"
+                               (gethash "core_result" result))))))
+    (testing "a cut past the scan cap is published as inexact"
+      (let ((issue (aref (issues-for
+                          (loop for i below 500 collect (intern (format nil "W~D" i))))
+                         0)))
+        (ok (eql 201 (gethash "omitted_items" issue)))
+        (ok (eq yason:false (gethash "omitted_items_exact" issue)))))
+    (testing "a small cut is published as exact"
+      (let ((issue (aref (issues-for
+                          (loop for i below 205 collect (intern (format nil "W~D" i))))
+                         0)))
+        (ok (eql 5 (gethash "omitted_items" issue)))
+        (ok (eq t (gethash "omitted_items_exact" issue)))))))
+
+(deftest a-large-state-post-form-keeps-the-text-bounded
+  ;; The state-post line used a raw PRINC-TO-STRING, which ignores every output
+  ;; bound.  A large declared form must be cut and say so, on one line.
+  (let* ((form (cons 'and (make-list 5000
+                                       :initial-element '(= (purse-balance purse) 0))))
+         (response (%check-response-for-record
+                    (%capture-state-record nil :state-post-form form)))
+         (text (first-text response)))
+    (ok (search "state-post: violation at form 0" text))
+    (ok (search "the whole form is in core_result.data" text))
+    (ok (< (length text) 4000))))
+
+(deftest a-circular-state-post-form-does-not-hang-the-text
+  ;; A shared or circular declared form must not run forever, and the printer
+  ;; must not evaluate or read it.  Covered under a deadline because a
+  ;; regression here is a hang, not a failed assertion.
+  (let ((form (list 'and '(= (purse-balance purse) 0))))
+    (setf (cddr form) form)
+    (multiple-value-bind (text timed-out)
+        (handler-case
+            (values (sb-ext:with-timeout 20
+                      (first-text
+                       (%check-response-for-record
+                        (%capture-state-record nil :state-post-form form))))
+                    nil)
+          (sb-ext:timeout () (values "" t)))
+      (ok (not timed-out))
+      (ok (search "state-post: violation" text)))))

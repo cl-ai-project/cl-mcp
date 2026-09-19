@@ -1536,3 +1536,75 @@ listing functions are not -- the shape the blanket listing guard refused."
     (testing "an unreadable contract declaration alone is enough to refuse verified"
       (let ((results (list (passing-contract-result :declares-cases :unknown))))
         (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Output bounds, threaded all the way down
+;;; ---------------------------------------------------------------------------
+
+(deftest check-report-honors-max-value-chars-inside-core-result
+  ;; The P2 finding: the legacy counterexample alias was bounded by the
+  ;; caller's max_value_chars, and core_result.data used the projector's 2000
+  ;; default instead -- one response, two answers for the same value.
+  (let ((big (make-list 4000 :initial-element (%sym "A")))
+        (record (copy-list *passing-result*)))
+    (setf (getf record :counterexample) (list (%sym "A") big))
+    (let* ((api (%api-with-run
+                 (lambda (&rest ignored)
+                   (declare (ignore ignored))
+                   (%result-stub :status :passed))
+                 :result-data (lambda (result)
+                                (declare (ignore result))
+                                record)))
+           (report (check-report
+                    api :ok
+                    :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                    :max-value-chars 10))
+           (result (first (getf report :results)))
+           (alias (getf (getf (first (getf result :counterexample)) :value)
+                        :printed))
+           (data (getf (getf result :core-record) :data))
+           (entry (first (second (field-of data "counterexample"))))
+           (projected (getf (second (field-of entry "value")) :printed)))
+      (ok (= 10 (length alias)))
+      (ok (= 10 (length projected)))
+      (testing "and the cut is reported rather than hidden"
+        (ok (getf (getf result :core-record) :projection))
+        (ok (not (getf (second (field-of entry "value")) :printed-complete)))))))
+
+(deftest describe-honors-max-chars-inside-core-record
+  ;; %DESCRIBE-FUNCTION-SPEC already received max_chars, but its core_record
+  ;; projection silently reverted to the projector's 2000 default.
+  (let ((contract (copy-list *cases-contract*)))
+    (setf (getf contract :source-form)
+          (list 'defspec-function 'add
+                (make-list 500 :initial-element 'padding)))
+    (let* ((api (%stub-api :function-spec-data
+                           (lambda (name &key registry)
+                             (declare (ignore name registry))
+                             contract)))
+           (report (describe-report api :ok "function-spec" "ADD"
+                                    :package "CL-MCP-SPEC-REPORT-FIXTURE"
+                                    :max-chars 10))
+           (data (getf (getf report :core-record) :data))
+           (source-node (field-of data "source_form")))
+      (ok (eq :ok (getf report :status)))
+      (ok (= 10 (length (getf (second source-node) :printed))))
+      (ok (= 10 (length (getf report :source-form)))))))
+
+(deftest a-duplicate-record-key-cannot-split-alias-from-data
+  ;; GETF answers the first occurrence; the projection keeps the same one, so
+  ;; results[].status and core_result.data.status cannot disagree.
+  (let* ((record (append (copy-list *passing-result*) '(:status :failed)))
+         (api (%api-with-run
+               (lambda (&rest ignored)
+                 (declare (ignore ignored))
+                 (%result-stub :status :passed))
+               :result-data (lambda (result)
+                              (declare (ignore result))
+                              record)))
+         (report (check-report api :ok
+                               :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+         (result (first (getf report :results)))
+         (data (getf (getf result :core-record) :data)))
+    (ok (eq :passed (getf result :status)))
+    (ok (equal '(:scalar "passed") (field-of data "status")))))

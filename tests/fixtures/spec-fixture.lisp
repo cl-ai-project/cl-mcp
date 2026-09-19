@@ -37,6 +37,7 @@
            #:remaining-balance
            #:overlapping-balance
            #:withdraw-without-recording!
+           #:diagnostic-capture
            #:never-satisfied-p
            #:magnitude-of-impossible))
 
@@ -123,6 +124,14 @@ there is, and the one whose failure signature carries (:POST-FORM 0)."
   "Return the absolute value of VALUE."
   (abs value))
 
+(defun diagnostic-capture (value)
+  "Return VALUE, so the capture evidence below is the only interesting part.
+
+The contract always fails its :state-post, so a run produces a failure
+observation carrying :capture -- which is where cl-spec v1 puts each captured
+binding's availability record."
+  value)
+
 (defun function-specs-supported-p ()
   "Return true when the loaded cl-spec implements function specs.
 
@@ -164,7 +173,13 @@ one registry rather than all of them has the same fault one step in."
   (and registry (gethash registry *contracts-registered-in*) t))
 
 (defstruct (purse (:constructor make-purse (balance id)))
-  "A tiny mutable object, so a contract has some state to observe."
+  "A tiny mutable object, so a contract has some state to observe.
+
+The two slots carry no per-slot docstring because ANSI DEFSTRUCT has no
+:DOCUMENTATION slot option -- SBCL's own reader accepts only :TYPE and
+:READ-ONLY -- so the documented-accessor pattern the style checker suggests
+does not exist for structures.  BALANCE holds the stored amount and ID an
+opaque identity token; both are set by MAKE-PURSE."
   balance
   id)
 

@@ -733,3 +733,77 @@ value discarded."
           (%ok-core-record-read-whole result)
           (testing "and the text names the half that broke"
             (ok (search "broken half: postcondition" text)))))))
+
+(defun %capture-tagged-union-p ()
+  "Return true when this cl-spec's SCHEMA-INFO declares the v1 capture union.
+
+The guard that keeps this file honest: a cl-spec checkout whose
+state.capture.values is still the pre-release (NAME . VALUE) alist would let
+the capture assertions below pass against a shape cl-mcp no longer reads, so
+the test skips loudly instead of reporting a green it did not earn."
+  (let ((schema-info (find-symbol "SCHEMA-INFO" "CL-SPEC")))
+    (and schema-info
+         (fboundp schema-info)
+         (let ((info (funcall schema-info)))
+           (and (equal '(:collected :unavailable)
+                       (getf info :capture-value-states))
+                (member :anonymous-class
+                        (getf info :capture-value-type-forms)))))))
+
+(defun %capture-entry (values-array name)
+  "Return the capture-value entry named NAME, or NIL."
+  (loop for entry across values-array
+        when (equal name (gethash "name" (gethash "name" entry)))
+          return entry))
+
+(deftest real-capture-availability-records-survive-both-branches
+  ;; cl-spec PR #34 (merge 08d3ada): a captured binding is an explicit
+  ;; availability record, so cl-mcp performs no shape-based recognition.  This
+  ;; is the upstream-collision regression the original P1 finding asked for: a
+  ;; legal application value shaped like the old opaque marker must stay
+  ;; :COLLECTED, and a genuinely unfreezable value must be :UNAVAILABLE with no
+  ;; value and no object id.
+  (if (not (%contracts-available-p))
+      (skip +no-contracts-reason+)
+      (if (not (%capture-tagged-union-p))
+          (skip "This cl-spec predates the v1 capture-value tagged union (PR #34).")
+          (with-fixture-registry
+            (let* ((response (spec-check-response
+                              (make-ht "function"
+                                       (%fixture-name "DIAGNOSTIC-CAPTURE")
+                                       "trials" 1 "seed" "1")))
+                   (result (%first-result response))
+                   (record (gethash "data" (gethash "core_result" result)))
+                   (failure (gethash "failure" record))
+                   (values-array (gethash "values"
+                                          (gethash "capture"
+                                                   (gethash "state" failure))))
+                   (text (%text response))
+                   (marker (%capture-entry values-array "DIAGNOSTIC-BEFORE"))
+                   (opaque (%capture-entry values-array "TABLE-BEFORE")))
+              (ok (equal "failed" (gethash "status" result)))
+              (ok (equal "state-post" (gethash "failure_phase" record)))
+              (%ok-core-record-read-whole result)
+              (testing "the availability records themselves are the v1 union"
+                (ok (hash-table-p marker))
+                (ok (hash-table-p opaque)))
+              (testing "the old-marker-shaped value is collected application data"
+                (ok (equal "collected" (gethash "availability" marker)))
+                (ok (hash-table-p (gethash "value" marker)))
+                (ok (search "UNAVAILABLE"
+                            (gethash "printed" (gethash "value" marker))))
+                (ok (integerp (gethash "object_id" (gethash "value" marker))))
+                ;; The unavailable-only key must not appear.
+                (ok (null (gethash "reason" marker))))
+              (testing "the hash table is structurally unavailable"
+                (ok (equal "unavailable" (gethash "availability" opaque)))
+                (ok (equal "opaque-value" (gethash "reason" opaque)))
+                ;; :TYPE is ordinary data: a named type symbol here.
+                (ok (equal "HASH-TABLE"
+                           (gethash "name" (gethash "type" opaque))))
+                (ok (null (gethash "value" opaque))))
+              (testing "and the text tells the same story"
+                (ok (search "DIAGNOSTIC-BEFORE = " text))
+                (ok (search "UNAVAILABLE" text))
+                (ok (search "TABLE-BEFORE = UNAVAILABLE -- opaque-value (type HASH-TABLE)"
+                            text))))))))

@@ -90,6 +90,25 @@ it does not."
 (cl-spec:defspec impossible-int (and (range integer 0 100)
                                      (satisfies never-satisfied-p)))
 
+(cl-spec:defspec-function diagnostic-capture
+  "Capture evidence with both availability states of cl-spec's v1 union.
+
+DIAGNOSTIC-BEFORE is a legal application value shaped exactly like the
+pre-release opaque marker -- (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE
+:HASH-TABLE) -- so a run proves cl-mcp treats it as :COLLECTED data rather
+than reclassifying it from its shape.  TABLE-BEFORE is a hash table, which
+cl-spec reports :UNAVAILABLE with :REASON :OPAQUE-VALUE.  The :state-post is
+false for every input, so a run always files the failure observation that
+carries the capture."
+  (:args (value small-int))
+  (:capture
+    (diagnostic-before (list :unavailable :reason :opaque-value
+                             :type :hash-table))
+    (table-before (make-hash-table)))
+  (:returns small-int)
+  (:post (= result value))
+  (:state-post (= value (1+ value))))
+
 (cl-spec:defspec-function magnitude-of-impossible
   "A contract whose argument spec no generated candidate satisfies."
   (:args (value impossible-int))

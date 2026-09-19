@@ -53,19 +53,135 @@
       (ok (eq :value (first node)))
       (ok (stringp (getf (second node) :printed)))
       (ok (equal "hash-table" (getf (second node) :type)))))
-  (testing "cl-spec's own can-not-freeze-this marker is kept as data, not
-externalized -- externalizing it would assign an object id to the marker
-list itself rather than to the value cl-spec said it could not freeze"
+  (testing "the pre-release opaque marker shape is application data, not cl-spec
+metadata -- cl-mcp v1 decides availability from the record, never from the
+value's shape, so this is externalized like any other value"
     (let ((node (project-value (list :unavailable :reason :opaque-value
                                      :type :hash-table))))
-      (ok (eq :object (first node)))
-      (let ((fields (second node)))
-        (ok (equal '(:scalar t)
-                   (cdr (assoc "unavailable" fields :test #'equal))))
-        (ok (equal '(:scalar "opaque-value")
-                   (cdr (assoc "reason" fields :test #'equal))))
-        (ok (equal '(:scalar "hash-table")
-                   (cdr (assoc "type" fields :test #'equal))))))))
+      (ok (eq :value (first node)))
+      (ok (stringp (getf (second node) :printed))))))
+
+(deftest a-collected-capture-value-shaped-like-the-old-marker-is-application-data
+  ;; The P1 regression this branch was written to close.  cl-spec v1 marks a
+  ;; capture's availability in the record around the value, so a domain value
+  ;; that happens to be (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...) is
+  ;; :COLLECTED application data.  The projector must not reclassify it from
+  ;; its shape and must route it through the ordinary externalization path.
+  (let* ((node (project-record
+                (list :status :completed :declared '(:diagnostic-before)
+                      :values
+                      (list (list :name :diagnostic-before
+                                  :availability :collected
+                                  :value (list :unavailable :reason :opaque-value
+                                               :type :hash-table)))
+                      :error nil)
+                '(:ref :capture-evidence)))
+         (values-node (field-of node "values"))
+         (entry (first (second values-node))))
+    (testing "the record's availability is collected"
+      (ok (equal '(:scalar "collected") (field-of entry "availability"))))
+    (testing "and its value is externalized application data"
+      (let ((value (field-of entry "value")))
+        (ok (eq :value (first value)))
+        (ok (stringp (getf (second value) :printed)))
+        (ok (getf (second value) :object-id)))))
+  ;; The same plist under a bare :OPAQUE field (a counterexample value, an
+  ;; observation's :VALUE) is application data too.
+  (let* ((node (project-record
+                (list 'cl-user::a (list :unavailable :reason :opaque-value
+                                        :type :hash-table))
+                '(:ref :counterexample)))
+         (entry (first (second node)))
+         (value (field-of entry "value")))
+    (ok (eq :value (first value)))
+    (ok (getf (second value) :object-id))))
+
+(deftest a-collected-nil-capture-value-is-a-value-not-an-absence
+  ;; A captured NIL is a :COLLECTED record with a NIL :VALUE, not an absent
+  ;; key.  Its application value is externalized like any other, so the JSON
+  ;; carries a value node (printed "NIL") rather than dropping the key.
+  (let* ((node (project-record
+                (list :values (list (list :name :nothing-before
+                                          :availability :collected
+                                          :value nil)))
+                '(:ref :capture-evidence)))
+         (entry (first (second (field-of node "values")))))
+    (ok (equal '(:scalar "collected") (field-of entry "availability")))
+    (let ((value (field-of entry "value")))
+      (ok (eq :value (first value)))
+      (ok (equal "NIL" (getf (second value) :printed))))))
+
+(deftest an-unavailable-capture-value-claims-no-value-and-no-object-id
+  (let* ((node (project-record
+                (list :values (list (list :name :account-before
+                                          :availability :unavailable
+                                          :reason :opaque-value
+                                          :type 'cl-user::account)))
+                '(:ref :capture-evidence)))
+         (entry (first (second (field-of node "values")))))
+    (testing "availability, reason and type are all preserved"
+      (ok (equal '(:scalar "unavailable") (field-of entry "availability")))
+      (ok (equal '(:scalar "opaque-value") (field-of entry "reason")))
+      (ok (equal "ACCOUNT"
+                 (getf (second (field-of entry "type")) :name))))
+    (testing "there is no application value, so there is no value key at all"
+      (ok (null (assoc "value" (second entry) :test #'equal))))))
+
+(deftest a-capture-diagnostic-type-carries-all-three-v1-forms
+  (flet ((type-node (type)
+           (let* ((node (project-record
+                         (list :values
+                               (list (list :name :x
+                                           :availability :unavailable
+                                           :reason :opaque-value
+                                           :type type)))
+                         '(:ref :capture-evidence)))
+                  (entry (first (second (field-of node "values")))))
+             (field-of entry "type"))))
+    (testing "a named type is ordinary symbol metadata"
+      (let ((node (type-node 'cl-user::account)))
+        (ok (eq :symbol (first node)))
+        (ok (equal "ACCOUNT" (getf (second node) :name)))))
+    (testing "an anonymous class is a schema-known object, never externalized"
+      (let ((node (type-node '(:kind :anonymous-class
+                               :metaclass standard-class))))
+        (ok (eq :object (first node)))
+        (ok (equal '(:scalar "anonymous-class") (field-of node "kind")))
+        (ok (equal "STANDARD-CLASS"
+                   (getf (second (field-of node "metaclass")) :name)))
+        (dolist (pair (second node))
+          (ok (not (eq :value (first (cdr pair))))))))
+    (testing "the :unknown fallback survives as a word"
+      (ok (equal '(:scalar "unknown") (type-node :unknown))))))
+
+(deftest a-duplicate-plist-key-keeps-its-first-occurrence
+  ;; cl-spec's records are open plists read with ordinary plist semantics,
+  ;; where GETF answers the first occurrence.  A projection that emitted both
+  ;; let a JSON renderer keep the last, so a compatibility alias built with
+  ;; GETF and core_result.data could disagree about one record.  One record,
+  ;; one interpretation: first occurrence wins, later ones are ignored.
+  (let ((node (project-record '(:status :passed :trials 3 :status :failed)
+                              '(:object (:status . :leaf) (:trials . :leaf)))))
+    (ok (equal '(:scalar "passed") (field-of node "status")))
+    (ok (equal '(:scalar 3) (field-of node "trials")))
+    (testing "the key appears once in the projected object"
+      (ok (= 1 (count "status" (second node)
+                      :key #'car :test #'equal)))))
+  (testing "an unknown key's duplicate is reported once too"
+    (multiple-value-bind (node issues unknown)
+        (project-record '(:mystery 1 :mystery 2)
+                        '(:object (:status . :leaf)))
+      (declare (ignore node issues))
+      (ok (equal '("mystery") unknown))))
+  (testing "a known server key in a nested object follows the same rule"
+    (let* ((node (project-record
+                  (list :values (list (list :name :x
+                                            :availability :unavailable
+                                            :availability :collected
+                                            :reason :opaque-value)))
+                  '(:ref :capture-evidence)))
+           (entry (first (second (field-of node "values")))))
+      (ok (equal '(:scalar "unavailable") (field-of entry "availability"))))))
 
 (deftest object-descriptor-projects-only-declared-keys
   (let ((shape '(:object (:kind . :leaf) (:index . :leaf))))
@@ -124,64 +240,6 @@ list itself rather than to the value cl-spec said it could not freeze"
         (ok (equal '(:scalar "range")
                    (cdr (assoc "kind" (second expected) :test #'equal))))))))
 
-(deftest an-alist-of-capture-values-becomes-name-value-pairs
-  ;; Measured shape: ((BALANCE-BEFORE . 30) (ID-BEFORE . 7)).  Dotted pairs are
-  ;; not proper lists, so an array rule has nothing to say about them.
-  (let* ((node (project-record (list (cons 'cl-user::balance-before 30))
-                               '(:alist :opaque)))
-         (entry (first (second node)))
-         (fields (second entry)))
-    (ok (eq :array (first node)))
-    (ok (equal "BALANCE-BEFORE"
-               (getf (second (cdr (assoc "name" fields :test #'equal))) :name)))
-    (ok (eq :value (first (cdr (assoc "value" fields :test #'equal)))))))
-
-(deftest an-opaque-value-marker-survives-the-walk-path-not-only-project-value
-  ;; The bug this closes: WALK's :OPAQUE branch used to hand a captured value
-  ;; straight to EXTERNALIZE-VALUE, bypassing PROJECT-VALUE's own marker case
-  ;; entirely -- so a capture value cl-spec could not freeze still got an
-  ;; object id, and its type read "cons" (the marker list's own type) rather
-  ;; than the type cl-spec named.  A test that only calls PROJECT-VALUE
-  ;; directly cannot see this: it never goes through WALK/:OPAQUE at all.
-  (let* ((node (project-record
-                (list :status :ok :declared '(:balance-before)
-                      :values (list (cons :balance-before
-                                          (list :unavailable :reason :opaque-value
-                                                :type :hash-table))))
-                '(:ref :capture-evidence)))
-         (values-node (cdr (assoc "values" (second node) :test #'equal)))
-         (entry (first (second values-node)))
-         (value (cdr (assoc "value" (second entry) :test #'equal))))
-    (testing "the marker is kept as an object, not externalized"
-      (ok (eq :object (first value)))
-      (let ((fields (second value)))
-        (ok (equal '(:scalar t)
-                   (cdr (assoc "unavailable" fields :test #'equal))))
-        (ok (equal '(:scalar "opaque-value")
-                   (cdr (assoc "reason" fields :test #'equal))))
-        (ok (equal '(:scalar "hash-table")
-                   (cdr (assoc "type" fields :test #'equal))))))
-    (testing "no field of the marker is an externalized-value node"
-      ;; Only a (:VALUE plist) node ever carries :OBJECT-ID.  Every field
-      ;; here is a plain :SCALAR, so none of them could hold one.
-      (dolist (pair (second value))
-        (ok (not (eq :value (first (cdr pair)))))))))
-
-(deftest a-second-opaque-field-keeps-the-marker-too
-  ;; Generality check: :COUNTEREXAMPLE is another (:PAIRS :OPAQUE) field, a
-  ;; sibling to capture values rather than a special case wired in on its own.
-  ;; The fixture is a flat plist, not an alist -- see
-  ;; A-COUNTEREXAMPLE-PLIST-PROJECTS-AS-NAME-VALUE-PAIRS for why.
-  (let* ((node (project-record
-                (list 'cl-user::a (list :unavailable :reason :opaque-value
-                                        :type :hash-table))
-                '(:ref :counterexample)))
-         (entry (first (second node)))
-         (value (cdr (assoc "value" (second entry) :test #'equal))))
-    (ok (eq :object (first value)))
-    (ok (equal '(:scalar "hash-table")
-               (cdr (assoc "type" (second value) :test #'equal))))))
-
 (deftest a-length-cut-is-reported-not-hidden
   (let ((*projection-max-length* 2))
     (multiple-value-bind (node issues)
@@ -226,18 +284,6 @@ list itself rather than to the value cl-spec said it could not freeze"
           (ok (eq :length-limit (getf (first issues) :reason)))
           (ok (eql 1 (getf (first issues) :omitted-items)))
           (ok (getf (first issues) :omitted-items-exact-p)))))))
-
-(deftest a-length-cut-on-an-alist-drops-whole-entries
-  (let ((*projection-max-length* 2))
-    (multiple-value-bind (node issues)
-        (project-record (list (cons 'cl-user::a 1) (cons 'cl-user::b 2)
-                               (cons 'cl-user::c 3))
-                         '(:alist :opaque))
-      (ok (= 2 (length (second node))))
-      (ok (= 1 (length issues)))
-      (ok (eq :length-limit (getf (first issues) :reason)))
-      (ok (eql 1 (getf (first issues) :omitted-items)))
-      (ok (getf (first issues) :omitted-items-exact-p)))))
 
 (deftest a-circular-list-is-projected-without-hanging
   ;; LENGTH loops forever on a circular list; this must never call it on
@@ -352,6 +398,24 @@ list itself rather than to the value cl-spec said it could not freeze"
   "Return the child NODE holds under the JSON key KEY."
   (cdr (assoc key (second node) :test #'equal)))
 
+(deftest project-core-record-threads-max-chars-into-data
+  ;; A caller that asked for a smaller bound must get it inside :DATA too.
+  ;; Before this, project-core-record used the projector's default 2000 no
+  ;; matter what the caller passed, so one response could publish a 10-char
+  ;; compatibility alias beside 2000 chars of core_result.data.
+  (let* ((record (append (remove-from-plist-once *passing-result* :counterexample)
+                         (list :counterexample
+                               (list 'value (make-list 500
+                                                       :initial-element
+                                                       'padding)))))
+         (report (project-core-record record :result-data :max-chars 10))
+         (node (field-of (getf report :data) "counterexample"))
+         (entry (first (second node)))
+         (value (field-of entry "value")))
+    (ok (eq :value (first value)))
+    (ok (= 10 (length (getf (second value) :printed))))
+    (ok (null (getf (second value) :printed-complete)))))
+
 (deftest a-result-record-projects-its-whole-envelope
   (multiple-value-bind (report status) (project-core-record *passing-result*
                                                             :result-data)
@@ -414,10 +478,10 @@ list itself rather than to the value cl-spec said it could not freeze"
   ;; The regression this guards: cl-spec's NAME-ARGUMENTS (measured via
   ;; PROPERTY-NAMED-ARGUMENTS in cl-spec/tests/rest-function-test.lisp) builds
   ;; a flat {variable value} PLIST for a counterexample -- (BALANCE 5
-  ;; AMOUNT 5) -- not an alist of dotted pairs.  A descriptor of
-  ;; (:ALIST :OPAQUE) calls CAR/CDR on the bare argument-value 5 here and
-  ;; signals a TYPE-ERROR; this must fail against that descriptor and pass
-  ;; only against (:PAIRS :OPAQUE), which :COUNTEREXAMPLE now uses.
+  ;; AMOUNT 5) -- not an alist of dotted pairs.  A dotted-pair reader would
+  ;; call CAR/CDR on the bare argument-value 5 here and signal a TYPE-ERROR;
+  ;; this must pass only against (:PAIRS :OPAQUE), which :COUNTEREXAMPLE now
+  ;; uses.
   (let* ((record (append (list :counterexample '(balance 5 amount 5))
                          (remove-from-plist-once *passing-result*
                                                  :counterexample)))
