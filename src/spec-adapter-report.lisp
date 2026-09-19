@@ -28,6 +28,9 @@
                 #:core-schema-data #:definition-digest
                 #:printed-for-display
                 #:print-form-bounded)
+  (:import-from #:cl-mcp/src/spec-core-record
+                #:project-core-record
+                #:validate-versioned-record)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -809,6 +812,13 @@ to the caller as one that exists."
     (list :kind (getf spec-plist :kind)
           :name (let ((name (getf spec-plist :name)))
                   (when name (symbol-data name)))
+          ;; Where a custom whole-argument generator is recorded.  Measured:
+          ;; an :ARGUMENT-SCHEMA tuple node comes back as
+          ;; (:KIND :TUPLE :GENERATOR SCRIPTED-ARGUMENTS ...), and dropping
+          ;; this key lost the only statement that the inputs are scripted
+          ;; rather than drawn.
+          :generator (let ((generator (getf spec-plist :generator)))
+                       (when generator (symbol-data generator)))
           :target (let ((target (getf spec-plist :target)))
                     (when target (symbol-data target)))
           :type (let ((type (getf spec-plist :type)))
@@ -844,77 +854,142 @@ is no end to report and NIL stays NIL."
         (value (printed-for-display value))
         ((eq :range kind) "*")))
 
+(defun %contract-arguments (arguments)
+  "Return one contract argument list as report plists.
+
+An absent :KIND means :REQUIRED and is normalized to it rather than published
+as null.  FUNCTION-SPEC-DATA omits the key for a required argument -- measured,
+and its source reads (unless (eq :required (argument-binding-kind binding)))
+-- so null here would leave a reader unable to tell a required argument from a
+revision that does not report kinds at all.  This normalization is a statement
+about version 1 only; the caller refuses any other version before reaching it."
+  (loop for argument in arguments
+        collect (list :variable (symbol-data (getf argument :variable))
+                      :spec (%spec-tree (getf argument :spec))
+                      :kind (or (getf argument :kind) :required)
+                      :supplied-p (let ((name (getf argument :supplied-p)))
+                                    (when name (symbol-data name)))
+                      :keyword (getf argument :keyword))))
+
+(defun %contract-capture (bindings max-chars)
+  "Return a contract's :CAPTURE declarations, bounded.
+
+These are the forms as written, never the values a run observed: projecting
+this list runs no capture form."
+  (loop for binding in bindings
+        collect (multiple-value-bind (text complete omitted)
+                    (%print-bounded-form (getf binding :form) max-chars)
+                  (list :name (symbol-data (getf binding :name))
+                        :form text
+                        :form-complete complete
+                        :form-omitted-chars omitted))))
+
+(defun %contract-cases (cases max-chars)
+  "Return a contract's ordered named cases as report plists.
+
+Order is the contract's, because case selection is exclusive and the author
+wrote them in the order they are tried.  Guards and postconditions are the
+source forms; their compiled counterparts are not projected and are not run."
+  (loop for case in cases
+        collect
+        (multiple-value-bind (guard guard-complete guard-omitted)
+            (%print-bounded-form (getf case :when) max-chars)
+          (let ((post (getf case :postconditions)))
+            (multiple-value-bind (post-text post-complete post-omitted)
+                (if post
+                    (%print-bounded-form (if (null (rest post))
+                                             (first post)
+                                             (cons 'and post))
+                                         max-chars)
+                    (values nil :not-applicable nil))
+              (list :name (getf case :name)
+                    :documentation (getf case :documentation)
+                    :guard guard
+                    :guard-complete guard-complete
+                    :guard-omitted-chars guard-omitted
+                    :outcome (getf case :outcome)
+                    :returns (%spec-tree (getf case :returns))
+                    :signals (%spec-tree (getf case :signals))
+                    :postconditions post-text
+                    :postconditions-complete post-complete
+                    :postconditions-omitted-chars post-omitted
+                    :post-value-variables
+                    (mapcar #'symbol-data (getf case :post-value-variables))
+                    :state-post
+                    (let ((forms (getf case :state-post)))
+                      (when forms (%print-bounded-form forms max-chars)))))))))
+
 (defun %describe-function-spec (api name registry max-chars)
   "Return the detail plist for the contract registered for NAME.
 
-Built from cl-spec's own FUNCTION-SPEC-DATA, for the same reason the spec and
-property projections are: the two halves a caller asks about before editing a
-function -- which inputs are accepted, which output is required -- are
-cl-spec's answer to give, not this adapter's to assemble.
+Built from cl-spec's own FUNCTION-SPEC-DATA.  The two halves a caller asks
+about before editing a function -- which inputs are accepted, which output is
+required -- are cl-spec's answer to give, not this adapter's to assemble.
 
-:PRE and :POST are the author's forms.  Their compiled counterparts are not
-projected: a function cannot be read, and whether they hold is what spec-check
-answers."
+Nothing here runs contract code.  FUNCTION-SPEC-DATA projects no compiled
+guard, capture form, post form or state-post form, so describing a contract
+cannot call the target, its :PRE, its captures, its case guards or any of its
+post forms.
+
+A record whose schema version this adapter does not know is refused rather than
+read under version 1's rules -- an absent :KIND means :REQUIRED in version 1
+and may mean anything in a later one."
   (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
-    ;; NIL is not a contract with no arguments and no :returns.  It renders
-    ;; byte-identically to one, which is the reading %FUNCTION-SPEC-LISTING
-    ;; carries :READ-FAILED to prevent -- and this is the path where a caller
-    ;; actually reads the contract before editing the function.
-    (unless data
-      (return-from %describe-function-spec
-        (list :status :unsupported
-              :kind "function-spec"
-              :name (symbol-data name)
-              :message
-              (concatenate 'string
-                           "cl-spec returned no projection for this contract. "
-                           "It is registered; what it says could not be read, "
-                           "and an empty description would read as a contract "
-                           "with no arguments and no :returns."))))
+    (multiple-value-bind (status reason)
+        (validate-versioned-record data :expected-record-kind :definition
+                                        :expected-entity-kind :function-spec)
+      (when (eq :unsupported-schema status)
+        (return-from %describe-function-spec
+          (list :status :unsupported :kind "function-spec" :name (symbol-data name)
+                :message (format nil "cl-spec returned this contract under ~
+schema version ~A, which this cl-mcp does not know. Its fields are not read ~
+under version 1's rules, because an absent key means different things between ~
+versions." reason))))
+      (when (eq :malformed status)
+        (return-from %describe-function-spec
+          (list :status :unsupported :kind "function-spec" :name (symbol-data name)
+                :message (format nil "cl-spec returned a contract projection ~
+this adapter cannot read: ~A. An empty description would read as a contract ~
+with no arguments and no :returns." reason)))))
     (flet ((clause (forms)
-             ;; Bounded like the body a property describe carries.  A :PRE or
-             ;; :POST form is short in practice, but "in practice" is not a
-             ;; budget, and every other form this module prints is cut at one.
-             ;; NIL rather than the string "NIL" for an absent clause, so a
-             ;; renderer can tell a contract with no :PRE from one whose :PRE
-             ;; is the literal NIL.
-             ;; What cl-spec evaluates, not the list it stores.
-             ;; :PRECONDITIONS is a list of forms -- (:pre (<= low high))
-             ;; arrives as ((<= low high)) -- and DEFSPEC-FUNCTION compiles
-             ;; them as (and ,@pre), so one clause prints as the clause and
-             ;; several print as that AND.  Printing the bare list gave the
-             ;; reader a form they cannot paste back: a call to the list.
              (when forms
                (multiple-value-bind (text complete omitted)
                    (%print-bounded-form (if (null (rest forms))
                                             (first forms)
                                             (cons 'and forms))
                                         max-chars)
-                 (list text complete omitted)))))
+                 (list text complete omitted))))
+           (form-text (form)
+             (when form (%print-bounded-form form max-chars))))
       (let ((pre (clause (getf data :preconditions)))
             (post (clause (getf data :postconditions))))
         (multiple-value-bind (source source-complete source-omitted)
             (%print-bounded-form (getf data :source-form) max-chars)
-          ;; The pair, not the value alone.  A digest whose input hit the print
-          ;; limit is not one a caller may compare, and this was the third
-          ;; place offering one for expect_definition_digest without saying so.
           (multiple-value-bind (digest complete)
               (definition-digest api name registry :property data)
             (list :core-schema (core-schema-data data)
+                  :core-record (project-core-record
+                                data :function-spec-data
+                                :expected-record-kind :definition
+                                :expected-entity-kind :function-spec)
                   :status :ok
                   :kind "function-spec"
                   :name (symbol-data name)
                   :documentation (getf data :documentation)
-                  :arguments (loop for argument in (getf data :arguments)
-                                   collect (list :variable
-                                                 (symbol-data (getf argument :variable))
-                                                 :spec (%spec-tree (getf argument :spec))))
+                  :arguments (%contract-arguments (getf data :arguments))
+                  :argument-generator
+                  (let ((generator (getf data :argument-generator)))
+                    (when generator (symbol-data generator)))
+                  :argument-schema (%spec-tree (getf data :argument-schema))
                   :returns (%spec-tree (getf data :returns))
+                  :signals (%spec-tree (getf data :signals))
+                  :post-value-variables
+                  (mapcar #'symbol-data (getf data :post-value-variables))
+                  :capture (%contract-capture (getf data :capture) max-chars)
+                  :state-post (form-text (getf data :state-post))
+                  :case-selection (getf data :case-selection)
+                  :cases (%contract-cases (getf data :cases) max-chars)
                   :preconditions (first pre)
-                  ;; Only when there is a clause.  "complete: true" about a
-                  ;; :PRE the contract does not have is a claim, and the
-                  ;; response has %OPTIONAL-BOOL to carry an absent flag as
-                  ;; null -- which is what this PR added it for.
                   :preconditions-complete (if pre (second pre) :not-applicable)
                   :preconditions-omitted-chars (third pre)
                   :postconditions (first post)

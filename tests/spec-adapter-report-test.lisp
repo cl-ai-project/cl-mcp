@@ -273,6 +273,128 @@ GETF readers is a complete substitute and no cl-spec class is needed."
       (ok (eq :unsupported (getf report :status)))
       (ok (search "function-spec-data" (getf report :message))))))
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  ;; *CASES-CONTRACT* below embeds real symbols in the fixture package via
+  ;; reader syntax (CL-MCP-SPEC-REPORT-FIXTURE::ADD and friends), not
+  ;; strings, because it stands in for what FUNCTION-SPEC-DATA actually
+  ;; returns. The reader resolves that syntax while this file is being
+  ;; compiled, before %FIXTURE-PACKAGE's own call runs, so the package has
+  ;; to exist at compile time too.
+  (or (find-package "CL-MCP-SPEC-REPORT-FIXTURE")
+      (make-package "CL-MCP-SPEC-REPORT-FIXTURE" :use '())))
+
+(defparameter *cases-contract*
+  '(:schema-version 1 :record-kind :definition :entity-kind :function-spec
+    :definition-digest "fnv1a64-v1:0cbb" :definition-digest-complete t
+    :definition-digest-covers :declaration-and-registered-dependencies
+    :digest-omissions nil :digest-exclusions (:target-implementation)
+    :capabilities (:generation :available :shrinking :none
+                   :instrumentation :unavailable)
+    :case-selection :exclusive
+    :cases ((:name :sufficient-funds
+             :documentation "The amount fits."
+             :when (<= amount balance) :outcome :returns
+             :returns (:kind :range :base-type integer :min 0 :max :unbounded)
+             :signals nil :postconditions ((= result (- balance amount))))
+            (:name :insufficient-funds
+             :documentation "The amount does not fit."
+             :when (> amount balance) :outcome :signals :returns nil
+             :signals (:kind :type :type insufficient-funds)
+             :postconditions nil))
+    :capture ((:name balance-before :form (account-balance account)))
+    :state-post ((= (account-balance account) (- balance-before amount)))
+    :name cl-mcp-spec-report-fixture::add :kind :function-spec
+    :documentation "Withdraw."
+    :arguments ((:variable cl-mcp-spec-report-fixture::a
+                 :spec (:kind :range :base-type integer :min 0 :max 1000))
+                (:variable cl-mcp-spec-report-fixture::b
+                 :spec (:kind :type :type integer)
+                 :kind :key :supplied-p cl-mcp-spec-report-fixture::b-p
+                 :keyword :b))
+    :argument-generator cl-mcp-spec-report-fixture::scripted
+    :argument-schema (:kind :tuple :generator cl-mcp-spec-report-fixture::scripted
+                      :children ((:kind :type :type integer)))
+    :preconditions nil :returns nil :signals nil :postconditions nil
+    :post-value-variables (cl-mcp-spec-report-fixture::result)
+    :source-form (defspec-function add)
+    :source-location (:file "/tmp/a.lisp" :package "CL-MCP-SPEC-REPORT-FIXTURE")
+    :metadata nil)
+  "A contract carrying every feature the describe path used to drop.")
+
+(deftest describe-keeps-argument-kinds-and-generators
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           *cases-contract*)))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE"))
+         (arguments (getf report :arguments)))
+    (ok (eq :ok (getf report :status)))
+    (testing "a required argument's absent :kind means required, not unknown"
+      (ok (eq :required (getf (first arguments) :kind)))
+      (ok (null (getf (first arguments) :supplied-p))))
+    (testing "a keyword argument keeps its kind, supplied-p and keyword"
+      (ok (eq :key (getf (second arguments) :kind)))
+      (ok (equal "B-P" (getf (getf (second arguments) :supplied-p) :name)))
+      (ok (eq :b (getf (second arguments) :keyword))))
+    (testing "the argument generator and schema survive"
+      (ok (equal "SCRIPTED" (getf (getf report :argument-generator) :name)))
+      (ok (getf report :argument-schema))
+      ;; %SPEC-TREE used to drop :GENERATOR, which is where a custom
+      ;; whole-argument generator is recorded.
+      (ok (equal "SCRIPTED"
+                 (getf (getf (getf report :argument-schema) :generator) :name))))
+    (testing "project-core-record's own :data confirms real cl-spec key names,
+not only that the adapter's report carries them"
+      (let ((fields (second (getf (getf report :core-record) :data))))
+        (ok (equal '(:scalar "Withdraw.")
+                   (cdr (assoc "documentation" fields :test #'string=))))
+        (ok (equal '(:scalar "exclusive")
+                   (cdr (assoc "case_selection" fields :test #'string=))))))))
+
+(deftest describe-keeps-cases-capture-and-state-post
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           *cases-contract*)))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE"))
+         (cases (getf report :cases)))
+    (ok (eq :exclusive (getf report :case-selection)))
+    (ok (= 2 (length cases)))
+    (testing "cases keep their order, guard, outcome and postconditions"
+      (ok (eq :sufficient-funds (getf (first cases) :name)))
+      (ok (search "<=" (getf (first cases) :guard)))
+      (ok (eq :returns (getf (first cases) :outcome)))
+      (ok (getf (first cases) :returns))
+      (ok (search "=" (getf (first cases) :postconditions))))
+    (testing "the signalling case keeps its condition spec"
+      (ok (eq :signals (getf (second cases) :outcome)))
+      (ok (getf (second cases) :signals)))
+    (testing "capture and state-post are declarations, printed not run"
+      (ok (equal "BALANCE-BEFORE"
+                 (getf (getf (first (getf report :capture)) :name) :name)))
+      ;; The display printer this module uses upcases symbols (see
+      ;; WITH-DISPLAY-PRINTING), the same convention every other SEARCH
+      ;; assertion in this file follows against a printed form.
+      (ok (search "ACCOUNT-BALANCE" (getf (first (getf report :capture)) :form)))
+      (ok (search "ACCOUNT-BALANCE" (getf report :state-post))))
+    (testing "post-value variables survive"
+      (ok (equal "RESULT"
+                 (getf (first (getf report :post-value-variables)) :name))))))
+
+(deftest describe-refuses-a-contract-schema-it-cannot-read
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           (list* :schema-version 2 (cddr *cases-contract*)))))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE")))
+    (ok (eq :unsupported (getf report :status)))
+    (ok (search "schema version 2" (getf report :message)))
+    ;; No v1 rule may run over it -- including "an absent :kind means required".
+    (ok (null (getf report :arguments)))))
+
 (deftest describe-report-rejects-unknown-kind
   (testing "an unrecognized kind is an argument error"
     (let ((report (describe-report (%stub-api) :ok "generator"
