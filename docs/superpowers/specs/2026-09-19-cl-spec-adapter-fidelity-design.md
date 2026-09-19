@@ -75,6 +75,13 @@ Task H が要求する「取得できなかった」と「測定されたゼロ�
 | `arguments[].keyword` | **欠落** | `arguments[].keyword` | keyword→string | `null` |
 | `:argument-generator` | **欠落** | `argument_generator` | `symbol_data` | `null` |
 | `:argument-schema` | **欠落** | `argument_schema` | `%spec-tree` | `null` |
+
+`%spec-tree` は現在 `spec->data` ノードの `:generator` を落としている。実測では
+`:argument-schema` の tuple ノードが
+`(:KIND :TUPLE :GENERATOR SCRIPTED-ARGUMENTS ...)` を返しており、これが
+Task A の言う「引数ジェネレータ情報」の在り処である。`%spec-tree` に
+`generator`（`symbol_data`）を追加する。これは spec / property の describe に
+も効く共通の改善で、`argument_schema` だけの特例にはしない。
 | `:preconditions` | あり | 変更なし | 有界 form | — |
 | `:returns` | あり | 変更なし | `%spec-tree` | — |
 | `:signals` | **欠落** | `signals` | `%spec-tree` | `null` |
@@ -170,6 +177,19 @@ cl-spec の `case-run-report` をそのまま写す。
 生成予算の枯渇は、仕様が充足不能である証拠でも target 実装が誤っている証拠でも
 ない。target の失敗に翻訳しない。
 
+実測の注意 — 正常値であって異常ではないもの:
+
+- 成功した run の `shrink_report` は `:NOT-COLLECTED`。縮小が失敗したのでは
+  なく、失敗が無いので縮小自体が起きていない。§3 の `not-collected` に
+  落とし、テキストでは何も言わない。
+- 有界 AND フィルタを使わない契約の `generation_report` は
+  `attempts: 0` / `rejections: 0`。これは異常ではないので、
+  `termination` が `completed` であれば何も言わない。
+- case-selection error でも `counterexample` は存在する（実測: `balance 5
+  amount 5`）。target は呼ばれていないので、テキストはこの値を
+  「この入力で関数が失敗した」と読ませてはならない。§7 の
+  `failure phase:` 行がその役目を負う。
+
 ### 5.3 `shrink_report`（Task F）
 
 `{candidates, budget, termination}` を写す。`termination` は
@@ -228,12 +248,29 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:status` | `status` | keyword→string |
 | `:reason` | `reason` | keyword→string |
 | `:signature` | `signature` | 有界 form |
-| `:explanation` | `explanation` + complete/omitted | 有界 form |
+| `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
 | `:outcome` | `target_outcome` | keyword→string |
 | `:value` | `primary_value` | `externalize-value` |
 | `:case` | `selected_case` | keyword→string |
 | `:condition-report` | `condition_report` | 文字列（有界） |
 | `:state` | `state`（下記） | — |
+
+`:explanation` は文字列ではなく plist である。実測（case-selection error）:
+
+```lisp
+(:KIND :CASE-SELECTION-ERROR :CASE-ERROR :AMBIGUOUS-CASE
+ :FUNCTION OVERLAPPING-BALANCE :CASES (:AT-LEAST :AT-MOST)
+ :CASE NIL :CONDITION-TYPE NIL :CONDITION-REPORT NIL)
+```
+
+`:KIND` ごとに key が異なるので、`shrink_report` / `generation_report` と同じ
+汎用 plist 投影（既知 key はそのまま、値は `externalize-value`、未知 key は
+`unknown_keys` に名前のみ）を使い、構造を保ったまま運ぶ。有界印字した文字列
+1 本に潰すと、`:CASES (:AT-LEAST :AT-MOST)` のような「どの case が衝突したか」
+が散文の中に埋もれる。
+
+既存の `contract.explanation`（`property-result-explanation` の選択値を有界
+印字した文字列）はそのまま残す。§8 のとおり別の問いに答えるフィールドである。
 
 `state` は単一の boolean に潰さない。
 
