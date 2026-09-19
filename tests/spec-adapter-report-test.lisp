@@ -201,6 +201,10 @@ Its :SHRINK-REPORT is a collected form, not :NOT-COLLECTED -- :CANDIDATES /
 :BUDGET / :TERMINATION -- which spec-core-record-test.lisp's own passing
 fixture never exercised.")
 
+(defun field-of (node key)
+  "Return the child NODE holds under the JSON key KEY."
+  (cdr (assoc key (second node) :test #'equal)))
+
 (deftest result-record-crosses-the-boundary-whole
   (let* ((api (%stub-api :result-data (constantly *passing-result*)
                          :result-status (constantly :passed)
@@ -222,10 +226,64 @@ fixture never exercised.")
                      "shrink_report" "generation_report" "failure_phase"
                      "failure_reason" "case_report" "failure" "shrunk_failure"))
         (ok (assoc key (second data) :test #'equal))))
+    (testing "not just present -- the values that arrived are the fixture's own"
+      (ok (equal '(:scalar 2) (field-of data "budget")))
+      (ok (equal '(:scalar 0) (field-of data "rejected")))
+      (ok (equal '(:scalar nil) (field-of data "failure_phase"))))
     (testing "the aliases agree with the record because they come from it"
       (ok (eq :passed (getf report :status)))
       ;; A seed is text on both sides; a JSON consumer would round the number.
       (ok (equal "4611686018427387903" (getf report :seed))))))
+
+(deftest contract-rejected-agrees-with-the-record-even-against-a-disagreeing-reader
+  ;; The drift this branch exists to close: CONTRACT.REJECTED and
+  ;; CORE_RESULT.DATA.REJECTED must be the same fact, read once, not two
+  ;; independent answers published side by side.  :CHECK-REJECTED here
+  ;; answers a different, wrong number -- the record must win regardless.
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :failed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)
+                         :check-rejected (constantly 999)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (contract (getf report :contract))
+         (data (getf (getf report :core-record) :data)))
+    (ok (eql 0 (getf contract :rejected)))
+    (ok (equal '(:scalar 0) (field-of data "rejected")))
+    ;; Not the legacy reader's disagreeing answer.
+    (ok (not (eql 999 (getf contract :rejected))))))
+
+(deftest contract-failure-reason-agrees-with-the-record-even-against-a-disagreeing-reader
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :failed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)
+                         :check-failure-reason (constantly :postcondition)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (contract (getf report :contract))
+         (data (getf (getf report :core-record) :data)))
+    (ok (null (getf contract :failure-reason)))
+    (ok (equal '(:scalar nil) (field-of data "failure_reason")))
+    ;; NIL here is the record's own measured answer, not this adapter unable
+    ;; to ask: the record declares the key, so it is readable even though its
+    ;; value is NIL.
+    (ok (getf contract :failure-reason-readable))
+    ;; Not the legacy reader's disagreeing answer.
+    (ok (not (eq :postcondition (getf contract :failure-reason))))))
 
 (deftest an-old-cl-spec-still-answers-through-the-legacy-readers
   ;; Section 12 case 6.  No RESULT-DATA handle at all.
@@ -247,6 +305,31 @@ fixture never exercised.")
     (ok (null (getf record :data)))
     ;; Not reported as measured zeros for counters nothing kept.
     (ok (null (getf record :field-availability)))))
+
+(deftest an-old-cl-specs-contract-fields-still-come-from-the-legacy-readers
+  ;; Mirrors AN-OLD-CL-SPEC-STILL-ANSWERS-THROUGH-THE-LEGACY-READERS for the
+  ;; two %CONTRACT-PLIST fields %CORE-FACT now also covers.  No RESULT-DATA
+  ;; handle at all: :REJECTED and :FAILURE-REASON must still come from
+  ;; :CHECK-REJECTED / :CHECK-FAILURE-REASON, and READABLE must still mean
+  ;; "the legacy reader resolved".
+  (let* ((api (%stub-api :result-status (constantly :failed)
+                         :result-trials (constantly 8)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.1)
+                         :check-rejected (constantly 2)
+                         :check-failure-reason (constantly :postcondition)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 8)
+                  '(:value nil :complete nil :covers :contract) nil 2000 nil))
+         (contract (getf report :contract)))
+    (ok (eql 2 (getf contract :rejected)))
+    (ok (eq :postcondition (getf contract :failure-reason)))
+    (ok (getf contract :rejected-readable))
+    (ok (getf contract :failure-reason-readable))))
 
 (deftest a-result-data-that-signals-is-an-adapter-fault
   ;; Section 12 case 21.  The name resolved and the call broke: falling back

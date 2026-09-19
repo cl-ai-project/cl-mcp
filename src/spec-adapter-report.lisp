@@ -30,7 +30,8 @@
                 #:print-form-bounded)
   (:import-from #:cl-mcp/src/spec-core-record
                 #:project-core-record
-                #:validate-versioned-record)
+                #:validate-versioned-record
+                #:field-availability)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -1723,7 +1724,34 @@ report text is a rendering, not the value."
                       :value (externalize-value value
                                                 :max-chars max-value-chars))))
 
-(defun %contract-plist (api result executed max-value-chars
+(defun %core-fact (record key legacy)
+  "Return one fact by the precedence rule: the record first, then the reader.
+
+RECORD is the parsed core record's :DATA source plist, or NIL when this cl-spec
+has none.  LEGACY is a thunk calling the public reader.
+
+The rule is about which reader is CALLED, not about comparing two answers.
+When the record is there it is the only thing read, so the two can never
+disagree; when it is not, the reader is all there is.  That is also what makes
+the existing top-level fields safe as compatibility aliases -- they are built
+from this, not beside it.
+
+Returns (VALUES FACT READABLE-P).  Most callers only want FACT and ignore the
+second value, but %CONTRACT-PLIST's REJECTED and FAILURE-REASON need it: on
+the record path READABLE-P is FIELD-AVAILABILITY's :COLLECTED/:ABSENT
+distinction, true for a key the record declares even when its value is NIL,
+false only for a key this record's schema does not carry at all.  On the
+legacy path it is whatever LEGACY's own second value says -- for a thunk
+built over READ-SLOT-style readers, \"the reader resolved without
+signalling\" -- the same question asked a different way, so a caller that
+wants a readable flag gets one with the same meaning regardless of which
+path answered."
+  (if record
+      (values (getf record key)
+              (not (eq :absent (field-availability record key))))
+      (funcall legacy)))
+
+(defun %contract-plist (api result executed max-value-chars source
                         &optional (precondition-p :unknown))
   "Return the contract-specific half of a CHECK-FUNCTION result.
 
@@ -1731,6 +1759,17 @@ Always a plist: %RESULT-PLIST decides whether a run had a contract half and
 calls this only then, and %EVALUATED-P reads a non-NIL :CONTRACT as \"this was
 a contract run\" -- a NIL return here would put it back on the raw trial count
 this function exists to withhold.
+
+SOURCE is %RESULT-PLIST's parsed RESULT-DATA record, or NIL when this cl-spec
+has none -- the same value %CORE-FACT closes over for every other fact there.
+REJECTED and FAILURE-REASON go through it here too, so a record that carries
+them answers with the record's own numbers rather than a second,
+independently read count sitting beside it.  EXECUTED already arrives
+core-first, resolved one level up in %RESULT-PLIST before this function ever
+sees it; routing REJECTED any other way would make :EFFECTIVE-TRIALS and
+:REJECTION-STATUS -- whose whole premise is that cl-spec's own refusal
+counter cannot be trusted -- a subtraction across two different answers to
+\"how many\", which is worse than either answer alone.
 
 REJECTED is what separates a run that checked the function from one that only
 generated arguments for it: cl-spec's checker refuses inputs its :PRE does not
@@ -1747,7 +1786,10 @@ runs in 8 against a contract whose function signals inside its :PRE region,
 one of them reporting 1 trial and 2 rejections.
 
 FAILURE-REASON names which half of the contract broke; EXPLANATION carries
-cl-spec's structured account of a return value that missed its spec."
+cl-spec's structured account of a return value that missed its spec.
+EXPLANATION has no record counterpart at this level: RESULT-DATA nests an
+explanation inside :FAILURE's own observation, not beside :REJECTED and
+:FAILURE-REASON at the top, so it stays on the legacy reader alone."
   (flet ((read-slot (key)
            ;; (values VALUE OK-P).  Resolving the symbol is not the same as
            ;; calling it: a reader that signals -- a result type that drifted,
@@ -1759,103 +1801,112 @@ cl-spec's structured account of a return value that missed its spec."
                (handler-case (values (funcall (api-fn api key) result) t)
                  (error () (values nil nil)))
                (values nil nil))))
-    (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
+    (multiple-value-bind (reason reason-readable)
+        (%core-fact source :failure-reason
+                    (lambda () (read-slot :check-failure-reason)))
       (multiple-value-bind (explanation explanation-read)
           (read-slot :check-explanation)
-        (multiple-value-bind (rejected rejected-read) (read-slot :check-rejected)
-        (let* (
-               (countable (and (integerp executed) (integerp rejected)))
-               (overcounted (and countable (> rejected executed)))
-               ;; A refusal reported against a contract whose projection says it
-               ;; has nothing to refuse with.  Two readers disagreeing, like the
-               ;; overcount above, and handled the same way rather than only in
-               ;; the text: a subtraction over figures that contradict each
-               ;; other is not a call count, and publishing it while the text
-               ;; says it cannot be derived leaves one response saying both.
-               (contradicted (and countable
-                                  (null precondition-p)
-                                  (plusp rejected)))
-               ;; One keyword for one three-valued question, decided in one
-               ;; place.  Five booleans meant the renderer re-derived which
-               ;; reason applied by testing them in an order that could not
-               ;; change -- :UNKNOWN is not NULL, so its clause had to precede
-               ;; the no-:pre one, silently -- while the gap list and the
-               ;; verdict read a sixth.  The booleans below are published from
-               ;; this, not computed beside it.
-               (rejection-status
-                 ;; The countability clauses first, before every one below
-                 ;; them: each of those ends in a subtraction, and cl-spec can
-                 ;; report a result whose trial count is NIL -- its own
-                 ;; check-function writes
-                 ;; (- (or (property-result-trials result) 0) rejected) for
-                 ;; that reason.  Ordered after :NO-PRECONDITION, a contract
-                 ;; without a :pre reached (- NIL 0) and the TYPE-ERROR came
-                 ;; back to the caller as "this adapter failed".
-                 ;;
-                 ;; :UNMEASURED and :TRIALS-UNCOUNTED are separate because
-                 ;; they are separate sentences: one says the refusal count
-                 ;; could not be read, the other that it was read and the
-                 ;; trial count was not.  One keyword for both had the text
-                 ;; denying a number the JSON was publishing beside it.
-                 (cond ((not (integerp rejected)) :unmeasured)
-                       ((not (integerp executed)) :trials-uncounted)
-                       ;; Both directions.  The premise of this plist is that
-                       ;; cl-spec's refusal counter cannot be trusted, and a
-                       ;; count below zero passed every gate: it subtracted to
-                       ;; MORE trials than the budget and carried a verified
-                       ;; verdict on the difference.
-                       ((minusp rejected) :negative)
-                       (overcounted :overcounted)
-                       ((eq :unknown precondition-p) :precondition-unknown)
-                       (contradicted :contradicted)
-                       ((null precondition-p) :no-precondition)
-                       (t :usable)))
-               (usable (member rejection-status '(:usable :no-precondition))))
-          (multiple-value-bind (explanation-text explanation-complete
-                                explanation-omitted)
-              (if explanation
-                  ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
-                  ;; non-positive budget lives in the wrapper, and this was the
-                  ;; one bounded print in the file reaching the stream without
-                  ;; it.
-                  (%print-bounded-form explanation max-value-chars)
-                  (values nil :not-applicable nil))
-            (list ;; Only when it is a number.  A reader that answered a
-                ;; keyword or a float published that value beside a status
-                ;; saying the count could not be read -- and handed yason
-                ;; something it may refuse to serialize.
-                :rejected (when (integerp rejected) rejected)
-                  :rejection-status rejection-status
-                  :rejected-measured (and rejected-read (integerp rejected) t)
-                :rejected-readable (and rejected-read t)
-                  ;; Carried so a renderer does not describe a refusal that
-                  ;; cannot happen: "0 of them refused by :pre" told the reader
-                  ;; a precondition exists, on a contract written without one.
-                  :precondition-p precondition-p
-                  :rejected-overcounted (and overcounted t)
-                  :rejected-contradicted (and contradicted t)
-                  ;; The single question every consumer of this plist asks: is
-                  ;; the refusal count one this response may subtract with.
-                  :rejected-usable (and usable t)
-                  ;; Absent, not floored, when the two cannot be subtracted: 0
-                  ;; is itself a claim -- "the function was never called" --
-                  ;; about a run that did call it, and the text says the number
-                  ;; cannot be derived while the JSON would have said zero.
-                  :effective-trials (when usable (- executed rejected))
-                  :failure-reason reason
-                  ;; Whether the reader resolved, not whether it returned it.
-                  ;; NIL is a legitimate answer from cl-spec -- a passing run,
-                  ;; or a failing one whose counterexample did not reproduce --
-                  ;; so it cannot double as "this adapter could not ask".
-                  ;; Reported for the same reason REJECTED-MEASURED is: without
-                  ;; it a renderer tells the caller their function is
-                  ;; non-deterministic on the evidence of a name this image
-                  ;; could not find.
-                  :failure-reason-readable (and reason-read t)
-                  :explanation explanation-text
-                  :explanation-readable (and explanation-read t)
-                  :explanation-complete explanation-complete
-                  :explanation-omitted-chars explanation-omitted))))))))
+        (multiple-value-bind (rejected rejected-readable)
+            (%core-fact source :rejected (lambda () (read-slot :check-rejected)))
+          (let* ((countable (and (integerp executed) (integerp rejected)))
+                 (overcounted (and countable (> rejected executed)))
+                 ;; A refusal reported against a contract whose projection says it
+                 ;; has nothing to refuse with.  Two readers disagreeing, like the
+                 ;; overcount above, and handled the same way rather than only in
+                 ;; the text: a subtraction over figures that contradict each
+                 ;; other is not a call count, and publishing it while the text
+                 ;; says it cannot be derived leaves one response saying both.
+                 (contradicted (and countable
+                                   (null precondition-p)
+                                   (plusp rejected)))
+                 ;; One keyword for one three-valued question, decided in one
+                 ;; place.  Five booleans meant the renderer re-derived which
+                 ;; reason applied by testing them in an order that could not
+                 ;; change -- :UNKNOWN is not NULL, so its clause had to precede
+                 ;; the no-:pre one, silently -- while the gap list and the
+                 ;; verdict read a sixth.  The booleans below are published from
+                 ;; this, not computed beside it.
+                 (rejection-status
+                   ;; The countability clauses first, before every one below
+                   ;; them: each of those ends in a subtraction, and cl-spec can
+                   ;; report a result whose trial count is NIL -- its own
+                   ;; check-function writes
+                   ;; (- (or (property-result-trials result) 0) rejected) for
+                   ;; that reason.  Ordered after :NO-PRECONDITION, a contract
+                   ;; without a :pre reached (- NIL 0) and the TYPE-ERROR came
+                   ;; back to the caller as "this adapter failed".
+                   ;;
+                   ;; :UNMEASURED and :TRIALS-UNCOUNTED are separate because
+                   ;; they are separate sentences: one says the refusal count
+                   ;; could not be read, the other that it was read and the
+                   ;; trial count was not.  One keyword for both had the text
+                   ;; denying a number the JSON was publishing beside it.
+                   (cond ((not (integerp rejected)) :unmeasured)
+                         ((not (integerp executed)) :trials-uncounted)
+                         ;; Both directions.  The premise of this plist is that
+                         ;; cl-spec's refusal counter cannot be trusted, and a
+                         ;; count below zero passed every gate: it subtracted to
+                         ;; MORE trials than the budget and carried a verified
+                         ;; verdict on the difference.
+                         ((minusp rejected) :negative)
+                         (overcounted :overcounted)
+                         ((eq :unknown precondition-p) :precondition-unknown)
+                         (contradicted :contradicted)
+                         ((null precondition-p) :no-precondition)
+                         (t :usable)))
+                 (usable (member rejection-status '(:usable :no-precondition))))
+            (multiple-value-bind (explanation-text explanation-complete
+                                  explanation-omitted)
+                (if explanation
+                    ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
+                    ;; non-positive budget lives in the wrapper, and this was the
+                    ;; one bounded print in the file reaching the stream without
+                    ;; it.
+                    (%print-bounded-form explanation max-value-chars)
+                    (values nil :not-applicable nil))
+              (list ;; Only when it is a number.  A reader that answered a
+                  ;; keyword or a float published that value beside a status
+                  ;; saying the count could not be read -- and handed yason
+                  ;; something it may refuse to serialize.
+                  :rejected (when (integerp rejected) rejected)
+                    :rejection-status rejection-status
+                    ;; READABLE, not whether the legacy reader resolved: on
+                    ;; the record path this is %CORE-FACT's own
+                    ;; FIELD-AVAILABILITY check, true for a declared key even
+                    ;; when its value is NIL; on the legacy path it is
+                    ;; whatever READ-SLOT resolved.  Both answer the one
+                    ;; question this flag exists for -- a definitive count,
+                    ;; or a gap -- so a consumer sees the same meaning
+                    ;; regardless of which path supplied REJECTED.
+                    :rejected-measured (and rejected-readable (integerp rejected) t)
+                  :rejected-readable (and rejected-readable t)
+                    ;; Carried so a renderer does not describe a refusal that
+                    ;; cannot happen: "0 of them refused by :pre" told the reader
+                    ;; a precondition exists, on a contract written without one.
+                    :precondition-p precondition-p
+                    :rejected-overcounted (and overcounted t)
+                    :rejected-contradicted (and contradicted t)
+                    ;; The single question every consumer of this plist asks: is
+                    ;; the refusal count one this response may subtract with.
+                    :rejected-usable (and usable t)
+                    ;; Absent, not floored, when the two cannot be subtracted: 0
+                    ;; is itself a claim -- "the function was never called" --
+                    ;; about a run that did call it, and the text says the number
+                    ;; cannot be derived while the JSON would have said zero.
+                    :effective-trials (when usable (- executed rejected))
+                    :failure-reason reason
+                    ;; The same READABLE question as :REJECTED-READABLE, asked
+                    ;; about FAILURE-REASON: NIL is a legitimate answer -- a
+                    ;; passing run, or a failing one whose counterexample did
+                    ;; not reproduce -- so it cannot double as "could not ask".
+                    ;; On the record path %CORE-FACT answers it from
+                    ;; FIELD-AVAILABILITY; on the legacy path it is whether
+                    ;; READ-SLOT resolved without signalling.
+                    :failure-reason-readable (and reason-readable t)
+                    :explanation explanation-text
+                    :explanation-readable (and explanation-read t)
+                    :explanation-complete explanation-complete
+                    :explanation-omitted-chars explanation-omitted))))))))
 
 (defun %recorded-budget (api result)
   "Return the trial budget cl-spec recorded on RESULT, or NIL.
@@ -1868,21 +1919,6 @@ cl-spec that does not export the reader."
   (when (api-has-p api :check-budget)
     (handler-case (funcall (api-fn api :check-budget) result)
       (error () nil))))
-
-(defun %core-fact (record key legacy)
-  "Return one fact by the precedence rule: the record first, then the reader.
-
-RECORD is the parsed core record's :DATA source plist, or NIL when this cl-spec
-has none.  LEGACY is a thunk calling the public reader.
-
-The rule is about which reader is CALLED, not about comparing two answers.
-When the record is there it is the only thing read, so the two can never
-disagree; when it is not, the reader is all there is.  That is also what makes
-the existing top-level fields safe as compatibility aliases -- they are built
-from this, not beside it."
-  (if record
-      (getf record key)
-      (funcall legacy)))
 
 (defun %result-plist (api result name kind trials digest expected-digest
                       max-value-chars facts)
@@ -1981,7 +2017,7 @@ this adapter cannot read: ~A." core-record-reason))))
               :kind kind
               :contract (when (eq kind :contract)
                           (%contract-plist api result executed max-value-chars
-                                           (getf facts :precondition-p)))
+                                           source (getf facts :precondition-p)))
               :status status
               ;; The recorded budget wins over the derived one, and takes the
               ;; derivation note off with it: the note says cl-spec does not
