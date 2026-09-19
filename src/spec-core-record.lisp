@@ -106,7 +106,26 @@ Keys are snake_case and values keep their hyphens -- \"budget_source\" holding
       (getf *record-shapes* (second descriptor))
       descriptor))
 
-(defun project-record (value descriptor &optional path)
+(defun %tail-unit-count (tail unit cap)
+  "Return (values COUNT EXACT-P) for TAIL's length in units of UNIT conses,
+walked at most CAP units so this always terminates.
+
+TAIL may be circular or far longer than any real record, so this never calls
+LENGTH on it.  NTHCDR always takes exactly the steps it is asked for,
+regardless of what it is walking, so stepping through TAIL that way is safe
+where LENGTH is not.  COUNT is exact -- TAIL's true length in units -- when
+TAIL runs out within CAP units.  Otherwise COUNT is CAP, the most this walked
+and not a total it never reached, and EXACT-P is NIL."
+  (let ((rest tail))
+    (dotimes (count cap)
+      (when (null rest)
+        (return-from %tail-unit-count (values count t)))
+      (setf rest (nthcdr unit rest)))
+    (if (null rest)
+        (values cap t)
+        (values cap nil))))
+
+(defun project-record (value descriptor &key path (max-chars 2000))
   "Project VALUE under DESCRIPTOR and return (values NODE ISSUES UNKNOWN-KEYS).
 
 DESCRIPTOR says what VALUE means; VALUE's own shape never decides.  That is the
@@ -116,48 +135,63 @@ publish a key/value relation cl-spec never declared.
 
 NODE is one of (:SCALAR x), (:SYMBOL plist), (:VALUE plist),
 (:OBJECT ((key . NODE) ...)) or (:ARRAY (NODE ...)).  ISSUES records every
-place the projection was cut, as (:PATH path :REASON reason [:OMITTED-ITEMS n]),
-so a consumer can tell a record with two errors from a record with ten that was
-cut at two.  UNKNOWN-KEYS names the keys no descriptor covers: their existence
-is reported and their meaning is deliberately not guessed.
+place the projection was cut, as (:PATH path :REASON reason [:OMITTED-ITEMS n
+:OMITTED-ITEMS-EXACT-P boolean]).  OMITTED-ITEMS is exact when EXACT-P is
+true; otherwise it is only how far %TAIL-UNIT-COUNT got before giving up, not
+the value's true excess, because counting that exactly could mean walking
+however long an untrusted value turns out to be.  UNKNOWN-KEYS names the keys
+no descriptor covers: their existence is reported and their meaning is
+deliberately not guessed.
 
 PATH is the position reached so far, for the entries of ISSUES and
-UNKNOWN-KEYS."
+UNKNOWN-KEYS.  MAX-CHARS bounds every value this projects, leaf or opaque, the
+same way EXTERNALIZE-VALUE's own :MAX-CHARS does."
   (let ((issues '())
         (unknown '()))
     (labels
         ((walk (value descriptor path depth)
            (let ((descriptor (%resolve-descriptor descriptor)))
              (cond
-               ((eq :leaf descriptor) (project-value value))
-               ((eq :opaque descriptor) (list :value (externalize-value value)))
+               ((eq :leaf descriptor)
+                (project-value value :max-chars max-chars))
+               ((eq :opaque descriptor)
+                (list :value (externalize-value value :max-chars max-chars)))
                ;; >= rather than >: DEPTH counts containers already opened on
                ;; the way here, so the container that would be the (n+1)th is
                ;; the one cut, not one further past it.
                ((>= depth *projection-max-depth*)
                 (push (list :path (reverse path) :reason :depth-limit) issues)
-                (list :value (externalize-value value)))
+                (list :value (externalize-value value :max-chars max-chars)))
                ((eq :word-list descriptor)
                 (list :array (walk-list value :leaf path depth)))
-               ((not (consp descriptor)) (project-value value))
+               ((not (consp descriptor))
+                (project-value value :max-chars max-chars))
                ((eq :array (first descriptor))
                 (list :array (walk-list value (second descriptor) path depth)))
                ((eq :alist (first descriptor))
                 (list :array (walk-alist value (second descriptor) path depth)))
                ((eq :object (first descriptor))
                 (walk-object value (rest descriptor) path depth))
-               (t (project-value value)))))
-         (bounded (items path)
+               (t (project-value value :max-chars max-chars)))))
+         (bounded (items path &optional (unit 1))
            ;; Cut here rather than in each caller, so the entry that records
-           ;; the cut cannot be forgotten in one of them.
-           (if (<= (length items) *projection-max-length*)
-               items
-               (progn
-                 (push (list :path (reverse path) :reason :length-limit
-                             :omitted-items (- (length items)
-                                               *projection-max-length*))
-                       issues)
-                 (subseq items 0 *projection-max-length*))))
+           ;; the cut cannot be forgotten in one of them.  Never call LENGTH:
+           ;; ITEMS came from outside this module and may be circular, and
+           ;; LENGTH does not return on one.  UNIT is 2 for WALK-OBJECT's flat
+           ;; plist, so the cut always falls on a pair boundary instead of
+           ;; splitting one and fabricating a value for the key it orphans.
+           (let* ((limit *projection-max-length*)
+                  (cut-at (* limit unit))
+                  (tail (nthcdr cut-at items)))
+             (if (null tail)
+                 items
+                 (multiple-value-bind (dropped exactp)
+                     (%tail-unit-count tail unit (1+ limit))
+                   (push (list :path (reverse path) :reason :length-limit
+                               :omitted-items dropped
+                               :omitted-items-exact-p exactp)
+                         issues)
+                   (subseq items 0 cut-at)))))
          (walk-list (items descriptor path depth)
            (loop for item in (bounded items path)
                  for index from 0
@@ -173,7 +207,7 @@ UNKNOWN-KEYS."
                                          (cons index path) (1+ depth)))))))
          (walk-object (plist fields path depth)
            (let ((entries '()))
-             (loop for (key raw) on (bounded plist path) by #'cddr
+             (loop for (key raw) on (bounded plist path 2) by #'cddr
                    for field = (assoc key fields)
                    do (if field
                           (push (cons (%json-key key)

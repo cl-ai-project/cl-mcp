@@ -104,7 +104,7 @@
 (deftest a-length-cut-is-reported-not-hidden
   (let ((*projection-max-length* 2))
     (multiple-value-bind (node issues)
-        (project-record '(:a :b :c :d :e) :word-list '("failure" "cases"))
+        (project-record '(:a :b :c :d :e) :word-list :path '("failure" "cases"))
       (ok (= 2 (length (second node))))
       (ok (= 1 (length issues)))
       (let ((issue (first issues)))
@@ -124,3 +124,64 @@
         (ok (eq :value (first inner))))
       (ok (eq :depth-limit (getf (first issues) :reason)))
       (ok (equal '("inner") (getf (first issues) :path))))))
+
+(deftest a-length-cut-on-an-object-never-fabricates-a-value
+  ;; An odd number of surviving pairs used to let a raw-element cut fall mid
+  ;; pair, leaving a key whose real value was dropped and silently reporting
+  ;; NIL for it instead -- a fabricated measurement, the one thing this
+  ;; module must not produce.
+  (let ((*projection-max-length* 3)
+        (shape '(:object (:a . :leaf) (:b . :leaf) (:c . :leaf) (:d . :leaf))))
+    (multiple-value-bind (node issues)
+        (project-record '(:a 1 :b 2 :c 3 :d 4) shape)
+      (let ((fields (second node)))
+        (testing "only whole pairs are kept, never a key with a fabricated value"
+          (ok (equal '(:scalar 1) (cdr (assoc "a" fields :test #'equal))))
+          (ok (equal '(:scalar 2) (cdr (assoc "b" fields :test #'equal))))
+          (ok (equal '(:scalar 3) (cdr (assoc "c" fields :test #'equal))))
+          (ok (null (assoc "d" fields :test #'equal))))
+        (testing "the cut is reported by entries, not raw plist elements"
+          (ok (= 1 (length issues)))
+          (ok (eq :length-limit (getf (first issues) :reason)))
+          (ok (eql 1 (getf (first issues) :omitted-items)))
+          (ok (getf (first issues) :omitted-items-exact-p)))))))
+
+(deftest a-length-cut-on-an-alist-drops-whole-entries
+  (let ((*projection-max-length* 2))
+    (multiple-value-bind (node issues)
+        (project-record (list (cons 'cl-user::a 1) (cons 'cl-user::b 2)
+                               (cons 'cl-user::c 3))
+                         '(:alist :opaque))
+      (ok (= 2 (length (second node))))
+      (ok (= 1 (length issues)))
+      (ok (eq :length-limit (getf (first issues) :reason)))
+      (ok (eql 1 (getf (first issues) :omitted-items)))
+      (ok (getf (first issues) :omitted-items-exact-p)))))
+
+(deftest a-circular-list-is-projected-without-hanging
+  ;; LENGTH loops forever on a circular list; this must never call it on
+  ;; untrusted input.  A regression here should fail loudly, not wedge the
+  ;; suite, hence the timeout.
+  (let ((circular (list 1 2 3)))
+    (setf (cdddr circular) circular)
+    (multiple-value-bind (node issues)
+        (sb-ext:with-timeout 5 (project-record circular :word-list))
+      (ok (eq :array (first node)))
+      (ok (= *projection-max-length* (length (second node))))
+      (testing "the drop count is honest about only what it counted"
+        (ok (eql (1+ *projection-max-length*) (getf (first issues) :omitted-items)))
+        (ok (not (getf (first issues) :omitted-items-exact-p)))))))
+
+(deftest max-chars-reaches-a-nested-leaf
+  ;; The bound must reach every PROJECT-VALUE/EXTERNALIZE-VALUE call inside
+  ;; WALK's own recursion, not just a value project-record is handed
+  ;; directly -- this leaf is two OBJECT layers down.
+  (let* ((shape '(:object (:outer . (:object (:inner . :leaf)))))
+         (many-numbers (loop for i below 500 collect i))
+         (node (project-record (list :outer (list :inner many-numbers)) shape
+                                :max-chars 5))
+         (outer (cdr (assoc "outer" (second node) :test #'equal)))
+         (inner (cdr (assoc "inner" (second outer) :test #'equal))))
+    (ok (eq :value (first inner)))
+    (ok (= 5 (length (getf (second inner) :printed))))
+    (ok (null (getf (second inner) :printed-complete)))))
