@@ -134,7 +134,49 @@ sentinel を使う。
 これは §3 で掲げた区別を scalar フィールドでも実際に成立させるための要件で
 あって、飾りではない。回帰テストを 1 件立てる（§12）。
 
-### 3.3 `result-data` の呼び出しが失敗した場合
+### 3.3 `:NOT-COLLECTED` は場所によってはデータそのもの
+
+**`:NOT-COLLECTED` を見つけたら availability に変換する、という再帰規則を
+作らない。** cl-spec では同じ keyword が場所によって semantic value である。
+
+実測で確認した該当例:
+
+| 出現位置 | 意味 | 扱い |
+|---|---|---|
+| `failure.outcome` | **target を一度も呼んでいない**（§6.1） | semantic value。`target_outcome.kind = "not-collected"` として保持 |
+| `provenance.collection_states.target_revision` | その項目を収集しなかった | semantic value。そのまま保持 |
+| `shrink_report` / `generation_report` / `case_report`（top-level） | backend がレポートを作らなかった | availability sentinel |
+| `digest_omissions` / `digest_exclusions`（top-level） | `result-data` が明示的に埋める（`(getf metadata field :not-collected)`） | availability sentinel |
+
+したがって **availability への変換は、schema 上その sentinel を使うと分かって
+いる top-level field に限る**。任意の nested value へ再帰適用しない。
+回帰テストを 1 件立てる（§12）。
+
+### 3.4 未知の schema version
+
+「`result-data` はある / 呼び出しも成功した / `schema-version` が 2 で、
+adapter は v1 しか知らない」は四状態のどれでもない。unavailable でも absent
+でも not-collected でもなく、adapter が意味を理解できる collected でもない。
+
+availability を 5 値に増やさず、独立した真偽値で表す。
+
+```json
+"core_result": {
+  "availability": "collected",
+  "schema_supported": false,
+  "schema_version": 2,
+  "field_availability": null,
+  "data": null
+}
+```
+
+**v2 に対して v1 の absence 規則を適用しない。** §4 の
+「`:kind` の欠落は `:required`」は v1 についての規則であって、v2 の欠落が
+同じ意味だと仮定してはならない。`schema-info` が v1 について
+`unknown-keys :ignore` と言っているのは「未来の schema version も v1 として
+読め」という意味ではない。
+
+### 3.5 `result-data` の呼び出しが失敗した場合
 
 四状態のどれでもない第五の状態として扱う。
 
@@ -209,6 +251,12 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 | `:post-value-variables` | `post_value_variables` | `symbol_data[]` |
 | `:state-post` | `state_post` + complete/omitted | 有界 form |
 
+**root metadata も同じ扱いにする。** `function-spec-data` の root は
+`definition-metadata` が作る envelope をそのまま持ち、state 監視契約では
+`:state-constraints` が付く。現行の `core-schema-data` が拾う 7 key に加えて
+`digest_omissions` / `digest_exclusions` / `state_constraints` を
+`spec-describe` の応答にも載せる（§5 の `core_result.data` と一貫させる）。
+
 **実行しないこと**: `function-spec-data` は guard・capture・post・state-post の
 コンパイル済み関数を投影しないので、adapter は読むだけで済む。target も
 `:pre` も capture form も case guard も post form も state-post form も
@@ -225,7 +273,11 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 
 | `result-data` key | 現在の cl-mcp | 変更後 | 旧 cl-spec fallback |
 |---|---|---|---|
-| envelope 7 key | `results[].core_schema` | 変更なし | `null` |
+| envelope 7 key | `results[].core_schema` | 変更なし（互換 alias） | `null` |
+| `:digest-omissions` | **欠落**（`core-schema-data` は 7 key しか拾わない） | `core_result.data.digest_omissions` | `field_availability` |
+| `:digest-exclusions` | **欠落**（同上） | `core_result.data.digest_exclusions` | `field_availability` |
+| `:capabilities` | `core_schema.capabilities` | `core_result.data.capabilities` + 既存 alias | `null` |
+| `:state-constraints` | **欠落** | `core_result.data.state_constraints` | `field_availability` |
 | `:name` | 引数 `name` から | 変更なし | — |
 | `:status` | legacy `property-result-status` | `results[].status`（core 優先） | legacy reader |
 | `:trials` | legacy `property-result-trials` | `results[].trials.executed`（core 優先） | legacy reader |
@@ -247,8 +299,27 @@ Task A の言う「引数ジェネレータ情報」の在り処である。`%sp
 | `:shrunk-failure` | **欠落** | `core_result.data.shrunk_failure` | `null` + `field_availability` で absent/unavailable を区別 |
 | `:elapsed` | legacy reader | `results[].elapsed`（core 優先） | legacy reader |
 
-`core_result.data` は上表の右列を cl-spec の綴りのまま snake_case にした純粋な
-写像である。既存の `results[].status` / `.trials.budget` / `.seed` /
+`:state-constraints` は state 監視契約でのみ現れる（`definition-metadata`
+が `(when state (list :state-constraints state))` で前置する）。現行
+`core-schema-data` は envelope 7 key しか拾わないので、`digest-omissions` /
+`digest-exclusions` / `state-constraints` は今まで一つも通っていない。
+
+`core_result.data` は cl-spec の record の **semantic 1:1 投影**である。
+JSON 表現上どうしても必要な構造変換だけを行い、それ以外は何も足さず何も
+落とさない。Lisp の plist をそのまま JSON にはできないので、次の形を決めて
+おく。
+
+| フィールド | Lisp | JSON |
+|---|---|---|
+| `counterexample` / `shrunk_counterexample` | `(BALANCE 5 AMOUNT 5)` | `[{"variable": <symbol_data>, "value": <externalized>}, ...]`（既存 `%named-values` と同じ） |
+| `capabilities` | `(:GENERATION :AVAILABLE :SHRINKING :NONE :INSTRUMENTATION :UNAVAILABLE)` | `{"generation": "available", "shrinking": "none", "instrumentation": "unavailable"}` |
+| `digest_exclusions` | `(:TARGET-IMPLEMENTATION ...)` | `["target-implementation", ...]` |
+| `digest_omissions` | `NIL` / 省略記録のリスト | `[]` / 各要素を §6.2 の再帰 projector で |
+| `options` | 呼び出し側 plist | §6.2 の再帰 projector（任意の Lisp 値を含みうる） |
+| `provenance` | plist、`collection_states` はネスト plist | オブジェクト。`:not-collected` は §3.3 のとおり値として保持 |
+| `state_constraints` | 実装依存 | §6.2 の再帰 projector |
+
+上表の右列を cl-spec の綴りのまま snake_case にした写像であり、既存の `results[].status` / `.trials.budget` / `.seed` /
 `contract.rejected` / `contract.failure_reason` などは**互換 alias**として残り、
 §2 のとおり `data` と同じ解析済み値から生成する。両者が食い違うことは構造上
 起こらない。
@@ -305,7 +376,7 @@ cl-spec の `case-run-report` をそのまま写す。
 | `failure_phase = generation` | 検証対象へ十分到達できなかった | **はい**（`generation-incomplete`） |
 | `generation_report.exhaustion_phase = generation` | generation 側の未完了 | 上と同時に立つのでそちらで表す |
 | `generation_report.exhaustion_phase = shrinking` | 反例縮小の未完了 | **いいえ**。既存の failure evidence は有効 |
-| `shrink_report.termination != completed` | 縮小品質の問題 | **いいえ**。元の failure を無効化しない |
+| `shrink_report.termination`（値を問わず） | 縮小の状態。§5.3 を見よ | **いいえ**。元の failure を無効化しない |
 
 generation フェーズの枯渇では cl-spec 自身が `:status :error` /
 `:failure-reason :generation-budget-exhausted` / `:failure-phase :generation`
@@ -332,11 +403,41 @@ false になる。adapter が termination から verification status を再推�
 ### 5.3 `shrink_report`（Task F）
 
 `{candidates, budget, termination}` を写す。`termination` は
-**閉じた列挙として検証しない**。cl-spec が公開する閉じた列挙が無い以上、
-未知の値はそのまま文字列として通し、adapter エラーにはしない。
+**閉じた列挙として検証しない**。未知の値はそのまま文字列として通し、
+adapter エラーにはしない。
+
+**`completed` という termination は存在しない。** ソースの全リテラルを
+数えた結果は次のとおりで、`grep -c ":termination :completed"` は 0 である。
+
+```
+budget-exhausted  shrinker-error  mutation  validation-error  execution-error
+exhausted  state-restoration-unavailable  not-a-target-failure  disabled
+no-shrinker  generation-budget-exhausted
+```
+
+したがって「`termination != completed` なら縮小が不完全」という判定は書け
+ない。さらに `:exhausted` は「探索を尽くし、それ以上小さくならなかった」と
+いう**成功側**の値であって、不完全を意味しない。
+
+規則:
+
+- `shrink_report.termination` を **verification の成否判定に一切使わない**
+- 意味が確定している既知の値だけテキスト化する。少なくとも
+  `state-restoration-unavailable` / `generation-budget-exhausted` /
+  `interrupted` 系は「縮小が実行不能 / 未完了」、`exhausted` は
+  「探索を尽くした」、`disabled` / `no-shrinker` は「縮小機構が無い」
+- **未知の値は値をそのまま表示し、`complete` / `incomplete` に勝手に分類
+  しない**
+
+**`shrink_report` の `not-collected` は「縮小しなかった」ではない。**
+通常経路の縮小（汎用ジェネレータの `shrink`）はレポートを作らないため、
+`run-property` が `(or ... :not-collected)` で `:NOT-COLLECTED` を入れる。
+つまり `not-collected` は「失敗が無かった」か「ふつうに縮小した」のどちらか
+である。**通常の縮小を説明するのは `shrunk_outcome`**（`:used` /
+`:none` / `:different-failure`）であり、こちらが第一の情報源になる。
 
 現行の「`shrunk_counterexample` が空 → 縮小して何も出なかった」という推論は、
-`shrunk_outcome` / `shrink_report` が読める限り使わない。特に
+`shrunk_outcome` が読める限り使わない。特に
 `state-restoration-unavailable` を「shrinking ran and found no smaller
 counterexample」と描画しない。両者は別のことを言っている。
 
@@ -392,7 +493,7 @@ counterexample」と描画しない。両者は別のことを言っている。
 | `:arguments` | `arguments[]` | 各値 `externalize-value` |
 | `:status` | `status` | keyword→string |
 | `:reason` | `reason` | keyword→string |
-| `:signature` | `signature` | 有界 form |
+| `:signature` | `signature` | **再帰 projector・配列強制**（§6.2.1） |
 | `:explanation` | `explanation` | **構造化オブジェクト**（後述） |
 | `:outcome` | `target_outcome` | **構造化オブジェクト**（後述） |
 | `:value` | `primary_value` | `externalize-value` |
@@ -425,6 +526,11 @@ export されていない**（実測で確認）ので、この plist を読む�
 "target_outcome": { "kind": "not-collected" }
 ```
 
+投影規則: `values[]` は各値を `externalize-value`、`condition_type` は
+シンボルなので `symbol_data`、`condition_report` は文字列（有界）、
+`kind` は keyword→string。`:NOT-COLLECTED` は §3.3 のとおり
+**この field 自身の semantic value** であり、availability へ変換しない。
+
 **これが今回もっとも保存したい情報である。** `kind` が `not-collected` で
 ないことが「target が実際に呼ばれた」ことの**核となる事実**であり、
 adapter 側の推論ではない。したがって
@@ -446,14 +552,64 @@ target_outcome.kind = returned
  :CASE NIL :CONDITION-TYPE NIL :CONDITION-REPORT NIL)
 ```
 
-`:KIND` ごとに key が異なるので、`shrink_report` / `generation_report` と同じ
-汎用 plist 投影（既知 key はそのまま、値は `externalize-value`、未知 key は
-`unknown_keys` に名前のみ）を使い、構造を保ったまま運ぶ。有界印字した文字列
-1 本に潰すと、`:CASES (:AT-LEAST :AT-MOST)` のような「どの case が衝突したか」
-が散文の中に埋もれる。
+`:KIND` ごとに key が異なる。**値ごと `externalize-value` にかけてはいけない**
+— それでは `:errors` が `{"printed": "((:KIND ...))"}` という文字列 1 本に
+戻ってしまい、cl-spec がわざわざ構造化した explain が無駄になる。
+`:CASES (:AT-LEAST :AT-MOST)` も同じである。
+
+専用の**再帰 projector** を作る。型で決め、役割を推測しない。
+
+| Lisp | JSON |
+|---|---|
+| keyword | 文字列（lower-case） |
+| その他のシンボル | `symbol_data` オブジェクト |
+| 文字列 | 文字列 |
+| fixnum 範囲の整数 | 数値 |
+| cons | 下記の object/array 規則 |
+| それ以外（実際のユーザ値、CLOS インスタンス等） | `externalize-value` |
+
+cons の規則: **長さが偶数で、偶数位置がすべて相異なる keyword** のときだけ
+オブジェクトに投影し、そうでなければ配列に投影する。どちらも無損失で、
+どちらになったかは消費側が見れば分かる。深さと要素数には既存の
+`*value-print-level*` / `*value-print-length*` と同じ上限を掛ける。
+
+`:errors` / `:branches` / `:conjuncts` は cl-spec 自身が
+`*failure-shape-containers*` として「error 形式の plist のリスト」と分類して
+いる 3 つなので、各要素をオブジェクト投影した配列になる。
 
 既存の `contract.explanation`（`property-result-explanation` の選択値を有界
 印字した文字列）はそのまま残す。§8 のとおり別の問いに答えるフィールドである。
+
+### 6.2.1 `signature` — 構造化するが、オブジェクトにはしない
+
+`signature` も文字列に潰さず、**同じ再帰 projector** を通す。ただし
+**flat array にはならないし、オブジェクトにもしない。**
+
+`failure-signature` が実際に組む形:
+
+```lisp
+(:return-value :return-spec (<failure-shape plist> ...))  ; ネストする
+(:condition-spec SIMPLE-ERROR (<failure-shape plist> ...))
+(:missing-condition)                                      ; 1 要素
+(:target-signal SIMPLE-ERROR)                             ; 位置的タグ
+(:case :sufficient-funds :state-postcondition 0)          ; 実測
+```
+
+先頭の keyword は **key ではなくタグ**である。`(:target-signal SIMPLE-ERROR)`
+を `{"target-signal": "SIMPLE-ERROR"}` と読ませると、cl-spec が宣言していない
+key/value 関係を adapter が発明したことになる。また `:return-spec` の
+signature は `failure-shape` の plist を入れ子に持つので、スカラーの
+flat array でも表せない。
+
+したがって `signature` は **§6.2 の cons 規則のうち配列側を強制**し、
+再帰的に配列として投影する。
+
+```json
+"signature": ["case", "sufficient-funds", "state-postcondition", 0]
+"signature": ["return-value", "return-spec", [ { "kind": "...", "expected": [...] } ]]
+```
+
+これは failure identity の比較にも使える（順序を保つ無損失表現）。
 
 `state` は単一の boolean に潰さない。
 
@@ -648,10 +804,20 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
    値が NIL の record と、key 自体が無い record で `field_availability` が
    `collected` / `absent` に分かれること。§3.2 の最重要回帰テスト。
 9. **`result-data` はあるが呼ぶと signal する** — legacy fallback せず
-   `internal-error` になること（§3.3）。
+   `internal-error` になること（§3.5）。
 10. **live condition object の維持** — 現行 cl-spec 経路でも既存の
     `condition.object_id` が失われないこと（§2 の補助 reader 例外）。
-11. **不透明な捕捉値** — cl-spec が
+11. **`:NOT-COLLECTED` の field 固有性** — `failure.outcome` が
+    `:NOT-COLLECTED` のとき、`target_outcome.kind = "not-collected"` として
+    残り、`field_availability` へ誤変換されないこと。
+    `provenance.collection_states.target_revision` も同様。§3.3 の回帰テスト。
+12. **未知の schema version** — `schema-version 2` の record に対して
+    `schema_supported: false` / `data: null` になり、v1 の absence 規則
+    （`:kind` 欠落 → required 等）が適用されないこと（§3.4）。
+13. **explanation / signature が文字列にならない** — `:errors` が
+    ネストしたオブジェクトの配列として残り、`signature` が配列として残ること
+    （§6.2 / §6.2.1）。
+14. **不透明な捕捉値** — cl-spec が
     `(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE ...)` を返したとき、
     `object_id` を付けず unavailable のまま通ること（§6.3）。
 
@@ -659,11 +825,14 @@ fixture は `tests/fixtures/spec-fixture-contracts.lisp` に追加する。
 
 テキストと JSON の不一致を禁止するアサーション（§7 の 3 パターン）に加えて:
 
-12. **shrinking 中の生成予算枯渇** — 反例は確立済みで
+15. **shrinking 中の生成予算枯渇** — 反例は確立済みで
     `generation_report.termination = budget-exhausted` /
     `exhaustion_phase = shrinking` のとき、「verification incomplete」と
     表示せず「failure established, shrinking incomplete」と表示すること。
     `verification_gaps` にも入らないこと（§5.2 / §5.5）。
+16. **未知の shrink termination** — 知らない termination 値を
+    `complete` / `incomplete` に分類せず、値そのものを表示すること。
+    `exhausted` を「縮小が不完全」と表示しないこと（§5.3）。
 
 ## 13. 非目標
 
