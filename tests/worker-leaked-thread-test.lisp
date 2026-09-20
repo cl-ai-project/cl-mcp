@@ -535,10 +535,10 @@ initialization pool-wide for")
         (ignore-errors (sb-ext:process-kill process 9))
         (ignore-errors (sb-ext:process-wait process))))))
 
-(deftest reaper-records-terminal-diagnostics-after-eof
+(deftest reaper-keeps-eof-snapshot-and-logs-terminal-diagnostics
   ;; EOF only tells the parent that the transport closed.  The child can still
-  ;; be alive when it is observed, so the reaper's terminal process state is
-  ;; the diagnostic record that has to survive the race.
+  ;; be alive when it is observed, so the reaper records its terminal state
+  ;; separately without changing the crash snapshot used by pool recovery.
   (let* ((process (sb-ext:run-program "/bin/sh" '("-c" "exec sleep 30")
                                       :wait nil :search nil))
          (worker (cl-mcp/src/worker-client::make-worker
@@ -548,46 +548,108 @@ initialization pool-wide for")
                            (make-string-input-stream "")
                            (make-broadcast-stream)))))
     (unwind-protect
-         (let ((crash
-                 (handler-case
-                     (progn
-                       (cl-mcp/src/worker-client:worker-rpc
-                        worker "worker/probe" nil)
-                       nil)
-                   (cl-mcp/src/worker-client:worker-crashed (condition)
-                     condition))))
-           (ok crash "the deterministic closed stream is reported as a crash")
-           (ok (and crash
-                    (string= "eof"
-                             (cl-mcp/src/worker-client:worker-crashed-reason
-                              crash)))
-               "the closed stream follows the EOF path")
-           (let ((terminal-status
-                   (loop repeat 200
-                         for status =
-                           (ignore-errors (sb-ext:process-status process))
-                         when (member status '(:exited :signaled))
-                           return status
-                         do (sleep 0.02))))
-             (ok terminal-status
-                 "the reaper terminates the process after EOF")
-             (let ((terminal-code
-                     (and terminal-status
-                          (ignore-errors
-                            (sb-ext:process-exit-code process)))))
-               (ok (loop repeat 200
-                         thereis
-                           (and (equal
+         (let ((sink (make-string-output-stream))
+               (old-log-stream cl-mcp/src/log:*log-stream*)
+               (old-log-level cl-mcp/src/log:*log-level*))
+           (unwind-protect
+                (progn
+                  ;; A reaper is a separate thread, so install the test sink
+                  ;; globally while it emits the asynchronous event.
+                  (bordeaux-threads:with-lock-held
+                      (cl-mcp/src/log:*log-lock*)
+                    (setf cl-mcp/src/log:*log-stream* sink
+                          cl-mcp/src/log:*log-level* :debug))
+                  (let ((crash
+                          (handler-case
+                              (progn
+                                (cl-mcp/src/worker-client:worker-rpc
+                                 worker "worker/probe" nil)
+                                nil)
+                            (cl-mcp/src/worker-client:worker-crashed (condition)
+                              condition))))
+                    (ok crash
+                        "the deterministic closed stream is reported as a crash")
+                    (ok (and crash
+                             (string= "eof"
+                                      (cl-mcp/src/worker-client:worker-crashed-reason
+                                       crash)))
+                        "the closed stream follows the EOF path")
+                    (let ((terminal-status
+                            (loop repeat 200
+                                  for status =
+                                    (ignore-errors
+                                      (sb-ext:process-status process))
+                                  when (member status '(:exited :signaled))
+                                    return status
+                                  do (sleep 0.02))))
+                      (ok terminal-status
+                          "the reaper terminates the process after EOF")
+                      (let ((terminal-code
+                              (and terminal-status
+                                   (ignore-errors
+                                     (sb-ext:process-exit-code process)))))
+                        (let ((reaped-event
+                                (let ((log-text ""))
+                                  (labels
+                                      ((capture-log ()
+                                         (setf log-text
+                                               (concatenate
+                                                'string log-text
+                                                (bordeaux-threads:with-lock-held
+                                                    (cl-mcp/src/log:*log-lock*)
+                                                  (get-output-stream-string
+                                                   sink)))))
+                                       (find-reaped-event ()
+                                         (capture-log)
+                                         (with-input-from-string
+                                             (input log-text)
+                                           (loop for line =
+                                                   (read-line input nil)
+                                                 while line
+                                                 for event = (yason:parse line)
+                                                 when (and
+                                                       (equal "worker.reaped"
+                                                              (gethash "event" event))
+                                                       (eql
+                                                        (cl-mcp/src/worker-client:worker-pid
+                                                         worker)
+                                                        (gethash "pid" event)))
+                                                   return event))))
+                                    (loop repeat 200
+                                          for event = (find-reaped-event)
+                                          when event return event
+                                          do (sleep 0.02))))))
+                          (ok reaped-event
+                              "the reaper emits a terminal diagnostics event")
+                          (when reaped-event
+                            (ok (equal "running"
+                                       (cl-mcp/src/worker-client:worker-last-exit-status
+                                        worker))
+                                "the EOF-time status remains the crash snapshot")
+                            (ok (equal "unknown"
+                                       (cl-mcp/src/worker-client:worker-last-exit-code
+                                        worker))
+                                "the EOF-time exit code remains the crash snapshot")
+                            (ok (equal "running"
+                                       (gethash "observed_exit_status"
+                                                reaped-event))
+                                "the event retains the EOF-time status")
+                            (ok (equal "unknown"
+                                       (gethash "observed_exit_code"
+                                                reaped-event))
+                                "the event retains the EOF-time exit code")
+                            (ok (equal
                                  (string-downcase
                                   (symbol-name terminal-status))
-                                 (cl-mcp/src/worker-client:worker-last-exit-status
-                                  worker))
-                                (eql terminal-code
-                                     (cl-mcp/src/worker-client:worker-last-exit-code
-                                      worker)))
-                         do (sleep 0.02))
-                   "the reaper replaces the initial observation with its
-terminal status and exit code"))))
+                                 (gethash "final_exit_status" reaped-event))
+                                "the event records the terminal process status")
+                            (ok (eql terminal-code
+                                     (gethash "final_exit_code" reaped-event))
+                                "the event records the terminal process code")))))))
+             (bordeaux-threads:with-lock-held
+                 (cl-mcp/src/log:*log-lock*)
+               (setf cl-mcp/src/log:*log-stream* old-log-stream
+                     cl-mcp/src/log:*log-level* old-log-level))))
       (ignore-errors (sb-ext:process-kill process 9))
       (ignore-errors (sb-ext:process-wait process)))))
 
