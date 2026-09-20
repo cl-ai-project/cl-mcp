@@ -28,6 +28,12 @@
   (:returns small-int)
   (:post (> result value)))
 
+(cl-spec:defspec-function grow-by-nothing
+  "GROW-BY-NOTHING returns more than it was given, which it never does."
+  (:args (value small-int))
+  (:returns small-int)
+  (:post (> result value)))
+
 (cl-spec:defspec-function never-callable
   "A contract whose precondition no generated value can satisfy."
   (:args (value small-int))
@@ -37,4 +43,73 @@
 (cl-spec:defspec-function magnitude
   "The magnitude is never negative, and has no upper bound worth naming."
   (:args (value small-int))
+  (:returns (range integer 0 *)))
+
+(cl-spec:defgenerator scripted-arguments ()
+  "Return the next scripted argument list, so a test controls its inputs."
+  (pop *scripted-arguments*))
+
+(cl-spec:defspec-function remaining-balance
+  "Require the remainder when the balance suffices, and the named error when
+it does not."
+  (:args (balance (range integer 0 1000)) (amount (range integer 1 1000)))
+  (:args-generator scripted-arguments)
+  (:cases
+    (:sufficient-funds
+      "The amount fits: return the remaining balance."
+      (:when (<= amount balance))
+      (:returns (range integer 0 *))
+      (:post (= result (- balance amount))))
+    (:insufficient-funds
+      "The amount does not fit: signal the named error."
+      (:when (> amount balance))
+      (:signals (type insufficient-funds)))))
+
+(cl-spec:defspec-function overlapping-balance
+  "Two guards that both hold when the amounts are equal."
+  (:args (balance (range integer 0 1000)) (amount (range integer 1 1000)))
+  (:args-generator scripted-arguments)
+  (:cases
+    (:at-least (:when (>= balance amount)) (:returns (range integer 0 *)))
+    (:at-most (:when (<= balance amount)) (:returns (range integer 0 *)))))
+
+(cl-spec:defspec-function withdraw-without-recording!
+  "A successful call must reduce the stored balance, which this target does not."
+  (:args (purse (satisfies purse-p)) (amount (range integer 1 100)))
+  (:args-generator scripted-arguments)
+  (:capture
+    (balance-before (purse-balance purse))
+    (id-before (purse-id purse)))
+  (:cases
+    (:sufficient-funds
+      (:when (<= amount balance-before))
+      (:returns (type integer))
+      (:state-post (= (purse-balance purse) (- balance-before amount))
+                   (eql (purse-id purse) id-before)))))
+
+(cl-spec:defspec impossible-int (and (range integer 0 100)
+                                     (satisfies never-satisfied-p)))
+
+(cl-spec:defspec-function diagnostic-capture
+  "Capture evidence with both availability states of cl-spec's v1 union.
+
+DIAGNOSTIC-BEFORE is a legal application value shaped exactly like the
+pre-release opaque marker -- (:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE
+:HASH-TABLE) -- so a run proves cl-mcp treats it as :COLLECTED data rather
+than reclassifying it from its shape.  TABLE-BEFORE is a hash table, which
+cl-spec reports :UNAVAILABLE with :REASON :OPAQUE-VALUE.  The :state-post is
+false for every input, so a run always files the failure observation that
+carries the capture."
+  (:args (value small-int))
+  (:capture
+    (diagnostic-before (list :unavailable :reason :opaque-value
+                             :type :hash-table))
+    (table-before (make-hash-table)))
+  (:returns small-int)
+  (:post (= result value))
+  (:state-post (= value (1+ value))))
+
+(cl-spec:defspec-function magnitude-of-impossible
+  "A contract whose argument spec no generated candidate satisfies."
+  (:args (value impossible-int))
   (:returns (range integer 0 *)))

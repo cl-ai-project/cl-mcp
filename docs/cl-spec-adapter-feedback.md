@@ -331,3 +331,103 @@ adapter は `find-package` + `find-symbol` で遅延解決し、欠けている�
 
 次点は **1.1（予算 0）** と **1.2（反例の有無）**。どちらも
 §72 の受け入れ条件に直接対応し、`property-result` への小さな追加で塞がる。
+
+---
+
+## 7. 追記 — 2026-09-20
+
+- 日付: 2026-09-20
+- 送り元: cl-mcp `feat/cl-spec-adapter-fidelity`（`spec-describe` /
+  `spec-check` に `core_record` / `core_result` を追加し、cl-spec の
+  versioned record を transport metadata の外側にそのまま包んで運ぶ改修。
+  設計は `docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md`）
+- 対象 cl-spec revision: `08d3ada`（PR #33 `check-call`、PR #34
+  capture-value tagged union マージ済み）
+- 立場: 引き続き **cl-spec の consumer**。cl-spec 側のコードは 1 行も変更していない
+
+### 7.1 2026-03 の P1 3 件のその後
+
+1.1・1.2・1.3 は今回対象の revision で解消を確認した（実測・ソース確認）。
+
+- **1.1（予算 0 が `:PASSED` / `trials 0` を返す）解消。** `run-property` は
+  解決済みの trial 予算をそのまま `property-result-budget` に記録するように
+  なった（`src/property-runner.lisp` の `:budget trials`）。そのうえで
+  `(and (eq :passed (getf outcome :status)) (= (getf outcome :trials)
+  (getf outcome :rejected 0)))` のとき `status` を `:skipped` に読み替える —
+  「1 件も admit された trial が無ければ検証証拠にならない」が cl-spec 自身の
+  判定になった。`property-result` の docstring が挙げていた `:skipped` の、
+  現 backend からの初めての用途でもある。cl-mcp は `core_result.data.budget`
+  をそのまま運ぶだけになり、`%trials-budget` による再導出は fallback に降格した。
+- **1.2（引数ゼロの Property の反例が `NIL` で「取得できない」と区別できない）
+  解消。** `result-data` の `:failure`（`core_result.data.failure`）は、
+  失敗自体が無いときだけ `NIL` になる。失敗があれば、引数の有無に関わらず
+  `:arguments` を含む observation plist が返る（`observation-data` が
+  observation が `NIL` のときだけ `NIL` を返す実装のため）。「反例を取得できな
+  かった」と「反例はあるが空」が構造的に別の値になり、cl-mcp が
+  `property-data` の `:arguments` の長さを別読みしていた回避策は不要になった。
+- **1.3（`(:shrink nil)` の失敗と「縮小できなかった」が同じ `NIL`）解消。**
+  `property-result-shrunk-outcome`（`:used` / `:different-failure` / `:none`）
+  と `property-result-shrink-report`（`termination` に `:disabled` /
+  `:no-shrinker` / `:exhausted` / `:state-restoration-unavailable` 等を含む）
+  が別 slot として増えた。cl-mcp は `data.shrunk_outcome` を通常の縮小につい
+  ての第一情報源にし、`data.shrink_report` が `not-collected` のときは
+  「失敗が無かった」と「ふつうに縮小した」のどちらもありうる availability
+  sentinel として扱う（`shrink_report.termination` に `:completed` という値
+  自体が存在しない — `src/backends/check-it.lisp` で
+  `grep -c ":termination :completed"` は 0 — ので `:exhausted` を成功側と
+  読み違えない）。
+
+3 件とも、以前は `property-data` や `*generator-backend*` の別読みという
+**原理的に不完全な回避策**に頼っていたが、今回の revision からは
+`result-data`（versioned record）1 本を読むだけで区別がつく。
+
+### 7.2 解消 — 捕捉値の availability が tagged union になった（PR #34）
+
+以前ここには「cl-spec が凍結できなかった捕捉値のマーカーが素の plist
+`(:UNAVAILABLE :REASON :OPAQUE-VALUE :TYPE <type>)` であり、対象コード側の
+ドメイン値が偶然同じ形を取ると区別できない」という P1 を書いていた。
+cl-spec PR #34（merge `08d3ada`）で解消した。
+
+`schema-info` の version は 1 のままだが、`state.capture.values` は
+`(NAME . VALUE)` の alist ではなくなり、捕捉 binding ごとの明示的な
+availability record になった:
+
+```lisp
+(:name NAME :availability :collected :value VALUE)
+
+(:name NAME :availability :unavailable :reason :opaque-value :type TYPE)
+```
+
+`:availability` は framework metadata、`:value` は application data であり、
+`:value` は `:collected` のときにしか現れない。したがって
+`(:unavailable :reason :opaque-value :type :hash-table)` という**合法な
+アプリケーション値**は `:collected` としてそのまま `:value` に入り、
+availability の判定が値の形に依存することはなくなった。`:type` も通常の
+Lisp データ（named type symbol、`(:kind :anonymous-class :metaclass NAME)`、
+`:unknown`）だけになった。
+
+**consumer 側の対応**: cl-mcp は availability record をそのまま読み、
+`%opaque-marker-node` のような形ベースの認識を完全に削除した。詳細は
+`src/spec-core-record.lisp` の `:capture-value-record` descriptor と
+`docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md` を参照。
+
+### 7.3 引き続き露出できないもの
+
+- `call-outcome` の reader（`call-outcome-kind` / `call-outcome-values` /
+  `call-outcome-condition`）は `cl-spec/src/call-outcome` パッケージからのみ
+  export され、公開パッケージ `CL-SPEC`（`main.lisp` の nickname）からは
+  export されていない（実測で確認 — `main.lisp` に `call-outcome` の
+  import-from も export も無い）。したがって、ある observation の
+  target-call outcome を読む経路は `observation-data` が返す plist の
+  `:outcome` キー一本のみであり、構造体 reader 経由の型チェック付きアクセス
+  はできない。
+- `check-call` / `call-check-data` の MCP 公開は本ブランチでも意図的に見送
+  った。理由は
+  `docs/superpowers/specs/2026-09-19-cl-spec-adapter-fidelity-design.md` §11
+  のとおり: `check-call` の引数は生の Lisp オブジェクト列で、JSON から供給するには
+  (a) reader を通す（禁止事項に反する）、(b) worker の object ID レジストリ
+  を使う（JSON リテラルと ID の混在列という新しい直列化契約の設計そのもの）、
+  (c) JSON リテラルの部分集合に限る（`:capture` / state 契約が要求する構造
+  体・CLOS インスタンスを表現できず主用途を外す）のいずれかになり、どれも
+  「小さく、曖昧さのない拡張」に該当しない。実装するなら (b) を基礎に既存
+  object ID を再利用する方向が同節の第一候補。

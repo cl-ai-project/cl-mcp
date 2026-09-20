@@ -17,13 +17,29 @@
            #:function-specs-supported-p
            #:magnitude
            #:widen
+           #:grow-by-nothing
            #:never-callable
            #:small-int
            #:clamp-is-within-bounds
            #:clamp-is-idempotent
            #:clamp-is-wrong-on-purpose
            #:register-corrected-property
-           #:contracts-registered-p))
+           #:contracts-registered-p
+           #:purse
+           #:make-purse
+           #:purse-balance
+           #:purse-id
+           #:purse-p
+           #:*scripted-arguments*
+           #:insufficient-funds
+           #:insufficient-funds-balance
+           #:insufficient-funds-amount
+           #:remaining-balance
+           #:overlapping-balance
+           #:withdraw-without-recording!
+           #:diagnostic-capture
+           #:never-satisfied-p
+           #:magnitude-of-impossible))
 
 (in-package #:cl-mcp/tests/fixtures/spec-fixture)
 
@@ -90,6 +106,16 @@ up empty about once in twenty runs -- measured at 4 misses in 60.  A fixture
 whose failure is rare makes the test that reads it a coin toss."
   (+ value 50))
 
+(defun grow-by-nothing (value)
+  "Return VALUE unchanged, although its contract's :POST requires more.
+
+WIDEN breaks its :RETURNS, and cl-spec classifies that first, so no run of it
+ever reaches the :POST.  This one is the other half: every answer it gives
+satisfies SMALL-INT and none of them satisfies (> result value), so every
+trial is an ordinary postcondition failure -- the commonest contract failure
+there is, and the one whose failure signature carries (:POST-FORM 0)."
+  value)
+
 (defun never-callable (value)
   "Return VALUE. Its contract's :PRE admits nothing, so nothing ever calls it."
   value)
@@ -97,6 +123,14 @@ whose failure is rare makes the test that reads it a coin toss."
 (defun magnitude (value)
   "Return the absolute value of VALUE."
   (abs value))
+
+(defun diagnostic-capture (value)
+  "Return VALUE, so the capture evidence below is the only interesting part.
+
+The contract always fails its :state-post, so a run produces a failure
+observation carrying :capture -- which is where cl-spec v1 puts each captured
+binding's availability record."
+  value)
 
 (defun function-specs-supported-p ()
   "Return true when the loaded cl-spec implements function specs.
@@ -137,6 +171,61 @@ could skip the contract tests against a shared registry that holds them, or a
 private load that succeeded could send them at one that does not.  Recording
 one registry rather than all of them has the same fault one step in."
   (and registry (gethash registry *contracts-registered-in*) t))
+
+(defstruct (purse (:constructor make-purse (balance id)))
+  "A tiny mutable object, so a contract has some state to observe.
+
+The two slots carry no per-slot docstring because ANSI DEFSTRUCT has no
+:DOCUMENTATION slot option -- SBCL's own reader accepts only :TYPE and
+:READ-ONLY -- so the documented-accessor pattern the style checker suggests
+does not exist for structures.  BALANCE holds the stored amount and ID an
+opaque identity token; both are set by MAKE-PURSE."
+  balance
+  id)
+
+(defvar *scripted-arguments* nil
+  "Argument lists a scripted generator hands out, front to back.
+
+A special rather than a closure, so a test states its inputs in one place and
+the contract names one registered generator.  Copied from cl-spec's own
+examples, where the same device keeps a demo from depending on what a seed
+happens to draw.")
+
+(define-condition insufficient-funds (error)
+  ((balance :initarg :balance :reader insufficient-funds-balance)
+   (amount :initarg :amount :reader insufficient-funds-amount))
+  (:report (lambda (condition stream)
+             (format stream "Cannot withdraw ~D from ~D."
+                     (insufficient-funds-amount condition)
+                     (insufficient-funds-balance condition))))
+  (:documentation "The expected error of the withdrawal fixtures."))
+
+(defun remaining-balance (balance amount)
+  "Return what is left, or signal INSUFFICIENT-FUNDS.  Pure."
+  (if (<= amount balance)
+      (- balance amount)
+      (error 'insufficient-funds :balance balance :amount amount)))
+
+(defun overlapping-balance (balance amount)
+  "A target whose contract's two guards both hold when the amounts are equal."
+  (- balance amount))
+
+(defun withdraw-without-recording! (purse amount)
+  "Return the new balance and forget to store it.
+
+The target returns correctly and leaves the object wrong, which is the one
+failure a return-value contract cannot see and a :state-post can."
+  (declare (ignore amount))
+  (purse-balance purse))
+
+(defun never-satisfied-p (value)
+  "Return NIL for every value, so a filtered generator can exhaust its budget."
+  (declare (ignore value))
+  nil)
+
+(defun magnitude-of-impossible (value)
+  "Return the absolute value of VALUE.  Its contract's argument spec is unmeetable."
+  (abs value))
 
 ;; Loaded rather than guarded in place.  This file is LOADed, not compiled,
 ;; and LOAD reads each top-level form before evaluating it -- so a

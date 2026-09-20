@@ -26,7 +26,10 @@
 
 (deftest result-digest-uses-captured-core-metadata
   (let* ((data '(:schema-version 1 :record-kind :result :entity-kind :property
-                 :definition-digest "captured" :definition-digest-complete t))
+                 :definition-digest "captured" :definition-digest-complete t
+                 :definition-digest-covers :declaration-and-registered-dependencies
+                 :capabilities (:generation :available :shrinking :none
+                                :instrumentation :unavailable)))
          (api (make-cl-spec-api
                :functions
                (list :result-data (constantly data)
@@ -165,6 +168,209 @@ GETF readers is a complete substitute and no cl-spec class is needed."
           :spec nil :function-spec nil :property nil
           :properties-about (list (%sym "ADD-COMMUTES") (%sym "ADD-COMMUTES")))))
 
+(defparameter *passing-result*
+  '(:schema-version 1 :record-kind :result :entity-kind :function-spec
+    :definition-digest "abc" :definition-digest-complete t
+    :definition-digest-covers :declaration-and-registered-dependencies
+    :capabilities (:generation :available :shrinking :none
+                   :instrumentation :unavailable)
+    :name add :status :passed :trials 2
+    :budget 2 :rejected 0 :seed 4611686018427387903 :profile :normal
+    :options nil :counterexample nil :shrunk-counterexample nil
+    :shrunk-outcome nil
+    :shrink-report (:candidates 4 :budget 8 :termination :completed)
+    :generation-report (:scope :request :termination :completed
+                        :attempts 2 :rejections 0)
+    :failure-phase nil :failure-reason nil
+    :case-report (:selection :exclusive :unit :normal-trials
+                  :declared-cases (:sufficient-funds :insufficient-funds)
+                  :cases ((:name :sufficient-funds :documentation nil
+                           :called 2 :passed 2 :failed 0 :error 0)
+                          (:name :insufficient-funds :documentation nil
+                           :called 0 :passed 0 :failed 0 :error 0))
+                  :case-selection-errors 0 :capture-errors 0
+                  :never-called (:insufficient-funds))
+    :provenance (:backend :check-it :lisp-implementation-type "SBCL"
+                :lisp-implementation-version "2.4.0"
+                :cl-spec-version "0.1.0" :target-revision nil
+                :collection-states nil)
+    :failure nil :shrunk-failure nil :elapsed 0.005)
+  "A measured v1 result carrying every field %RESULT-PLIST used to drop.
+
+Its :SHRINK-REPORT is a collected form, not :NOT-COLLECTED -- :CANDIDATES /
+:BUDGET / :TERMINATION -- which spec-core-record-test.lisp's own passing
+fixture never exercised.")
+
+(defun field-of (node key)
+  "Return the child NODE holds under the JSON key KEY."
+  (cdr (assoc key (second node) :test #'equal)))
+
+(deftest result-record-crosses-the-boundary-whole
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :passed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (record (getf report :core-record))
+         (data (getf record :data)))
+    (ok (eq :collected (getf record :availability)))
+    (testing "the twelve fields that never crossed now do"
+      (dolist (key '("budget" "rejected" "options" "provenance" "shrunk_outcome"
+                     "shrink_report" "generation_report" "failure_phase"
+                     "failure_reason" "case_report" "failure" "shrunk_failure"))
+        (ok (assoc key (second data) :test #'equal))))
+    (testing "not just present -- the values that arrived are the fixture's own"
+      (ok (equal '(:scalar 2) (field-of data "budget")))
+      (ok (equal '(:scalar 0) (field-of data "rejected")))
+      (ok (equal '(:scalar nil) (field-of data "failure_phase"))))
+    (testing "the aliases agree with the record because they come from it"
+      (ok (eq :passed (getf report :status)))
+      ;; A seed is text on both sides; a JSON consumer would round the number.
+      (ok (equal "4611686018427387903" (getf report :seed))))))
+
+(deftest contract-rejected-agrees-with-the-record-even-against-a-disagreeing-reader
+  ;; The drift this branch exists to close: CONTRACT.REJECTED and
+  ;; CORE_RESULT.DATA.REJECTED must be the same fact, read once, not two
+  ;; independent answers published side by side.  :CHECK-REJECTED here
+  ;; answers a different, wrong number -- the record must win regardless.
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :failed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)
+                         :check-rejected (constantly 999)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (contract (getf report :contract))
+         (data (getf (getf report :core-record) :data)))
+    (ok (eql 0 (getf contract :rejected)))
+    (ok (equal '(:scalar 0) (field-of data "rejected")))
+    ;; Not the legacy reader's disagreeing answer.
+    (ok (not (eql 999 (getf contract :rejected))))))
+
+(deftest contract-failure-reason-agrees-with-the-record-even-against-a-disagreeing-reader
+  (let* ((api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :failed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 4611686018427387903)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.005)
+                         :check-failure-reason (constantly :postcondition)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 2)
+                  '(:value "abc" :complete t :covers :contract) nil 2000 nil))
+         (contract (getf report :contract))
+         (data (getf (getf report :core-record) :data)))
+    (ok (null (getf contract :failure-reason)))
+    (ok (equal '(:scalar nil) (field-of data "failure_reason")))
+    ;; NIL here is the record's own measured answer, not this adapter unable
+    ;; to ask: the record declares the key, so it is readable even though its
+    ;; value is NIL.
+    (ok (getf contract :failure-reason-readable))
+    ;; Not the legacy reader's disagreeing answer.
+    (ok (not (eq :postcondition (getf contract :failure-reason))))))
+
+(deftest an-old-cl-spec-still-answers-through-the-legacy-readers
+  ;; Section 12 case 6.  No RESULT-DATA handle at all.
+  (let* ((api (%stub-api :result-status (constantly :failed)
+                         :result-trials (constantly 30)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly '(a 1))
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.1)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 30)
+                  '(:value nil :complete nil :covers :property) nil 2000
+                  '(:argument-count 1 :shrink-enabled t :known t)))
+         (record (getf report :core-record)))
+    (ok (eq :failed (getf report :status)))
+    (ok (eq :unavailable (getf record :availability)))
+    (ok (null (getf record :data)))
+    ;; Not reported as measured zeros for counters nothing kept.
+    (ok (null (getf record :field-availability)))))
+
+(deftest an-old-cl-specs-contract-fields-still-come-from-the-legacy-readers
+  ;; Mirrors AN-OLD-CL-SPEC-STILL-ANSWERS-THROUGH-THE-LEGACY-READERS for the
+  ;; two %CONTRACT-PLIST fields %CORE-FACT now also covers.  No RESULT-DATA
+  ;; handle at all: :REJECTED and :FAILURE-REASON must still come from
+  ;; :CHECK-REJECTED / :CHECK-FAILURE-REASON, and READABLE must still mean
+  ;; "the legacy reader resolved".
+  (let* ((api (%stub-api :result-status (constantly :failed)
+                         :result-trials (constantly 8)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0.1)
+                         :check-rejected (constantly 2)
+                         :check-failure-reason (constantly :postcondition)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :contract '(:executed 8)
+                  '(:value nil :complete nil :covers :contract) nil 2000 nil))
+         (contract (getf report :contract)))
+    (ok (eql 2 (getf contract :rejected)))
+    (ok (eq :postcondition (getf contract :failure-reason)))
+    (ok (getf contract :rejected-readable))
+    (ok (getf contract :failure-reason-readable))))
+
+(deftest a-result-data-that-signals-is-an-adapter-fault
+  ;; Section 12 case 21.  The name resolved and the call broke: falling back
+  ;; to the legacy readers would hide a signature mismatch behind a healthy
+  ;; response.
+  (let* ((api (%stub-api :result-data (lambda (result)
+                                        (declare (ignore result))
+                                        (error "boom"))
+                         :result-status (constantly :passed)
+                         :result-trials (constantly 2)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly nil)
+                         :result-elapsed (constantly 0)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 2)
+                  '(:value nil :complete nil :covers :property) nil 2000 nil)))
+    (ok (eq :internal-error (getf report :status)))
+    (ok (search "result-data" (string-downcase (getf report :message))))))
+
+(deftest a-live-condition-keeps-its-object-id
+  ;; Section 12 case 10.  RESULT-DATA has no :condition key -- measured -- so
+  ;; this is the auxiliary reader the core rule allows.
+  (let* ((condition (make-condition 'simple-error
+                                    :format-control "gone" :format-arguments nil))
+         (api (%stub-api :result-data (constantly *passing-result*)
+                         :result-status (constantly :error)
+                         :result-trials (constantly 1)
+                         :result-seed (constantly 7)
+                         :result-profile (constantly :normal)
+                         :result-counterexample (constantly nil)
+                         :result-shrunk-counterexample (constantly nil)
+                         :result-condition (constantly condition)
+                         :result-elapsed (constantly 0)))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  api nil (%sym "ADD") :property '(:executed 1)
+                  '(:value nil :complete nil :covers :property) nil 2000 nil)))
+    (ok (integerp (getf (getf report :condition) :object-id)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Environment and availability
 ;;; ---------------------------------------------------------------------------
@@ -272,6 +478,135 @@ GETF readers is a complete substitute and no cl-spec class is needed."
                                    "CL-MCP-SPEC-REPORT-FIXTURE:ADD")))
       (ok (eq :unsupported (getf report :status)))
       (ok (search "function-spec-data" (getf report :message))))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  ;; *CASES-CONTRACT* below embeds real symbols in the fixture package via
+  ;; reader syntax (CL-MCP-SPEC-REPORT-FIXTURE::ADD and friends), not
+  ;; strings, because it stands in for what FUNCTION-SPEC-DATA actually
+  ;; returns. The reader resolves that syntax while this file is being
+  ;; compiled, before %FIXTURE-PACKAGE's own call runs, so the package has
+  ;; to exist at compile time too.
+  (or (find-package "CL-MCP-SPEC-REPORT-FIXTURE")
+      (make-package "CL-MCP-SPEC-REPORT-FIXTURE" :use '())))
+
+(defparameter *cases-contract*
+  '(:schema-version 1 :record-kind :definition :entity-kind :function-spec
+    :definition-digest "fnv1a64-v1:0cbb" :definition-digest-complete t
+    :definition-digest-covers :declaration-and-registered-dependencies
+    :digest-omissions nil :digest-exclusions (:target-implementation)
+    :capabilities (:generation :available :shrinking :none
+                   :instrumentation :unavailable)
+    :case-selection :exclusive
+    :cases ((:name :sufficient-funds
+             :documentation "The amount fits."
+             :when (<= amount balance) :outcome :returns
+             :returns (:kind :range :base-type integer :min 0 :max :unbounded)
+             :signals nil :postconditions ((= result (- balance amount))))
+            (:name :insufficient-funds
+             :documentation "The amount does not fit."
+             :when (> amount balance) :outcome :signals :returns nil
+             :signals (:kind :type :type insufficient-funds)
+             :postconditions nil))
+    :capture ((:name balance-before :form (account-balance account)))
+    :state-post ((= (account-balance account) (- balance-before amount)))
+    :name cl-mcp-spec-report-fixture::add :kind :function-spec
+    :documentation "Withdraw."
+    :arguments ((:variable cl-mcp-spec-report-fixture::a
+                 :spec (:kind :range :base-type integer :min 0 :max 1000))
+                (:variable cl-mcp-spec-report-fixture::b
+                 :spec (:kind :type :type integer)
+                 :kind :key :supplied-p cl-mcp-spec-report-fixture::b-p
+                 :keyword :b))
+    :argument-generator cl-mcp-spec-report-fixture::scripted
+    :argument-schema (:kind :tuple :generator cl-mcp-spec-report-fixture::scripted
+                      :children ((:kind :type :type integer)))
+    :preconditions nil :returns nil :signals nil :postconditions nil
+    :post-value-variables (cl-mcp-spec-report-fixture::result)
+    :source-form (defspec-function add)
+    :source-location (:file "/tmp/a.lisp" :package "CL-MCP-SPEC-REPORT-FIXTURE")
+    :metadata nil)
+  "A contract carrying every feature the describe path used to drop.")
+
+(deftest describe-keeps-argument-kinds-and-generators
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           *cases-contract*)))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE"))
+         (arguments (getf report :arguments)))
+    (ok (eq :ok (getf report :status)))
+    (testing "a required argument's absent :kind means required, not unknown"
+      (ok (eq :required (getf (first arguments) :kind)))
+      (ok (null (getf (first arguments) :supplied-p))))
+    (testing "a keyword argument keeps its kind, supplied-p and keyword"
+      (ok (eq :key (getf (second arguments) :kind)))
+      (ok (equal "B-P" (getf (getf (second arguments) :supplied-p) :name)))
+      (ok (eq :b (getf (second arguments) :keyword))))
+    (testing "the argument generator and schema survive"
+      (ok (equal "SCRIPTED" (getf (getf report :argument-generator) :name)))
+      (ok (getf report :argument-schema))
+      ;; %SPEC-TREE used to drop :GENERATOR, which is where a custom
+      ;; whole-argument generator is recorded.
+      (ok (equal "SCRIPTED"
+                 (getf (getf (getf report :argument-schema) :generator) :name))))
+    (testing "project-core-record's own :data confirms real cl-spec key names,
+not only that the adapter's report carries them"
+      (let ((fields (second (getf (getf report :core-record) :data))))
+        (ok (equal '(:scalar "Withdraw.")
+                   (cdr (assoc "documentation" fields :test #'string=))))
+        (ok (equal '(:scalar "exclusive")
+                   (cdr (assoc "case_selection" fields :test #'string=))))))
+    (testing "the six keys %spec-tree renders are declared elsewhere, not unknown"
+      ;; :arguments, :argument-schema, :returns, :signals, :cases and
+      ;; :source-location are real keys of every function-spec-data record,
+      ;; and this adapter renders all six through %SPEC-TREE/%CONTRACT-*.  A
+      ;; nonempty unknown-keys here would mean core-record's own projection
+      ;; disagrees with what the rest of this report already understands.
+      (ok (null (getf (getf report :core-record) :unknown-keys))))))
+
+(deftest describe-keeps-cases-capture-and-state-post
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           *cases-contract*)))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE"))
+         (cases (getf report :cases)))
+    (ok (eq :exclusive (getf report :case-selection)))
+    (ok (= 2 (length cases)))
+    (testing "cases keep their order, guard, outcome and postconditions"
+      (ok (eq :sufficient-funds (getf (first cases) :name)))
+      (ok (search "<=" (getf (first cases) :guard)))
+      (ok (eq :returns (getf (first cases) :outcome)))
+      (ok (getf (first cases) :returns))
+      (ok (search "=" (getf (first cases) :postconditions))))
+    (testing "the signalling case keeps its condition spec"
+      (ok (eq :signals (getf (second cases) :outcome)))
+      (ok (getf (second cases) :signals)))
+    (testing "capture and state-post are declarations, printed not run"
+      (ok (equal "BALANCE-BEFORE"
+                 (getf (getf (first (getf report :capture)) :name) :name)))
+      ;; The display printer this module uses upcases symbols (see
+      ;; WITH-DISPLAY-PRINTING), the same convention every other SEARCH
+      ;; assertion in this file follows against a printed form.
+      (ok (search "ACCOUNT-BALANCE" (getf (first (getf report :capture)) :form)))
+      (ok (search "ACCOUNT-BALANCE" (getf report :state-post))))
+    (testing "post-value variables survive"
+      (ok (equal "RESULT"
+                 (getf (first (getf report :post-value-variables)) :name))))))
+
+(deftest describe-refuses-a-contract-schema-it-cannot-read
+  (let* ((api (%stub-api :function-spec-data
+                         (lambda (name &key registry)
+                           (declare (ignore name registry))
+                           (list* :schema-version 2 (cddr *cases-contract*)))))
+         (report (describe-report api :ok "function-spec" "ADD"
+                                  :package "CL-MCP-SPEC-REPORT-FIXTURE")))
+    (ok (eq :unsupported (getf report :status)))
+    (ok (search "schema version 2" (getf report :message)))
+    ;; No v1 rule may run over it -- including "an absent :kind means required".
+    (ok (null (getf report :arguments)))))
 
 (deftest describe-report-rejects-unknown-kind
   (testing "an unrecognized kind is an argument error"
@@ -1081,3 +1416,195 @@ listing functions are not -- the shape the blanket listing guard refused."
                    :property "CL-MCP-SPEC-REPORT-FIXTURE:ADD-COMMUTES"
                    :expect-definition-digest "0000000000000000")))
       (ok (eq :false (getf report :reproduction-faithful))))))
+
+(deftest an-unreached-case-is-not-a-verified-contract
+  ;; §12 scenario 1, at the report layer.  cl-spec says :PASSED and that stays;
+  ;; what changes is whether cl-mcp calls it evidence.
+  (let ((results (list (list :status :passed :kind :contract
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             (list :availability :collected :schema-supported t
+                                   :field-availability '(:case-report :collected)
+                                   :source '(:case-report
+                                             (:never-called (:insufficient))))))))
+    (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
+    (ok (member :cases-never-called
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest an-unreadable-case-report-is-unknown-only-when-cases-are-declared
+  (testing "cases are declared and the report did not come back"
+    (let ((results (list (list :status :passed :kind :contract
+                               :declares-cases t
+                               :contract '(:effective-trials 2 :rejected-usable t)
+                               :trials '(:executed 2)
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:case-report :not-collected)
+                                 :source nil)))))
+      (ok (member :case-coverage-unknown
+                  (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+  (testing "whether cases exist could not be read -- do not guess that they do"
+    (let ((results (list (list :status :passed :kind :contract
+                               :declares-cases :unknown
+                               :contract '(:effective-trials 2 :rejected-usable t)
+                               :trials '(:executed 2)
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:case-report :not-collected)
+                                 :source nil)))))
+      (ok (not (member :case-coverage-unknown
+                       (cl-mcp/src/spec-adapter-report::%verification-gaps
+                        results)))))))
+
+(deftest generation-and-shrinking-incompleteness-are-different
+  (testing "the run stopped in generation -- verification did not complete"
+    (let ((results (list (list :status :error :kind :contract
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:failure-phase :collected)
+                                 :source (:failure-phase :generation))))))
+      (ok (member :generation-incomplete
+                  (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+  (testing "the budget ran out while shrinking -- the failure still stands"
+    (let ((results (list (list :status :failed :kind :contract
+                               :core-record
+                               '(:availability :collected :schema-supported t
+                                 :field-availability (:failure-phase :collected)
+                                 :source (:failure-phase nil
+                                          :generation-report
+                                          (:termination :budget-exhausted
+                                           :exhaustion-phase :shrinking)))))))
+      (ok (not (member :generation-incomplete
+                       (cl-mcp/src/spec-adapter-report::%verification-gaps
+                        results)))))))
+
+(deftest a-schema-this-adapter-cannot-read-is-not-a-pass
+  (let ((results (list (list :status :passed :kind :contract
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             '(:availability :collected :schema-supported nil
+                               :schema-version 2 :field-availability nil
+                               :source nil)))))
+    (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
+    (ok (member :core-schema-unsupported
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest an-unreadable-contract-declaration-is-its-own-gap
+  ;; :DECLARES-CASES :UNKNOWN means %CONTRACT-FACTS could not validate the
+  ;; Function Spec record at all -- a different failure from the result's own
+  ;; schema being unsupported, which CORE-SCHEMA-UNSUPPORTED already covers.
+  (let ((results (list (list :status :passed :kind :contract
+                             :declares-cases :unknown
+                             :contract '(:effective-trials 2 :rejected-usable t)
+                             :trials '(:executed 2)
+                             :core-record
+                             '(:availability :unavailable :schema-supported nil
+                               :field-availability nil :source nil)))))
+    (ok (member :contract-schema-unsupported
+                (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
+
+(deftest verified-p-fails-closed-on-each-new-conjunct-in-isolation
+  ;; Each new conjunct is exercised on its own: one field changes from a
+  ;; baseline that is otherwise perfectly passing (:PASSED, an evaluated
+  ;; trial, no never-called case, a readable schema on both sides), so a
+  ;; failure here can only be the conjunct meant to be tested and not some
+  ;; other gap this task also added.
+  (flet ((passing-contract-result (&rest overrides)
+           ;; OVERRIDES come first in the plist, so GETF finds them before
+           ;; the baseline fields they are meant to replace.
+           (append overrides
+                   (list :status :passed :kind :contract
+                         :declares-cases t
+                         :contract '(:effective-trials 2 :rejected-usable t)
+                         :trials '(:executed 2)
+                         :core-record
+                         '(:availability :collected :schema-supported t
+                           :field-availability (:case-report :collected)
+                           :source (:case-report (:never-called nil)))))))
+    (testing "the baseline itself verifies, so the isolation below means something"
+      (ok (cl-mcp/src/spec-adapter-report::%verified-p
+           (list (passing-contract-result)))))
+    (testing "case coverage unknown alone is enough to refuse verified"
+      (let ((results (list (passing-contract-result
+                            :core-record
+                            '(:availability :collected :schema-supported t
+                              :field-availability (:case-report :not-collected)
+                              :source nil)))))
+        (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))))
+    (testing "an unreadable contract declaration alone is enough to refuse verified"
+      (let ((results (list (passing-contract-result :declares-cases :unknown))))
+        (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Output bounds, threaded all the way down
+;;; ---------------------------------------------------------------------------
+
+(deftest check-report-honors-max-value-chars-inside-core-result
+  ;; The P2 finding: the legacy counterexample alias was bounded by the
+  ;; caller's max_value_chars, and core_result.data used the projector's 2000
+  ;; default instead -- one response, two answers for the same value.
+  (let ((big (make-list 4000 :initial-element (%sym "A")))
+        (record (copy-list *passing-result*)))
+    (setf (getf record :counterexample) (list (%sym "A") big))
+    (let* ((api (%api-with-run
+                 (lambda (&rest ignored)
+                   (declare (ignore ignored))
+                   (%result-stub :status :passed))
+                 :result-data (lambda (result)
+                                (declare (ignore result))
+                                record)))
+           (report (check-report
+                    api :ok
+                    :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"
+                    :max-value-chars 10))
+           (result (first (getf report :results)))
+           (alias (getf (getf (first (getf result :counterexample)) :value)
+                        :printed))
+           (data (getf (getf result :core-record) :data))
+           (entry (first (second (field-of data "counterexample"))))
+           (projected (getf (second (field-of entry "value")) :printed)))
+      (ok (= 10 (length alias)))
+      (ok (= 10 (length projected)))
+      (testing "and the cut is reported rather than hidden"
+        (ok (getf (getf result :core-record) :projection))
+        (ok (not (getf (second (field-of entry "value")) :printed-complete)))))))
+
+(deftest describe-honors-max-chars-inside-core-record
+  ;; %DESCRIBE-FUNCTION-SPEC already received max_chars, but its core_record
+  ;; projection silently reverted to the projector's 2000 default.
+  (let ((contract (copy-list *cases-contract*)))
+    (setf (getf contract :source-form)
+          (list 'defspec-function 'add
+                (make-list 500 :initial-element 'padding)))
+    (let* ((api (%stub-api :function-spec-data
+                           (lambda (name &key registry)
+                             (declare (ignore name registry))
+                             contract)))
+           (report (describe-report api :ok "function-spec" "ADD"
+                                    :package "CL-MCP-SPEC-REPORT-FIXTURE"
+                                    :max-chars 10))
+           (data (getf (getf report :core-record) :data))
+           (source-node (field-of data "source_form")))
+      (ok (eq :ok (getf report :status)))
+      (ok (= 10 (length (getf (second source-node) :printed))))
+      (ok (= 10 (length (getf report :source-form)))))))
+
+(deftest a-duplicate-record-key-cannot-split-alias-from-data
+  ;; GETF answers the first occurrence; the projection keeps the same one, so
+  ;; results[].status and core_result.data.status cannot disagree.
+  (let* ((record (append (copy-list *passing-result*) '(:status :failed)))
+         (api (%api-with-run
+               (lambda (&rest ignored)
+                 (declare (ignore ignored))
+                 (%result-stub :status :passed))
+               :result-data (lambda (result)
+                              (declare (ignore result))
+                              record)))
+         (report (check-report api :ok
+                               :symbol "CL-MCP-SPEC-REPORT-FIXTURE:ADD"))
+         (result (first (getf report :results)))
+         (data (getf (getf result :core-record) :data)))
+    (ok (eq :passed (getf result :status)))
+    (ok (equal '(:scalar "passed") (field-of data "status")))))

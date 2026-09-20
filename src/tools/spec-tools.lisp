@@ -168,6 +168,22 @@ kind='function-spec' the contract: the spec of each argument, the spec of the
                      one says so rather than having a projection invented for
                      it.
 
+function-spec also carries, beyond the argument and return specs above: each
+argument's kind (required/optional/key/rest -- absent on a v1 record means
+required, since cl-spec omits that key rather than sending it), supplied_p,
+keyword, argument_generator, argument_schema, signals, post_value_variables,
+capture, state_post, case_selection and the ordered cases, each with its own
+guard, outcome, returns/signals and postconditions. Reading a contract runs
+none of it -- no target call, no :pre, no capture form, no case guard, no
+post form. core_record carries cl-spec's own versioned definition record
+under the same availability/schema_supported/field_availability rules
+spec-check's core_result uses (see that tool). It never carries
+schema_supported false: this call validates the schema before projecting
+anything, so an unreadable schema version (or a malformed record) returns
+status='unsupported' with name and message instead -- no core_record, no
+arguments, nothing projected. When core_record is present at all, v1-only
+normalizations such as kind-absent-means-required always apply to it.
+
 Long bodies are cut at max_chars and the cut is reported. Truncated text is a
 preview for reading, NOT a form that can be read back.
 
@@ -270,6 +286,16 @@ verification_gaps names what the run could not establish. Values:
   related-properties-unknown  whether any property is registered about the
                               symbol could not be read at all.
   no-properties-selected      the selection was empty. Nothing ran.
+  cases-never-called          a Function Spec declares named cases and at
+                              least one was never reached. status stays
+                              passed -- cl-spec judged the trials that ran --
+                              but the unreached branch was not verified.
+  case-coverage-unknown       cases are declared and no case report came back.
+  generation-incomplete       the run stopped in generation and never reached
+                              a verdict. NOT a finding about the code.
+  core-schema-unsupported     the result record declares a schema version this
+                              cl-mcp cannot read, so nothing in it is evidence.
+  contract-schema-unsupported the same, for the Function Spec declaration.
 A result status that is not a verdict appears here as itself: skipped,
 pending, timeout, not-run, generator-error, backend-error, not-registered,
 undefined-function, unsupported, internal-error. Only passed, failed and error
@@ -284,6 +310,46 @@ them passed, AND every one evaluated at least one trial. A property whose
 profile resolves to a budget of zero passes without running anything, and that
 is not a verification. verification_gaps names what the run could not
 establish, and always includes input-domain coverage, which nothing measures.
+
+CORE_RESULT (results[].core_result)
+Each result also carries core_result: a projection of cl-spec's OWN versioned
+result record under its own field names (outcome, value, case -- not
+renamed). data holds nothing cl-mcp added; availability, schema_supported,
+field_availability, unknown_keys and projection sit beside data, never inside
+it -- field_availability tells a key cl-spec never sent (absent) apart from
+one it sent as null (collected, value null), and projection.issues names
+every value a length or depth limit cut. schema_supported false means data is
+null and this cl-mcp cannot read that schema version at all: NOT usable
+evidence, whatever a legacy field elsewhere in the response says -- verified
+is false and core-schema-unsupported (or contract-schema-unsupported, for the
+function spec's own declaration) is in verification_gaps.
+
+data.failure and data.shrunk_failure are observations whose outcome is EITHER
+an object ({\"kind\": \"returned\"/\"signaled\", ...}) OR, when cl-spec
+recorded none, the bare STRING \"not-collected\" -- never {\"kind\":
+\"not-collected\"}.
+What not-collected MEANS depends on what ran: for a function spec (a contract
+run) it means the target function was never called; for an ordinary property
+it means only that no target-call evidence was kept -- a property's
+evaluate-trial returns none at all, and the property BODY still ran. Do not
+read \"the target was not called\" out of a property's not-collected result.
+
+data.shrink_report being not-collected does NOT mean nothing was shrunk --
+the built-in shrinker produces no report at all, so it covers both \"no
+failure\" and \"shrunk normally\"; data.shrunk_outcome (used / none /
+different-failure) is what actually describes ordinary shrinking. A present
+shrink_report's termination is reported exactly as cl-spec gave it: there is
+no \"completed\" value, and exhausted is the SUCCESSFUL search, not an
+incomplete one. data.generation_report has its OWN, separately-spelled
+termination field, and its vocabulary DOES include completed -- the
+no-completed rule above is specific to shrink_report and does not carry
+over. exhaustion_phase of shrinking on data.generation_report means
+the failure is already established and only its reduction ran out of budget
+-- NOT a gap; exhaustion_phase of generation is generation-incomplete.
+
+data.provenance records the environment the run happened in, captured before
+it started; the response's own environment field reads this image right now.
+Neither overwrites the other, and the two may legitimately disagree.
 
 CONTRACT RUNS (function=...)
 A contract check generates arguments from :args, drops the ones :pre refuses,

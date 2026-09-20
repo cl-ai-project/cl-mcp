@@ -28,6 +28,10 @@
                 #:core-schema-data #:definition-digest
                 #:printed-for-display
                 #:print-form-bounded)
+  (:import-from #:cl-mcp/src/spec-core-record
+                #:project-core-record
+                #:validate-versioned-record
+                #:field-availability)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -809,6 +813,13 @@ to the caller as one that exists."
     (list :kind (getf spec-plist :kind)
           :name (let ((name (getf spec-plist :name)))
                   (when name (symbol-data name)))
+          ;; Where a custom whole-argument generator is recorded.  Measured:
+          ;; an :ARGUMENT-SCHEMA tuple node comes back as
+          ;; (:KIND :TUPLE :GENERATOR SCRIPTED-ARGUMENTS ...), and dropping
+          ;; this key lost the only statement that the inputs are scripted
+          ;; rather than drawn.
+          :generator (let ((generator (getf spec-plist :generator)))
+                       (when generator (symbol-data generator)))
           :target (let ((target (getf spec-plist :target)))
                     (when target (symbol-data target)))
           :type (let ((type (getf spec-plist :type)))
@@ -844,81 +855,167 @@ is no end to report and NIL stays NIL."
         (value (printed-for-display value))
         ((eq :range kind) "*")))
 
+(defun %contract-arguments (arguments)
+  "Return one contract argument list as report plists.
+
+An absent :KIND means :REQUIRED and is normalized to it rather than published
+as null.  FUNCTION-SPEC-DATA omits the key for a required argument -- measured,
+and its source reads (unless (eq :required (argument-binding-kind binding)))
+-- so null here would leave a reader unable to tell a required argument from a
+revision that does not report kinds at all.  This normalization is a statement
+about version 1 only; the caller refuses any other version before reaching it."
+  (loop for argument in arguments
+        collect (list :variable (symbol-data (getf argument :variable))
+                      :spec (%spec-tree (getf argument :spec))
+                      :kind (or (getf argument :kind) :required)
+                      :supplied-p (let ((name (getf argument :supplied-p)))
+                                    (when name (symbol-data name)))
+                      :keyword (getf argument :keyword))))
+
+(defun %clause-text (forms max-chars)
+  "Return (values TEXT COMPLETE-P OMITTED-CHARS) for one clause's FORMS.
+
+A contract clause -- :PRE, :POST, :STATE-POST -- is a list of forms that must
+all hold, and printing the bare list hands a reader something that cannot be
+pasted back: (FORM FORM) reads as a call of the first.  One form prints as
+itself and several print as (AND ...), which is what the clause means and what
+a reader can evaluate.
+
+Every clause is bounded and reports its cut, because a clause silently cut at
+MAX-CHARS reads as the whole condition: a reader takes it for the contract and
+concludes the definition admits inputs it refuses, or requires less than it
+does.
+
+No forms answers COMPLETE-P :NOT-APPLICABLE -- \"this definition has no such
+clause\" -- which is the third answer a boolean cannot give, and distinct from
+a clause that is there and was cut."
+  (if forms
+      (%print-bounded-form (if (null (rest forms))
+                               (first forms)
+                               (cons 'and forms))
+                           max-chars)
+      (values nil :not-applicable nil)))
+
+(defun %contract-capture (bindings max-chars)
+  "Return a contract's :CAPTURE declarations, bounded.
+
+These are the forms as written, never the values a run observed: projecting
+this list runs no capture form."
+  (loop for binding in bindings
+        collect (multiple-value-bind (text complete omitted)
+                    (%print-bounded-form (getf binding :form) max-chars)
+                  (list :name (symbol-data (getf binding :name))
+                        :form text
+                        :form-complete complete
+                        :form-omitted-chars omitted))))
+
+(defun %contract-cases (cases max-chars)
+  "Return a contract's ordered named cases as report plists.
+
+Order is the contract's, because case selection is exclusive and the author
+wrote them in the order they are tried.  Guards and postconditions are the
+source forms; their compiled counterparts are not projected and are not run.
+
+:POSTCONDITIONS and :STATE-POST are both clauses and both go through
+%CLAUSE-TEXT, so each arrives as a form a reader can paste back and each
+carries the complete/omitted pair beside it.  A :STATE-POST that was cut with
+no such pair is a clause a reader takes for the whole condition."
+  (loop for case in cases
+        collect
+        (multiple-value-bind (guard guard-complete guard-omitted)
+            (%print-bounded-form (getf case :when) max-chars)
+          (multiple-value-bind (post-text post-complete post-omitted)
+              (%clause-text (getf case :postconditions) max-chars)
+            (multiple-value-bind (state-text state-complete state-omitted)
+                (%clause-text (getf case :state-post) max-chars)
+              (list :name (getf case :name)
+                    :documentation (getf case :documentation)
+                    :guard guard
+                    :guard-complete guard-complete
+                    :guard-omitted-chars guard-omitted
+                    :outcome (getf case :outcome)
+                    :returns (%spec-tree (getf case :returns))
+                    :signals (%spec-tree (getf case :signals))
+                    :postconditions post-text
+                    :postconditions-complete post-complete
+                    :postconditions-omitted-chars post-omitted
+                    :post-value-variables
+                    (mapcar #'symbol-data (getf case :post-value-variables))
+                    :state-post state-text
+                    :state-post-complete state-complete
+                    :state-post-omitted-chars state-omitted))))))
+
 (defun %describe-function-spec (api name registry max-chars)
   "Return the detail plist for the contract registered for NAME.
 
-Built from cl-spec's own FUNCTION-SPEC-DATA, for the same reason the spec and
-property projections are: the two halves a caller asks about before editing a
-function -- which inputs are accepted, which output is required -- are
-cl-spec's answer to give, not this adapter's to assemble.
+Built from cl-spec's own FUNCTION-SPEC-DATA.  The two halves a caller asks
+about before editing a function -- which inputs are accepted, which output is
+required -- are cl-spec's answer to give, not this adapter's to assemble.
 
-:PRE and :POST are the author's forms.  Their compiled counterparts are not
-projected: a function cannot be read, and whether they hold is what spec-check
-answers."
+Nothing here runs contract code.  FUNCTION-SPEC-DATA projects no compiled
+guard, capture form, post form or state-post form, so describing a contract
+cannot call the target, its :PRE, its captures, its case guards or any of its
+post forms.
+
+A record whose schema version this adapter does not know is refused rather than
+read under version 1's rules -- an absent :KIND means :REQUIRED in version 1
+and may mean anything in a later one."
   (let ((data (funcall (api-fn api :function-spec-data) name :registry registry)))
-    ;; NIL is not a contract with no arguments and no :returns.  It renders
-    ;; byte-identically to one, which is the reading %FUNCTION-SPEC-LISTING
-    ;; carries :READ-FAILED to prevent -- and this is the path where a caller
-    ;; actually reads the contract before editing the function.
-    (unless data
-      (return-from %describe-function-spec
-        (list :status :unsupported
-              :kind "function-spec"
-              :name (symbol-data name)
-              :message
-              (concatenate 'string
-                           "cl-spec returned no projection for this contract. "
-                           "It is registered; what it says could not be read, "
-                           "and an empty description would read as a contract "
-                           "with no arguments and no :returns."))))
+    (multiple-value-bind (status reason)
+        (validate-versioned-record data :expected-record-kind :definition
+                                        :expected-entity-kind :function-spec)
+      (when (eq :unsupported-schema status)
+        (return-from %describe-function-spec
+          (list :status :unsupported :kind "function-spec" :name (symbol-data name)
+                :message (format nil "cl-spec returned this contract under ~
+schema version ~A, which this cl-mcp does not know. Its fields are not read ~
+under version 1's rules, because an absent key means different things between ~
+versions." reason))))
+      (when (eq :malformed status)
+        (return-from %describe-function-spec
+          (list :status :unsupported :kind "function-spec" :name (symbol-data name)
+                :message (format nil "cl-spec returned a contract projection ~
+this adapter cannot read: ~A. An empty description would read as a contract ~
+with no arguments and no :returns." reason)))))
     (flet ((clause (forms)
-             ;; Bounded like the body a property describe carries.  A :PRE or
-             ;; :POST form is short in practice, but "in practice" is not a
-             ;; budget, and every other form this module prints is cut at one.
-             ;; NIL rather than the string "NIL" for an absent clause, so a
-             ;; renderer can tell a contract with no :PRE from one whose :PRE
-             ;; is the literal NIL.
-             ;; What cl-spec evaluates, not the list it stores.
-             ;; :PRECONDITIONS is a list of forms -- (:pre (<= low high))
-             ;; arrives as ((<= low high)) -- and DEFSPEC-FUNCTION compiles
-             ;; them as (and ,@pre), so one clause prints as the clause and
-             ;; several print as that AND.  Printing the bare list gave the
-             ;; reader a form they cannot paste back: a call to the list.
-             (when forms
-               (multiple-value-bind (text complete omitted)
-                   (%print-bounded-form (if (null (rest forms))
-                                            (first forms)
-                                            (cons 'and forms))
-                                        max-chars)
-                 (list text complete omitted)))))
+             (multiple-value-list (%clause-text forms max-chars))))
       (let ((pre (clause (getf data :preconditions)))
-            (post (clause (getf data :postconditions))))
+            (post (clause (getf data :postconditions)))
+            (state-post (clause (getf data :state-post))))
         (multiple-value-bind (source source-complete source-omitted)
             (%print-bounded-form (getf data :source-form) max-chars)
-          ;; The pair, not the value alone.  A digest whose input hit the print
-          ;; limit is not one a caller may compare, and this was the third
-          ;; place offering one for expect_definition_digest without saying so.
           (multiple-value-bind (digest complete)
               (definition-digest api name registry :property data)
             (list :core-schema (core-schema-data data)
+                  :core-record (project-core-record
+                                data :function-spec-data
+                                :expected-record-kind :definition
+                                :expected-entity-kind :function-spec
+                                :max-chars max-chars)
                   :status :ok
                   :kind "function-spec"
                   :name (symbol-data name)
                   :documentation (getf data :documentation)
-                  :arguments (loop for argument in (getf data :arguments)
-                                   collect (list :variable
-                                                 (symbol-data (getf argument :variable))
-                                                 :spec (%spec-tree (getf argument :spec))))
+                  :arguments (%contract-arguments (getf data :arguments))
+                  :argument-generator
+                  (let ((generator (getf data :argument-generator)))
+                    (when generator (symbol-data generator)))
+                  :argument-schema (%spec-tree (getf data :argument-schema))
                   :returns (%spec-tree (getf data :returns))
+                  :signals (%spec-tree (getf data :signals))
+                  :post-value-variables
+                  (mapcar #'symbol-data (getf data :post-value-variables))
+                  :capture (%contract-capture (getf data :capture) max-chars)
+                  :state-post (first state-post)
+                  :state-post-complete (second state-post)
+                  :state-post-omitted-chars (third state-post)
+                  :case-selection (getf data :case-selection)
+                  :cases (%contract-cases (getf data :cases) max-chars)
                   :preconditions (first pre)
-                  ;; Only when there is a clause.  "complete: true" about a
-                  ;; :PRE the contract does not have is a claim, and the
-                  ;; response has %OPTIONAL-BOOL to carry an absent flag as
-                  ;; null -- which is what this PR added it for.
-                  :preconditions-complete (if pre (second pre) :not-applicable)
+                  :preconditions-complete (second pre)
                   :preconditions-omitted-chars (third pre)
                   :postconditions (first post)
-                  :postconditions-complete (if post (second post) :not-applicable)
+                  :postconditions-complete (second post)
                   :postconditions-omitted-chars (third post)
                   :source-form source
                   :source-form-complete source-complete
@@ -1516,6 +1613,13 @@ here rather than things read off a definition."
         ;; input passed, a usable refusal count, an effective trial count --
         ;; and a verified verdict resting on them.
         (unless data (error 'unreadable-projection))
+        (let ((schema (validate-versioned-record
+                       data :expected-record-kind :definition
+                            :expected-entity-kind :function-spec)))
+          ;; A v2 contract record must not have v1's keys read off it: an
+          ;; absent :KIND means :REQUIRED in v1 and may mean anything later,
+          ;; and the same holds for :CASES and :PRECONDITIONS.
+          (unless (eq :ok schema) (error 'unreadable-projection)))
         (list :argument-count (length (getf data :arguments))
               :kind :contract
               :shrink-enabled t
@@ -1524,11 +1628,17 @@ here rather than things read off a definition."
               ;; :PRE refuses nothing, and saying so is different from having
               ;; failed to read whether it has one.
               :precondition-p (and (getf data :preconditions) t)
+              ;; Three answers, not two.  "This contract declares no cases" and
+              ;; "whether it declares any could not be read" lead to different
+              ;; verdicts, and %VERIFICATION-GAPS must not guess that cases
+              ;; exist in order to report their coverage unknown.
+              :declares-cases (if (getf data :case-selection) t nil)
               :data data
               :known t))
     (error ()
       (list :argument-count nil :kind :contract :shrink-enabled t
-            :trials-table nil :precondition-p :unknown :data nil :known nil))))
+            :trials-table nil :precondition-p :unknown :declares-cases :unknown
+            :data nil :known nil))))
 
 (defun %digest-facts (api name registry facts)
   "Return (:value <string-or-nil> :complete <boolean>) for NAME's digest.
@@ -1648,7 +1758,34 @@ report text is a rendering, not the value."
                       :value (externalize-value value
                                                 :max-chars max-value-chars))))
 
-(defun %contract-plist (api result executed max-value-chars
+(defun %core-fact (record key legacy)
+  "Return one fact by the precedence rule: the record first, then the reader.
+
+RECORD is the parsed core record's :DATA source plist, or NIL when this cl-spec
+has none.  LEGACY is a thunk calling the public reader.
+
+The rule is about which reader is CALLED, not about comparing two answers.
+When the record is there it is the only thing read, so the two can never
+disagree; when it is not, the reader is all there is.  That is also what makes
+the existing top-level fields safe as compatibility aliases -- they are built
+from this, not beside it.
+
+Returns (VALUES FACT READABLE-P).  Most callers only want FACT and ignore the
+second value, but %CONTRACT-PLIST's REJECTED and FAILURE-REASON need it: on
+the record path READABLE-P is FIELD-AVAILABILITY's :COLLECTED/:ABSENT
+distinction, true for a key the record declares even when its value is NIL,
+false only for a key this record's schema does not carry at all.  On the
+legacy path it is whatever LEGACY's own second value says -- for a thunk
+built over READ-SLOT-style readers, \"the reader resolved without
+signalling\" -- the same question asked a different way, so a caller that
+wants a readable flag gets one with the same meaning regardless of which
+path answered."
+  (if record
+      (values (getf record key)
+              (not (eq :absent (field-availability record key))))
+      (funcall legacy)))
+
+(defun %contract-plist (api result executed max-value-chars source
                         &optional (precondition-p :unknown))
   "Return the contract-specific half of a CHECK-FUNCTION result.
 
@@ -1656,6 +1793,17 @@ Always a plist: %RESULT-PLIST decides whether a run had a contract half and
 calls this only then, and %EVALUATED-P reads a non-NIL :CONTRACT as \"this was
 a contract run\" -- a NIL return here would put it back on the raw trial count
 this function exists to withhold.
+
+SOURCE is %RESULT-PLIST's parsed RESULT-DATA record, or NIL when this cl-spec
+has none -- the same value %CORE-FACT closes over for every other fact there.
+REJECTED and FAILURE-REASON go through it here too, so a record that carries
+them answers with the record's own numbers rather than a second,
+independently read count sitting beside it.  EXECUTED already arrives
+core-first, resolved one level up in %RESULT-PLIST before this function ever
+sees it; routing REJECTED any other way would make :EFFECTIVE-TRIALS and
+:REJECTION-STATUS -- whose whole premise is that cl-spec's own refusal
+counter cannot be trusted -- a subtraction across two different answers to
+\"how many\", which is worse than either answer alone.
 
 REJECTED is what separates a run that checked the function from one that only
 generated arguments for it: cl-spec's checker refuses inputs its :PRE does not
@@ -1672,7 +1820,10 @@ runs in 8 against a contract whose function signals inside its :PRE region,
 one of them reporting 1 trial and 2 rejections.
 
 FAILURE-REASON names which half of the contract broke; EXPLANATION carries
-cl-spec's structured account of a return value that missed its spec."
+cl-spec's structured account of a return value that missed its spec.
+EXPLANATION has no record counterpart at this level: RESULT-DATA nests an
+explanation inside :FAILURE's own observation, not beside :REJECTED and
+:FAILURE-REASON at the top, so it stays on the legacy reader alone."
   (flet ((read-slot (key)
            ;; (values VALUE OK-P).  Resolving the symbol is not the same as
            ;; calling it: a reader that signals -- a result type that drifted,
@@ -1684,103 +1835,112 @@ cl-spec's structured account of a return value that missed its spec."
                (handler-case (values (funcall (api-fn api key) result) t)
                  (error () (values nil nil)))
                (values nil nil))))
-    (multiple-value-bind (reason reason-read) (read-slot :check-failure-reason)
+    (multiple-value-bind (reason reason-readable)
+        (%core-fact source :failure-reason
+                    (lambda () (read-slot :check-failure-reason)))
       (multiple-value-bind (explanation explanation-read)
           (read-slot :check-explanation)
-        (multiple-value-bind (rejected rejected-read) (read-slot :check-rejected)
-        (let* (
-               (countable (and (integerp executed) (integerp rejected)))
-               (overcounted (and countable (> rejected executed)))
-               ;; A refusal reported against a contract whose projection says it
-               ;; has nothing to refuse with.  Two readers disagreeing, like the
-               ;; overcount above, and handled the same way rather than only in
-               ;; the text: a subtraction over figures that contradict each
-               ;; other is not a call count, and publishing it while the text
-               ;; says it cannot be derived leaves one response saying both.
-               (contradicted (and countable
-                                  (null precondition-p)
-                                  (plusp rejected)))
-               ;; One keyword for one three-valued question, decided in one
-               ;; place.  Five booleans meant the renderer re-derived which
-               ;; reason applied by testing them in an order that could not
-               ;; change -- :UNKNOWN is not NULL, so its clause had to precede
-               ;; the no-:pre one, silently -- while the gap list and the
-               ;; verdict read a sixth.  The booleans below are published from
-               ;; this, not computed beside it.
-               (rejection-status
-                 ;; The countability clauses first, before every one below
-                 ;; them: each of those ends in a subtraction, and cl-spec can
-                 ;; report a result whose trial count is NIL -- its own
-                 ;; check-function writes
-                 ;; (- (or (property-result-trials result) 0) rejected) for
-                 ;; that reason.  Ordered after :NO-PRECONDITION, a contract
-                 ;; without a :pre reached (- NIL 0) and the TYPE-ERROR came
-                 ;; back to the caller as "this adapter failed".
-                 ;;
-                 ;; :UNMEASURED and :TRIALS-UNCOUNTED are separate because
-                 ;; they are separate sentences: one says the refusal count
-                 ;; could not be read, the other that it was read and the
-                 ;; trial count was not.  One keyword for both had the text
-                 ;; denying a number the JSON was publishing beside it.
-                 (cond ((not (integerp rejected)) :unmeasured)
-                       ((not (integerp executed)) :trials-uncounted)
-                       ;; Both directions.  The premise of this plist is that
-                       ;; cl-spec's refusal counter cannot be trusted, and a
-                       ;; count below zero passed every gate: it subtracted to
-                       ;; MORE trials than the budget and carried a verified
-                       ;; verdict on the difference.
-                       ((minusp rejected) :negative)
-                       (overcounted :overcounted)
-                       ((eq :unknown precondition-p) :precondition-unknown)
-                       (contradicted :contradicted)
-                       ((null precondition-p) :no-precondition)
-                       (t :usable)))
-               (usable (member rejection-status '(:usable :no-precondition))))
-          (multiple-value-bind (explanation-text explanation-complete
-                                explanation-omitted)
-              (if explanation
-                  ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
-                  ;; non-positive budget lives in the wrapper, and this was the
-                  ;; one bounded print in the file reaching the stream without
-                  ;; it.
-                  (%print-bounded-form explanation max-value-chars)
-                  (values nil :not-applicable nil))
-            (list ;; Only when it is a number.  A reader that answered a
-                ;; keyword or a float published that value beside a status
-                ;; saying the count could not be read -- and handed yason
-                ;; something it may refuse to serialize.
-                :rejected (when (integerp rejected) rejected)
-                  :rejection-status rejection-status
-                  :rejected-measured (and rejected-read (integerp rejected) t)
-                :rejected-readable (and rejected-read t)
-                  ;; Carried so a renderer does not describe a refusal that
-                  ;; cannot happen: "0 of them refused by :pre" told the reader
-                  ;; a precondition exists, on a contract written without one.
-                  :precondition-p precondition-p
-                  :rejected-overcounted (and overcounted t)
-                  :rejected-contradicted (and contradicted t)
-                  ;; The single question every consumer of this plist asks: is
-                  ;; the refusal count one this response may subtract with.
-                  :rejected-usable (and usable t)
-                  ;; Absent, not floored, when the two cannot be subtracted: 0
-                  ;; is itself a claim -- "the function was never called" --
-                  ;; about a run that did call it, and the text says the number
-                  ;; cannot be derived while the JSON would have said zero.
-                  :effective-trials (when usable (- executed rejected))
-                  :failure-reason reason
-                  ;; Whether the reader resolved, not whether it returned it.
-                  ;; NIL is a legitimate answer from cl-spec -- a passing run,
-                  ;; or a failing one whose counterexample did not reproduce --
-                  ;; so it cannot double as "this adapter could not ask".
-                  ;; Reported for the same reason REJECTED-MEASURED is: without
-                  ;; it a renderer tells the caller their function is
-                  ;; non-deterministic on the evidence of a name this image
-                  ;; could not find.
-                  :failure-reason-readable (and reason-read t)
-                  :explanation explanation-text
-                  :explanation-readable (and explanation-read t)
-                  :explanation-complete explanation-complete
-                  :explanation-omitted-chars explanation-omitted))))))))
+        (multiple-value-bind (rejected rejected-readable)
+            (%core-fact source :rejected (lambda () (read-slot :check-rejected)))
+          (let* ((countable (and (integerp executed) (integerp rejected)))
+                 (overcounted (and countable (> rejected executed)))
+                 ;; A refusal reported against a contract whose projection says it
+                 ;; has nothing to refuse with.  Two readers disagreeing, like the
+                 ;; overcount above, and handled the same way rather than only in
+                 ;; the text: a subtraction over figures that contradict each
+                 ;; other is not a call count, and publishing it while the text
+                 ;; says it cannot be derived leaves one response saying both.
+                 (contradicted (and countable
+                                   (null precondition-p)
+                                   (plusp rejected)))
+                 ;; One keyword for one three-valued question, decided in one
+                 ;; place.  Five booleans meant the renderer re-derived which
+                 ;; reason applied by testing them in an order that could not
+                 ;; change -- :UNKNOWN is not NULL, so its clause had to precede
+                 ;; the no-:pre one, silently -- while the gap list and the
+                 ;; verdict read a sixth.  The booleans below are published from
+                 ;; this, not computed beside it.
+                 (rejection-status
+                   ;; The countability clauses first, before every one below
+                   ;; them: each of those ends in a subtraction, and cl-spec can
+                   ;; report a result whose trial count is NIL -- its own
+                   ;; check-function writes
+                   ;; (- (or (property-result-trials result) 0) rejected) for
+                   ;; that reason.  Ordered after :NO-PRECONDITION, a contract
+                   ;; without a :pre reached (- NIL 0) and the TYPE-ERROR came
+                   ;; back to the caller as "this adapter failed".
+                   ;;
+                   ;; :UNMEASURED and :TRIALS-UNCOUNTED are separate because
+                   ;; they are separate sentences: one says the refusal count
+                   ;; could not be read, the other that it was read and the
+                   ;; trial count was not.  One keyword for both had the text
+                   ;; denying a number the JSON was publishing beside it.
+                   (cond ((not (integerp rejected)) :unmeasured)
+                         ((not (integerp executed)) :trials-uncounted)
+                         ;; Both directions.  The premise of this plist is that
+                         ;; cl-spec's refusal counter cannot be trusted, and a
+                         ;; count below zero passed every gate: it subtracted to
+                         ;; MORE trials than the budget and carried a verified
+                         ;; verdict on the difference.
+                         ((minusp rejected) :negative)
+                         (overcounted :overcounted)
+                         ((eq :unknown precondition-p) :precondition-unknown)
+                         (contradicted :contradicted)
+                         ((null precondition-p) :no-precondition)
+                         (t :usable)))
+                 (usable (member rejection-status '(:usable :no-precondition))))
+            (multiple-value-bind (explanation-text explanation-complete
+                                  explanation-omitted)
+                (if explanation
+                    ;; %PRINT-BOUNDED-FORM, not PRINT-FORM-BOUNDED: the clamp on a
+                    ;; non-positive budget lives in the wrapper, and this was the
+                    ;; one bounded print in the file reaching the stream without
+                    ;; it.
+                    (%print-bounded-form explanation max-value-chars)
+                    (values nil :not-applicable nil))
+              (list ;; Only when it is a number.  A reader that answered a
+                  ;; keyword or a float published that value beside a status
+                  ;; saying the count could not be read -- and handed yason
+                  ;; something it may refuse to serialize.
+                  :rejected (when (integerp rejected) rejected)
+                    :rejection-status rejection-status
+                    ;; READABLE, not whether the legacy reader resolved: on
+                    ;; the record path this is %CORE-FACT's own
+                    ;; FIELD-AVAILABILITY check, true for a declared key even
+                    ;; when its value is NIL; on the legacy path it is
+                    ;; whatever READ-SLOT resolved.  Both answer the one
+                    ;; question this flag exists for -- a definitive count,
+                    ;; or a gap -- so a consumer sees the same meaning
+                    ;; regardless of which path supplied REJECTED.
+                    :rejected-measured (and rejected-readable (integerp rejected) t)
+                  :rejected-readable (and rejected-readable t)
+                    ;; Carried so a renderer does not describe a refusal that
+                    ;; cannot happen: "0 of them refused by :pre" told the reader
+                    ;; a precondition exists, on a contract written without one.
+                    :precondition-p precondition-p
+                    :rejected-overcounted (and overcounted t)
+                    :rejected-contradicted (and contradicted t)
+                    ;; The single question every consumer of this plist asks: is
+                    ;; the refusal count one this response may subtract with.
+                    :rejected-usable (and usable t)
+                    ;; Absent, not floored, when the two cannot be subtracted: 0
+                    ;; is itself a claim -- "the function was never called" --
+                    ;; about a run that did call it, and the text says the number
+                    ;; cannot be derived while the JSON would have said zero.
+                    :effective-trials (when usable (- executed rejected))
+                    :failure-reason reason
+                    ;; The same READABLE question as :REJECTED-READABLE, asked
+                    ;; about FAILURE-REASON: NIL is a legitimate answer -- a
+                    ;; passing run, or a failing one whose counterexample did
+                    ;; not reproduce -- so it cannot double as "could not ask".
+                    ;; On the record path %CORE-FACT answers it from
+                    ;; FIELD-AVAILABILITY; on the legacy path it is whether
+                    ;; READ-SLOT resolved without signalling.
+                    :failure-reason-readable (and reason-readable t)
+                    :explanation explanation-text
+                    :explanation-readable (and explanation-read t)
+                    :explanation-complete explanation-complete
+                    :explanation-omitted-chars explanation-omitted))))))))
 
 (defun %recorded-budget (api result)
   "Return the trial budget cl-spec recorded on RESULT, or NIL.
@@ -1803,91 +1963,169 @@ property that generates no arguments and fails has a counterexample that is
 legitimately empty, and cl-spec reports it as NIL -- exactly what a run that
 never reached a verdict also reports.  Reading one as the other is how a
 consumer ends up believing a timeout produced a counterexample with no
-arguments, or that a failure was somehow argument-free."
-  (let* ((core-data (when (api-has-p api :result-data)
-                      (funcall (api-fn api :result-data) result)))
-         (core-schema (core-schema-data core-data))
-         (digest (if core-data
-                     (multiple-value-bind (value complete)
-                         (definition-digest api name nil :property core-data)
-                       (list :value value :complete complete :covers (getf digest :covers)))
-                     digest))
-         (status (funcall (api-fn api :result-status) result))
-         (counterexample (funcall (api-fn api :result-counterexample) result))
-         (shrunk (funcall (api-fn api :result-shrunk-counterexample) result))
-         (condition (funcall (api-fn api :result-condition) result))
-         (seed (funcall (api-fn api :result-seed) result))
-         (argument-count (getf facts :argument-count))
-         (zero-argument-property (eql 0 argument-count))
-         (executed (funcall (api-fn api :result-trials) result))
-         (verdict (member status '(:failed :error))))
-    (list :core-schema core-schema
-          :property (symbol-data name)
-          :kind kind
-          :contract (when (eq kind :contract)
-                      (%contract-plist api result executed max-value-chars
-                                       (getf facts :precondition-p)))
-          :status status
-          ;; The recorded budget wins over the derived one, and takes the
-          ;; derivation note off with it: the note says cl-spec does not
-          ;; expose the resolved budget, which is false of a contract result
-          ;; that carries it.
-          :trials (let ((recorded (and (eq kind :contract)
-                                       (%recorded-budget api result))))
-                    ;; Prepended, not substituted.  GETF finds the first
-                    ;; occurrence, so the recorded budget wins while the
-                    ;; derived plist keeps the keys it alone carries --
-                    ;; :BACKEND-DEFAULT among them, which a caller compares
-                    ;; against exactly when a trials= was in play.
-                    (append (list :executed executed)
-                            (when recorded
-                              (list :budget recorded
-                                    :budget-source "cl-spec result"
-                                    :budget-derivation nil))
-                            trials))
-          ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
-          ;; consumer holding it as a number would round it, which turns a
-          ;; reproducible failure into one that cannot be reproduced.
-          :seed (when seed (format nil "~D" seed))
-          ;; NIL for a contract, which has no profile.  CHECK-FUNCTION takes
-          ;; none; :NORMAL appears on the result only because RUN-PROPERTY
-          ;; defaults it on the synthetic property cl-spec builds underneath.
-          ;; Publishing that is the same mis-report profile= is refused for.
-          :profile (unless (eq kind :contract)
-                     (funcall (api-fn api :result-profile) result))
-          :counterexample (%named-values counterexample max-value-chars)
-          :counterexample-status
-          (cond ((not verdict) :not-applicable)
-                (counterexample :present)
-                (zero-argument-property :present)
-                ((null argument-count) :unknown)
-                (t :none))
-          :counterexample-unavailable-reason
-          (when (and verdict (null counterexample) (null argument-count))
-            "the property's argument list could not be read, so an empty
+arguments, or that a failure was somehow argument-free.
+
+Every fact besides the exception below follows one precedence rule, run
+through %CORE-FACT: read cl-spec's versioned RESULT-DATA record when this
+cl-spec has one, and fall back to the individual reader only when it does not.
+A RESULT-DATA that exists and then signals is reported as an adapter fault
+rather than silently replaced by the legacy readers, which would publish a
+healthy-looking response built while the versioned API was broken -- and the
+same is true of a record RESULT-DATA hands back that this adapter cannot
+read."
+  (let* ((raw (when (api-has-p api :result-data)
+                (handler-case (list :ok (funcall (api-fn api :result-data) result))
+                  (error (condition) (list :failed condition)))))
+         (core-status (first raw))
+         (core-data (when (eq :ok core-status) (second raw)))
+         (core-schema (core-schema-data core-data)))
+    ;; A versioned reader that exists and then breaks is a fault to report.
+    ;; Falling back here would publish a healthy-looking response built from
+    ;; the older readers while the new API was broken -- which is the failure
+    ;; this adapter's status vocabulary exists to keep visible.
+    (when (eq :failed core-status)
+      (return-from %result-plist
+        (list :property (symbol-data name) :kind kind :status :internal-error
+              :trials trials :counterexample-status :unavailable
+              :shrink-status :unavailable
+              :message (format nil "cl-spec's result-data signalled while this ~
+adapter read the result: ~A. The legacy readers are not used in its place, ~
+because that would hide a broken versioned API behind a response that looked ~
+complete." (princ-to-string (second raw))))))
+    (multiple-value-bind (core-record core-record-status core-record-reason)
+        (if core-data
+            (project-core-record core-data :result-data
+                                 :expected-record-kind :result
+                                 :max-chars max-value-chars)
+            (values (list :availability :unavailable :schema-supported nil
+                          :schema-version nil :field-availability nil
+                          :unknown-keys nil
+                          :projection (list :complete t :issues nil)
+                          :data nil)
+                    :unavailable nil))
+      (when (eq :malformed core-record-status)
+        (return-from %result-plist
+          (list :property (symbol-data name) :kind kind :status :internal-error
+                :trials trials :counterexample-status :unavailable
+                :shrink-status :unavailable
+                :message (format nil "cl-spec's result-data returned a record ~
+this adapter cannot read: ~A." core-record-reason))))
+      (let* ((source (when (eq :ok core-record-status) core-data))
+             (status (%core-fact source :status
+                                 (lambda () (funcall (api-fn api :result-status)
+                                                     result))))
+             (executed (%core-fact source :trials
+                                   (lambda () (funcall (api-fn api :result-trials)
+                                                       result))))
+             (seed (%core-fact source :seed
+                               (lambda () (funcall (api-fn api :result-seed)
+                                                   result))))
+             (counterexample
+               (%core-fact source :counterexample
+                           (lambda ()
+                             (funcall (api-fn api :result-counterexample) result))))
+             (shrunk (%core-fact source :shrunk-counterexample
+                                 (lambda ()
+                                   (funcall (api-fn api :result-shrunk-counterexample)
+                                            result))))
+             (elapsed (%core-fact source :elapsed
+                                  (lambda () (funcall (api-fn api :result-elapsed)
+                                                      result))))
+             ;; Kept as a reader on purpose.  result-data carries
+             ;; :CONDITION-REPORT, which is text, and no :CONDITION key at all,
+             ;; so this is the only route to the object inspect-object drills
+             ;; into.  It adds what the record does not carry and reclassifies
+             ;; nothing the record does.
+             (condition (funcall (api-fn api :result-condition) result))
+             (digest (if core-data
+                         (multiple-value-bind (value complete)
+                             (definition-digest api name nil :property core-data)
+                           (list :value value :complete complete
+                                 :covers (getf digest :covers)))
+                         digest))
+             (argument-count (getf facts :argument-count))
+             (zero-argument-property (eql 0 argument-count))
+             (verdict (member status '(:failed :error))))
+        (list :core-schema core-schema
+              :core-record core-record
+              :property (symbol-data name)
+              :kind kind
+              ;; From the contract facts, because the verdict is about this run
+              ;; of that contract.  A property run has no cases and answers NIL.
+              :declares-cases (getf facts :declares-cases)
+              :contract (when (eq kind :contract)
+                          (%contract-plist api result executed max-value-chars
+                                           source (getf facts :precondition-p)))
+              :status status
+              ;; The recorded budget wins over the derived one, and takes the
+              ;; derivation note off with it: the note says cl-spec does not
+              ;; expose the resolved budget, which is false of a contract
+              ;; result that carries it.
+              :trials (let ((recorded
+                              (and (eq kind :contract)
+                                   (%core-fact source :budget
+                                               (lambda ()
+                                                 (%recorded-budget api result))))))
+                        ;; Prepended, not substituted.  GETF finds the first
+                        ;; occurrence, so the recorded budget wins while the
+                        ;; derived plist keeps the keys it alone carries --
+                        ;; :BACKEND-DEFAULT among them, which a caller
+                        ;; compares against exactly when a trials= was in
+                        ;; play.
+                        (append (list :executed executed)
+                                (when recorded
+                                  (list :budget recorded
+                                        :budget-source "cl-spec result"
+                                        :budget-derivation nil))
+                                trials))
+              ;; Text, not a number: a cl-spec seed reaches 2^62 and a JSON
+              ;; consumer holding it as a number would round it, which turns a
+              ;; reproducible failure into one that cannot be reproduced.
+              :seed (when seed (format nil "~D" seed))
+              ;; NIL for a contract, which has no profile.  CHECK-FUNCTION
+              ;; takes none; :NORMAL appears on the result only because
+              ;; RUN-PROPERTY defaults it on the synthetic property cl-spec
+              ;; builds underneath.  Publishing that is the same mis-report
+              ;; profile= is refused for.
+              :profile (unless (eq kind :contract)
+                         (%core-fact source :profile
+                                     (lambda ()
+                                       (funcall (api-fn api :result-profile)
+                                               result))))
+              :counterexample (%named-values counterexample max-value-chars)
+              :counterexample-status
+              (cond ((not verdict) :not-applicable)
+                    (counterexample :present)
+                    (zero-argument-property :present)
+                    ((null argument-count) :unknown)
+                    (t :none))
+              :counterexample-unavailable-reason
+              (when (and verdict (null counterexample) (null argument-count))
+                "the property's argument list could not be read, so an empty
 counterexample cannot be told from a missing one")
-          :shrunk-counterexample (%named-values shrunk max-value-chars)
-          :shrink-status
-          (cond ((not verdict) :not-applicable)
-                ((not (getf facts :shrink-enabled)) :disabled)
-                (shrunk :present)
-                (zero-argument-property :present)
-                (t :none))
-          :shrink-note (when (and verdict (getf facts :shrink-enabled))
-                         +shrink-note+)
-          :condition (when condition (%condition-data condition))
-          :elapsed (funcall (api-fn api :result-elapsed) result)
-          :definition-digest (getf digest :value)
-          :definition-digest-complete (getf digest :complete)
-          ;; What the digest is a digest OF.  It covers the definition
-          ;; cl-spec holds and the specs reachable from it -- which for a
-          ;; property is the thing that ran, and for a contract is not: the
-          ;; code under test is the function, and nothing here reads a
-          ;; function body.  Editing TRANSFER and replaying its contract from
-          ;; the same seed is faithful by this digest and is not a
-          ;; reproduction, so the field has to say which it measured.
-          :definition-digest-covers (getf digest :covers)
-          :definition-match (%definition-match digest expected-digest))))
+              :shrunk-counterexample (%named-values shrunk max-value-chars)
+              :shrink-status
+              (cond ((not verdict) :not-applicable)
+                    ((not (getf facts :shrink-enabled)) :disabled)
+                    (shrunk :present)
+                    (zero-argument-property :present)
+                    (t :none))
+              :shrink-note (when (and verdict (getf facts :shrink-enabled))
+                             +shrink-note+)
+              :condition (when condition (%condition-data condition))
+              :elapsed elapsed
+              :definition-digest (getf digest :value)
+              :definition-digest-complete (getf digest :complete)
+              ;; What the digest is a digest OF.  It covers the definition
+              ;; cl-spec holds and the specs reachable from it -- which for a
+              ;; property is the thing that ran, and for a contract is not:
+              ;; the code under test is the function, and nothing here reads
+              ;; a function body.  Editing TRANSFER and replaying its
+              ;; contract from the same seed is faithful by this digest and
+              ;; is not a reproduction, so the field has to say which it
+              ;; measured.
+              :definition-digest-covers (getf digest :covers)
+              :definition-match (%definition-match digest expected-digest))))))
 
 (defun %definition-match (digest expected)
   "Return how DIGEST compares to EXPECTED: one of four answers, not two.
@@ -2025,13 +2263,15 @@ the run's own machinery."
 (defparameter +verification-gap-values+
   '(:zero-trials :effective-trials-unknown :rejection-counts-unmeasured
     :input-coverage-unmeasured :contract-not-run :properties-not-run
-    :related-properties-unknown :no-properties-selected)
+    :related-properties-unknown :no-properties-selected
+    :cases-never-called :case-coverage-unknown :generation-incomplete
+    :core-schema-unsupported :contract-schema-unsupported)
   "Every verification_gaps value that is not a per-result status.
 
 A result status that is not a verdict is pushed into the list as itself, and
 those are documented through +RESULT-STATUSES+.  These are the rest, kept here
 for the same reason the status lists are: the tool description is the only
-documentation a model ever sees, this set has grown four times in one branch,
+documentation a model ever sees, this set has grown five times in one branch,
 and a value the code can emit that the description does not name is a value the
 caller has to guess at.")
 
@@ -2099,6 +2339,45 @@ counted more refusals than trials."
   (let ((contract (getf result :contract)))
     (and contract (not (integerp (getf contract :effective-trials))))))
 
+(defun %core-source (result)
+  "Return the raw cl-spec record behind RESULT, or NIL."
+  (getf (getf result :core-record) :source))
+
+(defun %never-called-cases (result)
+  "Return the declared cases this run never reached, or NIL.
+
+Only a measured case report answers.  A report that did not come back says
+nothing about coverage, which is a different shortfall and has its own gap."
+  (when (eq :collected (getf (getf (getf result :core-record) :field-availability)
+                             :case-report))
+    (getf (getf (%core-source result) :case-report) :never-called)))
+
+(defun %case-coverage-unknown-p (result)
+  "Return true when cases are declared and their run report is missing.
+
+Keyed on :DECLARES-CASES being exactly T.  :UNKNOWN means the contract record
+could not be read, and claiming a coverage gap there would be this adapter
+asserting that cases exist -- which is what it could not find out."
+  (and (eq t (getf result :declares-cases))
+       (not (eq :collected
+                (getf (getf (getf result :core-record) :field-availability)
+                      :case-report)))))
+
+(defun %schema-unsupported-p (result)
+  "Return true when the result record declares a schema version this adapter
+does not know.  Its fields are then unread, so nothing in it is evidence."
+  (let ((record (getf result :core-record)))
+    (and (eq :collected (getf record :availability))
+         (not (getf record :schema-supported)))))
+
+(defun %generation-incomplete-p (result)
+  "Return true when the run stopped in generation rather than on the target.
+
+cl-spec's own :FAILURE-PHASE decides, not the generation report's termination.
+An exhaustion in the shrinking phase leaves the failure established and only
+the reduction unfinished, so it is not a verification shortfall."
+  (eq :generation (getf (%core-source result) :failure-phase)))
+
 (defun %verification-gaps (results &optional selection)
   "Return the reasons RESULTS fall short of a complete verification.
 
@@ -2158,7 +2437,13 @@ establish -- read full coverage for a function whose contract never ran."
       ;; whose count could not be derived is the case where it is least known,
       ;; and the docs promise the gap is there whenever it is unknown.
       (when (%effective-unknown-p result)
-        (pushnew :effective-trials-unknown gaps)))
+        (pushnew :effective-trials-unknown gaps))
+      (when (%never-called-cases result) (pushnew :cases-never-called gaps))
+      (when (%case-coverage-unknown-p result) (pushnew :case-coverage-unknown gaps))
+      (when (%generation-incomplete-p result) (pushnew :generation-incomplete gaps))
+      (when (%schema-unsupported-p result) (pushnew :core-schema-unsupported gaps))
+      (when (eq :unknown (getf result :declares-cases))
+        (pushnew :contract-schema-unsupported gaps)))
     (append (nreverse gaps)
             (when (getf selection :contract-not-run) (list :contract-not-run))
             (when (or (getf selection :properties-not-run)
@@ -2173,13 +2458,26 @@ establish -- read full coverage for a function whose contract never ran."
 (defun %verified-p (results)
   "Return true only when RESULTS are evidence that every property held.
 
-Three conditions, not one: something was selected, every result is :PASSED,
-and every one of them evaluated at least one trial.  Dropping the third would
-let a property budgeted zero trials report itself verified."
+Something was selected, and every result clears six conditions: :PASSED; at
+least one trial evaluated; no declared case left never-called; case coverage
+not unknown; :DECLARES-CASES not :UNKNOWN (the contract's own declaration was
+read); and a result schema this adapter supports.  Dropping any one of them
+lets the shortfall it guards against pass silently as verified."
   (and results
        (every (lambda (result)
                 (and (eq :passed (getf result :status))
-                     (%evaluated-p result)))
+                     (%evaluated-p result)
+                     ;; A declared case nobody reached is a branch of the
+                     ;; contract this run says nothing about.  cl-spec's
+                     ;; :PASSED is untouched; what is refused is calling it
+                     ;; evidence about the whole contract.
+                     (null (%never-called-cases result))
+                     (not (%case-coverage-unknown-p result))
+                     ;; Reading the contract is a precondition for judging its
+                     ;; coverage.  VERIFIED over a declaration this adapter
+                     ;; could not parse would be a verdict about nothing.
+                     (not (eq :unknown (getf result :declares-cases)))
+                     (not (%schema-unsupported-p result))))
               results)
        t))
 

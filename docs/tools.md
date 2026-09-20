@@ -1099,10 +1099,42 @@ construction is supported; it does not guarantee successful draws or reductions.
     `timeout_seconds` (number, default 30)
   - `function-spec` projects the contract: the spec of each argument, the spec
     of the return value, and the `:pre` / `:post` forms. It answers
-    `unsupported` only when the loaded cl-spec exports no `function-spec-data`
-    — a statement about that revision, not about whether a contract exists.
+    `unsupported` for three different reasons, and `message` says which: the
+    loaded cl-spec exports no `function-spec-data` — a statement about that
+    revision, not about whether a contract exists — or it answered a record
+    under a schema version this cl-mcp does not know, or it answered a record
+    that failed validation. The last two are the short-circuit described under
+    `core_record` below.
   - `:pre` and `:post` are cut at `max_chars` with the cut reported, like
     `body` and `source_form`.
+  - `function-spec` also carries, beyond the argument and return specs above:
+    each argument's `kind` (`required` / `optional` / `key` / `rest` — an
+    absent `kind` on a v1 record is normalized to `required`, since cl-spec
+    omits that key for required arguments rather than sending it),
+    `supplied_p`, `keyword`, `argument_generator`, `argument_schema`,
+    `signals`, `post_value_variables`, `capture`, `state_post`,
+    `case_selection`, and the ordered `cases` (each with its own `guard`,
+    `outcome`, `returns` / `signals`, `postconditions` and `state_post`).
+    Reading a contract runs none of it — no target call, no `:pre`, no capture
+    form, no case guard, no post form.
+  - `state_post` is one form, not the bare list of forms it was declared as:
+    several clauses print as `(and ...)`, so what you read can be pasted back.
+    It is cut at `max_chars` like every other form here, and carries
+    `state_post_complete` / `state_post_omitted_chars` beside it — at the
+    contract root and inside each case — so a cut clause cannot be mistaken
+    for the whole condition.
+  - `core_record` carries cl-spec's own versioned definition record, under
+    the same `availability` / `schema_supported` / `field_availability` /
+    `unknown_keys` / `projection` transport metadata `spec-check`'s
+    `core_result` uses — see that entry below for the shared rules. It never
+    carries `schema_supported: false`: `spec-describe` validates the schema
+    *before* projecting anything, so a schema version this adapter does not
+    know (or a malformed record) short-circuits the whole call into a
+    top-level `status: "unsupported"` response with `name` and `message`
+    instead — no `core_record`, no `arguments`, no `cases`, nothing
+    projected. When `core_record` is present at all, the v1-only
+    normalizations above (such as an absent `kind` meaning `required`)
+    always apply to it.
 - `spec-check` — run one property, every property registered `(:about
   <symbol>)`, or one function spec against its function.
   - `property` **or** `symbol` **or** `function` (exactly one), `package`,
@@ -1145,13 +1177,14 @@ construction is supported; it does not guarantee successful draws or reductions.
     refusal count is the reason). The raw trial count is never used as a
     fallback — it is the number the refusal count exists to correct, and a
     `:pre` that admits nothing would otherwise read as a hundred trials.
-  - `verification_gaps` values: `zero-trials`, `effective-trials-unknown`,
-    `rejection-counts-unmeasured`, `input-coverage-unmeasured`,
-    `contract-not-run`, `properties-not-run`, `related-properties-unknown`,
-    `no-properties-selected`, and any result status that is not a verdict
-    (`skipped`, `pending`, `timeout`, `not-run`, the `*-error` statuses). The tool's
-    own description defines each one, and `tests/spec-tools-test.lisp` checks
-    that description against the code's list so the two cannot drift.
+  - `verification_gaps` values are listed in the tool's own description, not
+    duplicated here: `tests/spec-tools-test.lisp` pins that description to
+    the code's `+verification-gap-values+` list (plus every result status
+    that is not a verdict), so the two cannot drift the way a copy kept here
+    already had — the set has grown five times in one branch, most recently
+    with `cases-never-called`, `case-coverage-unknown`,
+    `generation-incomplete`, `core-schema-unsupported` and
+    `contract-schema-unsupported`, none of which this bullet used to name.
   - `selection.properties_not_run` is `null`, not `[]`, for a selection that
     never looks — `property=` and `symbol=` leave the symbol's other
     registrations unrun without reporting which.
@@ -1164,6 +1197,103 @@ construction is supported; it does not guarantee successful draws or reductions.
     `tests/spec-tools-test.lisp`, and a second copy would only drift.
   - The seed is text because a cl-spec seed exceeds JSON's safe integer range;
     a JSON number is refused rather than silently ignored.
+  - `results[].core_result` carries cl-spec's own versioned result record.
+    `data` is that record and holds no field cl-mcp added — its keys are
+    cl-spec's own names (`outcome`, `value`, `case`, not renamed to something
+    more readable). `availability`, `schema_supported`, `field_availability`,
+    `unknown_keys` and `projection` sit beside `data`, never inside it, and
+    are cl-mcp's transport metadata: what cl-mcp could get, not what cl-spec
+    reported. `field_availability` distinguishes a key that is **absent**
+    (this revision never sent it) from one whose value is **`null`**
+    (cl-spec measured it and the answer is null) — this matters most for
+    `failure_phase`, where `null` means an ordinary target observation, not
+    missing data. `projection.issues` names every place a long or deep value
+    was cut, so a short list can be told from a truncated one, and
+    `unknown_keys` names a key this schema version does not recognize
+    without guessing what it means. `schema_supported: false` means this
+    cl-mcp cannot read that schema version at all — `data` is then `null`,
+    and it is not usable evidence regardless of what a legacy field
+    elsewhere in the response says: `verified` is false and
+    `core-schema-unsupported` (or `contract-schema-unsupported`, for the
+    Function Spec declaration) is in `verification_gaps`.
+  - Four rules decide how one value inside `data` is rendered, and each one
+    exists because a shape cl-spec did not declare must never be invented.
+    A field cl-spec declares and did not measure is **`null`**, never `{}`:
+    `result-data` emits every key on every run, so `data.failure` and
+    `data.shrunk_failure` are `null` on a passing run rather than an empty
+    record whose fields all happen to be missing. An **empty collection stays
+    `[]`** — that one was measured empty. A **seed is always a decimal
+    string**, `data.seed` included, because a cl-spec seed exceeds JSON's
+    exact integer range. And a field cl-spec defines as two-valued —
+    `definition_digest_complete`, an explanation's `valid` — is JSON `true` or
+    `false`; every other `nil` is `null`, and `field_availability` is what
+    tells a measured `null` from an absent key.
+  - `projection.issues` carries a `reason` of `length-limit` when a list was
+    cut, `depth-limit` when the walk stopped descending, `char-limit` when a
+    long string leaf (a `condition_report`, a docstring) was cut, and
+    `atom-for-container` when cl-spec's record did not have the shape this
+    adapter's descriptor predicted. `omitted_items` counts list elements for
+    the first and characters for the third. `omitted_items_exact` says whether
+    that count is the true total: `true` for a measured cut, `false` when the
+    value was longer than the adapter will walk to count (the count is then a
+    lower bound, and `false` is JSON `false`, never `null`). An issue with no
+    omitted count — `depth-limit` — carries neither key.
+  - cl-spec v1's `state.capture.values` is an array of tagged availability
+    records, and `data` mirrors them: `{"name": ..., "availability":
+    "collected", "value": ...}` for a value that was frozen, or `{"name": ...,
+    "availability": "unavailable", "reason": "opaque-value", "type": ...}` for
+    one that was not. Only `collected` treats `value` as application data, and
+    an `unavailable` record has no `value` and no `object_id` — the two are
+    decided by the record's own `availability`, never by the shape of a value,
+    so a legal application value that happens to look like cl-spec metadata is
+    still data. A diagnostic `type` is ordinary data: a named type symbol,
+    `{"kind": "anonymous-class", "metaclass": ...}`, or the string `"unknown"`.
+  - `data.failure` and `data.shrunk_failure` are observations, themselves a
+    projection of cl-spec's own field names. Their `outcome` is **either** an
+    object — `{"kind": "returned", "values": [...]}` or `{"kind": "signaled",
+    "condition_type": ..., "condition_report": ...}` — **or**, when cl-spec
+    recorded none, the bare **string** `"not-collected"`, never `{"kind":
+    "not-collected"}`: cl-mcp does not invent a shape cl-spec did not send,
+    so a reader must check whether `outcome` is a string before reading
+    `.kind`.
+  - What `outcome` being `not-collected` **means** depends on what ran, and
+    getting this backwards is the single easiest mistake to make reading
+    this field. For a **Function Spec (a contract run)**, `not-collected`
+    means the target function was never called — case-selection or capture
+    failed before it could be reached. For an ordinary **property**,
+    `not-collected` appears on every failure regardless of whether the
+    target ran: cl-spec's generic `evaluate-trial` returns no target-call
+    evidence at all for a property, but the property's body still executed.
+    Reading "the target was not called" out of a property's `not-collected`
+    result states something false about code that ran.
+  - `data.shrink_report` being `"not-collected"` does **not** mean nothing
+    was shrunk — the built-in (non-custom) shrinker produces no report at
+    all, so `not-collected` covers both "there was no failure to shrink" and
+    "shrinking ran normally". `data.shrunk_outcome` (`used` / `none` /
+    `different-failure`) is what actually describes ordinary shrinking, and
+    is the field to read first. When a `shrink_report` **is** present, its
+    `termination` is reported exactly as cl-spec gave it and is never sorted
+    into complete or incomplete: there is no `completed` value to contrast
+    with, and `exhausted` is the **successful** search — it ran out of
+    smaller candidates to try, not out of time. An unrecognized termination
+    is shown as text rather than classified. `data.generation_report` has
+    its **own**, separately-spelled `termination` field, and its vocabulary
+    is different: it **does** include `completed` — the "no `completed`
+    value" rule above is specific to `shrink_report` and does not carry over.
+  - `data.generation_report.exhaustion_phase` of `shrinking` means the
+    failure is already established and only its later reduction ran out of
+    budget — this is **not** a verification gap. `exhaustion_phase` of
+    `generation` (mirrored by `data.failure_phase` of `generation`) means
+    generation itself never reached a verdict, and that **is**
+    `generation-incomplete`.
+  - `data.provenance` records the environment the run happened in, captured
+    before execution started (backend, Lisp implementation, cl-spec version,
+    target revision, and which of those `collection_states` actually got
+    recorded — a per-item `"not-collected"` there is likewise a recorded
+    value, not an absence). The existing `environment` field reads this
+    image right now, at response-building time. Neither overwrites the
+    other, and the two may legitimately disagree — for example if the
+    worker was restarted between the run and reading the result.
 
 Prerequisite: `load-system` with `cl-spec/check-it` (execution) or `cl-spec`
 (introspection only), plus the system defining the specs and properties. All

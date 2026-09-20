@@ -15,6 +15,9 @@
                 #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/spec-adapter-core
+                #:externalize-value
+                #:print-form-bounded)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
                 #:listing-kind-wanted-p)
@@ -315,6 +318,7 @@ system defining them may simply not be loaded.")
              "max" (getf data :max)
              "class_name" (%symbol-ht (getf data :class-name))
              "source_form" (getf data :source-form)
+             "generator" (%symbol-ht (getf data :generator))
              "children" (coerce (mapcar #'%spec-tree-ht (getf data :children))
                                 'vector))))
 
@@ -361,6 +365,14 @@ the :RETURNS spec four lines below showed all three."
         (format stream " [~A, ~A]" (or minimum "*") (or maximum "*")))
       (when base (format stream "  base: ~A" base))
       (when values* (format stream "  values: ~A" values*)))
+    ;; The generator is the reason %SPEC-TREE grew this key (design section 4):
+    ;; a node's declared generator is what decides which inputs a run actually
+    ;; drew, and an argument schema's tuple node is where a contract's
+    ;; :ARGS-GENERATOR lands.  Publishing it in the payload and not here is
+    ;; the same as not publishing it, for a client that renders content[].text.
+    (let ((generator (getf node :generator)))
+      (when generator
+        (format stream "  generator: ~A" (getf generator :qualified))))
     ;; MAP NIL rather than LOOP ACROSS: this helper walks the report plist,
     ;; where :CHILDREN is a list, while the payload carries a vector.  ACROSS
     ;; signalled a type error on the list, and the deadline wrapper above
@@ -419,15 +431,31 @@ to see the rest.~@[ ~A~]"
     (when (getf report :arguments)
       (format stream "~&~%arguments:")
       (dolist (argument (getf report :arguments))
-        (let ((spec (getf argument :spec))
-              (name (getf (getf argument :variable) :name)))
+        (let* ((spec (getf argument :spec))
+               (kind (getf argument :kind))
+               (name (format nil "~@[~A ~]~A~@[ [supplied-p ~A]~]"
+                             (case kind
+                               (:optional "&optional")
+                               (:key "&key")
+                               (:rest "&rest")
+                               (t nil))
+                             (getf (getf argument :variable) :name)
+                             (getf (getf argument :supplied-p) :name))))
           (if spec
-              ;; The node itself, not its children: the bounds, member values
-              ;; and base type live on the argument's own spec, and rendering
-              ;; only the children dropped exactly the half of a contract the
-              ;; tool promises -- which inputs it accepts.
               (%format-spec-node stream spec 0 name)
               (format stream "~&  ~A" name)))))
+    ;; Which generator actually drew those arguments.  A contract with
+    ;; :ARGS-GENERATOR is checked against whatever that generator hands out,
+    ;; so a reader taking the argument specs above for the input domain is
+    ;; reading a domain the run never used.
+    (let ((generator (getf report :argument-generator)))
+      (when generator
+        (format stream "~&  argument generator: ~A"
+                (getf generator :qualified))))
+    (let ((variables (getf report :post-value-variables)))
+      (when variables
+        (format stream "~&  :post value variables: ~{~A~^, ~}"
+                (mapcar (lambda (variable) (getf variable :name)) variables))))
     ;; Cut and reported, like the body and the source form below.  A silently
     ;; truncated :PRE is worse than either: a reader takes a clause for the
     ;; whole condition and concludes the contract admits inputs it refuses.
@@ -441,6 +469,44 @@ to see the rest.~@[ ~A~]"
     (when (getf report :postconditions)
       (format stream "~&~%:post ~A" (getf report :postconditions))
       (%report-cut stream report :postconditions-complete :postconditions-omitted-chars))
+    ;; The lambda list as declared.  An argument rendered without its kind
+    ;; reads as positional, and a caller building a call from this description
+    ;; would pass a keyword argument by position.
+    (let ((signals (getf report :signals)))
+      (when signals
+        (format stream "~&~%signals:")
+        (%format-spec-node stream signals 0)))
+    (when (getf report :capture)
+      (format stream "~&~%capture:")
+      (dolist (binding (getf report :capture))
+        (format stream "~&  ~A = ~A"
+                (getf (getf binding :name) :name) (getf binding :form))))
+    (when (getf report :state-post)
+      (format stream "~&~%state-post: ~A" (getf report :state-post))
+      (%report-cut stream report :state-post-complete
+                   :state-post-omitted-chars))
+    (when (getf report :cases)
+      (format stream "~&~%cases (~A selection):"
+              (string-downcase (princ-to-string (getf report :case-selection))))
+      (dolist (case (getf report :cases))
+        (format stream "~&  ~A~@[ -- ~A~]"
+                (string-downcase (princ-to-string (getf case :name)))
+                (getf case :documentation))
+        (format stream "~&    when:  ~A" (getf case :guard))
+        (let ((outcome (getf case :outcome)))
+          (if (eq :signals outcome)
+              (progn (format stream "~&    signals:")
+                     (%format-spec-node stream (getf case :signals) 2))
+              (progn (format stream "~&    returns:")
+                     (%format-spec-node stream (getf case :returns) 2))))
+        (when (getf case :postconditions)
+          (format stream "~&    :post  ~A" (getf case :postconditions))
+          (%report-cut stream case :postconditions-complete
+                       :postconditions-omitted-chars :indent 4))
+        (when (getf case :state-post)
+          (format stream "~&    state-post: ~A" (getf case :state-post))
+          (%report-cut stream case :state-post-complete
+                       :state-post-omitted-chars :indent 4))))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -502,6 +568,95 @@ preconditions_complete.  Absent has to reach the consumer as null."
                         "instrumentation" (%keyword-string
                                            (getf capabilities :instrumentation)))))))
 
+(defun %projected-ht (node)
+  "Render one projection node from the record layer as JSON-ready data.
+
+The node carries its own kind, so this never has to tell a symbol plist from an
+externalized-value plist by looking for one of their keys."
+  (when node
+    (ecase (first node)
+      (:scalar (second node))
+      ;; The record layer names no JSON library, so it tags a two-valued
+      ;; field and this turns the tag into whatever false is here.  A scalar
+      ;; NIL is JSON null -- the empty list, or the absence of a phase -- and
+      ;; a (:BOOL NIL) is JSON false, which is a measurement.
+      (:bool (json-bool (second node)))
+      (:symbol (%symbol-ht (second node)))
+      (:value (%value-ht (second node)))
+      (:array (coerce (mapcar #'%projected-ht (second node)) 'vector))
+      (:object (let ((table (make-hash-table :test #'equal)))
+                 (loop for (key . child) in (second node)
+                       do (setf (gethash key table) (%projected-ht child)))
+                 table)))))
+
+(defun %projection-issue-ht (issue)
+  "Render one projection loss: where it happened, why, and how much was dropped.
+
+OMITTED_ITEMS_EXACT travels with OMITTED_ITEMS and only with it.  The record
+layer reports OMITTED-ITEMS as a lower bound when it refused to walk a value
+long enough to count the excess exactly (see %TAIL-UNIT-COUNT), and dropping
+that flag published 201 for a 500-element list as though it were the count.
+It is JSON false there, never null: false is a measurement and absence is not.
+An issue with no omitted count -- a depth cut -- carries neither key rather
+than an exactness flag about a count that does not exist."
+  (let ((table (make-ht "path" (coerce (mapcar #'princ-to-string
+                                              (getf issue :path))
+                                       'vector)
+                        "reason" (%keyword-string (getf issue :reason)))))
+    (when (get-properties issue '(:omitted-items))
+      (setf (gethash "omitted_items" table) (getf issue :omitted-items)
+            (gethash "omitted_items_exact" table)
+            (json-bool (getf issue :omitted-items-exact-p))))
+    table))
+
+(defun %core-record-ht (report)
+  "Render a versioned cl-spec record and what cl-mcp knows about carrying it.
+
+DATA is the record; everything beside it is transport metadata.  Keeping them
+apart is what lets a reader ask whether a short list is short or was cut."
+  (when report
+    (make-ht "availability" (%keyword-string (getf report :availability))
+             "schema_supported" (json-bool (getf report :schema-supported))
+             "schema_version" (getf report :schema-version)
+             "field_availability"
+             (let ((table (make-hash-table :test #'equal)))
+               (loop for (key availability) on (getf report :field-availability)
+                       by #'cddr
+                     do (setf (gethash (substitute #\_ #\- (string-downcase
+                                                            (symbol-name key)))
+                                       table)
+                              (%keyword-string availability)))
+               table)
+             "unknown_keys" (coerce (getf report :unknown-keys) 'vector)
+             "projection"
+             (let ((projection (getf report :projection)))
+               (make-ht "complete" (json-bool (getf projection :complete))
+                        "issues" (coerce (mapcar #'%projection-issue-ht
+                                                 (getf projection :issues))
+                                         'vector)))
+             "data" (%projected-ht (getf report :data)))))
+
+(defun %case-ht (case)
+  "Render one named case of a Function Spec."
+  (make-ht "name" (%keyword-string (getf case :name))
+           "documentation" (sanitize-for-json (getf case :documentation))
+           "guard" (sanitize-for-json (getf case :guard))
+           "guard_complete" (%optional-bool case :guard-complete)
+           "guard_omitted_chars" (getf case :guard-omitted-chars)
+           "outcome" (%keyword-string (getf case :outcome))
+           "returns" (%spec-tree-ht (getf case :returns))
+           "signals" (%spec-tree-ht (getf case :signals))
+           "postconditions" (sanitize-for-json (getf case :postconditions))
+           "postconditions_complete" (%optional-bool case :postconditions-complete)
+           "postconditions_omitted_chars" (getf case :postconditions-omitted-chars)
+           "post_value_variables" (%symbol-hts (getf case :post-value-variables))
+           ;; The companion flags are not optional decoration: a state-post
+           ;; clause cut at max_chars with nothing beside it reads as the whole
+           ;; clause, exactly as guard and postconditions would.
+           "state_post" (sanitize-for-json (getf case :state-post))
+           "state_post_complete" (%optional-bool case :state-post-complete)
+           "state_post_omitted_chars" (getf case :state-post-omitted-chars)))
+
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
   (case (getf report :status)
@@ -526,11 +681,39 @@ preconditions_complete.  Absent has to reach the consumer as null."
                                 (make-ht "variable"
                                          (%symbol-ht (getf argument :variable))
                                          "spec"
-                                         (%spec-tree-ht (getf argument :spec))))
+                                         (%spec-tree-ht (getf argument :spec))
+                                         "kind" (%keyword-string
+                                                 (getf argument :kind))
+                                         "supplied_p"
+                                         (%symbol-ht (getf argument :supplied-p))
+                                         "keyword" (%keyword-string
+                                                    (getf argument :keyword))))
                               (getf report :arguments))
                       'vector)
               "spec" (%spec-tree-ht (getf report :spec))
               "returns" (%spec-tree-ht (getf report :returns))
+              "argument_generator" (%symbol-ht (getf report :argument-generator))
+              "argument_schema" (%spec-tree-ht (getf report :argument-schema))
+              "signals" (%spec-tree-ht (getf report :signals))
+              "post_value_variables" (%symbol-hts
+                                      (getf report :post-value-variables))
+              "capture"
+              (coerce (mapcar (lambda (binding)
+                                (make-ht "name" (%symbol-ht (getf binding :name))
+                                         "form" (sanitize-for-json
+                                                 (getf binding :form))
+                                         "form_complete" (%optional-bool
+                                                          binding :form-complete)
+                                         "form_omitted_chars"
+                                         (getf binding :form-omitted-chars)))
+                              (getf report :capture))
+                      'vector)
+              "state_post" (sanitize-for-json (getf report :state-post))
+              "state_post_complete" (%optional-bool report :state-post-complete)
+              "state_post_omitted_chars" (getf report :state-post-omitted-chars)
+              "case_selection" (%keyword-string (getf report :case-selection))
+              "cases" (coerce (mapcar #'%case-ht (getf report :cases)) 'vector)
+              "core_record" (%core-record-ht (getf report :core-record))
               "preconditions" (sanitize-for-json (getf report :preconditions))
               "preconditions_complete" (%optional-bool report :preconditions-complete)
               "preconditions_omitted_chars" (getf report
@@ -669,6 +852,7 @@ not be read."
            "timeout_seconds" (getf result :timeout-seconds)
            "thread_leaked" (json-bool (getf result :thread-leaked))
            "core_schema" (%core-schema-ht (getf result :core-schema))
+           "core_result" (%core-record-ht (getf result :core-record))
            "definition_digest" (getf result :definition-digest)
            "definition_digest_covers" (%keyword-string
                                        (getf result :definition-digest-covers))
@@ -686,6 +870,291 @@ not be read."
                               (getf (getf entry :variable) :name)
                               (getf (getf entry :value) :printed)))
                     entries))))
+
+(defparameter +evidence-value-chars+ 200
+  "How much of one value from the code under test a summary line carries.
+
+The evidence lines are one-liners in a block a reader skims; the whole
+bounded value is in core_result.data beside them, where EXTERNALIZE-VALUE's
+own max_value_chars budget applies.")
+
+(defun %evidence-value (value)
+  "Return VALUE printed for one evidence line, bounded and marked when cut.
+
+These are values off the code under test, read straight from cl-spec's own
+record -- a target return value or a captured pre-state.  cl-spec's
+SNAPSHOT-VALUE (cl-spec/src/execution.lisp:138) is documented to preserve
+cycles and sharing on purpose, so a circular value reaches the record intact
+and PRINC-TO-STRING on one does not return; a merely large value would put
+however many megabytes it prints as into content[].text.  EXTERNALIZE-VALUE's
+printer is the bound every other value path in this file already goes
+through: *PRINT-CIRCLE*, *VALUE-PRINT-LEVEL*, *VALUE-PRINT-LENGTH* and a sink
+that stops accepting characters at the budget.
+
+A cut says so and says by how much, rather than handing back a prefix that
+reads as the whole value.  It does NOT promise that the whole value is in
+core_result.data: that projection is bounded by the caller's max_value_chars
+too, so it may hold more than this line, or -- when the caller asked for less
+than +EVIDENCE-VALUE-CHARS+ -- less.  The line points at the bounded record
+and at the projection metadata that reports the cut rather than asserting the
+value is somewhere whole."
+  (let ((data (externalize-value value :max-chars +evidence-value-chars+)))
+    (if (getf data :printed-complete)
+        (getf data :printed)
+        (format nil "~A... (~D more character~:P; see core_result.data and ~
+projection metadata)"
+                (getf data :printed) (getf data :omitted-chars)))))
+
+(defparameter +evidence-form-chars+ 200
+  "How much of one evidence source form a summary line carries.
+
+The state-post line names the form that did not hold; 200 characters is
+enough to recognise it, and a more complete bounded rendering may be in
+core_result.data beside the line -- itself bounded by max_value_chars.")
+
+(defun %bounded-form-text (form)
+  "Return FORM printed for one evidence line, bounded and marked when cut.
+
+A state-post :FORM is a source form from the contract under test, and this
+block is built by a bare WITH-OUTPUT-TO-STRING with no printer bindings of its
+own -- a raw PRINC-TO-STRING on it ignores every output bound, and a circular
+or shared form does not return at all.  PRINT-FORM-BOUNDED is the printer the
+describe path already uses for exactly this kind of form: it caps depth,
+length and characters, terminates on circular structure, and never reads or
+evaluates the form.  A cut says so rather than handing back a prefix that
+reads as the whole form, and it does not claim the whole form is in
+core_result.data -- that projection is bounded by the caller's max_value_chars
+too.  It points at the bounded record and its projection metadata instead."
+  (multiple-value-bind (text complete omitted)
+      (print-form-bounded form +evidence-form-chars+)
+    (if complete
+        text
+        (format nil "~A... (~D more character~:P; see core_result.data and ~
+projection metadata)"
+                text omitted))))
+
+(defun %diagnostic-type-text (type)
+  "Return cl-spec's diagnostic :TYPE rendered for one evidence line.
+
+cl-spec v1's DIAGNOSTIC-TYPE-DATA answers ordinary data: a named type symbol,
+(:KIND :ANONYMOUS-CLASS :METACLASS NAME) for a class with no name, or the
+:UNKNOWN fallback.  Never a live class object, so nothing here needs a printer
+bound -- only the three cases the record can carry."
+  (cond
+    ((and (consp type) (eq :kind (first type)))
+     (format nil "anonymous class (metaclass ~A)"
+             (getf type :metaclass)))
+    ((eq :unknown type) "unknown")
+    ((null type) "unknown")
+    (t (princ-to-string type))))
+
+(defun %capture-value-text (record)
+  "Return one line for one cl-spec v1 capture-value RECORD.
+
+The record is a tagged availability union, and :AVAILABILITY -- not the shape
+of anything -- decides how it reads.  A :COLLECTED record's :VALUE is
+application data and goes through %EVIDENCE-VALUE; an :UNAVAILABLE record
+carries :REASON and :TYPE instead, so there is no application value to print
+and the line says so.  A value shaped like cl-spec's own old marker is
+:COLLECTED application data here like any other."
+  (let ((name (getf record :name)))
+    (if (eq :collected (getf record :availability))
+        (format nil "~A = ~A" name (%evidence-value (getf record :value)))
+        (format nil "~A = UNAVAILABLE -- ~A (type ~A)"
+                name
+                (or (%keyword-string (getf record :reason)) "unknown")
+                (%diagnostic-type-text (getf record :type))))))
+
+(defparameter +shrink-terminations+
+  (list (cons :state-restoration-unavailable
+              (concatenate 'string
+                           "not attempted -- this contract observes state, "
+                           "which nothing restores, so no candidate may call "
+                           "the target again"))
+        (cons :not-a-target-failure
+              (concatenate 'string
+                           "not attempted -- the failure happened before the "
+                           "target was called"))
+        (cons :disabled
+              "not attempted -- shrinking is off for this definition")
+        (cons :no-shrinker "not attempted -- this generator has no shrinker")
+        (cons :mutation "stopped -- the target changed its arguments")
+        (cons :generation-budget-exhausted
+              (concatenate 'string
+                           "stopped -- the generation budget ran out while "
+                           "shrinking. The failure above still stands; only "
+                           "the reduction is unfinished"))
+        (cons :budget-exhausted "stopped -- the shrink budget ran out")
+        (cons :shrinker-error "stopped -- the shrinker signalled")
+        (cons :exhausted
+              "ran to exhaustion -- no smaller failing input was found"))
+  "How to word each shrink termination cl-spec is known to record.
+
+Not a closed enumeration: cl-spec publishes none, and there is no :COMPLETED
+at all -- :EXHAUSTED is the successful search.  A value absent from this table
+is printed as itself rather than sorted into complete or incomplete, because
+sorting it would be this adapter deciding a meaning cl-spec has not stated.")
+
+(defparameter +shrunk-outcomes+
+  (list (cons :used
+              (concatenate 'string
+                           "a smaller failing input was found, and it is the "
+                           "shrunk counterexample below"))
+        (cons :none "the search ran and found no smaller failing input")
+        (cons :different-failure
+              (concatenate 'string
+                           "every smaller input that failed, failed "
+                           "differently -- none of them is a reduction of "
+                           "this finding")))
+  "How to word each :SHRUNK-OUTCOME cl-spec records.
+
+The field that answers for ordinary shrinking (design 5.3): the built-in
+shrinker files no shrink report, so this is the only thing a failing run says
+about whether a reduction was attempted and what came of it.
+
+Not a closed enumeration, for the same reason +SHRINK-TERMINATIONS+ is not.
+cl-spec's own VALIDATE-BACKEND-OUTCOME requires one of these three
+(cl-spec/src/generator.lisp:229); a later revision's fourth is printed as
+itself rather than sorted into a verdict this adapter invented.")
+
+(defun %format-core-evidence (stream result)
+  "Write the evidence cl-spec recorded for RESULT to STREAM.
+
+Only what the record actually carries.  Every line here is keyed on a field of
+the versioned record, so the text cannot claim something the JSON beside it
+does not say.  :CASE-REPORT, :GENERATION-REPORT and :SHRINK-REPORT are each
+guarded against cl-spec's own :NOT-COLLECTED sentinel before any GETF reads a
+sub-key of them -- calling GETF on that bare keyword, rather than on a plist,
+signals a TYPE-ERROR.
+
+Every value that came out of the code under test -- a target return value, a
+captured pre-state -- goes through %EVIDENCE-VALUE rather than the printer's
+defaults.  These are raw values off :SOURCE, and this stream is built by a
+bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
+  (let* ((record (getf result :core-record))
+         (source (getf record :source))
+         (contract-p (eq :contract (getf result :kind))))
+    (when source
+      (let ((case-report (getf source :case-report)))
+        (when (and case-report (not (eq :not-collected case-report)))
+          (let ((cases (getf case-report :cases))
+                (never (getf case-report :never-called)))
+            (when cases
+              (format stream "~&    cases: ~{~A~^ | ~}"
+                      (mapcar (lambda (entry)
+                                (if (zerop (getf entry :called))
+                                    (format nil "~(~A~) NEVER CALLED"
+                                            (getf entry :name))
+                                    (format nil "~(~A~) ~D called (~D passed)"
+                                            (getf entry :name)
+                                            (getf entry :called)
+                                            (getf entry :passed))))
+                              cases)))
+            (when never
+              (format stream "~&      ~D declared case~:P ~
+~:*~[~;was~:;were~] never reached, so this run says nothing about ~
+~:*~[~;it~:;them~]."
+                      (length never))))))
+      (let ((phase (getf source :failure-phase)))
+        (when phase
+          (format stream "~&    failure phase: ~(~A~) -- ~A"
+                  phase
+                  (case phase
+                    (:state-post
+                     ;; Not "... and returned": a :signals case may carry a
+                     ;; :state-post clause too (cl-spec's DSL explicitly
+                     ;; allows it), and for one whose target signalled as
+                     ;; expected this gloss would contradict the target:
+                     ;; line two rows down.  The gloss's job is the phase;
+                     ;; how the call finished is the target: line's job.
+                     (concatenate 'string
+                                  "the target WAS called; the contract's "
+                                  "state-post clause is what failed"))
+                    (:case-selection
+                     (concatenate 'string
+                                  "the target was NOT called; choosing which "
+                                  "case applies is what failed"))
+                    (:capture
+                     (concatenate 'string
+                                  "the target was NOT called; a :capture "
+                                  "form signalled before it"))
+                    (:generation
+                     (concatenate 'string
+                                  "the run stopped in generation and never "
+                                  "reached a verdict -- verification did NOT "
+                                  "complete, and this is not a finding about "
+                                  "the code under test"))
+                    (t "see failure_phase in the payload")))))
+      ;; Only for a contract.  A property's observation records no target
+      ;; outcome at all, so :NOT-COLLECTED there means "no target evidence
+      ;; was kept", not "the body never ran" -- and saying the latter would
+      ;; be a false statement about code that executed.
+      (when contract-p
+        (let ((outcome (getf (getf source :failure) :outcome)))
+          (cond ((eq :not-collected outcome)
+                 (format stream "~&    target: not called"))
+                ((eq :returned (getf outcome :kind))
+                 (format stream "~&    target: returned ~{~A~^, ~}"
+                         (mapcar #'%evidence-value (getf outcome :values))))
+                ((eq :signaled (getf outcome :kind))
+                 (format stream "~&    target: signalled ~A"
+                         (getf outcome :condition-type))))))
+      (let ((state (getf (getf source :failure) :state)))
+        (let ((capture (getf state :capture)))
+          (when (getf capture :values)
+            (format stream "~&    captured: ~{~A~^, ~}"
+                    (mapcar #'%capture-value-text (getf capture :values)))))
+        (let ((post (getf state :state-post)))
+          (when (member (getf post :status) '(:violation :error))
+            (format stream "~&    state-post: ~(~A~) at form ~A~@[ -- ~A~]"
+                    (getf post :status) (getf post :index)
+                    (when (getf post :form)
+                      (%bounded-form-text (getf post :form)))))))
+      (let ((generation (getf source :generation-report)))
+        (when (and generation (not (eq :not-collected generation))
+                   (not (eq :completed (getf generation :termination))))
+          (format stream "~&    generation: ~(~A~)~@[ in the ~(~A~) phase~] ~
+(~D of ~D candidates)~@[ -- ~A~]"
+                  (getf generation :termination)
+                  (getf generation :exhaustion-phase)
+                  (getf generation :attempts) (getf generation :budget)
+                  (when (eq :shrinking (getf generation :exhaustion-phase))
+                    (concatenate 'string
+                                 "the failure above still stands; only the "
+                                 "reduction is unfinished")))))
+      ;; Two sources for one line, and which one answers depends on whether
+      ;; there is a shrink report at all.  The built-in shrinker files none:
+      ;; RUN-PROPERTY leaves :SHRINK-REPORT at its :NOT-COLLECTED initform
+      ;; (cl-spec/src/property-runner.lisp:63), which is present and not a
+      ;; plist on every ordinary run -- so a line keyed on the report alone
+      ;; said nothing at all about shrinking for the commonest failing run
+      ;; there is.  :SHRUNK-OUTCOME is what answers on that path (design 5.3).
+      ;;
+      ;; It is not a substitute for the report, which is why the report is
+      ;; still read first: cl-spec records :NONE both for a search that came
+      ;; back empty and for a search that was never run at all
+      ;; (cl-spec/src/backends/check-it.lisp:431, under the SHRINK-P guard
+      ;; above it), and only the report's termination tells those apart.
+      (let ((shrink (getf source :shrink-report)))
+        (if (and shrink (not (eq :not-collected shrink)))
+            (let ((wording (cdr (assoc (getf shrink :termination)
+                                       +shrink-terminations+))))
+              (format stream "~&    shrinking: ~(~A~) -- ~A"
+                      (getf shrink :termination)
+                      (or wording
+                          (concatenate 'string
+                                       "this cl-mcp does not know that "
+                                       "termination; it is reported as "
+                                       "cl-spec gave it"))))
+            (let ((outcome (getf source :shrunk-outcome)))
+              (when outcome
+                (format stream "~&    shrinking: ~(~A~) -- ~A"
+                        outcome
+                        (or (cdr (assoc outcome +shrunk-outcomes+))
+                            (concatenate 'string
+                                         "this cl-mcp does not know that "
+                                         "outcome; it is reported as cl-spec "
+                                         "gave it"))))))))))
 
 (defun %format-counterexample (stream result)
   "Write RESULT's counterexample and shrinking lines to STREAM.
@@ -727,8 +1196,28 @@ whether anything was learned."
        (format stream "~&    shrunk counterexample: not attempted -- this ~
 property is defined with (:shrink nil)"))
       (:none
-       (format stream "~&    shrunk counterexample: shrinking was enabled but ~
-returned no smaller input"))
+       ;; "shrinking was enabled but returned no smaller input" is a claim
+       ;; about a search, so it is made only where a search is known to have
+       ;; happened.  A shrink report exists exactly where one may not have --
+       ;; a state-observing contract's :STATE-RESTORATION-UNAVAILABLE is the
+       ;; case -- and the shrinking: line above words that one, so this stays
+       ;; silent there.  With no report, :SHRUNK-OUTCOME answers, and :NONE is
+       ;; the one value that says the search came back empty.
+       ;;
+       ;; This used to ask only whether :SHRINK-REPORT was present -- and it
+       ;; always is, as the bare :NOT-COLLECTED keyword whenever the built-in
+       ;; shrinker ran (cl-spec/src/property-runner.lisp:63) -- so the line
+       ;; never printed at all against a modern cl-spec.
+       (let* ((source (getf (getf result :core-record) :source))
+              (report (getf source :shrink-report)))
+         (cond ((and report (not (eq :not-collected report))) nil)
+               ;; No core record to read: the older reading, which prints.
+               ((null source)
+                (format stream "~&    shrunk counterexample: shrinking was ~
+enabled but returned no smaller input"))
+               ((eq :none (getf source :shrunk-outcome))
+                (format stream "~&    shrunk counterexample: shrinking was ~
+enabled but returned no smaller input")))))
       (:unavailable
        (format stream "~&    shrunk counterexample: UNAVAILABLE -- the run did ~
 not reach a verdict"))
@@ -832,6 +1321,7 @@ a finding about the function"))))
             (or (getf trials :budget) "unknown")
             (or (getf trials :budget-source) "unknown")))
   (%format-contract stream result)
+  (%format-core-evidence stream result)
   (%format-counterexample stream result)
   (let ((condition (getf result :condition)))
     (when condition
@@ -960,8 +1450,25 @@ claiming what the run did not establish."
          (properties (append (getf selection :properties-not-run)
                              (let ((own (getf selection :own-property-not-run)))
                                (when own (list own)))))
+         ;; Guarded the same way %FORMAT-CORE-EVIDENCE guards it: cl-spec's
+         ;; own :NOT-COLLECTED sentinel for an uncollected case report is a
+         ;; bare keyword, and GETF on it (rather than on a plist) signals a
+         ;; TYPE-ERROR.
+         (never-called
+           (remove-duplicates
+            (loop for result in (getf report :results)
+                  for case-report
+                    = (getf (getf (getf result :core-record) :source)
+                            :case-report)
+                  when (and case-report (not (eq :not-collected case-report)))
+                    append (getf case-report :never-called))))
          (coverage
            (cond
+             ;; First: the headline is where a reader stops, and a declared
+             ;; case nobody reached is exactly the gap a bare verdict hides.
+             (never-called
+              (format nil "~D declared case~:P never reached: ~{~(~A~)~^, ~}"
+                      (length never-called) never-called))
              (contract
               (format nil "properties only -- the function spec for ~A was NOT run"
                       (getf contract :qualified)))
