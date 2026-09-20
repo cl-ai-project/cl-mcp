@@ -213,9 +213,13 @@ NIL `package-name` is the reliable liveness test."
        t))
 
 (defun %safe-prin1-to-string (value)
-  "Print VALUE with `prin1-to-string`, degrading to a placeholder on any error.
+  "Print VALUE with `prin1-to-string`, degrading to a placeholder on a
+SERIOUS-CONDITION.
 The result-printing block of `%do-repl-eval` sits outside its HANDLER-BIND, so a
-printer error signalled here would otherwise escape `repl-eval` entirely."
+printer SERIOUS-CONDITION signalled here would otherwise escape `repl-eval`
+entirely.  This is deliberately not a generic CONDITION handler: ordinary
+condition signaling, warnings, and restart protocols retain their normal
+semantics."
   (handler-case (prin1-to-string value)
     (serious-condition ()
       (or (ignore-errors (format nil "#<unprintable ~A>" (type-of value)))
@@ -352,12 +356,26 @@ result is returned -- completed work is never discarded as a timeout."
       (multiple-value-bind (result status leaked)
           (call-with-deadline-thread
            (lambda ()
-             ;; Nothing raised by THUNK -- evaluation *or* printing -- may
-             ;; reach the debugger hook: a worker process runs under
-             ;; SB-EXT:DISABLE-DEBUGGER, where an unhandled condition in this
-             ;; thread aborts the whole process and destroys the session's
-             ;; state.  Degrade to an error result instead.  The deadline
-             ;; unwind is a THROW, not a condition, so this does not defeat it.
+             ;; A SERIOUS-CONDITION raised by THUNK -- evaluation *or*
+             ;; printing -- must not reach the debugger hook: a worker process
+             ;; runs under SB-EXT:DISABLE-DEBUGGER, where an unhandled
+             ;; condition in this thread aborts the whole process and destroys
+             ;; the session's state.  Degrade those conditions to an error
+             ;; result instead.
+             ;;
+             ;; This is intentionally a SERIOUS-CONDITION boundary, not a
+             ;; generic CONDITION handler.  The latter would turn ordinary
+             ;; SIGNAL notifications, warnings, and restart-based control flow
+             ;; into failures.  Therefore a non-SERIOUS-CONDITION passed to
+             ;; ERROR is not handled by this layer; if it reaches the debugger,
+             ;; then, in pooled-worker mode, the parent observes worker
+             ;; termination and begins its normal crash handling.  The circuit
+             ;; breaker may stop replacement after repeated crashes.  Inline
+             ;; mode has no child-worker recovery boundary.  A future hardening
+             ;; boundary belongs at the request/debugger boundary, including
+             ;; this deadline thread.
+             ;; The deadline unwind is a THROW, not a condition, so this does
+             ;; not defeat it.
              (handler-case (funcall thunk)
                (serious-condition (e)
                  (ignore-errors

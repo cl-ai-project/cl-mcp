@@ -182,6 +182,15 @@ Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-*`,
 a dedicated worker with automatic crash recovery and circuit breaker protection.
 File-system and editing tools run inline in the parent process.
 
+With the worker pool enabled, a worker crash loses all worker-local Lisp state
+(loaded systems, definitions, packages, and REPL state). Any in-flight call
+that observes the crash fails. The pool normally attempts recovery; if it
+supplies a replacement, that worker starts with fresh Lisp state. The circuit
+breaker can halt automatic recovery after repeated crashes. In diagnostic logs,
+`worker.crashed` can initially report `exit_status=running` after TCP EOF; that
+is a provisional snapshot. Use the later `worker.reaped` event for the final
+process exit status.
+
 Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keyword:
 
 ```lisp

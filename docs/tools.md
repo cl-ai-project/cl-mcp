@@ -50,9 +50,9 @@ Output fields:
 - `stderr`: concatenated standard error from evaluation
 - `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 
-- `error_context` (object|null): when an error occurs, contains structured error info including
-  `condition_type`, `message`, `restarts`, and `frames` with local variable inspection. The
-  content text carries the same thing: each displayed frame is followed by its locals as
+- `error_context` (object|null): when `repl-eval` returns a structured in-process error
+  result, contains `condition_type`, `message`, `restarts`, and `frames` with local
+  variable inspection. The content text carries the same thing: each displayed frame is followed by its locals as
   `NAME = VALUE`, with `[object-id: N]` on a non-primitive one, capped at 10 per frame.
   `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
   the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached. A
@@ -60,6 +60,11 @@ Output fields:
   likewise: `print_level`/`print_length` bound a structure's depth and width but not a
   string, so one large local would otherwise spend the whole `max_output_length` budget and
   drop the frames below it
+
+With the worker pool enabled, if the worker process itself exits, the in-flight
+call instead reports a worker crash and no `error_context` is available. If
+the pool supplies a replacement worker, it starts with fresh Lisp state; the
+circuit breaker can halt automatic recovery after repeated crashes.
 
 Example JSON‑RPC request:
 
@@ -881,6 +886,9 @@ Notes:
 - Auto-detects Rove or FiveAM when available; falls back to ASDF `test-system` for text capture
 - Single test execution requires the test package to be loaded first
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
+- With the worker pool enabled, a worker crash is distinct from a test failure:
+  it aborts the in-flight call, resets worker-local Lisp state, and is reported
+  as a worker crash rather than as a test-result hash.
 
 ## `pool-status`
 Return worker pool diagnostic information. No arguments required.
