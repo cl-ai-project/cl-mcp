@@ -535,6 +535,62 @@ initialization pool-wide for")
         (ignore-errors (sb-ext:process-kill process 9))
         (ignore-errors (sb-ext:process-wait process))))))
 
+(deftest reaper-records-terminal-diagnostics-after-eof
+  ;; EOF only tells the parent that the transport closed.  The child can still
+  ;; be alive when it is observed, so the reaper's terminal process state is
+  ;; the diagnostic record that has to survive the race.
+  (let* ((process (sb-ext:run-program "/bin/sh" '("-c" "exec sleep 30")
+                                      :wait nil :search nil))
+         (worker (cl-mcp/src/worker-client::make-worker
+                  :state :bound
+                  :process-info process
+                  :stream (make-two-way-stream
+                           (make-string-input-stream "")
+                           (make-broadcast-stream)))))
+    (unwind-protect
+         (let ((crash
+                 (handler-case
+                     (progn
+                       (cl-mcp/src/worker-client:worker-rpc
+                        worker "worker/probe" nil)
+                       nil)
+                   (cl-mcp/src/worker-client:worker-crashed (condition)
+                     condition))))
+           (ok crash "the deterministic closed stream is reported as a crash")
+           (ok (and crash
+                    (string= "eof"
+                             (cl-mcp/src/worker-client:worker-crashed-reason
+                              crash)))
+               "the closed stream follows the EOF path")
+           (let ((terminal-status
+                   (loop repeat 200
+                         for status =
+                           (ignore-errors (sb-ext:process-status process))
+                         when (member status '(:exited :signaled))
+                           return status
+                         do (sleep 0.02))))
+             (ok terminal-status
+                 "the reaper terminates the process after EOF")
+             (let ((terminal-code
+                     (and terminal-status
+                          (ignore-errors
+                            (sb-ext:process-exit-code process)))))
+               (ok (loop repeat 200
+                         thereis
+                           (and (equal
+                                 (string-downcase
+                                  (symbol-name terminal-status))
+                                 (cl-mcp/src/worker-client:worker-last-exit-status
+                                  worker))
+                                (eql terminal-code
+                                     (cl-mcp/src/worker-client:worker-last-exit-code
+                                      worker)))
+                         do (sleep 0.02))
+                   "the reaper replaces the initial observation with its
+terminal status and exit code"))))
+      (ignore-errors (sb-ext:process-kill process 9))
+      (ignore-errors (sb-ext:process-wait process)))))
+
 (deftest killing-a-worker-lets-its-last-words-through
   ;; KILL-WORKER closes the worker's pipe by killing it, so the drain thread
   ;; ends on its own with whatever the worker said last -- after a SIGKILL,

@@ -777,6 +777,34 @@ Returns nothing."
                              (sb-ext:process-kill process 9)
                              (sleep 0.2))))
                        (ignore-errors (sb-ext:process-wait process nil nil))
+                       ;; EOF only says the transport closed.  A child that
+                       ;; was still alive at that moment is terminated here,
+                       ;; so retain the terminal observation in worker diagnostics after
+                       ;; the snapshot has already been sent to the caller.
+                       (let ((final-status nil)
+                             (final-code nil))
+                         (ignore-errors
+                           (let ((status (sb-ext:process-status process)))
+                             (when (member status '(:exited :signaled))
+                               (setf final-status
+                                     (string-downcase (symbol-name status))
+                                     final-code
+                                     (sb-ext:process-exit-code process)))))
+                         (when final-status
+                           (setf (worker-last-exit-status worker) final-status
+                                 (worker-last-exit-code worker)
+                                 (or final-code "unknown"))
+                           (sb-thread:barrier (:write)))
+                         (log-event :info "worker.reaped"
+                                    "id" wid
+                                    "pid" (worker-pid worker)
+                                    "reason" reason
+                                    "observed_exit_status"
+                                    (or exit-status "unknown")
+                                    "observed_exit_code"
+                                    (or exit-code "unknown")
+                                    "exit_status" (or final-status "unknown")
+                                    "exit_code" (or final-code "unknown")))
                        (ignore-errors (sb-ext:process-close process)))
                    ;; Self-remove from reaper thread list on completion
                    (bt:with-lock-held (*reaper-threads-lock*)
