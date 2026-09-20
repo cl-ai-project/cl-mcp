@@ -191,6 +191,15 @@ When the accept loop exits (parent disconnected or server stopped),
 the process exits cleanly instead of falling through to the
 Roswell REPL."
   #+sbcl (sb-ext:disable-debugger)
+  ;; Keep this top-level boundary at SERIOUS-CONDITION.  A generic CONDITION
+  ;; handler here would misclassify ordinary SIGNAL notifications, warnings,
+  ;; and restart-based control flow as worker failures.  An unhandled
+  ;; non-SERIOUS-CONDITION that reaches SBCL's debugger instead terminates this
+  ;; non-interactive worker; the parent treats the resulting EOF as a worker
+  ;; crash and handles it through normal crash recovery.  Replacement, if any,
+  ;; is governed by the pool's circuit breaker and lifecycle state.
+  ;; Request-level hardening must preserve that distinction rather than
+  ;; broadening this handler.
   (handler-case
       (progn
         (%install-signal-handlers)
