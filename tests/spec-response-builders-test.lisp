@@ -1808,10 +1808,14 @@ circular one."
   "Return the built spec-check response for a run capturing VALUES."
   (%check-response-for-record (%capture-state-record values)))
 
-(defun %check-response-for-record (record)
-  "Return the built spec-check response for RECORD."
+(defun %check-response-for-record (record &key (max-chars 2000))
+  "Return the built spec-check response for RECORD.
+
+MAX-CHARS is the bound handed to the core-result projection, so a test can
+make core_result.data shorter than the text preview beside it."
   (let* ((core-record (project-core-record record :result-data
-                                           :expected-record-kind :result))
+                                           :expected-record-kind :result
+                                           :max-chars max-chars))
          (report (list :status :completed
                        :selection
                        (list :mode "explicit" :count 1
@@ -2189,9 +2193,35 @@ the gap, not only the body a reader may never reach"
          (text (remove #\Newline
                        (first-text (build-spec-check-response report)))))
     (ok (search "target: returned " text))
-    (ok (search "the whole value is in core_result.data" text))
+    (ok (search "see core_result.data and projection metadata" text))
+    (testing "and the text does not claim the whole value is in the record"
+      ;; core_result.data is bounded by max_value_chars too, so it need not
+      ;; hold the whole value -- or anything more than this line.
+      (ok (not (search "the whole value is in" text))))
     (testing "and the line is bounded, not the value's own length"
       (ok (< (length text) 4000)))))
+
+(deftest a-smaller-core-bound-makes-the-wholeness-claim-false
+  ;; The regression the wording exists for: with max_value_chars below the
+  ;; text preview bound, core_result.data holds FEWER characters than the line
+  ;; beside it.  "The whole value is in core_result.data" would be a false
+  ;; statement, so the line points at the bounded record and its projection
+  ;; metadata instead.
+  (let* ((big (make-list 4000 :initial-element 'padding))
+         (response (%check-response-for-record
+                    (%capture-state-record
+                     (list (list :name 'ring
+                                 :availability :collected
+                                 :value big)))
+                    :max-chars 10))
+         (text (first-text response))
+         (entry (aref (%capture-entries response) 0))
+         (projected (gethash "printed" (gethash "value" entry))))
+    (testing "the core projection obeys the caller's smaller bound"
+      (ok (= 10 (length projected))))
+    (testing "and the text points at it rather than promising wholeness"
+      (ok (search "see core_result.data and projection metadata" text))
+      (ok (not (search "the whole value is in" text))))))
 
 (deftest a-long-collection-publishes-its-inexact-count-as-inexact
   ;; %TAIL-UNIT-COUNT caps its scan, so a collection past the cap reports a
@@ -2227,7 +2257,11 @@ the gap, not only the body a reader may never reach"
                     (%capture-state-record nil :state-post-form form)))
          (text (first-text response)))
     (ok (search "state-post: violation at form 0" text))
-    (ok (search "the whole form is in core_result.data" text))
+    (ok (search "see core_result.data and projection metadata" text))
+    (testing "and it does not claim the whole form is in the record"
+      ;; The core projection is bounded by max_value_chars as well, so a 5000
+      ;; element form is cut there too; "whole" would be false.
+      (ok (not (search "the whole form is in" text))))
     (ok (< (length text) 4000))))
 
 (deftest a-circular-state-post-form-does-not-hang-the-text

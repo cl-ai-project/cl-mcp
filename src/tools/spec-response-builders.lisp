@@ -892,20 +892,25 @@ through: *PRINT-CIRCLE*, *VALUE-PRINT-LEVEL*, *VALUE-PRINT-LENGTH* and a sink
 that stops accepting characters at the budget.
 
 A cut says so and says by how much, rather than handing back a prefix that
-reads as the whole value."
+reads as the whole value.  It does NOT promise that the whole value is in
+core_result.data: that projection is bounded by the caller's max_value_chars
+too, so it may hold more than this line, or -- when the caller asked for less
+than +EVIDENCE-VALUE-CHARS+ -- less.  The line points at the bounded record
+and at the projection metadata that reports the cut rather than asserting the
+value is somewhere whole."
   (let ((data (externalize-value value :max-chars +evidence-value-chars+)))
     (if (getf data :printed-complete)
         (getf data :printed)
-        (format nil "~A... (~D more character~:P; the whole value is in ~
-core_result.data)"
+        (format nil "~A... (~D more character~:P; see core_result.data and ~
+projection metadata)"
                 (getf data :printed) (getf data :omitted-chars)))))
 
 (defparameter +evidence-form-chars+ 200
   "How much of one evidence source form a summary line carries.
 
 The state-post line names the form that did not hold; 200 characters is
-enough to recognise it, and the whole bounded form is in
-core_result.data beside the line.")
+enough to recognise it, and a more complete bounded rendering may be in
+core_result.data beside the line -- itself bounded by max_value_chars.")
 
 (defun %bounded-form-text (form)
   "Return FORM printed for one evidence line, bounded and marked when cut.
@@ -917,13 +922,15 @@ or shared form does not return at all.  PRINT-FORM-BOUNDED is the printer the
 describe path already uses for exactly this kind of form: it caps depth,
 length and characters, terminates on circular structure, and never reads or
 evaluates the form.  A cut says so rather than handing back a prefix that
-reads as the whole form."
+reads as the whole form, and it does not claim the whole form is in
+core_result.data -- that projection is bounded by the caller's max_value_chars
+too.  It points at the bounded record and its projection metadata instead."
   (multiple-value-bind (text complete omitted)
       (print-form-bounded form +evidence-form-chars+)
     (if complete
         text
-        (format nil "~A... (~D more character~:P; the whole form is in ~
-core_result.data)"
+        (format nil "~A... (~D more character~:P; see core_result.data and ~
+projection metadata)"
                 text omitted))))
 
 (defun %diagnostic-type-text (type)
