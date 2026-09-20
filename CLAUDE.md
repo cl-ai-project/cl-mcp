@@ -91,3 +91,14 @@ auto-discovers project-local skills on session start, so invoking `/dogfooding-c
 (or the `Skill` tool with `skill: "dogfooding-cl-mcp"`) loads the workflow.
 The skill includes a pitfalls table of known issues and a P1/P2/P3 feedback
 format; contributing new pitfalls back to the skill is welcomed via normal PRs.
+
+For the `cl-spec` tool group specifically, use `dogfooding-cl-spec`
+(`.claude/skills/dogfooding-cl-spec/SKILL.md`) instead. It measures something
+narrower: whether an agent can read a contract, repair the code without
+breaking it, and tell `verified` from `not falsified over the trials that ran`.
+Its cycles plant a fault a contract can see — prepared outside the repairing
+agent's context whenever diagnosis quality is being scored — forbid
+implementing any new `spec-*` tool mid-cycle, and record every `repl-eval`
+fallback with a class (A-D), so a proposal like `spec-check-call` is decided by
+measured friction across three to five cycles rather than by one uncomfortable
+moment.
