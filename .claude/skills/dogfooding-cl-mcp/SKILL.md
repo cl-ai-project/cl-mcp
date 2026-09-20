@@ -7,9 +7,9 @@ description: Use when you want to stress-test cl-mcp tools against a realistic C
 
 ## Overview
 
-Build a real mid-size Common Lisp project with cl-mcp's own tools, watching for every rough edge along the way. The point is not the project — it is the feedback. Every retry, every confusing error, every tool that surprises you goes into the feedback file.
+Build a real mid-size Common Lisp project with cl-mcp's own tools, watching for every rough edge along the way. The point is not the project — it is the feedback. Every retry, every confusing error, every tool that surprises you goes into the ledger; what survives triage goes into the feedback file.
 
-**Core principle:** Cheap, disposable projects that exercise the full cl-mcp tool surface produce better feedback than abstract review. Build, notice friction, record it, throw it away.
+**Core principle:** Cheap, disposable projects that exercise the full cl-mcp tool surface produce better feedback than abstract review. Build, notice friction, find out which layer it lives in, record what that produced, throw the project away.
 
 ## When to Use
 
@@ -25,8 +25,9 @@ Build a real mid-size Common Lisp project with cl-mcp's own tools, watching for 
 
 Scaffold projects live under `experiments/` inside the cl-mcp checkout.
 This directory is listed in `.gitignore`, so generated files never appear
-in `git status` and cannot be committed by accident.  No project-root
-switching is needed.
+in `git status` and cannot be committed by accident.  Build and edit with the
+root left at the cl-mcp checkout; step 5 switches it to the experiment for the
+reference scan alone, and switches it straight back.
 
 ```
 fs-set-project-root path=.            # ensure project root is cl-mcp
@@ -150,9 +151,78 @@ Deliberately try each tool at least once so friction surfaces:
 
 `clgrep-search`, `code-find`, `code-describe`, `code-find-references`, `inspect-object` on a non-primitive result, `lisp-read-file` with `name_pattern`, `repl-eval` with an intentional error to see `error_context`, `run-tests` on both a passing and a deliberately-failing assertion.
 
-### 6. Record feedback as you go
+**The search tools cannot see `experiments/` from the cl-mcp root.**
+`clgrep-search` and `code-find-references`' source scan collect files the same
+way, and that collector honours the `.gitignore` **of the root it is handed**.
+cl-mcp's own `.gitignore` lists `experiments/`, so a search rooted at the
+cl-mcp checkout answers `0 matches` for a symbol that plainly exists in your
+project. That is the layout working as designed, not a tool bug. Reach the
+project like this:
 
-Keep a running list. Append to the feedback file at the end of the cycle, not at the end of the session.
+| Tool | How to reach the throwaway project |
+|---|---|
+| `clgrep-search` | Pass `path: "experiments/<project>"`. The `.gitignore` that then applies is the scaffold's own, which lists only fasls |
+| `code-find-references` | It has no scan-root parameter. `fs-set-project-root <absolute_path from step 2>` for the duration of step 5, then set it back to the cl-mcp checkout |
+
+While the root is switched, every path argument (`lisp-edit-form file_path`,
+`fs-read-file path`) is relative to the experiment and `clgrep-search` needs no
+`path`. Restore the root before step 7, which reads `git status` in cl-mcp.
+(`fs-set-project-root` asks for the directory you are working in; for the
+length of this step that is the experiment, so the call is in scope.)
+
+### 6. Triage each candidate, then record
+
+Friction you notice is a **candidate**, not a feedback item. It becomes a
+feedback item once you can name the layer it lives in. The number of candidates
+is an observation; the number of promoted items is whatever survives triage,
+and **zero promoted items is a complete, reportable cycle**.
+
+Keep a running ledger from the first candidate on — one row each, written as
+you go, not reconstructed at the end:
+
+```text
+| # | What I saw | Layer | Evidence | Promoted? |
+```
+
+**Assigning the layer.** Look at what the candidate is actually about:
+
+- **cl-mcp's own surface** — an error message you could not act on, a parameter
+  name the docs contradict, a missing default, a schema that refuses a
+  reasonable value, output too long to use. Layer is `tool` by inspection.
+  Promote it; no control run needed.
+- **Lisp behaviour** — a form was rejected, a value came back wrong, a condition
+  was not caught, ASDF or the test framework acted oddly. **Run the control
+  before promoting.** Without one the row is `unverified` and stays in the
+  ledger.
+
+**The control run.** The same behaviour, the same forms, outside cl-mcp
+entirely. This is a shell command by definition — it is how this step is
+performed, and it is allowed here:
+
+```bash
+ros run --non-interactive --eval '(progn <the smallest form that shows it>)'
+```
+
+| Control run result | Layer | Promote? |
+|---|---|---|
+| Same as the worker | `ANSI CL` / `ASDF` / `Rove`/`FiveAM` / `project code` | No. Ledger row carrying the control output |
+| Differs — plain SBCL is fine, the worker is not | `worker` | Yes. Paste both outputs |
+| Cannot be built, because the repro needs a cl-mcp tool | `tool` | Yes |
+
+Two more checks, both cheap:
+
+- **Spec check.** If the claim is "CL should have accepted this", confirm with
+  `clhs-lookup` and quote the line. `define-condition`'s options are
+  `:default-initargs`, `:documentation` and `:report` — `:format-control` is not
+  one of them, a bare slot name is legal, and `defstruct` generates
+  `make-<name>` rather than a `make-instance` initarg protocol. A rejection the
+  standard mandates is not a cl-mcp finding.
+- **Fresh worker.** `pool-kill-worker reset=true`, then repeat. Reproduces only
+  on the warm worker? That *is* the finding — say so in the row.
+
+**This skill is a layer too.** If the instructions here sent you the wrong way —
+a step that contradicts itself, a pitfalls row that has gone stale — record it
+with layer `skill` and promote it. Those rows compound into the next cycle.
 
 **Feedback file location**: `claudedocs/dogfooding-feedback.md` inside the cl-mcp checkout.
 The `claudedocs/` directory is listed in `.gitignore` so it is never committed. If the user has said
@@ -165,7 +235,10 @@ In all cases: **append, never overwrite**. Create the file with `fs-write-file` 
 - **P2** — rough edges, token waste, confusing error messages, docs mismatches
 - **P3** — nits, scaffold template polish, nice-to-haves
 
-For each item: Problem (one line), Reproduction or symptom, Suggested fix.
+For each item: Problem (one line), Layer (`tool` / `worker` / `skill`),
+Reproduction or symptom, the control-run output if one was needed,
+Suggested fix. Write the ledger out too, dismissed rows included — the
+dismissals are what stop the next cycle re-filing the same candidate.
 
 ### 7. Cleanup
 
@@ -199,6 +272,9 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. **`run-tests` cannot detect this defect**, so a green run is not evidence | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with the tests-not-checks count under "Working in a FiveAM project" — it must match `run-tests`' `passed + failed + pending` |
 | FiveAM project: the test count silently drops (e.g. 6 → 1) between two `run-tests` calls, still reporting `✓ PASS` | A sub-test file does not depend on the root-suite file, so its load order comes from the `.asd` `:depends-on` list. Wrong order on a *cold* worker is a loud `Unknown suite <NAME>`; on a *warm* one the sub-suite attaches to the previous run's root-suite object, is orphaned when the new root replaces it, and its tests just disappear | Give every sub-test `defpackage` an `(:import-from #:<name>/tests/main-test)` clause. That makes ASDF order the files regardless of the `:depends-on` order — verified by leaving the list deliberately reversed |
 | `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
+| `clgrep-search` or `code-find-references` finds nothing in your throwaway project, although the symbol is right there | Both honour the `.gitignore` of their scan root, and cl-mcp's lists `experiments/` | `clgrep-search path=experiments/<project>`; for references, switch the project root to the experiment for step 5 and back afterwards. Expected behaviour - do not record it as a tool bug |
+| A plain CL form looks broken in the worker: `define-condition` with a bare slot name, `handler-case` with a `(type (var) ...)` clause | Almost always the form as written, not the worker. Both of those were run in the worker and in plain SBCL on 2026-09-20 and behaved identically | Control-run it before recording. `(:format-control ...)` as a `define-condition` option and `make-instance` on a `defstruct` are *supposed* to fail - neither is in the standard |
+| `(format t ...)` inside a test prints nothing in `run-tests`' summary | Deliberate: raw stdout is kept in a structured-only field and the summary renders `debug_output` alone, so an MCP client shows neither | Write to `cl-mcp/src/test-runner-core:*test-debug-output*` instead — that stream reaches both the field and the summary text. Surfacing a `stdout` preview is already an open feedback item; do not re-file it |
 
 ## Success criteria
 
@@ -206,9 +282,29 @@ You are done with one cycle when:
 
 - [ ] The throwaway project has all its tests green (Rove: verified per-package OR via aggregate `run-tests`, the aggregate undercount bug is now fixed. FiveAM: one aggregate run covers everything nested under the root suite)
 - [ ] At least one edited Lisp file was sanity-checked with `lisp-check-parens` (cheap and catches `lisp-patch-form` drift early)
-- [ ] At least **5 feedback items** were **actually appended** to the chosen feedback file (verify with a `fs-read-file` or shell `tail` — the "I'll record it later" trap is real)
+- [ ] Every candidate you noticed has a ledger row naming its layer. A cycle
+      that promoted **zero** feedback items is complete — report it as such
+- [ ] Every promoted item's layer is `tool`, `worker` or `skill`, and every
+      Lisp-behaviour item carries the control-run output that put it there
+- [ ] The ledger and any promoted items were **actually appended** to the
+      feedback file, verified by reading the tail back — even when the ledger
+      says "no promoted items". "I'll record it at the end" is how a cycle
+      loses its findings
 - [ ] Feedback is categorized P1/P2/P3 under a dated section heading
 - [ ] Nothing in `git status` references the throwaway project (gitignore should handle this)
+
+## Red flags — you are manufacturing feedback
+
+| Thought | Reality |
+|---|---|
+| "Only two items so far, let me look harder for a third" | The deliverable is the ledger, not a count. Two promoted items with control runs are worth more than five without |
+| "Probably a cl-mcp bug; I will write it up and let someone check" | An unverified candidate costs the reviewer more than it saved you. Ledger row, `unverified` |
+| "My code was wrong, but the error message could have been better" | That is a real `tool` item — write *that* one, not the bug you caused |
+| "The standard probably allows this" | `clhs-lookup` and quote it, or do not promote it |
+| "It failed in the worker, that is enough" | Only against a control run. A warm worker fails for reasons of its own |
+| "A cycle with nothing to report looks like I did not try" | It reports which tools carried the work with no friction. That is the result |
+
+**All of these mean: finish the triage, then write down whatever it produced.**
 
 ## Anti-patterns
 
@@ -216,6 +312,8 @@ You are done with one cycle when:
 - **Building a project you intend to keep.** This is a feedback-gathering exercise; grab shallow breadth (lots of tool calls) over deep polish.
 - **Trusting aggregate counts without cross-checking.** Both the zero-count and partial-count bugs are now fixed; aggregate `run-tests` should report correct totals. If counts seem wrong, verify with per-package runs.
 - **Recording only tool bugs.** Capture UX friction too: confusing errors, missing defaults, unnecessary retries. Those become P2/P3 items.
+- **Treating the feedback count as a target.** A count target is met by promoting your own mistakes, the CL standard and Rove's internals to P1. Those items then cost a reviewer a full investigation each to dismiss.
+- **Promoting a candidate with no layer.** "Something felt off in `run-tests`" is a ledger row until a control run or an inspection of cl-mcp's own output says which layer it is.
 - **Skipping the "try every tool" step.** If you only use `lisp-edit-form` and `run-tests`, you only produce feedback on those two tools.
 
 ## Output when asked to run a cycle
@@ -225,6 +323,8 @@ When a cycle completes, summarize:
 1. **Project:** name + absolute path
 2. **Size:** N src files, N test files, N tests and which framework, what CL features exercised (defclass, defmethod, etc.)
 3. **Test status:** Rove — per-package counts (avoid the aggregate trap). FiveAM — the root-suite run, plus a note on any suite that turned out not to be nested under it
-4. **Feedback recorded:** total count, P1/P2/P3 breakdown
-5. **Procedural pitfalls:** anything that took more than one try (these are usually the best P1/P2 candidates)
+4. **Feedback recorded:** candidates observed, how many were promoted with the
+   P1/P2/P3 breakdown, and the dismissed ones tallied by layer (`ANSI CL: 2`,
+   `project code: 1`, ...). "0 promoted, 4 dismissed" is a valid line
+5. **Procedural pitfalls:** anything that took more than one try — the best source of candidates, and each one still goes through step 6's triage before it is called a finding
 6. **Cleanup:** project root restored ✓, cl-mcp `git status` clean ✓

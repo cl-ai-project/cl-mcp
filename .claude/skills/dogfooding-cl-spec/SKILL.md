@@ -407,6 +407,12 @@ Measured, not guessed. Cite these instead of filing duplicates.
   whether the evidence was sufficient; reading the code first erases it.
 - **Reporting `✓ VERIFIED` as "the code is correct".** It means: not falsified,
   over the inputs drawn, under the definitions as they stand now.
+- **Promoting a candidate whose layer you never established.** A form that was
+  rejected, a value that came back wrong, a framework that behaved oddly: that
+  is a note until a control run outside cl-mcp
+  (`ros run --non-interactive --eval '<smallest form>'`) says whether the layer
+  is cl-spec, cl-mcp's worker, ANSI CL or your own code. `dogfooding-cl-mcp`'s
+  step 6 carries the procedure; the layers are the same here.
 - **Same project every cycle.** Vary the contract shape, or you measure habit.
 - **Fixing the property to make the run green.** That changes the claim, not the
   code. A declaration that is genuinely wrong — an ambiguous case set, a
