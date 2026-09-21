@@ -36,6 +36,7 @@
   (:import-from #:cl-mcp/tests/tools-helpers-test)
   (:import-from #:cl-mcp/tests/utils-paths-test)
   (:import-from #:cl-mcp/tests/utils-bounded-stream-test)
+  (:import-from #:cl-mcp/tests/utils-request-debugger-boundary-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tcp-test)
   (:import-from #:cl-mcp/tests/tools-test)
