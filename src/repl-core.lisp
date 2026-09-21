@@ -8,6 +8,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary-protocol
+                #:*request-debugger-config* #:make-request-debugger-config)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:request-debugger-escape-error-p
                 #:request-debugger-escape-error-context
@@ -231,7 +233,8 @@ semantics."
 
 (defun %do-repl-eval (input package safe-read print-level print-length max-output-length
                       &key locals-preview-frames locals-preview-max-depth
-                           locals-preview-max-elements locals-preview-skip-internal)
+                           locals-preview-max-elements locals-preview-skip-internal
+                           output-streams)
   "Evaluate INPUT and return (values printed raw-value stdout stderr error-context).
 PRINTED is rendered relative to the resolved eval package, in lower case and
 pretty-printed at a 100-column margin, so it reads as source.
@@ -241,6 +244,11 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
         (eval-package nil)
         (stdout (%make-capture-stream max-output-length))
         (stderr (%make-capture-stream max-output-length)))
+    ;; Retain these bounded sinks outside this extent: a private debugger
+    ;; THROW bypasses our normal return, but the settled caller can drain them.
+    (when output-streams
+      (setf (car output-streams) stdout
+            (cdr output-streams) stderr))
     (handler-bind ((warning (lambda (w)
                               (format stderr "~&Warning: ~A~%" w)
                               (when (find-restart 'muffle-warning)
@@ -335,7 +343,19 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
               (%captured-output stderr)
               nil))))
 
-(defun %thunk-error-result (condition)
+(defun %debugger-captured-output (stream)
+  "Snapshot a settled debugger request's output without risking its saved error.
+Only this diagnostic operation catches arbitrary conditions or debugger entry;
+evaluated user code has already unwound and is never inside these bindings."
+  (block snapshot
+    (flet ((unavailable (&rest ignored)
+             (declare (ignore ignored))
+             (return-from snapshot "")))
+      (let (#+sbcl (sb-ext:*invoke-debugger-hook* #'unavailable))
+        (handler-bind ((condition #'unavailable))
+          (if stream (%captured-output stream) ""))))))
+
+(defun %thunk-error-result (condition &optional output-streams)
   "Build the five-element `repl-eval` result list describing CONDITION.
 Shaped like the error returns of `%do-repl-eval`: printed value, raw value,
 stdout, stderr, error-context."
@@ -343,7 +363,10 @@ stdout, stderr, error-context."
     (let ((msg (format nil "Evaluation error: ~A"
                        (request-debugger-escape-error-display-text condition))))
       (return-from %thunk-error-result
-        (list msg msg "" "" (request-debugger-escape-error-context condition)))))
+        (list msg msg
+              (%debugger-captured-output (car output-streams))
+              (%debugger-captured-output (cdr output-streams))
+              (request-debugger-escape-error-context condition)))))
   (let ((msg (or (ignore-errors (format nil "Evaluation error: ~A" condition))
                  "Evaluation error: <unprintable condition>"))
         (type-name (or (ignore-errors (princ-to-string (type-of condition)))
@@ -354,7 +377,7 @@ stdout, stderr, error-context."
                 :restarts nil
                 :frames nil))))
 
-(defun %repl-eval-with-timeout (thunk timeout-seconds)
+(defun %repl-eval-with-timeout (thunk timeout-seconds &optional output-streams)
   "Execute THUNK, enforcing TIMEOUT-SECONDS on a dedicated thread.
 Without a usable deadline THUNK runs inline, exactly as before: there is
 nothing to enforce, and the caller's handlers and backtrace stay intact.
@@ -399,7 +422,7 @@ result is returned -- completed work is never discarded as a timeout."
           (:ok (values-list result))
           ;; A debugger escape carries the snapshot saved before unwinding;
           ;; this also handles a failure in the wrapper's error conversion.
-          (:error (values-list (%thunk-error-result result)))
+          (:error (values-list (%thunk-error-result result output-streams)))
           (:timeout
            (values
             (if leaked
@@ -443,6 +466,14 @@ Options:
 - LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
   (let* ((effective-max-output-length
            (or max-output-length *default-max-output-length*))
+         (*request-debugger-config*
+           (make-request-debugger-config
+            :print-level (or print-level 3) :print-length (or print-length 10)
+            :locals-preview-frames (or locals-preview-frames 0)
+            :preview-max-depth (or locals-preview-max-depth 1)
+            :preview-max-elements (or locals-preview-max-elements 5)
+            :locals-preview-skip-internal locals-preview-skip-internal))
+         (output-streams (cons nil nil))
          (thunk (lambda ()
                  (%do-repl-eval input
                                 package
@@ -453,5 +484,6 @@ Options:
                                 :locals-preview-frames locals-preview-frames
                                 :locals-preview-max-depth locals-preview-max-depth
                                 :locals-preview-max-elements locals-preview-max-elements
-                                :locals-preview-skip-internal locals-preview-skip-internal))))
-    (%repl-eval-with-timeout thunk timeout-seconds)))
+                                :locals-preview-skip-internal locals-preview-skip-internal
+                                :output-streams output-streams))))
+    (%repl-eval-with-timeout thunk timeout-seconds output-streams)))

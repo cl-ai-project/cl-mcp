@@ -23,10 +23,11 @@
 
 (defvar *rpc-id* 0)
 
-(defun %worker-eval (code &key (timeout 5))
-  (proxy-to-worker (incf *rpc-id*) "worker/eval"
-                   (make-ht "code" code "package" "CL-USER"
-                            "timeout_seconds" timeout)))
+(defun %worker-eval (code &key (timeout 5) options)
+  (let ((params (make-ht "code" code "package" "CL-USER" "timeout_seconds" timeout)))
+    (loop for (key value) on options by #'cddr
+          do (setf (gethash key params) value))
+    (proxy-to-worker (incf *rpc-id*) "worker/eval" params)))
 
 (defun %worker-text (result)
   (let ((content (gethash "content" result)))
@@ -165,6 +166,72 @@
         (define-condition worker-invoked-condition (condition) ())
         (invoke-debugger (make-condition 'worker-invoked-condition)))"
      "WORKER-INVOKED-CONDITION")))
+
+(deftest pooled-debugger-escape-keeps-captured-output
+  (with-boundary-worker (worker "debugger-boundary-output")
+    (%worker-eval "(defparameter *boundary-state* 73)
+                  (define-condition worker-output-condition (condition) ())")
+    (let* ((pid (worker-pid worker))
+           (result
+             (%worker-eval
+              "(progn
+                 (write-string \"stdout before debugger\")
+                 (write-string \"stderr before debugger\" *error-output*)
+                 (invoke-debugger (make-condition 'worker-output-condition)))")))
+      (ok (equal "stdout before debugger" (gethash "stdout" result)))
+      ;; SBCL may append its compilation-unit abort note during the unwind.
+      (ok (eql 0 (search "stderr before debugger" (gethash "stderr" result))))
+      (ok (search "WORKER-OUTPUT-CONDITION" (%context-type result)))
+      (ok (not (gethash "isError" result)))
+      (%assert-survival worker pid))))
+
+(deftest pooled-debugger-capture-honors-request-settings
+  (with-boundary-worker (worker "debugger-boundary-settings")
+    (%worker-eval
+     "(defparameter *boundary-state* 73)
+      (defparameter *boundary-config-locals* nil)
+      (define-condition worker-config-condition (condition) ()
+        (:report (lambda (condition stream)
+                   (declare (ignore condition))
+                   (write-string \"configured debugger capture\" stream))))
+      (defun worker-config-frame (structured printed)
+        (declare (optimize (debug 3) (speed 0)))
+        (unwind-protect
+             (invoke-debugger (make-condition 'worker-config-condition))
+          (setf *boundary-config-locals* (list structured printed))))")
+    (let* ((pid (worker-pid worker))
+           (result
+             (%worker-eval
+              "(worker-config-frame #(#(10 20 30) #(40 50 60) #(70 80 90))
+                                    '((1 2 3) (4 5 6) (7 8 9)))"
+              :options '("print_level" 1 "print_length" 2
+                         "locals_preview_frames" 1 "locals_preview_max_depth" 2
+                         "locals_preview_max_elements" 2)))
+           (context (gethash "error_context" result))
+           (frame (and context
+                       (find "WORKER-CONFIG-FRAME" (gethash "frames" context)
+                             :key (lambda (frame) (gethash "function" frame)) :test #'search)))
+           (locals (and frame (gethash "locals" frame)))
+           (structured (find "STRUCTURED" locals
+                             :key (lambda (local) (gethash "name" local)) :test #'equal))
+           (printed (find "PRINTED" locals
+                          :key (lambda (local) (gethash "name" local)) :test #'equal))
+           (preview (and structured (gethash "preview" structured))))
+      (ok (search "WORKER-CONFIG-CONDITION" (%context-type result)))
+      (ok (equal "configured debugger capture" (gethash "message" context)))
+      (ok frame "the real debug-3 user frame is captured")
+      (ok (hash-table-p preview) "the requested user local preview is present")
+      (when (hash-table-p preview)
+        (let* ((elements (gethash "elements" preview))
+               (child (elt elements 0)))
+          (ok (= 2 (length elements)) "the requested outer element limit is honored")
+          (ok (equal "array" (gethash "kind" child)) "depth two expands the nested array")
+          (ok (= 2 (length (gethash "elements" child))))
+          (ok (eql 2 (gethash "max_elements" (gethash "meta" child))))))
+      (ok (and printed (equal "(# # ...)" (gethash "value" printed)))
+          "requested print-level one and print-length two bound the local value")
+      (ok (not (gethash "isError" result)))
+      (%assert-survival worker pid))))
 
 (deftest pooled-worker-preserves-user-diagnostics
   (with-boundary-worker (worker "debugger-boundary-diagnostics")

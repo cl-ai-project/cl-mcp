@@ -17,6 +17,7 @@
                 #:with-lock-held)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary-protocol
                 #:*request-debugger-boundary-active*
+                #:*request-debugger-config*
                 #:call-with-request-debugger-boundary
                 #:request-debugger-result-status
                 #:request-debugger-result-error
@@ -152,6 +153,7 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
       (let ((tag (list :deadline))
             (deadline-marker (list :deadline-marker))
             (request-active *request-debugger-boundary-active*)
+            (debugger-config *request-debugger-config*)
             (outcome nil)
             (thread nil)
             (answered nil))
@@ -238,9 +240,10 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (setf thread
                          (make-thread
                           (lambda ()
-                            ;; Inherit only the Boolean policy. The boundary
-                            ;; allocates this child's context, hook, and tags.
-                            (let ((*request-debugger-boundary-active* request-active))
+                            ;; Inherit policy and immutable settings only. Each
+                            ;; boundary still owns its context, hook, and tags.
+                            (let ((*request-debugger-boundary-active* request-active)
+                                  (*request-debugger-config* debugger-config))
                               (if request-active
                                   (sb-sys:without-interrupts
                                     (let ((boundary-result

@@ -2,6 +2,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary-protocol
                 #:*request-debugger-boundary-active*
+                #:*request-debugger-config*
+                #:request-debugger-capture-options
                 #:call-with-request-debugger-boundary
                 #:request-debugger-deadline-interrupt
                 #:request-debugger-result-status
@@ -126,7 +128,8 @@ No original condition is retained or printed, and no user restart is selected.")
                  (%escape-debugger context minimal t)))
           (let ((sb-ext:*invoke-debugger-hook* #'secondary-hook))
             (%escape-debugger
-             context (capture-debugger-error-context condition #'diagnostic-condition))))
+             context (apply #'capture-debugger-error-context condition #'diagnostic-condition
+                            (request-debugger-capture-options *request-debugger-config*)))))
         (%escape-debugger context nil))))
 
 #+sbcl

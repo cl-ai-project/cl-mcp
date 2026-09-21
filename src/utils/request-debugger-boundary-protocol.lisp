@@ -1,6 +1,9 @@
 (defpackage #:cl-mcp/src/utils/request-debugger-boundary-protocol
   (:use #:cl)
   (:export #:*request-debugger-boundary-active*
+           #:*request-debugger-config*
+           #:make-request-debugger-config
+           #:request-debugger-capture-options
            #:call-with-request-debugger-boundary
            #:request-debugger-deadline-interrupt
            #:request-debugger-result-status
@@ -18,6 +21,29 @@
 Managed children may inherit this policy, but must create their own boundary.")
 
 (declaim (type boolean *request-debugger-boundary-active*))
+
+(defstruct request-debugger-config
+  "Immutable diagnostic settings, safe to share with managed deadline children."
+  (print-level 3 :read-only t)
+  (print-length 10 :read-only t)
+  (locals-preview-frames 0 :read-only t)
+  (preview-max-depth 1 :read-only t)
+  (preview-max-elements 5 :read-only t)
+  (locals-preview-skip-internal t :read-only t))
+
+(defvar *request-debugger-config* nil
+  "Request diagnostic settings only; never contains a hook, tag, context, or snapshot.")
+
+(defun request-debugger-capture-options (config)
+  "Return capture keyword arguments for CONFIG, or NIL for the existing defaults."
+  (when config
+    (list :print-level (request-debugger-config-print-level config)
+          :print-length (request-debugger-config-print-length config)
+          :locals-preview-frames (request-debugger-config-locals-preview-frames config)
+          :preview-max-depth (request-debugger-config-preview-max-depth config)
+          :preview-max-elements (request-debugger-config-preview-max-elements config)
+          :locals-preview-skip-internal
+          (request-debugger-config-locals-preview-skip-internal config))))
 
 (defgeneric call-with-request-debugger-boundary (thunk)
   (:documentation

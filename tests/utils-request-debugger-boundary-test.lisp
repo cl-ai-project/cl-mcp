@@ -154,6 +154,7 @@
 
 (deftest inactive-policy-does-not-create-request-context
   (let* ((*request-debugger-boundary-active* nil)
+         (*request-debugger-context* nil)
          (result
            (call-with-request-debugger-boundary
             (lambda ()
@@ -269,7 +270,11 @@
     (ok (zerop *report-invocations*))))
 
 (deftest inactive-deadline-interrupt-keeps-guarded-transfer
-  (let ((tag (list :test-deadline))
+  ;; RUN-TESTS may itself be inside a managed request boundary. This fixture
+  ;; specifically exercises calls outside any request context.
+  (let ((*request-debugger-boundary-active* nil)
+        (*request-debugger-context* nil)
+        (tag (list :test-deadline))
         (marker (list :test-deadline-marker)))
     (ok (eq marker (catch tag (request-debugger-deadline-interrupt tag marker))))
     (ok (null (request-debugger-deadline-interrupt tag marker))
@@ -277,7 +282,8 @@
 
 #+sbcl
 (deftest deadline-after-debugger-escape-does-not-target-expired-catch
-  (let* ((constructor 'cl-mcp/src/utils/request-debugger-boundary::%make-result)
+  (let* ((*request-debugger-context* nil)
+         (constructor 'cl-mcp/src/utils/request-debugger-boundary::%make-result)
          (original (fdefinition constructor))
          (tag (list :expired-deadline))
          (marker (list :deadline-marker))
