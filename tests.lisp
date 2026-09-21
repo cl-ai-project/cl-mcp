@@ -13,6 +13,7 @@
   (:import-from #:cl-mcp/tests/clos-response-builders-test)
   (:import-from #:cl-mcp/tests/clos-describe-integration-test)
   (:import-from #:cl-mcp/tests/core-test)
+  (:import-from #:cl-mcp/tests/debugger-boundary-worker-test)
   (:import-from #:cl-mcp/tests/fs-test)
   (:import-from #:cl-mcp/tests/frame-inspector-test)
   (:import-from #:cl-mcp/tests/inspect-test)
