@@ -43,6 +43,7 @@
                 #:judge-entry
                 #:judge-example
                 #:bundle-consistency-problems
+                #:covered-functions
                 #:report-ok-p
                 #:exit-code
                 #:git-state
@@ -137,9 +138,29 @@
       (ok (%same-names-p (spec-names) (list-specs registry)))
       (ok (%same-names-p (generator-names) (list-generators registry)))
       (ok (null (bundle-consistency-problems registry)))))
-  (testing "the listing names three contracts and nine properties"
+  (testing "the listing names exactly the bundle's contracts and properties"
+    (ok (%same-names-p (contract-names)
+                       '(cl-mcp/src/utils/strings:ensure-trailing-newline
+                         cl-mcp/src/utils/sanitize:sanitize-for-json
+                         cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 9 (length (property-names)))))
+    (ok (= 13 (length (property-names))))
+    (ok (= 13 (length (remove-duplicates (property-names)))))
+    (ok (%same-names-p (remove-if-not (lambda (name)
+                                        (string= "CL-MCP/SPECS/PATHS"
+                                                 (package-name (symbol-package name))))
+                                      (property-names))
+                       (cl-mcp/specs/paths:property-names))
+        "the read-path properties are the four of specs/paths.lisp"))
+  (testing "the functions it covers include those checked by properties alone"
+    (let ((registry (make-hash-table-registry)))
+      (register-specifications registry)
+      (ok (%same-names-p (covered-functions registry)
+                         '(cl-mcp/src/utils/strings:ensure-trailing-newline
+                           cl-mcp/src/utils/sanitize:sanitize-for-json
+                           cl-mcp/src/utils/sanitize:sanitize-error-message
+                           cl-mcp/src/utils/paths:allowed-read-path
+                           cl-mcp/src/utils/paths:resolve-readable-path)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)

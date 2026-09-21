@@ -11,7 +11,8 @@
 ;;;;                      negative-control: swap in wrong implementations and
 ;;;;                        demand that the bundle catches them (this process
 ;;;;                        only -- it replaces production functions);
-;;;;                      self-test: run cl-mcp/tests/specs-runner-test.
+;;;;                      self-test: run cl-mcp/tests/specs-runner-test and
+;;;;                        cl-mcp/tests/path-specs-test.
 ;;;; CL_MCP_SPECS_REPORT  file to write the check or negative-control report
 ;;;;                      to, as one Lisp form.
 ;;;;
@@ -71,20 +72,27 @@ missing dependencies are fetched."
                       :report-pathname (and report (plusp (length report))
                                             (uiop:parse-native-namestring report)))))
 
+(defparameter *self-test-systems*
+  '("cl-mcp/tests/specs-runner-test" "cl-mcp/tests/path-specs-test")
+  "The test systems self-test runs: the runner's own verdicts, and the read
+fixtures with the read policy's fixed cases.")
+
 (defun run-self-test ()
-  "Run the runner's own tests and return an exit code.  A suite that loaded no
-test is a failure, not a pass."
+  "Run *SELF-TEST-SYSTEMS* and return an exit code.  A system that loaded no
+test counts as a failure, not a pass."
   (load-system* "rove")
-  (load-system* "cl-mcp/tests/specs-runner-test")
-  (let* ((suite (uiop:symbol-call :rove/core/suite/package :find-suite
-                                  (find-package "CL-MCP/TESTS/SPECS-RUNNER-TEST")))
-         (count (length (and suite
-                             (uiop:symbol-call :rove/core/suite/package :suite-tests
-                                               suite)))))
-    (format t "~&cl-mcp/tests/specs-runner-test: ~D test~:P loaded~%" count)
-    (cond ((zerop count) 1)
-          ((uiop:symbol-call :rove :run "cl-mcp/tests/specs-runner-test") 0)
-          (t 1))))
+  (let ((code 0))
+    (dolist (system *self-test-systems* code)
+      (load-system* system)
+      (let* ((suite (uiop:symbol-call :rove/core/suite/package :find-suite
+                                      (find-package (string-upcase system))))
+             (count (length (and suite
+                                 (uiop:symbol-call :rove/core/suite/package :suite-tests
+                                                   suite)))))
+        (format t "~&~A: ~D test~:P loaded~%" system count)
+        (unless (and (plusp count)
+                     (uiop:symbol-call :rove :run system))
+          (setf code 1))))))
 
 (defun main ()
   "Run the mode CL_MCP_SPECS_MODE names and exit with its code."
