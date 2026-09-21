@@ -186,3 +186,35 @@
       (ok (search "/a" msg) "first path shown")
       (ok (search "/b" msg) "second path shown")
       (ok (not (search "#P" msg)) "no residual #P prefix"))))
+
+(deftest sanitize-error-message-truncates-at-500
+  (testing "one below, at and one above the 500-character limit"
+    (let ((below (make-string 499 :initial-element #\a))
+          (at (make-string 500 :initial-element #\a))
+          (above (make-string 501 :initial-element #\a)))
+      (ok (string= below (sanitize-error-message below)) "499 characters are kept")
+      (ok (string= at (sanitize-error-message at)) "500 characters are kept")
+      (let ((result (sanitize-error-message above)))
+        (ok (= 500 (length result)) "501 characters become 500")
+        (ok (string= (subseq above 0 497) (subseq result 0 497)) "the first 497 survive")
+        (ok (string= "..." (subseq result 497)) "and an ellipsis ends it")))))
+
+(deftest sanitize-error-message-normalizes-noise
+  (testing "whitespace runs collapse to one space and the ends are trimmed"
+    (ok (string= "a b c"
+                 (sanitize-error-message
+                  (format nil "  a ~C b~%~C c  " #\Tab #\Return)))))
+  (testing "an object representation goes, and the space around it collapses"
+    (ok (string= "boom here"
+                 (sanitize-error-message
+                  "boom #<SB-SYS:FD-STREAM for \"file /x\" {1001}> here"))))
+  (testing "a Stream: section goes, with everything after it"
+    (ok (string= "failed"
+                 (sanitize-error-message
+                  (format nil "failed Stream: #<SB-SYS:FD-STREAM {1}>~%  more"))))))
+
+(deftest sanitize-for-json-strips-escape-sequence-cut-at-end
+  (testing "a CSI sequence cut off by the end of the input leaves no fragment"
+    (let ((esc (code-char 27)))
+      (ok (string= "keep" (sanitize-for-json (format nil "keep~C[31" esc))))
+      (ok (string= "keep" (sanitize-for-json (format nil "keep~C[" esc)))))))

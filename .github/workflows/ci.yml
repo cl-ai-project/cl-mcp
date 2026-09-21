@@ -44,3 +44,62 @@ jobs:
       - name: Run Tests
         run: |
           rove cl-mcp.asd
+
+  # The opt-in cl-mcp/specs bundle (docs/specs.md): contracts on a few of
+  # cl-mcp's own functions, checked with cl-spec through its Lisp API and never
+  # through the MCP adapter.  Kept apart from `test` so the default suite still
+  # needs no cl-spec.
+  specs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LISP: sbcl-bin/2.5.0
+      # cl-spec is not in Quicklisp.  Pin the commit the bundle was written and
+      # checked against; bump it deliberately, in its own commit.
+      CL_SPEC_REPOSITORY: https://github.com/masatoi/cl-spec.git
+      CL_SPEC_REVISION: 08d3adaf912b614537ca32cf5a9451fe0b807337
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Roswell
+        run: |
+          curl -L https://raw.githubusercontent.com/roswell/roswell/master/scripts/install-for-ci.sh | sh
+          echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch cl-spec at the pinned revision
+        run: |
+          dir="$HOME/.roswell/local-projects/masatoi/cl-spec"
+          git init --quiet "$dir"
+          git -C "$dir" fetch --quiet --depth 1 "$CL_SPEC_REPOSITORY" "$CL_SPEC_REVISION"
+          git -C "$dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$CL_SPEC_REVISION"
+
+      # No `ros install cl-ai-project/cl-mcp` here: a second copy of cl-mcp on
+      # the search path could be the one ASDF loads.  The runner also fails
+      # unless cl-mcp and every contracted function came from this checkout.
+      - name: No other cl-mcp is installed
+        run: |
+          ! ls -d "$HOME"/.roswell/local-projects/*/cl-mcp 2>/dev/null
+
+      - name: Runner self-test
+        run: |
+          CL_MCP_SPECS_MODE=self-test timeout 900 ros run --load scripts/check-specs.lisp
+
+      - name: Check the bundle with fixed seeds
+        run: |
+          CL_MCP_SPECS_REPORT=specs-check.sexp \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
+      - name: Negative control
+        run: |
+          CL_MCP_SPECS_MODE=negative-control CL_MCP_SPECS_REPORT=specs-negative-control.sexp \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: specs-reports
+          path: specs-*.sexp
+          if-no-files-found: warn

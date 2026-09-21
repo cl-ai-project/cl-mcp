@@ -32,3 +32,13 @@
   (testing "preserves multiline string with trailing newline"
     (let ((s (format nil "line1~%line2~%")))
       (ok (string= (ensure-trailing-newline s) s)))))
+
+(deftest ensure-trailing-newline-boundaries
+  (testing "a lone carriage return is not a newline"
+    (ok (string= (coerce (list #\Return #\Newline) 'string)
+                 (ensure-trailing-newline (string #\Return)))))
+  (testing "a newline hidden past the fill pointer does not count"
+    (let ((text (make-array 3 :element-type 'character
+                              :initial-contents (format nil "ab~%")
+                              :fill-pointer 2)))
+      (ok (string= (format nil "ab~%") (ensure-trailing-newline text))))))
