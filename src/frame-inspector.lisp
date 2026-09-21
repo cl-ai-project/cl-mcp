@@ -14,6 +14,7 @@
   (:import-from #:cl-mcp/src/code-core
                 #:%offset->line)
   (:export #:capture-error-context
+           #:capture-debugger-error-context
            #:%internal-frame-p))
 
 
@@ -44,6 +45,12 @@ restart is distinguishable from a symbol-named one."
                       :description (or (ignore-errors
                                          (princ-to-string restart))
                                        ""))))
+
+(defun %collect-restarts-for-debugger ()
+  "Return available restarts without recovering from diagnostic failures."
+  (loop for restart in (compute-restarts)
+        collect (list :name (%restart-name-string restart)
+                      :description (princ-to-string restart))))
 
 #+sbcl
 (defun %frame-locals (frame print-level print-length
@@ -89,6 +96,48 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
                             locals)))
               (error () nil))))
       (error () nil))
+    (nreverse locals)))
+
+#+sbcl
+(defun %debugger-prin1 (object print-level print-length)
+  "Print OBJECT under diagnostic capture limits without absorbing conditions."
+  (let ((*print-level* print-level)
+        (*print-length* print-length)
+        (*print-readably* nil)
+        (*print-circle* nil))
+    (prin1-to-string object)))
+
+#+sbcl
+(defun %frame-locals-for-debugger (frame print-level print-length
+                                   &key include-preview preview-max-depth
+                                        preview-max-elements)
+  "Extract FRAME locals while allowing every diagnostic condition to escape."
+  (let ((debug-fun (sb-di:frame-debug-fun frame))
+        (locals '()))
+    (sb-di:do-debug-fun-vars (var debug-fun)
+      (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
+                :valid)
+        (let ((sym (sb-di:debug-var-symbol var))
+              (val (sb-di:debug-var-value var frame)))
+          (if (inspectable-p val)
+              (if include-preview
+                  (let ((preview (generate-result-preview
+                                  val
+                                  :max-depth (or preview-max-depth 1)
+                                  :max-elements (or preview-max-elements 5))))
+                    (push (list :name (symbol-name sym)
+                                :value (%debugger-prin1 val print-level print-length)
+                                :object-id (gethash "id" preview)
+                                :preview preview)
+                          locals))
+                  (let ((object-id (register-object val)))
+                    (push (list :name (symbol-name sym)
+                                :value (%debugger-prin1 val print-level print-length)
+                                :object-id object-id)
+                          locals)))
+              (push (list :name (symbol-name sym)
+                          :value (%debugger-prin1 val print-level print-length))
+                    locals)))))
     (nreverse locals)))
 
 #+sbcl
@@ -140,6 +189,25 @@ point)."
     (error () nil)))
 
 #+sbcl
+(defun %frame-source-location-for-debugger (frame)
+  "Extract FRAME source information without recovering from inspection failures."
+  (let ((code-location (sb-di:frame-code-location frame)))
+    (when code-location
+      (let ((debug-source (sb-di:code-location-debug-source code-location)))
+        (when debug-source
+          (let ((namestring (sb-di:debug-source-namestring debug-source)))
+            (when namestring
+              (let* ((tlf-offset
+                       (sb-di:code-location-toplevel-form-offset code-location))
+                     (start-positions (%debug-source-start-positions debug-source))
+                     (tlf-char (when (and start-positions tlf-offset
+                                          (< tlf-offset (length start-positions)))
+                                 (aref start-positions tlf-offset)))
+                     (line (when (and tlf-char (probe-file namestring))
+                             (%offset->line namestring tlf-char))))
+                (list :file namestring :line line)))))))))
+
+#+sbcl
 (defun %frame-function-name (frame)
   "Extract function name from FRAME as a string."
   (handler-case
@@ -149,6 +217,15 @@ point)."
             (prin1-to-string name)
             "<anonymous>"))
     (error () "<unknown>")))
+
+#+sbcl
+(defun %frame-function-name-for-debugger (frame)
+  "Extract FRAME's function name without recovering from inspection failures."
+  (let* ((debug-fun (sb-di:frame-debug-fun frame))
+         (name (sb-di:debug-fun-name debug-fun)))
+    (if name
+        (prin1-to-string name)
+        "<anonymous>")))
 
 (defparameter *internal-package-prefixes*
   '(;; CL-MCP implementation (not tests - those are user code to debug)
@@ -311,12 +388,65 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
       (error () nil))
     (nreverse frames)))
 
+#+sbcl
+(defun %collect-frames-for-debugger (max-frames print-level print-length
+                                     &key locals-preview-frames preview-max-depth
+                                          preview-max-elements
+                                          locals-preview-skip-internal
+                                          filter-internal)
+  "Walk the SBCL stack while letting every diagnostic condition escape."
+  (let ((frames '())
+        (index 0)
+        (user-frame-index 0)
+        (preview-frames (or locals-preview-frames 0))
+        (skip-internal (and locals-preview-skip-internal t))
+        (map-fn (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG"))))
+    (funcall map-fn
+             (lambda (frame)
+               (when (< index max-frames)
+                 (let* ((function-name (%frame-function-name-for-debugger frame))
+                        (source-loc (%frame-source-location-for-debugger frame))
+                        (is-internal (%internal-frame-p function-name)))
+                   (unless (and filter-internal is-internal)
+                     (let ((include-preview
+                             (if skip-internal
+                                 (and (not is-internal)
+                                      (< user-frame-index preview-frames))
+                                 (< index preview-frames))))
+                       (push (list :index index
+                                   :function function-name
+                                   :source-file (getf source-loc :file)
+                                   :source-line (getf source-loc :line)
+                                   :locals
+                                   (%frame-locals-for-debugger
+                                    frame print-level print-length
+                                    :include-preview include-preview
+                                    :preview-max-depth preview-max-depth
+                                    :preview-max-elements preview-max-elements))
+                             frames))
+                     (unless is-internal
+                       (incf user-frame-index))
+                     (incf index))))))
+    (nreverse frames)))
+
 #-sbcl
 (defun %collect-frames (max-frames print-level print-length
                         &key locals-preview-frames preview-max-depth
                              preview-max-elements locals-preview-skip-internal
                              filter-internal)
   "Fallback for non-SBCL: return empty frame list."
+  (declare (ignore max-frames print-level print-length
+                   locals-preview-frames preview-max-depth preview-max-elements
+                   locals-preview-skip-internal filter-internal))
+  nil)
+
+#-sbcl
+(defun %collect-frames-for-debugger (max-frames print-level print-length
+                                     &key locals-preview-frames preview-max-depth
+                                          preview-max-elements
+                                          locals-preview-skip-internal
+                                          filter-internal)
+  "Return no frames on implementations without the SBCL backtrace API."
   (declare (ignore max-frames print-level print-length
                    locals-preview-frames preview-max-depth preview-max-elements
                    locals-preview-skip-internal filter-internal))
@@ -360,3 +490,35 @@ Returns a plist with:
                          :locals-preview-skip-internal
                          locals-preview-skip-internal
                          :filter-internal filter-internal)))
+
+(defun %debugger-condition-type-name (condition)
+  "Return CONDITION's type text while the diagnostic handler-bind is active."
+  (let ((type (type-of condition)))
+    (if (symbolp type)
+        (symbol-name type)
+        (prin1-to-string type))))
+
+(defun capture-debugger-error-context
+    (condition on-diagnostic-condition
+     &key (max-frames 20) (print-level 3) (print-length 10)
+          (locals-preview-frames 0) (preview-max-depth 1)
+          (preview-max-elements 5) (locals-preview-skip-internal t)
+          (filter-internal nil))
+  "Capture CONDITION while every secondary condition transfers through
+ON-DIAGNOSTIC-CONDITION.
+
+This is for the request debugger hook only. ON-DIAGNOSTIC-CONDITION is
+expected to escape; it is deliberately not an ordinary recovery callback."
+  (handler-bind
+      ((condition on-diagnostic-condition))
+    (list :error t
+          :condition-type (%debugger-condition-type-name condition)
+          :message (princ-to-string condition)
+          :restarts (%collect-restarts-for-debugger)
+          :frames (%collect-frames-for-debugger
+                   max-frames print-level print-length
+                   :locals-preview-frames locals-preview-frames
+                   :preview-max-depth preview-max-depth
+                   :preview-max-elements preview-max-elements
+                   :locals-preview-skip-internal locals-preview-skip-internal
+                   :filter-internal filter-internal))))

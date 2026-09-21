@@ -5,9 +5,53 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/frame-inspector
-                #:capture-error-context))
+                #:capture-error-context
+                #:capture-debugger-error-context))
 
 (in-package #:cl-mcp/tests/frame-inspector-test)
+
+(define-condition diagnostic-capture-report-error (condition) ()
+  (:report
+   (lambda (condition stream)
+     (declare (ignore condition stream))
+     (error "diagnostic report failed"))))
+
+(deftest capture-debugger-error-context-keeps-live-restarts
+  (let (context)
+    (handler-bind
+        ((error
+           (lambda (condition)
+             (setf context
+                   (capture-debugger-error-context
+                    condition
+                    (lambda (secondary)
+                      (declare (ignore secondary))
+                      (error "unexpected diagnostic callback"))
+                    :max-frames 0))
+             (invoke-restart 'retry-snapshot))))
+      (restart-case
+          (error "snapshot source")
+        (retry-snapshot () :report "Retry the snapshot" nil)))
+    (ok (getf context :error))
+    (ok (search "SIMPLE-ERROR" (getf context :condition-type)))
+    (ok (search "snapshot source" (getf context :message)))
+    (ok (find "RETRY-SNAPSHOT" (getf context :restarts)
+              :key (lambda (restart) (getf restart :name))
+              :test #'search))))
+
+(deftest capture-debugger-error-context-transfers-on-secondary-condition
+  (let ((tag (list :diagnostic-transfer)))
+    (handler-case
+        (error 'diagnostic-capture-report-error)
+      (condition (original)
+        (let ((result
+                (catch tag
+                  (capture-debugger-error-context
+                   original
+                   (lambda (secondary)
+                     (throw tag (list :secondary (type-of secondary))))))))
+          (ok (equal '(:secondary simple-error) result)
+              "the report's ERROR reaches the caller's handler-bind exit"))))))
 
 (deftest capture-error-context-basic
   (testing "captures condition type and message"
