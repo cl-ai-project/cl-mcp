@@ -18,9 +18,12 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument as it was before the call, at most one character longer, and leaves the argument as it was | `ensure-trailing-newline-keeps-terminated-text` |
 | `cl-mcp/src/utils/sanitize:sanitize-for-json` | three cases: `NIL` gives `NIL`; a string gives a string free of what the docstring says is stripped (C0 controls but tab/LF/CR, DEL, anything above U+FFFF) and no longer than the argument; an integer gives its printed form | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
 | `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
+| `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
+| `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
 
-Property names are in `cl-mcp/specs/strings` and `cl-mcp/specs/sanitize`. Each
-Function Spec is registered on the production symbol itself.
+Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize` and
+`cl-mcp/specs/paths`. Each Function Spec is registered on the production symbol
+itself. Each read-access property is `(:about ...)` both path functions.
 
 The properties are chosen so that one check covers what another cannot. For
 example, the removal clause in `sanitize-for-json`'s contract passes an
@@ -61,19 +64,151 @@ the 499/500/501-character limit, whitespace collapse, `Stream:` removal and a
 CSI sequence cut off at the end of the input
 (`tests/utils-sanitize-test.lisp`, `tests/utils-strings-test.lisp`).
 
+## Read access
+
+`allowed-read-path` and `resolve-readable-path` decide whether cl-mcp may read an
+existing file or directory. The properties in `specs/paths.lisp` check that
+decision against this policy:
+
+```
+resolved target inside the project root                     -> allowed
+resolved target inside a registered ASDF source directory   -> allowed
+inside neither                                              -> denied
+```
+
+Roots are directories. Sharing a string prefix (`project/` and
+`project-other/`) is not containment. Where a symlink sits does not matter;
+where it leads does. So a link in the project to a registered dependency is
+allowed, and a link in the project to an unlisted file is denied.
+
+An allowed read must come back as an absolute pathname naming the very object
+the case reaches. That is checked against the truename of what the fixture
+created, so returning some other allowed file fails. A denied read must come
+back as `NIL` from `allowed-read-path`, and as `resolve-readable-path`'s refusal:
+a `simple-error` whose format control says "outside project root". Only that
+refusal counts. Any other condition, from the call or from the fixture, fails
+the trial. Each function is compared with the expectation separately.
+
+The expectation comes from the case's descriptor alone:
+`expected-read-decision` in `specs/path-fixtures.lisp` reads the region the
+target is in and whether the fixture's system is registered. It never calls
+the functions under test, `path-inside-p`, or ASDF's source-directory lookup.
+
+These are properties, not Function Specs. The answer depends on the project
+root, the ASDF registry and the filesystem as well as the argument. A contract
+would need its generator to create files that outlive the call, or a `:post`
+that calls the target again.
+
+| Property | Checks |
+|---|---|
+| `read-allows-project-files-as-themselves` | project files and directories are allowed as themselves, by every spelling, with or without a root alias |
+| `read-follows-dependency-registration` | a dependency place is denied, then allowed while its system is registered, then denied again; a project file stays allowed and an unlisted file denied throughout |
+| `read-denies-unlisted-regions` | `outside/` and `project-other/` are denied, relative (`../`) and absolute, whether or not a dependency is registered |
+| `read-judges-symlinks-by-their-target` | one symlink, to a file or to its directory, in the project or the dependency, leading to any region: allowed and returned as the target, or denied, by where it leads |
+
+### Fixtures
+
+Generators return printable descriptors only: regions, name parts, spellings
+and link topologies. They create nothing. Each trial builds its own tree from
+the descriptor inside the property, and removes it before the trial ends:
+
+```
+<tmp>/cl-mcp-read-spec-<pid>-<serial>-<time>/
+  project/         the project root
+  project-alias    a symlink to project/, when the case uses one as the root
+  dependency/      its own .asd; registered as an ASDF system only when asked
+  outside/         outside the project, never registered
+  project-other/   shares project/'s name as a string prefix only
+```
+
+- `*project-root*` is bound for the body only. The parent server's root, the
+  worker's global root and the current directory are not touched.
+- The ASDF system is the fixture's own. It has a fresh name, and its `.asd` is
+  in `dependency/` itself, so its source directory is `dependency/` and never
+  the scratch root. Registration uses `asdf:load-asd`, removal
+  `asdf:clear-system` of that name. No other system is removed or changed, and
+  the tests check that every other registered system is still there as the
+  same object. The cl-spec registry and the ASDF registry are separate: a
+  fresh cl-spec registry isolates neither ASDF nor the filesystem.
+- Before building anything, the fixture refuses to run if a registered
+  system's source directory contains the temporary directory. Such a system
+  would make `outside/` readable for a reason the case does not model. The
+  refusal is an error, so the trial fails; it is not counted as a pass.
+- Cleanup removes exactly what was created, newest first: it unlinks files and
+  links and removes directories one at a time. It never recurses and never
+  follows a link. A failure to remove something fails the trial after a normal
+  exit, and is printed to `*error-output*` when the body is already unwinding.
+  A process killed outright (SIGKILL, CI timeout) runs no Lisp cleanup, so its
+  scratch directory stays under the temporary directory, recognisable by the
+  `cl-mcp-read-spec-` prefix. CI throws the whole runner away afterwards.
+- Temporary names come from the process id, a counter and the clock, never
+  from `cl:random`. They do not disturb the seed's random stream. Re-running a
+  seed rebuilds the same descriptors and topology under a different scratch
+  path; it does not restore inodes or absolute paths.
+
+### Domain
+
+- Existing regular files and directories, up to two directories deep, named
+  with plain, spaced, Japanese, dotted and bracketed parts (`x[1]`,
+  `v[old] 2`). Arguments are built natively, never through the pathname
+  reader, which would read brackets as wild.
+- Spellings: relative to the project root (`../` for the other regions),
+  absolute strings, natively parsed pathnames, and a `./` plus `d/../d` detour
+  through a real directory. Directories are spelled without a trailing slash.
+- At most one symlink per case: to a file, or to its directory, never to one
+  of its own ancestors. The project root is given directly or as a symlink
+  alias. `resolve-readable-path` runs with `:must-exist t` and `nil`.
+- Not covered: writes, paths that do not exist, dangling links, loops, `..`
+  after a symlink (see *Known issues*), races with the filesystem (TOCTOU),
+  permissions and ACLs, hard links, mount namespaces, and Windows paths. These
+  properties do not show that any MCP endpoint, such as `fs-read-file`, calls
+  these functions the way it should.
+
+The key cases also run as fixed Rove tests in the default suite
+(`tests/path-specs-test.lisp`), so they do not depend on what a seed happens to
+draw:
+
+- every spelling, including names with spaces, Japanese and brackets;
+- the region roots, and the project root given as an alias;
+- a dependency before registration, while registered and after removal;
+- `outside/` and `project-other/`, including `../project-other/p.lisp`;
+- seven link topologies, each with and without a root alias.
+
+The same file tests the fixtures themselves: the tree and registration are
+gone after a normal exit and after an error, cleanup does not follow a link
+out of the scratch tree, a failed cleanup fails the run, and the environment
+check refuses a covering source directory.
+
+Each property runs 12 trials at `:normal` and 3 at `:smoke`, far fewer than
+the string properties, because every trial touches the disk and ASDF.
+
+| Property | Per seed at `:normal`, native runner (fresh process) | Per seed, MCP worker (~200 systems registered) |
+|---|---|---|
+| project | 0.01 s | 0.02 s |
+| dependency | 3.1–3.3 s | 6.6 s |
+| unlisted regions | 0.5 s | 1.1 s |
+| symlinks | 0.2–0.5 s | 1.1 s |
+
+Nearly all of that time is the functions under test consulting ASDF for every
+denied path (see *Known issues*).
+
 ## Dependencies
 
 ```
-cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize}
+cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
-cl-mcp (load, run, tests.lisp) ──X──> cl-mcp/specs, cl-spec
+cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
+tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtures
+               (no cl-spec; not the bundle)
 ```
 
-Nothing in `cl-mcp.asd`, `main.lisp` or `tests.lisp` refers to the bundle.
-`cl-mcp` is a package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its
-subsystems (`specs/*.lisp`) exist without any `.asd` entry. The runner's own
-tests, `cl-mcp/tests/specs-runner-test`, are likewise left out of `tests.lisp`.
+Nothing in `cl-mcp.asd` or `main.lisp` refers to the bundle. `cl-mcp` is a
+package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
+(`specs/*.lisp`) exist without any `.asd` entry. The runner's own tests,
+`cl-mcp/tests/specs-runner-test`, are left out of `tests.lisp`. The default
+suite does load `tests/path-specs-test.lisp` and the fixture library it uses,
+`specs/path-fixtures.lisp`. Neither needs cl-spec or loads the bundle.
 
 Loading `cl-mcp/specs` registers the bundle in `cl-spec:*registry*` and does
 nothing else: no check runs, nothing is instrumented, and no server or worker
@@ -103,6 +238,27 @@ spec-describe {"kind": "property",
 spec-check   {"function": "cl-mcp/src/utils/sanitize:sanitize-for-json", "trials": 200}
 spec-check   {"symbol": "cl-mcp/src/utils/sanitize:sanitize-for-json", "profile": "normal"}
 ```
+
+The read-access functions have properties and no Function Spec. `spec-symbol`
+shows "function spec: none" for them, so there is nothing to run with
+`function=`:
+
+```text
+spec-symbol  {"symbol": "cl-mcp/src/utils/paths:allowed-read-path"}
+spec-describe {"kind": "property",
+               "name": "cl-mcp/specs/paths::read-judges-symlinks-by-their-target"}
+spec-check   {"symbol": "cl-mcp/src/utils/paths:allowed-read-path", "profile": "normal",
+              "timeout_seconds": 300}
+spec-check   {"property": "cl-mcp/specs/paths::read-denies-unlisted-regions",
+              "profile": "normal", "seed": "<from its Replay: line>",
+              "expect_definition_digest": "<likewise>"}
+```
+
+These run inside your worker. Each trial creates its scratch tree under the
+worker's temporary directory, and registers its ASDF system in the worker's
+image, which is the image that runs the functions under test. A pass there
+checks those functions in that worker. It is not an end-to-end check of the
+parent server's file tools.
 
 Things that are easy to get wrong here:
 
@@ -137,8 +293,9 @@ keep running the parent server's image until the server restarts.
 
 1. Read the contract and the properties about the function
    (`spec-symbol`, then `spec-describe`).
-2. Take a baseline: `spec-check function=` and `spec-check symbol=`, and the
-   function's Rove tests with `run-tests`.
+2. Take a baseline: `spec-check function=` when the function has a Function
+   Spec, `spec-check symbol=`, and the function's Rove tests with `run-tests`
+   (for the path functions: `utils-paths-test` and `path-specs-test`).
 3. Edit, reload as above, and re-check the same selections: once with the
    baseline's seeds and digests, and once without a seed.
 4. Report each call's `verification_gaps` as it gave them.
@@ -177,9 +334,10 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 `spec-names`, `generator-names`). It then runs every target under the fixed
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
-from each property's `:trials` table (200 each). Function Specs run with 200
-trials. Each target has a 120-second deadline per seed. A local run takes a few
-seconds.
+from each property's `:trials` table: 200 for the string properties and 12 for
+the read-access ones. Function Specs run with 200 trials. Each target has a
+120-second deadline per seed. A local `check` takes about 20 s, most of it the
+dependency-registration property.
 
 A run passes only when all of the following hold:
 
@@ -190,7 +348,10 @@ A run passes only when all of the following hold:
 - every declared `:cases` branch was called, with no case-selection or capture
   error;
 - every `check-call` example passed and selected the case it names;
-- cl-mcp and every contracted function were loaded from the expected checkout.
+- cl-mcp and every covered function were loaded from the expected checkout.
+  The covered functions are those with a Function Spec plus every `(:about ...)`
+  target of the bundle's properties (`covered-functions`), so the path
+  functions are checked although they have no contract.
 
 Everything else fails the run. That includes `:failed`, `:error`, `:skipped`, a
 signalled condition such as a generator error, a timeout, a profile the
@@ -213,6 +374,12 @@ is printed on the summary line. Two runs at the same HEAD with the same file
 list but different uncommitted code get different fingerprints
 (`cl-mcp/specs/runner:git-state`).
 
+Anything a run writes to `*error-output*` is captured. The report shows how
+many lines were written and the first one, but not the text itself. The
+read-access runs make ASDF reload `.asd` files and warn hundreds of times, and
+that would otherwise bury the report. Captured output plays no part in a
+verdict.
+
 ### From the command line
 
 ```sh
@@ -227,8 +394,9 @@ Quicklisp and cl-spec can be found without Roswell. The script puts its own
 checkout first in ASDF's search. Exit status: `0` passed, `1` the checks ran and
 something failed, `2` the script could not run them.
 
-- `self-test` runs `cl-mcp/tests/specs-runner-test`. These tests use small
-  fixtures, each registered in a registry made for that test. They check that
+- `self-test` runs `cl-mcp/tests/specs-runner-test` and
+  `cl-mcp/tests/path-specs-test`, and fails if either loads no test. The runner
+  tests use small fixtures, each registered in a registry made for that test. They check that
   the runner refuses a failing property, an empty selection, an unregistered
   name, zero trials, an undeclared profile, a contract that rejected every
   input, a rejection count below zero or above the trials, an unreached case,
@@ -236,11 +404,23 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in four wrong implementations, one at a time:
+- `negative-control` swaps in nine wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
-  - one that overwrites its argument with `a`s and returns it.
+  - one that overwrites its argument with `a`s and returns it;
+  - an `allowed-read-path` that returns `NIL` for everything. The project and
+    dependency properties must fail.
+  - one that allows the project only, ignoring ASDF. The dependency property
+    must fail.
+  - one that allows any path written under the project root, wherever it
+    leads, and otherwise defers to the real function. Only a denial can differ
+    from the real function, and the symlink property must fail.
+  - one that treats a string prefix of the project root as containment. Only
+    the `project-other/` denial can catch it, in the unlisted-regions property.
+
+  `resolve-readable-path` is not replaced; it calls `allowed-read-path` for
+  its decision. Nothing is written to a path that should be denied.
 
   For each, it requires that the targets named for it answer `:failed` with a
   counterexample, that every target passes again once the real function is
@@ -330,3 +510,19 @@ These are recorded here, not fixed in this change:
   not claim to handle them, so this bundle neither generates nor claims
   anything about them. Never put a surrogate in a generator: a counterexample
   carrying one crashes the worker that prints it.
+- `allowed-read-path` resolves `..` lexically before the filesystem sees the
+  path, so `..` after a symlink cancels the link's name instead of leaving the
+  link's target. Take `dlnk` in the project, a link to `outside/`: the OS
+  resolves `dlnk/../project/x` to the project's `x`, but `allowed-read-path`
+  returns `project/project/x`, a path that does not exist, and allows it
+  because it lies under the project. The decision is made on the lexically
+  resolved path. When that path exists, it is resolved and judged like any
+  other. When it does not, as here, it comes back unresolved and reading it
+  fails. The read-access generators never put `..` after a link, and the file
+  header says so. This is recorded, not tested: whether `..` should follow the
+  OS here is a policy question.
+- Every denied path costs `allowed-read-path` a lookup of every registered ASDF
+  system by name. That runs `find-system`, which reloads `.asd` files whose
+  systems do not match their file names: check-it's, once cl-spec is loaded.
+  In a worker with about 200 systems this took about 46 ms per denied path,
+  with two ASDF warnings each time.
