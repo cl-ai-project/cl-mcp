@@ -7,6 +7,9 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:request-debugger-escape-error-p
+                #:request-debugger-escape-error-display-text)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -400,8 +403,11 @@ registering it."
                       "timeout" timeout-seconds
                       "thread_leaked" (if leaked-p "true" "false")))
           (errored-p
-           (let ((err (first result-list))
-                 (compiler-stderr *last-compiler-stderr*))
+           (let* ((err (first result-list))
+                  (saved-text
+                    (when (request-debugger-escape-error-p err)
+                      (request-debugger-escape-error-display-text err)))
+                  (compiler-stderr *last-compiler-stderr*))
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              ;; Carried so the response builder can withhold its standing
@@ -412,14 +418,16 @@ registering it."
                (setf (gethash "worker_healthy" ht) t))
              (setf (gethash "message" ht)
                    (sanitize-for-json
-                    (or (ignore-errors (princ-to-string err))
+                    (or saved-text
+                        (ignore-errors (princ-to-string err))
                         (format nil "~A" (type-of err)))))
              (when (and (stringp compiler-stderr)
                         (plusp (length compiler-stderr)))
                (setf (gethash "compiler_output" ht)
                      (sanitize-for-json compiler-stderr)))
              (log-event :error "load-system-error" "system" system-name
-                        "error" (or (ignore-errors (princ-to-string err))
+                        "error" (or saved-text
+                                    (ignore-errors (princ-to-string err))
                                     "unprintable error"))))
           (t
            (destructuring-bind

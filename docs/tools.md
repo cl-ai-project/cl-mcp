@@ -61,6 +61,12 @@ Output fields:
   string, so one large local would otherwise spend the whole `max_output_length` budget and
   drop the frames below it
 
+When this request-level debugger boundary is used, condition type/message,
+frames, locals when available, and restarts are captured before unwind.
+Restart entries are diagnostic snapshots only; they cannot be invoked after
+the response. The worker remaining alive does not make the evaluation
+transactional or restore mutated shared state.
+
 With the worker pool enabled, if the worker process itself exits, the in-flight
 call instead reports a worker crash and no `error_context` is available. If
 the pool supplies a replacement worker, it starts with fresh Lisp state; the

@@ -5,9 +5,161 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/frame-inspector
-                #:capture-error-context))
+                #:capture-error-context
+                #:capture-debugger-error-context))
 
 (in-package #:cl-mcp/tests/frame-inspector-test)
+
+(define-condition diagnostic-capture-report-error (condition) ()
+  (:report
+   (lambda (condition stream)
+     (declare (ignore condition stream))
+     (error "diagnostic report failed"))))
+
+(deftest capture-debugger-error-context-keeps-live-restarts
+  (let (context)
+    (handler-bind
+        ((error
+           (lambda (condition)
+             (setf context
+                   (capture-debugger-error-context
+                    condition
+                    (lambda (secondary)
+                      (declare (ignore secondary))
+                      (error "unexpected diagnostic callback"))
+                    :max-frames 0))
+             (invoke-restart 'retry-snapshot))))
+      (restart-case
+          (error "snapshot source")
+        (retry-snapshot () :report "Retry the snapshot" nil)))
+    (ok (getf context :error))
+    (ok (search "SIMPLE-ERROR" (getf context :condition-type)))
+    (ok (search "snapshot source" (getf context :message)))
+    (ok (find "RETRY-SNAPSHOT" (getf context :restarts)
+              :key (lambda (restart) (getf restart :name))
+              :test #'search))))
+
+(deftest capture-debugger-error-context-transfers-on-secondary-condition
+  (let ((tag (list :diagnostic-transfer)))
+    (handler-case
+        (error 'diagnostic-capture-report-error)
+      (condition (original)
+        (let ((result
+                (catch tag
+                  (capture-debugger-error-context
+                   original
+                   (lambda (secondary)
+                     (throw tag (list :secondary (type-of secondary))))))))
+          (ok (equal '(:secondary simple-error) result)
+              "the report's ERROR reaches the caller's handler-bind exit"))))))
+
+#+sbcl
+(defclass diagnostic-preview-printer () ())
+
+#+sbcl
+(defmethod print-object ((object diagnostic-preview-printer) stream)
+  (declare (ignore object stream))
+  (error "secondary preview printer failure"))
+
+#+sbcl
+(defclass diagnostic-preview-inspector ()
+  ((payload :initform 73)))
+
+#+sbcl
+(defmethod sb-mop:slot-value-using-class :before
+    ((class standard-class) (object diagnostic-preview-inspector) slot)
+  (declare (ignore class object slot))
+  (error "secondary preview inspector failure"))
+
+#+sbcl
+(defun capture-preview-local (object callback &optional ordinary-p)
+  (declare (optimize (debug 3) (speed 0)))
+  ;; The hash table's own printer does not print its contents. A failing
+  ;; nested printer therefore identifies preview collection, not :VALUE.
+  ;; Rove's whole-package runner otherwise prints imported capture functions
+  ;; unqualified, which the existing frame filter cannot identify as internal.
+  (let ((*package* (find-package '#:cl-user)))
+    (let ((context
+            (if ordinary-p
+                (capture-error-context
+                 (make-condition 'simple-error :format-control "preview source")
+                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :preview-max-depth 2)
+                (capture-debugger-error-context
+                 (make-condition 'simple-error :format-control "preview source") callback
+                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :preview-max-depth 2))))
+      (values context object))))
+
+#+sbcl
+(deftest debugger-positive-preview-transfers-secondary-conditions
+  (dolist (fixture '(diagnostic-preview-printer diagnostic-preview-inspector))
+    (let ((object (make-hash-table))
+          (tag (list :preview-transfer)))
+      (setf (gethash :nested object) (make-instance fixture))
+      (let ((result
+              (catch tag
+                (capture-preview-local
+                 object
+                 (lambda (secondary)
+                   (throw tag (princ-to-string secondary)))))))
+        (ok (equal (if (eq fixture 'diagnostic-preview-printer)
+                       "secondary preview printer failure"
+                       "secondary preview inspector failure")
+                   result)
+            "a positive locals preview must expose the original secondary condition")))))
+
+#+sbcl
+(deftest ordinary-positive-preview-keeps-recovery-fallbacks
+  (dolist (fixture '(diagnostic-preview-printer diagnostic-preview-inspector))
+    (let ((object (make-hash-table)))
+      (setf (gethash :nested object) (make-instance fixture))
+      (let* ((context (capture-preview-local object nil t))
+             (local (find "OBJECT" (getf (first (getf context :frames)) :locals)
+                          :key (lambda (local) (getf local :name)) :test #'equal)))
+        (ok (equal "preview source" (getf context :message)))
+        (ok (hash-table-p (getf local :preview))
+            "ordinary capture still returns the recoverable preview")))))
+
+#+sbcl
+(defstruct debugger-preview-record payload)
+
+#+sbcl
+(deftest debugger-positive-preview-preserves-bounds-and-references
+  (let ((object (make-hash-table)))
+    (setf (gethash :items object) (vector '(nested) 20 #\A 40 50 60 70)
+          (gethash :record object) (make-debugger-preview-record :payload 73)
+          (gethash :self object) object)
+    (let* ((context (capture-preview-local object #'error))
+           (local (find "OBJECT" (getf (first (getf context :frames)) :locals)
+                        :key (lambda (local) (getf local :name)) :test #'equal))
+           (preview (getf local :preview)))
+      (ok (hash-table-p preview))
+      (when (hash-table-p preview)
+        (flet ((entry (key)
+                 (gethash "value"
+                          (find key (gethash "entries" preview)
+                                :key (lambda (entry)
+                                       (gethash "value" (gethash "key" entry)))
+                                :test #'equal))))
+          (let* ((items (entry "ITEMS"))
+                 (elements (gethash "elements" items))
+                 (record (entry "RECORD"))
+                 (self (entry "SELF")))
+            (ok (equal "hash-table" (gethash "kind" preview)))
+            (ok (eql (getf local :object-id) (gethash "id" preview)))
+            (ok (= 5 (length elements)) "the element limit is retained")
+            (ok (gethash "truncated" (gethash "meta" items)))
+            (ok (equal "object-ref" (gethash "kind" (first elements)))
+                "nested objects at the depth limit keep an inspection handle")
+            (ok (integerp (gethash "id" (first elements))))
+            (ok (equal "CHARACTER" (gethash "type" (third elements))))
+            (ok (equal "A" (gethash "value" (third elements))))
+            (ok (equal "structure" (gethash "kind" record)))
+            (ok (eql 73 (gethash "value" (gethash "value"
+                                                 (first (gethash "slots" record))))))
+            (ok (equal "circular-ref" (gethash "kind" self)))
+            (ok (eql (gethash "id" preview) (gethash "ref_id" self)))))))))
 
 (deftest capture-error-context-basic
   (testing "captures condition type and message"
