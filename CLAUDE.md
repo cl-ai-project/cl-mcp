@@ -4,6 +4,7 @@
 
 @prompts/repl-driven-development.md
 @prompts/common-lisp-expert.md
+@prompts/cl-spec-driven-development.md
 
 ## Project Overview
 
