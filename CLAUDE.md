@@ -34,8 +34,15 @@ per-file subsystems that only `:force :all` reaches.)
 
 **Linting** (required before commit; the same globs the Lint CI job runs, tests included):
 ```bash
-mallet src/*.lisp src/*/*.lisp tests/*.lisp
+mallet src/*.lisp src/*/*.lisp tests/*.lisp specs.lisp specs/*.lisp scripts/*.lisp
 ```
+
+**Contracts on cl-mcp's own code** (`cl-mcp/specs`, opt-in, see `docs/specs.md`): when a change
+touches a function the bundle covers (`ensure-trailing-newline`, `sanitize-for-json`,
+`sanitize-error-message`), load `cl-spec/check-it` and `cl-mcp/specs`, read the contract with
+`spec-symbol`/`spec-describe` before editing, take a `spec-check function=` and `symbol=`
+baseline, and re-check after reloading (`load-system cl-mcp` with `clear_fasls`, then
+`cl-mcp/specs`). Elsewhere the bundle is not required.
 
 ## Architecture
 
@@ -78,7 +85,8 @@ cl-spec; the adapter resolves it at call time. See `docs/tools.md`.
 ```
 src/              Core implementation (protocol, tools, transports)
 tests/            Rove test suites (mirrored naming: *-test.lisp)
-scripts/          Helper clients and stdio<->TCP bridge
+specs.lisp, specs/  Opt-in cl-spec contracts on cl-mcp's own functions, and their runner
+scripts/          Helper clients, stdio<->TCP bridge, check-specs.lisp (CI entry for specs)
 prompts/          System prompts for AI agents
 .claude/skills/   Project-local Claude Code skills (auto-discovered)
 ```

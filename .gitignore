@@ -28,6 +28,9 @@ claudedocs/
 # generated skeleton is the artifact the user asked for.
 scaffolds/
 
+# Reports scripts/check-specs.lisp writes when CL_MCP_SPECS_REPORT names one
+/specs-*.sexp
+
 # AI agent working documents (designs, plans, reports)
 docs/plans/
 .superpowers/
