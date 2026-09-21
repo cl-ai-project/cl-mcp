@@ -268,3 +268,75 @@
     (ok (eq marker (catch tag (request-debugger-deadline-interrupt tag marker))))
     (ok (null (request-debugger-deadline-interrupt tag marker))
         "an absent tag outside a request retains the guarded transfer behavior")))
+
+#+sbcl
+(deftest deadline-after-debugger-escape-does-not-target-expired-catch
+  (let* ((constructor 'cl-mcp/src/utils/request-debugger-boundary::%make-result)
+         (original (fdefinition constructor))
+         (tag (list :expired-deadline))
+         (marker (list :deadline-marker))
+         (injected nil)
+         (delivered nil)
+         (result nil))
+    ;; Inject at the first result-construction call after the debugger catch
+    ;; has escaped. Keep the real constructor so the boundary still settles
+    ;; its own result, and restore it even if the stale-tag throw fails.
+    (unwind-protect
+         (progn
+           (setf (fdefinition constructor)
+                 (lambda (status &rest arguments)
+                   (when (eq :debugger status)
+                     (setf injected t)
+                     (sb-thread:interrupt-thread
+                      sb-thread:*current-thread*
+                      (lambda ()
+                        (setf delivered t)
+                        (request-debugger-deadline-interrupt tag marker))))
+                   (apply original status arguments)))
+           (setf result
+                 (handler-case
+                     (%boundary-result
+                      (lambda ()
+                        (catch tag
+                          (error 'boundary-direct-condition))))
+                   (control-error () :expired-catch))))
+      (setf (fdefinition constructor) original))
+    (ok injected "the deadline arrives between catch escape and result construction")
+    (ok delivered "the interrupt is eventually delivered")
+    (ok (not (eq :expired-catch result)) "the interrupt never throws to a dead catch")
+    (unless (eq :expired-catch result)
+      (ok (eq :debugger (request-debugger-result-status result))))))
+
+#+sbcl
+(defvar *boundary-interrupt-events* nil)
+
+#+sbcl
+(defun %probe-boundary-interrupts (phase)
+  (sb-thread:interrupt-thread
+   sb-thread:*current-thread*
+   (lambda () (push (list phase :interrupt) *boundary-interrupt-events*)))
+  (push (list phase :returned) *boundary-interrupt-events*))
+
+#+sbcl
+(define-condition boundary-interruptible-report-condition (condition) ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (%probe-boundary-interrupts :diagnostics)
+             (write-string "interruptible diagnostic report" stream))))
+
+#+sbcl
+(deftest boundary-keeps-execution-diagnostics-and-cleanup-interruptible
+  (let* ((*boundary-interrupt-events* nil)
+         (result
+           (%boundary-result
+            (lambda ()
+              (%probe-boundary-interrupts :thunk)
+              (unwind-protect
+                   (error 'boundary-interruptible-report-condition)
+                (%probe-boundary-interrupts :cleanup))))))
+    (ok (eq :debugger (request-debugger-result-status result)))
+    (ok (equal '((:thunk :interrupt) (:thunk :returned)
+                 (:diagnostics :interrupt) (:diagnostics :returned)
+                 (:cleanup :interrupt) (:cleanup :returned))
+               (nreverse *boundary-interrupt-events*))
+        "all user phases deliver interrupts immediately instead of deferring them")))

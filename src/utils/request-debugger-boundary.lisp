@@ -159,30 +159,39 @@ Ordinary signalling and user recovery are untouched until debugger entry."
   #+sbcl
   (when *request-debugger-boundary-active*
     (return-from call-with-request-debugger-boundary
-      (let* ((context (%make-context))
-             (*request-debugger-context* context)
-             (normal-result nil))
-        ;; The hook remains live while the debugger catch is unwinding. A
-        ;; cleanup that enters the debugger then uses only the terminal tag.
-        (catch (%context-terminal-tag context)
-          (let ((sb-ext:*invoke-debugger-hook*
-                  (lambda (condition previous-hook)
-                    (declare (ignore previous-hook))
-                    (%capture-debugger-entry context condition))))
-            (catch (%context-debugger-tag context)
-              (setf normal-result
-                    (%make-result :ok :values (multiple-value-list (funcall thunk)))))))
-        ;; Only now materialize an ERROR subtype: user ERROR handlers cannot
-        ;; intercept the debugger escape, and its report uses saved strings.
-        (ecase (%context-state context)
-          (:running normal-result)
-          (:debugger-unwinding
-           (let ((record (%context-pending context)))
-             (%make-result :debugger
-                           :error (make-condition 'request-debugger-escape-error
-                                                  :context record
-                                                  :condition-type
-                                                  (getf record :condition-type)
-                                                  :message (getf record :message)))))
-          (:deadline-unwinding (%make-result :timeout))))))
+      ;; Defer interrupts while exposing or retiring the context, including
+      ;; result construction after its catches have gone. A pending interrupt
+      ;; is delivered only after this context's binding has been unwound.
+      (sb-sys:without-interrupts
+        (let* ((context (%make-context))
+               (*request-debugger-context* context)
+               (normal-result nil))
+          ;; The hook remains live while the debugger catch is unwinding. A
+          ;; cleanup that enters the debugger then uses only the terminal tag.
+          (catch (%context-terminal-tag context)
+            (let ((sb-ext:*invoke-debugger-hook*
+                    (lambda (condition previous-hook)
+                      (declare (ignore previous-hook))
+                      (%capture-debugger-entry context condition))))
+              (catch (%context-debugger-tag context)
+                (setf normal-result
+                      (%make-result
+                       :ok :values
+                       (multiple-value-list
+                        ;; User execution, diagnostics, and unwind cleanups
+                        ;; all remain inside this interruptible extent.
+                        (sb-sys:with-local-interrupts (funcall thunk))))))))
+          ;; Only now materialize an ERROR subtype: user ERROR handlers cannot
+          ;; intercept the debugger escape, and its report uses saved strings.
+          (ecase (%context-state context)
+            (:running normal-result)
+            (:debugger-unwinding
+             (let ((record (%context-pending context)))
+               (%make-result :debugger
+                             :error (make-condition 'request-debugger-escape-error
+                                                    :context record
+                                                    :condition-type
+                                                    (getf record :condition-type)
+                                                    :message (getf record :message)))))
+            (:deadline-unwinding (%make-result :timeout)))))))
   (%make-result :ok :values (multiple-value-list (funcall thunk))))
