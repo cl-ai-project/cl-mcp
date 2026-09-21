@@ -57,6 +57,7 @@
            #:bundle-consistency-problems
            #:report-ok-p
            #:exit-code
+           #:git-state
            #:print-report
            #:write-report
            #:main))
@@ -237,7 +238,7 @@ case no trial called."
 (defun judge-entry (entry)
   "Return the problems of the target run ENTRY; NIL means it passed.
 Only :PASSED passes, and only with a positive trial count, a measured rejection
-count below it, and -- for a contract with :CASES -- a measured case report in
+count from zero up to but not including it, and -- for a contract with :CASES -- a measured case report in
 which every declared case was called and no selection or capture failed."
   (let ((status (getf entry :status))
         (trials (getf entry :trials))
@@ -249,6 +250,8 @@ which every declared case was called and no selection or capture failed."
            (list (list :no-trials trials)))
           ((not (integerp rejected))
            (list (list :rejections-unmeasured rejected)))
+          ((not (<= 0 rejected trials))
+           (list (list :rejections-out-of-range trials rejected)))
           ((not (plusp (- trials rejected)))
            (list (list :no-effective-trials trials rejected)))
           (declared
@@ -384,27 +387,83 @@ function's definition lives elsewhere.  NIL when EXPECTED-ROOT is NIL."
                     (push (list :source-outside-checkout name (%native file)) problems)))))))
       (nreverse problems))))
 
-(defun %git-state (directory)
-  "Return the git revision of DIRECTORY and its uncommitted changes, or :UNKNOWN."
-  (flet ((git (&rest arguments)
-           (handler-case
-               (multiple-value-bind (output error-output code)
-                   (uiop:run-program (list* "git" "-C" (%native directory) arguments)
-                                     :output '(:string :stripped t)
-                                     :error-output nil
-                                     :ignore-error-status t)
-                 (declare (ignore error-output))
-                 (and (eql code 0) output))
-             (error () nil))))
-    (if (null directory)
-        (list :revision :unknown)
-        (let ((revision (git "rev-parse" "HEAD"))
-              (status (git "status" "--porcelain")))
-          (list :revision (or revision :unknown)
-                :changes (if status
-                             (remove "" (uiop:split-string status :separator '(#\Newline))
-                                     :test #'string=)
-                             :unknown))))))
+(defun %git (directory arguments &key (strip t) input)
+  "Run git with ARGUMENTS in DIRECTORY and return its output, or NIL when git is
+missing or fails.  STRIP drops trailing whitespace; INPUT is a string fed to
+git's standard input."
+  (handler-case
+      (multiple-value-bind (output error-output code)
+          (uiop:run-program (list* "git" "-C" (%native directory) arguments)
+                            :output (if strip '(:string :stripped t) :string)
+                            :error-output nil
+                            :input (and input (make-string-input-stream input))
+                            :ignore-error-status t)
+        (declare (ignore error-output))
+        (and (eql code 0) output))
+    (error () nil)))
+
+(defun %lisp-source-changes (directory)
+  "Return (STATUS PATH BLOB) for every .lisp and .asd file of DIRECTORY's
+repository that differs from HEAD, untracked ones included (STATUS \"??\").
+PATH is relative to the repository's top level and BLOB is git's hash of the
+file as it is now, or :DELETED.  NIL when nothing differs, :UNKNOWN when git
+cannot say."
+  (let ((top (%git directory '("rev-parse" "--show-toplevel")))
+        (status (%git directory '("status" "--porcelain" "-z" "--untracked-files=all"
+                                  "--" "*.lisp" "*.asd")
+                      :strip nil)))
+    (if (not (and top status))
+        :unknown
+        (let ((fields (uiop:split-string status :separator (list (code-char 0))))
+              (entries '()))
+          (loop while fields
+                do (let ((field (pop fields)))
+                     (when (> (length field) 3)
+                       ;; A rename or copy is followed by its source path.
+                       (when (find-if (lambda (code) (find code "RC")) (subseq field 0 2))
+                         (pop fields))
+                       (push (list (subseq field 0 2) (subseq field 3)) entries))))
+          (let* ((entries (sort entries #'string< :key #'second))
+                 (present (remove-if (lambda (entry) (find #\D (first entry))) entries))
+                 (blobs (and present
+                             (uiop:split-string
+                              (or (%git top (list* "hash-object" "--"
+                                                   (mapcar #'second present)))
+                                  "")
+                              :separator '(#\Newline)))))
+            (if (and present (/= (length blobs) (length present)))
+                :unknown
+                (mapcar (lambda (entry)
+                          (list (first entry) (second entry)
+                                (if (member entry present)
+                                    (nth (position entry present) blobs)
+                                    :deleted)))
+                        entries)))))))
+
+(defun git-state (directory)
+  "Return what git says about DIRECTORY's repository, as a plist:
+  :REVISION           HEAD, or :UNKNOWN
+  :CHANGES            `git status --porcelain' lines, or :UNKNOWN
+  :LISP-CHANGES       (STATUS PATH BLOB) per .lisp/.asd file differing from HEAD
+  :LISP-FINGERPRINT   git's hash of those rows, or NIL when there are none
+Two runs at one HEAD with the same status lines can still have checked
+different code; their fingerprints differ whenever a changed Lisp file's
+contents do, untracked files included."
+  (if (null directory)
+      (list :revision :unknown)
+      (let ((revision (%git directory '("rev-parse" "HEAD")))
+            (status (%git directory '("status" "--porcelain")))
+            (lisp-changes (%lisp-source-changes directory)))
+        (list :revision (or revision :unknown)
+              :changes (if status
+                           (remove "" (uiop:split-string status :separator '(#\Newline))
+                                   :test #'string=)
+                           :unknown)
+              :lisp-changes lisp-changes
+              :lisp-fingerprint
+              (and (consp lisp-changes)
+                   (%git directory '("hash-object" "--stdin")
+                         :input (format nil "~:{~A ~A ~A~%~}" lisp-changes)))))))
 
 (defun %system-record (name)
   "Return the version, directory and git state of the ASDF system NAME."
@@ -412,7 +471,7 @@ function's definition lives elsewhere.  NIL when EXPECTED-ROOT is NIL."
          (directory (and system (asdf:system-source-directory system))))
     (list :version (and system (asdf:component-version system))
           :directory (%native directory)
-          :git (%git-state directory))))
+          :git (git-state directory))))
 
 (defun environment-record (&optional expected-root)
   "Return the Lisp, ASDF, cl-spec backend and the revisions of cl-mcp, cl-spec
@@ -463,23 +522,39 @@ whatever else is registered there are neither read nor changed."
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
-that must answer :FAILED with a counterexample against it."
+that must answer :FAILED with a counterexample against it.  Two of them
+overwrite their argument and return it, which a check comparing the result with
+the argument as it is after the call cannot see."
   (let ((newline (%bundle-name :function-spec "ENSURE-TRAILING-NEWLINE"))
         (terminated (%bundle-name :property "ENSURE-TRAILING-NEWLINE-KEEPS-TERMINATED-TEXT"))
         (sanitize (%bundle-name :function-spec "SANITIZE-FOR-JSON"))
         (allowed (%bundle-name :property "SANITIZE-FOR-JSON-KEEPS-ALLOWED-TEXT"))
-        (idempotent (%bundle-name :property "SANITIZE-FOR-JSON-IS-IDEMPOTENT")))
+        (idempotent (%bundle-name :property "SANITIZE-FOR-JSON-IS-IDEMPOTENT"))
+        (unmodified (%bundle-name :property "SANITIZE-FOR-JSON-LEAVES-ITS-ARGUMENT-UNMODIFIED")))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
            :replacement #'identity
            :targets (list (list :function-spec newline) (list :property terminated))
            :must-fail (list (list :function-spec newline)))
+     (list :function newline
+           :description "overwrites its argument with newlines and returns it"
+           :replacement (lambda (text)
+                          (if (zerop (length text))
+                              (string #\Newline)
+                              (fill text #\Newline)))
+           :targets (list (list :function-spec newline) (list :property terminated))
+           :must-fail (list (list :function-spec newline) (list :property terminated)))
      (list :function sanitize
            :description "returns the empty string for every argument but NIL"
            :replacement (lambda (value) (and value (make-string 0)))
            :targets (list (list :property allowed) (list :property idempotent))
-           :must-fail (list (list :property allowed))))))
+           :must-fail (list (list :property allowed)))
+     (list :function sanitize
+           :description "overwrites a string argument with a's and returns it"
+           :replacement (lambda (value) (if (stringp value) (fill value #\a) value))
+           :targets (list (list :property allowed) (list :property unmodified))
+           :must-fail (list (list :property allowed) (list :property unmodified))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
@@ -558,11 +633,16 @@ the real one, and both runs used definitions with the same digests."
 (defun %git-summary (record)
   "Return a one-line summary of a %SYSTEM-RECORD."
   (destructuring-bind (&key version directory git) record
-    (let ((changes (getf git :changes)))
-      (format nil "~@[~A ~]~A rev ~A (~A)" version directory (getf git :revision)
+    (let ((changes (getf git :changes))
+          (lisp-changes (getf git :lisp-changes)))
+      (format nil "~@[~A ~]~A rev ~A (~A~@[; ~A~])" version directory (getf git :revision)
               (cond ((eq changes :unknown) "local changes unknown")
                     ((null changes) "no local changes")
-                    (t (format nil "~D local change~:P" (length changes))))))))
+                    (t (format nil "~D local change~:P" (length changes))))
+              (cond ((eq lisp-changes :unknown) "Lisp source contents unknown")
+                    ((consp lisp-changes)
+                     (format nil "~D Lisp file~:P differ from HEAD, fingerprint ~A"
+                             (length lisp-changes) (getf git :lisp-fingerprint))))))))
 
 (defun %print-environment (report stream)
   "Print REPORT's environment and source records to STREAM."
@@ -574,7 +654,12 @@ the real one, and both runs used definitions with the same digests."
         (format stream "~(~A~): ~A~%" system (%git-summary (getf environment system)))
         (when (listp changes)
           (dolist (change (subseq changes 0 (min 20 (length changes))))
-            (format stream "    ~A~%" (%safe-text change))))))
+            (format stream "    ~A~%" (%safe-text change))))
+        (let ((lisp-changes (getf (getf (getf environment system) :git) :lisp-changes)))
+          (when (consp lisp-changes)
+            (dolist (row (subseq lisp-changes 0 (min 40 (length lisp-changes))))
+              (format stream "    ~A ~A ~A~%" (first row) (%safe-text (second row))
+                      (if (stringp (third row)) (subseq (third row) 0 12) (third row))))))))
     (format stream "Expected checkout: ~A~%"
             (or (getf environment :expected-root) "not checked"))
     (dolist (source (getf report :sources))

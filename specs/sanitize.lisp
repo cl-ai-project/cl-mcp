@@ -421,7 +421,10 @@ of a complete escape sequence that follow it, at least one and fewer than all."
 docstring says are stripped or replaced, and no longer than the argument.  An
 integer gives its printed form, which never needs sanitizing.  Checked over
 SANITIZE-FOR-JSON-ARGUMENTS; other non-string objects are outside this
-contract."
+contract.  The length clause reads the argument after the call; the generated
+strings are simple, and no call can change a simple string's length.  That the
+call leaves the argument's characters alone is claimed separately, by
+SANITIZE-FOR-JSON-LEAVES-ITS-ARGUMENT-UNMODIFIED, against a copy taken first."
     (:args (value (or null string integer)))
     (:args-generator sanitize-for-json-arguments)
     (:cases
@@ -439,13 +442,16 @@ contract."
       (:post (string= result (princ-to-string value))))))
   (defproperty sanitize-for-json-keeps-allowed-text
       ((text allowed-text))
-    "Text made only of allowed characters comes back unchanged.  Paired with the
-contract's removal clause, this is what rules out an implementation that
-returns the empty string for everything."
+    "Text made only of allowed characters comes back with the characters it had
+before the call.  Paired with the contract's removal clause, this is what rules
+out an implementation that returns the empty string for everything.  The
+expected text is copied first, so overwriting the argument and returning it
+does not pass."
     (:about sanitize-for-json)
     (:kind :preservation)
     (:trials (:smoke 25 :normal 200))
-    (string= text (sanitize-for-json text)))
+    (let ((before (copy-seq text)))
+      (string= before (sanitize-for-json text))))
   (defproperty sanitize-for-json-is-idempotent
       ((segments mixed-segments))
     "Sanitizing what SANITIZE-FOR-JSON returned changes nothing, over text
@@ -454,8 +460,9 @@ escape sequences and cut-off ones."
     (:about sanitize-for-json)
     (:kind :idempotence)
     (:trials (:smoke 25 :normal 200))
-    (let ((once (sanitize-for-json (render-segments segments))))
-      (string= once (sanitize-for-json once))))
+    (let* ((once (sanitize-for-json (render-segments segments)))
+           (before (copy-seq once)))
+      (string= before (sanitize-for-json once))))
   (defproperty sanitize-for-json-removes-complete-escape-sequences
       ((parts wrapped-sequence))
     "A complete ECMA-48 sequence -- CSI, OSC ended by BEL or ST, DCS, SOS, PM or
@@ -532,21 +539,25 @@ contract."
   (defproperty sanitize-error-message-keeps-normalized-text
       ((text short-normalized-text))
     "Single-spaced text of at most 500 characters, with no #<, #P\" or Stream:
-in it, comes back unchanged -- including at exactly 499 and 500 characters."
+in it, comes back with the characters it had before the call -- including at
+exactly 499 and 500 characters."
     (:about sanitize-error-message)
     (:kind :preservation)
     (:trials (:smoke 25 :normal 200))
-    (string= text (sanitize-error-message text)))
+    (let ((before (copy-seq text)))
+      (string= before (sanitize-error-message text))))
   (defproperty sanitize-error-message-truncates-long-text
       ((text long-normalized-text))
     "Single-spaced text longer than 500 characters comes back as exactly 500:
-its first 497 characters, then \"...\"."
+its first 497 characters as they were before the call, then \"...\"."
     (:about sanitize-error-message)
     (:kind :boundary)
     (:trials (:smoke 25 :normal 200))
-    (let ((result (sanitize-error-message text)))
+    ;; LET evaluates its init forms in order, so BEFORE is copied first.
+    (let ((before (copy-seq text))
+          (result (sanitize-error-message text)))
       (and (= 500 (length result))
-           (string= text result :end1 497 :end2 497)
+           (string= before result :end1 497 :end2 497)
            (string= "..." result :start2 497))))
   (defproperty sanitize-error-message-keeps-only-visible-words
       ((message error-message))

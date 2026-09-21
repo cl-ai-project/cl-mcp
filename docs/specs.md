@@ -15,7 +15,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 
 | Function | Function Spec (one per function) | Properties |
 |---|---|---|
-| `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument, at most one character longer | `ensure-trailing-newline-keeps-terminated-text` |
+| `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument as it was before the call, at most one character longer, and leaves the argument as it was | `ensure-trailing-newline-keeps-terminated-text` |
 | `cl-mcp/src/utils/sanitize:sanitize-for-json` | three cases: `NIL` gives `NIL`; a string gives a string free of what the docstring says is stripped (C0 controls but tab/LF/CR, DEL, anything above U+FFFF) and no longer than the argument; an integer gives its printed form | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
 | `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 
@@ -28,6 +28,16 @@ implementation that always returns `""`, and `…-keeps-allowed-text` does not.
 Likewise, `ensure-trailing-newline-keeps-terminated-text` passes an
 implementation that never adds a newline, and the Function Spec does not.
 The negative control below runs both of those wrong implementations.
+
+Every check that says the argument's text is kept compares against a copy
+taken **before** the call. That copy is `:capture (before (copy-seq text))` in
+a Function Spec, and a `copy-seq` ahead of the call in a Property. The argument
+object itself may have been overwritten by the time the check runs. An
+implementation that fills its argument with newlines and returns it passed
+every clause that read the argument after the call. It also passed
+`…-keeps-terminated-text`, because expected and actual were then one object.
+The negative control now includes that implementation, and a `sanitize-for-json`
+that overwrites its argument.
 
 ### Input domains
 
@@ -175,7 +185,8 @@ A run passes only when all of the following hold:
 
 - at least one target was selected, and every target is registered;
 - every run answered `:passed`;
-- every run executed at least one trial, and not every trial was rejected;
+- every run executed at least one trial, with a rejection count from 0 to
+  fewer than the trials;
 - every declared `:cases` branch was called, with no case-selection or capture
   error;
 - every `check-call` example passed and selected the case it names;
@@ -191,9 +202,16 @@ The report records, per run: target, seed, profile or trials, status, trials,
 budget, rejections, shrinking capability, digest and whether it is complete,
 the case counts, and for a failure the counterexample, the shrunk
 counterexample and a replay line for Lisp and for MCP. It also records the Lisp,
-ASDF and backend, the version, directory, git revision and local changes of
-cl-mcp, cl-spec and check-it, and the file each contracted function was loaded
-from.
+ASDF and backend, and the file each contracted function was loaded from. For
+cl-mcp, cl-spec and check-it it records the version, directory, git revision
+and `git status` lines.
+
+A file list alone cannot tell two edits of one file apart, so each run also
+records, per `.lisp` or `.asd` file that differs from HEAD (untracked ones
+included), git's hash of its current contents. A fingerprint over those hashes
+is printed on the summary line. Two runs at the same HEAD with the same file
+list but different uncommitted code get different fingerprints
+(`cl-mcp/specs/runner:git-state`).
 
 ### From the command line
 
@@ -213,14 +231,20 @@ something failed, `2` the script could not run them.
   fixtures, each registered in a registry made for that test. They check that
   the runner refuses a failing property, an empty selection, an unregistered
   name, zero trials, an undeclared profile, a contract that rejected every
-  input, an unreached case, a generator error and a timeout. They also check
-  registration, re-registration and a full bundle run. You can run the same
+  input, a rejection count below zero or above the trials, an unreached case,
+  a generator error and a timeout. They also check registration,
+  re-registration, the printed and written reports, the worktree fingerprint
+  (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` replaces `ensure-trailing-newline` with `identity` and
-  `sanitize-for-json` with a function that returns `""`. It requires that the
-  bundle's own Function Spec and properties answer `:failed` with a
-  counterexample against these wrong implementations, pass again once the real
-  functions are back, and use the same definition digests both times. It
+- `negative-control` swaps in four wrong implementations, one at a time:
+  - an `ensure-trailing-newline` that returns its argument unchanged;
+  - one that overwrites its argument with newlines and returns it;
+  - a `sanitize-for-json` that returns `""`;
+  - one that overwrites its argument with `a`s and returns it.
+
+  For each, it requires that the targets named for it answer `:failed` with a
+  counterexample, that every target passes again once the real function is
+  back, and that both runs use the same definition digests. It
   replaces global function definitions while it runs, so **run it only in a
   process of its own**, never in an MCP worker you are using. Catching a
   planted fault shows that these checks can fail. It does not measure an
@@ -229,11 +253,14 @@ something failed, `2` the script could not run them.
 ### Shrinking
 
 With the check-it backend, a custom generator's `:shrink` clause is used only
-when that generator produces a whole argument list. That is what the Function
-Specs' `:args-generator`s do, so a contract failure shrinks: against the
-negative control, `ensure-trailing-newline` shrinks to `""`. A property's
+when that generator produces a whole argument list. That is what the
+`:args-generator`s of `sanitize-for-json` and `sanitize-error-message` do, so
+their contract failures shrink. `ensure-trailing-newline`'s contract uses
+`:capture`, which makes it state-observing, and cl-spec does not shrink a
+state-observing contract. Its counterexamples are reported as found. That is
+the price of comparing against a copy taken before the call. A property's
 arguments are specs whose generators are nested, so property counterexamples
-are reported unshrunk. `spec-describe` still says `shrinking: enabled`, because
+are reported unshrunk as well. `spec-describe` still says `shrinking: enabled`, because
 that is the option the declaration carries. The run itself reports
 `shrinking: :none`. An unshrunk counterexample is still a valid one.
 
@@ -271,13 +298,17 @@ the checkout.
    check fails the run for any definition that is not listed.
 3. Derive expected values from the requirement: preservation, idempotence,
    composition, boundaries, or a small independent rule. Never compute them
-   with the function under test or its helpers.
+   with the function under test or its helpers. When a check compares with the
+   argument, compare with a copy taken before the call (`:capture` in a
+   contract, `copy-seq` first in a property), never with the argument object
+   after it.
 4. Build inputs from structure rather than filtering them with `:pre`. Bound
    the sizes, and list what is covered and what is not in the file header.
 5. Add boundary inputs to `call-examples` and, for exact values, to the Rove
    tests.
 6. Run `self-test` and `check`, and make sure a wrong implementation of the new
-   function fails a check. The negative control shows how.
+   function fails a check, including one that overwrites its argument. The
+   negative control shows how.
 
 Not every function needs a contract, and not every change needs the full
 bundle run. Use it when a change touches a function the bundle covers.

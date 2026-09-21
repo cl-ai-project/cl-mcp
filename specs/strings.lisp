@@ -22,8 +22,7 @@
   (:import-from #:cl-mcp/specs/fixtures
                 #:pick
                 #:chance
-                #:draw-allowed-text
-                #:shrink-text-candidates)
+                #:draw-allowed-text)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -113,32 +112,38 @@ CL-SPEC:*REGISTRY*.  Registering again replaces each definition by name."
     (draw-line-text))
   (defspec line-text string
     (:generator line-text-generator))
-  ;; The contract draws its argument list from a generator of its own because
-  ;; the check-it backend applies a :SHRINK clause only to a whole argument
-  ;; generator; one nested inside LINE-TEXT would never be called.
   (defgenerator ensure-trailing-newline-arguments ()
-    "Draw a one-element argument list of LINE-TEXT; shrink it to substrings."
-    (:shrink (arguments) (mapcar #'list (shrink-text-candidates (first arguments))))
+    "Draw a one-element argument list of LINE-TEXT."
     (list (draw-line-text)))
+  ;; Every comparison with the argument uses BEFORE, a copy taken ahead of the
+  ;; call: the argument object itself may have been overwritten by then, and an
+  ;; implementation that fills its argument with newlines and returns it would
+  ;; otherwise pass every clause.  :CAPTURE makes this a state-observing
+  ;; contract, which cl-spec does not shrink.
   (defspec-function ensure-trailing-newline
-    "The result ends in a newline, starts with the whole argument, and is at
-most one character longer.  Together these rule out returning a bare newline,
-dropping text, and adding more than one character.  Checked over
+    "The result ends in a newline, starts with the whole argument as it was
+before the call, and is at most one character longer; the argument itself is
+left as it was.  Together these rule out returning a bare newline, dropping or
+overwriting text, and adding more than one character.  Checked over
 ENSURE-TRAILING-NEWLINE-ARGUMENTS (see DRAW-LINE-TEXT)."
     (:args (text string))
     (:args-generator ensure-trailing-newline-arguments)
+    (:capture (before (copy-seq text)))
     (:returns string)
     (:post (and (ends-with-newline-p result)
-                (<= (length text) (length result) (1+ (length text)))
-                (string= text result :end2 (length text)))))
+                (<= (length before) (length result) (1+ (length before)))
+                (string= before result :end2 (length before))))
+    (:state-post (string= before text)))
   (defproperty ensure-trailing-newline-keeps-terminated-text
       ((body line-text))
-    "Text that already ends in a newline comes back with the same characters:
-the function adds a newline only when one is missing.  The argument is built
-by appending a newline to any LINE-TEXT, so every trial is terminated."
+    "Text that already ends in a newline comes back with the same characters it
+had before the call: the function adds a newline only when one is missing.
+The argument is built by appending a newline to any LINE-TEXT, so every trial
+is terminated, and the expected text is copied before the call."
     (:about ensure-trailing-newline)
     (:kind :preservation)
     (:trials (:smoke 25 :normal 200))
-    (let ((terminated (concatenate 'string body (string #\Newline))))
-      (string= terminated (ensure-trailing-newline terminated))))
+    (let* ((terminated (concatenate 'string body (string #\Newline)))
+           (before (copy-seq terminated)))
+      (string= before (ensure-trailing-newline terminated))))
   (values))

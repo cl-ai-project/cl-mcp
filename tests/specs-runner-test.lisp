@@ -45,6 +45,7 @@
                 #:bundle-consistency-problems
                 #:report-ok-p
                 #:exit-code
+                #:git-state
                 #:print-report
                 #:write-report))
 
@@ -268,6 +269,10 @@
     (ok (judge-entry '(:kind :property :status :passed :trials 0 :rejected 0)))
     (ok (judge-entry '(:kind :property :status :passed :trials 5 :rejected nil)))
     (ok (judge-entry '(:kind :property :status :passed :trials 5 :rejected 5)))
+    (ok (judge-entry '(:kind :function-spec :status :passed :trials 5 :rejected -1))
+        "a negative rejection count is not a measurement")
+    (ok (judge-entry '(:kind :function-spec :status :passed :trials 5 :rejected 6))
+        "nor is one above the trial count")
     (ok (null (judge-entry '(:kind :property :status :passed :trials 5 :rejected 0)))))
   (testing "a contract with cases needs a measured case report"
     (ok (judge-entry '(:kind :function-spec :status :passed :trials 5 :rejected 0
@@ -299,6 +304,50 @@
                           (read in))))))
           (ok (eq :check (getf form :mode)))
           (ok (stringp (getf (first (getf form :entries)) :name))))))))
+
+(deftest git-state-tells-worktrees-apart
+  (let ((directory (uiop:ensure-directory-pathname
+                    (uiop:merge-pathnames* (format nil "cl-mcp-git-state-~D-~D/"
+                                                   (get-universal-time) (random 100000))
+                                           (uiop:temporary-directory)))))
+    (flet ((git (&rest arguments)
+             (uiop:run-program (list* "git" "-C" (uiop:native-namestring directory)
+                                      "-c" "user.name=test" "-c" "user.email=test@example.com"
+                                      "-c" "commit.gpgsign=false" arguments)
+                               :output nil :error-output nil))
+           (spit (name text)
+             (with-open-file (out (merge-pathnames name directory)
+                                  :direction :output :if-exists :supersede)
+               (write-string text out))))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist directory)
+             (git "init" "--quiet")
+             (spit "a.lisp" "(a)")
+             (spit "notes.txt" "not lisp")
+             (git "add" "a.lisp" "notes.txt")
+             (git "commit" "--quiet" "-m" "base")
+             (testing "a clean tree has no Lisp changes and no fingerprint"
+               (let ((state (git-state directory)))
+                 (ok (null (getf state :lisp-changes)))
+                 (ok (null (getf state :lisp-fingerprint)))))
+             (spit "a.lisp" "(b)")
+             (let ((first (git-state directory)))
+               (spit "a.lisp" "(c)")
+               (let ((second (git-state directory)))
+                 (testing "one HEAD, one status line, two different contents"
+                   (ok (equal (getf first :revision) (getf second :revision)))
+                   (ok (equal (getf first :changes) (getf second :changes)))
+                   (ok (equal '((" M" "a.lisp"))
+                              (mapcar #'butlast (getf second :lisp-changes))))
+                   (ng (equal (getf first :lisp-fingerprint)
+                              (getf second :lisp-fingerprint))))))
+             (spit "b.lisp" "(new)")
+             (spit "notes.txt" "changed, but not Lisp")
+             (testing "untracked Lisp files count; other files do not"
+               (ok (equal '((" M" "a.lisp") ("??" "b.lisp"))
+                          (mapcar #'butlast (getf (git-state directory) :lisp-changes))))))
+        (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))))
 
 ;;; ------------------------------------------------------------------------
 ;;; The bundle itself
