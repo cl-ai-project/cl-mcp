@@ -46,12 +46,16 @@ hook に設定する。したがって boundary は前者ではなく後者を r
   来た場合だけ request failure になる。
 - 既存の `repl-eval` にある通常の `ERROR` capture とその error_context 経路は
   変えない。boundary はそこを抜けて debugger に至る場合だけ動く。
-- deadline の private THROW、cancel、`UNWIND-PROTECT` cleanup、leaked-thread
-  accounting は既存どおりである。boundary は cleanup が停止しない場合の即時安全な
-  中断を保証しない。
-- deadline/cancel による controlled unwind が既に始まった後は、その outcome が
-  cleanup 中の debugger 到達より優先する。通常実行中の debugger escape と、その
-  escape の cleanup 中の二次 debugger は error outcome に留め、成功へ戻さない。
+- `call-with-deadline-thread` の private deadline THROW、`UNWIND-PROTECT` cleanup、
+  leaked-thread accounting は既存どおりである。boundary は cleanup が停止しない場合の
+  即時安全な中断を保証しない。
+- controlled deadline unwind が既に始まった後は、その timeout outcome が cleanup 中の
+  debugger 到達より優先する。通常実行中の debugger escape と、その escape の cleanup 中の
+  二次 debugger は error outcome に留め、成功へ戻さない。ただし debugger escape の cleanup
+  が未完のうちに deadline が始まった競合では timeout を優先する。
+- MCP の `cancel-request` は worker に SIGTERM を送り、続けて `kill-worker` で socket、state、
+  reap を処理する既存の process-termination path である。これは cooperative deadline unwind
+  ではなく、今回の worker 生存保証の対象外である。cancel の worker 終了・reap 挙動は変更しない。
 
 ## 3. same-thread boundary
 
@@ -65,31 +69,60 @@ deadline を持つ execution thread の dynamic layout は、内側 tag への�
 terminal tag                         ; hook binding の外側
   request-local *INVOKE-DEBUGGER-HOOK*
     debugger-escape tag              ; normal execution の escape 先
-      deadline/cancel tag             ; existing controlled unwind の escape 先
+      deadline tag                    ; cooperative deadline unwind の escape 先
         user thunk
 ```
 
-thread-local exit state は `:running`、`:debugger-unwinding`、
-`:deadline-unwinding` のいずれかである。deadline/cancel interrupt は THROW の直前に
-後者を設定し、primary hook は debugger tag へ THROW する直前に前者を設定する。
+各 execution thread は tag と別に private な exit state と pending outcome を持つ。他 thread と
+共有するのは request-active policy だけである。exit state は `:running`、
+`:debugger-unwinding`、`:deadline-unwinding` のいずれか、pending outcome は未公開の
+debugger record または timeout record である。公開済みの `:ok` / `:timeout` / `:error` result と
+pending outcome は区別する。
+
+state の読取り、pending outcome の更新、脱出先の選択だけを短い interrupt-protected 区間で行う。
+その区間で diagnostic capture や user cleanup 全体を実行しない。既存の completion-wins 判定は
+deadline transition の前に維持する。
+
+| 現在 state | event | state / pending outcome | 脱出先と最終 outcome |
+|---|---|---|---|
+| `:running` | primary debugger 到達後の snapshot | `:debugger-unwinding` / snapshot record | debugger tag、`:error` |
+| `:running` | secondary hook または診断用 handler の二次障害 | `:debugger-unwinding` / degraded original record | debugger tag、`:error` |
+| `:running` | cooperative deadline interrupt | `:deadline-unwinding` / timeout record | deadline tag、`:timeout` |
+| `:debugger-unwinding` | cleanup 中の debugger または診断二次障害 | 変更しない | terminal tag、最初の `:error` |
+| `:debugger-unwinding` | error result 公開前の cooperative deadline interrupt | `:deadline-unwinding` / timeout record | terminal tag、`:timeout` |
+| `:deadline-unwinding` | primary/secondary hook または診断二次障害 | 変更しない | terminal tag、開始済み `:timeout` |
+| `:deadline-unwinding` | 重複した cooperative deadline interrupt | 変更しない | 新しい transfer は行わず、開始済み `:timeout` |
+
+`:debugger-unwinding` で deadline が到着する行が、debugger escape の cleanup 中に deadline が
+到着する逆順を扱う。deadline tag はすでに debugger tag への unwind により通過対象なので使わず、
+timeout を pending outcome として確定して terminal tag へ脱出する。これにより snapshot 採取済みと
+response result の公開済みを混同しない。
 
 ```text
-primary hook(condition, previous-hook), when state = :running:
-  make a non-printing minimal record with a fixed fallback message
-  install a secondary hook before rendering or inspecting the condition
+primary hook(condition, previous-hook):
+  if state is not :running, select terminal tag and exit without capture
+  otherwise make a non-printing minimal record with a fixed fallback message
+  install a secondary hook and diagnostic handler-bind before inspection
   snapshot original condition, frames, and restarts
-  set state to :debugger-unwinding
-  THROW debugger-escape tag with a private escape outcome
+  atomically select :debugger-unwinding only if state is still :running
+  otherwise select terminal tag without replacing an existing outcome
 
 secondary hook(diagnostic-condition, ignored), during capture only:
+  atomically use the same state table
+  when :running, mark the original record degraded and select debugger tag
+  when :debugger-unwinding or :deadline-unwinding, select terminal tag
   do not capture, print, or invoke a restart
-  mark the original snapshot degraded
-  set state to :debugger-unwinding
-  THROW debugger-escape tag with the minimal original record
 
-primary hook(condition, ignored), when state is no longer :running:
-  do not capture again
-  THROW terminal tag with a cleanup-reentry marker
+diagnostic handler-bind(condition), during capture only:
+  atomically use the same state table before any handler-case-like exit
+  when :running, mark the original record degraded and select debugger tag
+  otherwise select terminal tag without changing pending outcome
+
+deadline interrupt:
+  when :running, record pending timeout and select deadline tag
+  when :debugger-unwinding, replace pending debugger record with timeout
+    and select terminal tag
+  when :deadline-unwinding, do not start a second transfer
 ```
 
 SBCL temporarily binds the hook being called to `NIL`; the secondary hook is
@@ -99,35 +132,36 @@ the disabled hook or the primary hook recursively. `previous-hook` is ignored:
 for this call it is the hook value just before SBCL's temporary `NIL` binding,
 not a handle for the disabled debugger policy.
 
+診断用の ordinary condition は、hook-specific capture path の `handler-bind` で受ける。
+handler は正常 return や inner `handler-case` clause への移送をせず、上の state selection に従って
+debugger tag または terminal tag へ直接脱出する。したがって deadline unwind がすでに始まった
+時点で、診断用 handler が通過済みの inner escape に戻ることはない。`capture-error-context` の
+既存 `handler-case` / `ignore-errors` fallback を user-controlled printer や inspector の周りで
+そのまま使うことはこの hook path では許容しない。安全な primitive は再利用してよいが、
+boundary-aware capture entrypoint がすべての二次 condition をこの state selector に通す。
+
 hook から `ERROR` を re-signal しない。catch は user code より外側に置き、hook 自身は
 private tag への non-local exit だけを行う。そのため user の `ERROR` handler が
 internal wrapper を捕捉して実行を成功へ変換することも、wrapper が同じ hook を再入して
 無限再帰することもない。boundary は ABORT / CONTINUE を含む restart を選択しない。
 
-deadline/cancel の unwind 中、または debugger escape が cleanup を unwind 中に
-debugger が再到達した場合、debugger tag には THROW しない。どちらもまだ外側で有効な
-terminal tag へ escape する。前者は既存 deadline/cancel outcome、後者は最初に採った
-debugger error outcome を保つ。cleanup の残りを完遂できるとは保証しないが、無効化中の
-inner tag へ戻る undefined transfer や worker exit にはしない。
+controlled deadline unwind 中、または debugger escape が cleanup を unwind 中に
+debugger が再到達した場合、debugger tag には THROW しない。いずれもまだ外側で有効な
+terminal tag へ escape する。開始済み deadline は timeout を、deadline のない debugger
+cleanup 中の再到達は最初の debugger error を保つ。debugger cleanup の途中で deadline が
+始まった場合は table のとおり timeout を優先する。cleanup の残りを完遂できるとは保証しないが、
+無効化中の inner tag へ戻る undefined transfer や worker exit にはしない。
 [CLHS `UNWIND-PROTECT`](https://www.lispworks.com/documentation/HyperSpec/Body/s_unwind.htm)
 が示す、unwind 中に既に通過対象となった inner catch への再脱出は採用しない。
 
-`call-with-deadline-thread` 自身の cooperative deadline/cancel が inner tag を
-unwind し始める前には、既存の completion-wins 判定を済ませた上で、thread-local な
-pending deadline outcome を既存の interrupt 制御下に記録する。terminal catch はその
-state を見て、cleanup reentry を deadline outcome に縮退させる。通常の debugger escape
-では pending debugger record を同様に記録する。したがって outcome の優先順位は次である。
-
-1. 既に開始済みの `call-with-deadline-thread` の deadline/cancel は既存の
-   timeout/cancel outcome を保つ。
-2. 通常実行中の debugger 到達は snapshot 付き `:error` になる。
-3. その debugger escape の cleanup 中の再到達は、最初の `:error` snapshot を保つ。
-
-既存 utility が normal result を返す controlled deadline に限り、この outcome を既存の
-result publication と同じ interrupt 制御下で公開する。外側からの任意の non-local exit を
-新しい debugger error response に変換することはしない。いずれの local escape も結果格納を
-飛び越えて "thread exited without a result" にはならない。通常の返り値は multiple-value
-list として運び、`(values)`、`(values nil)`、複数値を escape と混同しない。
+terminal catch は `:deadline-unwinding` を既存の `:timeout` result に、
+`:debugger-unwinding` を snapshot 付き `:error` result に変換する。existing utility が
+normal result を返す controlled deadline に限り、この outcome を既存の result publication と
+同じ interrupt 制御下で公開する。MCP `cancel-request` はこの state machine や tag を使わず、
+従来どおり worker process を終了させる。外側からの任意の non-local exit を新しい debugger
+error response に変換することもしない。いずれの local escape も結果格納を飛び越えて
+thread-exited-without-result error にはならない。通常の返り値は multiple-value list として運び、
+`(values)`、`(values nil)`、複数値を escape と混同しない。
 
 escape outcome を既存の error result へ接続するための private `ERROR` subtype は、
 hook/catch を抜けた後に materialize してよい。元 condition と snapshot を内部保持するが、
@@ -137,7 +171,8 @@ printer に渡さない。
 ## 4. 診断 snapshot と応答変換
 
 snapshot は hook 内、すなわち original dynamic context がまだ残る時点で採る。
-`capture-error-context` / frame-inspector を既存の frame・print・preview 上限で使い、
+既存 `capture-error-context` / frame-inspector の data shape、frame・print・preview 上限を
+優先して再利用するが、hook-specific capture path は deadline-aware でなければならない。
 少なくとも次を保持する。
 
 - original condition type と安全に取得した message
@@ -151,19 +186,29 @@ fallback message から minimal original record を作る。message の render�
 inspection、locals preview はその後に行う。これにより、report/printer が壊れても
 secondary hook が返す縮退結果には元 condition を指す安全な record が残る。
 
-診断採取だけには二段の保護を置く。
+診断採取だけには二段の state-aware 保護を置く。
 
-1. 通常に signal された二次 condition は、採取関数を囲む局所的な
-   `(handler-case ... (condition ...))` で縮退させる。
+1. 通常に signal された二次 condition は、採取中だけ bound する `handler-bind` が
+   受ける。handler は state を判定して `:running` なら degraded original record 付きの
+   debugger escape を選び、すでに debugger/deadline unwind 中なら terminal escape を選ぶ。
+   正常 return や `handler-case` clause への local transfer は使わない。
 2. `:report`、printer、frame/restart inspection が**直接** `INVOKE-DEBUGGER` した場合は
    condition handler search を通らないため、採取中だけ bound する secondary
-   `SB-EXT:*INVOKE-DEBUGGER-HOOK*` が受ける。secondary hook は snapshot の再試行、
-   printing、restart invocation を一切せず、minimal original record と degraded marker を
-   private debugger escape に渡す。
+   `SB-EXT:*INVOKE-DEBUGGER-HOOK*` が同じ state selector を使う。secondary hook は snapshot
+   の再試行、printing、restart invocation を一切せず、minimal original record と degraded
+   marker だけを使う。
 
-これは `INVOKE-DEBUGGER` が debugger hook を直接呼ぶためであり、局所的な
-`handler-case` だけでは代替できない。
+これは `INVOKE-DEBUGGER` が debugger hook を直接呼び、`handler-case` が matching condition の
+clause へ non-local transfer するためである。deadline unwind がすでに始まった後に
+`handler-case` の inner escape へ戻る構成は使わない。
 [CLHS `INVOKE-DEBUGGER`](https://www.lispworks.com/documentation/HyperSpec/Body/f_invoke.htm)
+[CLHS `HANDLER-CASE`](https://www.lispworks.com/documentation/HyperSpec/Body/m_hand_1.htm)
+
+したがって hook path 用の capture entrypoint は、user-controlled report/printer/inspector を
+囲む既存の `handler-case` / `ignore-errors` fallback をそのまま呼ばない。安全と確認できた
+frame/restart primitive は再利用してよいが、二次 condition の処理は必ず上記 `handler-bind` と
+secondary hook の state selector に集約する。通常の `capture-error-context` 利用の意味論は、
+request debugger boundary が active でない限り変えない。
 
 この保護は user execution 全体を `(condition ...)` で捕捉するものではない。診断失敗後も
 元 condition の type/message を再度 `~A`、`PRINC-TO-STRING`、condition printer に渡さない。
@@ -181,9 +226,9 @@ type/message だけで完結する。
 | spec adapter report の `mcp-spec-check` deadline | 既存 condition/internal-error result。safe presentation だけを使う。 |
 | deadline を使わない worker handler | 既存 `-32603` path。少なくとも original type/message を message に残す。 |
 
-deadline/cancel cleanup 中の reentry は、上記の deadline/cancel outcome が優先するため、
-debugger diagnostic を新しい response field に載せない。通常実行中または debugger escape
-cleanup 中の reentry だけが debugger failure record を返す。全 tool の schema を統一しない。
+controlled deadline cleanup 中の reentry は、開始済み timeout outcome が優先するため、
+debugger diagnostic を新しい response field に載せない。通常実行中または deadline のない
+debugger escape cleanup 中の reentry だけが debugger failure record を返す。全 tool の schema を統一しない。
 新しい JSON-RPC code、MCP tool、debug policy option は作らない。
 
 ## 5. 実装面
@@ -191,24 +236,29 @@ cleanup 中の reentry だけが debugger failure record を返す。全 tool �
 想定する最小変更面は次のとおりである。
 
 1. `src/utils/deadline.lisp` と必要最小限の private helper に、request-active policy、
-   per-thread boundary、snapshot、private execution outcome を置く。policy が true の時だけ
-   child thread に独立した terminal/hook/debugger/deadline boundary を作り、child 内で policy
-   を動的に再束縛する。policy が false の inline path と request 外 deadline call site の
-   挙動は変えない。
-2. `src/worker/server.lisp` の authenticated handler dispatch で request-active policy を
+   per-thread boundary、exit state、pending outcome、private execution outcome を置く。policy が
+   true の時だけ child thread に独立した terminal/hook/debugger/deadline boundary を作り、child
+   内で policy を動的に再束縛する。policy が false の inline path と request 外 deadline call
+   site の挙動は変えない。
+2. `src/frame-inspector.lisp` または隣接する private capture helper に、hook path 専用の
+   boundary-aware capture entrypoint を置く。既存 data shape と安全な collector は再利用するが、
+   user-controlled printer/inspector 周囲の二次 condition は `handler-bind` と secondary hook の
+   state selector に通し、inner `handler-case` escape を残さない。
+3. `src/worker/server.lisp` の authenticated handler dispatch で request-active policy を
    動的に束縛し、deadline を使わない handler 用にも same-thread boundary を置く。normal
    result、existing serious-condition result、private debugger escape を既存 response に
    分岐接続する。
-3. `src/utils/deadline.lisp` の deadline interrupt/result-publication を、pending deadline
-   outcome と private execution outcome を区別できるようにする。completion-wins、
-   `UNWIND-PROTECT` cleanup、leaked-thread accounting、timeout/cancel の公開契約は維持する。
-4. `src/repl-core.lisp` で deadline の private debugger escape を `%thunk-error-result` より
+4. `src/utils/deadline.lisp` の deadline interrupt/result-publication を、state table に従う
+   pending timeout と private debugger outcome を区別できるようにする。completion-wins、
+   `UNWIND-PROTECT` cleanup、leaked-thread accounting、既存 `:ok` / `:timeout` / `:error` の
+   公開契約は維持する。MCP cancel の SIGTERM/kill/reap path は変更しない。
+5. `src/repl-core.lisp` で deadline の private debugger escape を `%thunk-error-result` より
    前に認識し、saved pre-unwind snapshot を既存 `error_context` へ接続する。
-5. `src/system-loader-core.lisp`、`src/tools/spec-entry.lisp`、
+6. `src/system-loader-core.lisp`、`src/tools/spec-entry.lisp`、
    `src/spec-adapter-report.lisp`、必要なら test runner の既存 `:error` consumer を確認し、
    private diagnostic object を表示する箇所が original condition を再 print しないよう
    safe presentation に接続する。各 tool の schema は広げない。
-6. focused regression tests と必要最小限の user documentation を追加する。worker が生きても
+7. focused regression tests と必要最小限の user documentation を追加する。worker が生きても
    副作用を rollback しないこと、restart は snapshot であり後から invoke できないことを
    記す。
 
@@ -259,8 +309,14 @@ SBCL 以外ではこの hook boundary を有効化せず、既存の挙動を保
 - normal debugger escape により user `UNWIND-PROTECT` cleanup が走ることを確認する。
   その cleanup が再び debugger に到達しても、最初の debugger error snapshot を保ち、
   無限再入・無効 tag への transfer・worker exit を起こさないことを確認する。
-- deadline/cancel の controlled unwind 中に cleanup が debugger に到達する fixture では、
-  定義済みの deadline/cancel outcome を保ち、worker を終了させないことを確認する。
-- 既存 timeout/cancel/leaked-thread tests を回帰し、debugger failure に誤分類しないことを
-  確認する。`sb-ext:exit` は isolated subprocess で EOF → crash recovery → reaper の従来経路を
+- debugger escape の cleanup が開始したことを同期点で確認してから deadline interrupt を
+  発生させる fixture を置く。timeout が最終 outcome になり、inner deadline tag への transfer、
+  worker exit、thread-exited-without-result error を起こさないことを確認する。
+- diagnostic capture 中に deadline を発生させ、採取対象の cleanup が (a) 直接
+  `INVOKE-DEBUGGER`、(b) 通常の二次 condition を signal する fixture を分けて置く。secondary
+  hook と diagnostic `handler-bind` が開始済み timeout を保ち、worker を終了させないことを
+  確認する。
+- 既存 timeout/leaked-thread tests を回帰し、debugger failure に誤分類しないことを確認する。
+  MCP `cancel-request` の SIGTERM → `kill-worker` → reap 経路も別に回帰し、worker 生存を
+  主張しない。`sb-ext:exit` は isolated subprocess で EOF → crash recovery → reaper の従来経路を
   維持することを確認する。
