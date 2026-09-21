@@ -8,6 +8,7 @@
                 #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:*request-debugger-boundary-active*
+                #:*request-debugger-context* #:%context-state
                 #:call-with-request-debugger-boundary
                 #:request-debugger-result-status
                 #:request-debugger-result-values
@@ -403,34 +404,68 @@
           "the deadline's publication protection permits interrupts in every user phase"))))
 
 #+sbcl
-(defun %assert-deadline-race (thunk entered)
-  ;; ENTERED proves that the child is in the intended user phase before the
-  ;; deadline is observed. Nothing releases that phase except the interrupt.
-  (let ((answer-ready (make-semaphore))
-        (answer nil))
-    (let ((caller
-            (make-thread
-             (lambda ()
-               (let ((*request-debugger-boundary-active* t))
-                 (setf answer
-                       (multiple-value-list
-                        (call-with-deadline-thread
-                         thunk 0.25 :name "debugger-cleanup-race"))))
-               (signal-semaphore answer-ready))
-             :name "deadline-debugger-race")))
-      (unwind-protect
-           (progn
-             (ok (wait-on-semaphore entered :timeout 2)
-                 "the intended user phase started before the deadline")
-             (ok (wait-on-semaphore answer-ready :timeout 5)
-                 "deadline terminates through the outer terminal tag")
-             (ok (eq :timeout (second answer)))
-             (ok (eql 0.25 (first answer)))
-             (ok (not (third answer))
-                 "the controlled timeout did not leak the deadline child"))
-        (when (thread-alive-p caller)
-          (destroy-thread caller))
-        (ignore-errors (join-thread caller))))))
+(defun %assert-deadline-race (thunk entered &key (state :running))
+  ;; Gate the actual deadline callback before it is queued. User execution,
+  ;; diagnostics, and cleanup remain interruptible while the caller waits.
+  (let* ((answer-ready (make-semaphore))
+         (callback-ready (make-semaphore))
+         (deliver-callback (make-semaphore))
+         (name (symbol-name (gensym "debugger-cleanup-race-")))
+         (interrupt-name 'bordeaux-threads:interrupt-thread)
+         (original (fdefinition interrupt-name))
+         (context nil)
+         (delivered-state nil)
+         (answer nil)
+         (caller nil))
+    (unwind-protect
+         (progn
+           (setf (fdefinition interrupt-name)
+                 (lambda (thread callback)
+                   (if (equal name (bordeaux-threads:thread-name thread))
+                       (progn
+                         (signal-semaphore callback-ready)
+                         (wait-on-semaphore deliver-callback)
+                         (funcall original thread
+                                  (lambda ()
+                                    (setf delivered-state (%context-state context))
+                                    (funcall callback))))
+                       (funcall original thread callback))))
+           (setf caller
+                 (make-thread
+                  (lambda ()
+                    (let ((*request-debugger-boundary-active* t))
+                      (setf answer
+                            (multiple-value-list
+                             (call-with-deadline-thread
+                              (lambda ()
+                                (setf context *request-debugger-context*)
+                                (funcall thunk))
+                              0.25 :name name))))
+                    (signal-semaphore answer-ready))
+                  :name "deadline-debugger-race"))
+           (ok (wait-on-semaphore entered :timeout 2)
+               "the intended user phase started before callback delivery")
+           (ok (wait-on-semaphore callback-ready :timeout 2)
+               "the actual deadline callback is waiting at the gate")
+           (ok (and context
+                    (eq state (%context-state context)))
+               "the intended boundary state is confirmed before callback delivery")
+           (signal-semaphore deliver-callback)
+           (ok (wait-on-semaphore answer-ready :timeout 5)
+               "deadline terminates through the outer terminal tag")
+           (ok (eq state delivered-state)
+               "the real callback was delivered in the confirmed phase")
+           (ok (eq :timeout (second answer)))
+           (ok (eql 0.25 (first answer)))
+           (ok (not (third answer))
+               "the controlled timeout did not leak the deadline child"))
+      (signal-semaphore deliver-callback)
+      (when caller
+        (unless (wait-on-semaphore answer-ready :timeout 0.1)
+          (when (thread-alive-p caller)
+            (destroy-thread caller)))
+        (ignore-errors (join-thread caller)))
+      (setf (fdefinition interrupt-name) original))))
 
 #+sbcl
 (deftest deadline-during-debugger-cleanup-prefers-timeout
@@ -441,7 +476,7 @@
             (error 'boundary-direct-condition)
          (signal-semaphore cleanup-started)
          (wait-on-semaphore (make-semaphore))))
-     cleanup-started)))
+     cleanup-started :state :debugger-unwinding)))
 
 #+sbcl
 (define-condition boundary-blocking-report-condition (condition)
@@ -497,3 +532,62 @@
      report-started)
     (ok (wait-on-semaphore cleanup-started :timeout 1)
         "deadline unwind entered the condition report's signalling cleanup")))
+
+#+sbcl
+(defclass boundary-preview-printer ()
+  ((entered :initarg :entered :reader preview-entered)
+   (cleanup :initarg :cleanup :reader preview-cleanup)))
+
+#+sbcl
+(defmethod print-object ((object boundary-preview-printer) stream)
+  (declare (ignore stream))
+  (unwind-protect
+       (progn
+         (signal-semaphore (preview-entered object))
+         (wait-on-semaphore (make-semaphore)))
+    (funcall (preview-cleanup object))))
+
+#+sbcl
+(defvar *preview-kept-local* nil)
+
+#+sbcl
+(defun boundary-preview-user-frame (object)
+  (declare (optimize (debug 3) (speed 0)))
+  (unwind-protect
+       (invoke-debugger (make-condition 'boundary-simple-condition
+                                       :format-control "original preview condition"))
+    (setf *preview-kept-local* object)))
+
+#+sbcl
+(deftest deadline-during-positive-preview-secondary-error-preserves-timeout
+  (let* ((entered (make-semaphore))
+         (object (make-hash-table))
+         (capture-name 'cl-mcp/src/frame-inspector:capture-debugger-error-context)
+         (capture (fdefinition capture-name))
+         (observed nil))
+    (setf (gethash :nested object)
+          (make-instance 'boundary-preview-printer
+                         :entered entered
+                         :cleanup (lambda ()
+                                    (error "secondary preview unwind failure"))))
+    ;; Enable the supported optional preview branch at the existing capture
+    ;; seam, while retaining the real hook, selector, and deadline callback.
+    (unwind-protect
+         (progn
+           (setf (fdefinition capture-name)
+                 (lambda (condition callback &rest options)
+                   (declare (ignore options))
+                   (funcall capture condition
+                            (lambda (secondary)
+                              (setf observed
+                                    (list (type-of secondary)
+                                          (princ-to-string secondary)
+                                          (%context-state *request-debugger-context*)))
+                              (funcall callback secondary))
+                            :max-frames 1 :filter-internal t :locals-preview-frames 1
+                            :preview-max-depth 2)))
+           (%assert-deadline-race (lambda () (boundary-preview-user-frame object)) entered)
+           (ok (equal '(simple-error "secondary preview unwind failure" :deadline-unwinding)
+                      observed)
+               "the diagnostic callback sees the preview cleanup error during deadline unwind"))
+      (setf (fdefinition capture-name) capture))))

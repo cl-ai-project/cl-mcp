@@ -11,6 +11,8 @@
                 #:safe-prin1)
   (:import-from #:cl-mcp/src/inspect
                 #:generate-result-preview)
+  (:import-from #:cl-mcp/src/debugger-preview
+                #:generate-debugger-preview)
   (:import-from #:cl-mcp/src/code-core
                 #:%offset->line)
   (:export #:capture-error-context
@@ -121,7 +123,7 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
               (val (sb-di:debug-var-value var frame)))
           (if (inspectable-p val)
               (if include-preview
-                  (let ((preview (generate-result-preview
+                  (let ((preview (generate-debugger-preview
                                   val
                                   :max-depth (or preview-max-depth 1)
                                   :max-elements (or preview-max-elements 5))))

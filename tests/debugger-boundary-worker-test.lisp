@@ -52,12 +52,17 @@
                     (sb-introspect:definition-source-pathname
                      (sb-introspect:find-definition-source
                       #'cl-mcp/src/worker/handlers::%handle-eval))))"))
-         (text (%worker-text result)))
+         (text (%worker-text result))
+         (paths (let ((*read-eval* nil)) (read-from-string text nil nil))))
     (%note "source pid=~D state=~S ~A" (worker-pid worker) (worker-state worker) text)
     (ok (not (gethash "isError" result)))
     (ok (not (gethash "error_context" result)))
-    (ok (search root text) "fresh worker ASDF root is the requested checkout")
-    (ok (search (namestring (merge-pathnames "src/worker/handlers.lisp" root)) text)
+    (ok (and (listp paths) (= 2 (length paths))) "worker returned two independent paths")
+    (ok (and (listp paths) (equal root (first paths)))
+        "fresh worker ASDF root is the requested checkout")
+    (ok (and (listp paths)
+             (equal (namestring (merge-pathnames "src/worker/handlers.lisp" root))
+                    (second paths)))
         "loaded worker handler was compiled from the requested checkout")))
 
 (defmacro with-boundary-worker ((worker session-id) &body body)
@@ -293,6 +298,12 @@
       (ok (eql 0 (gethash "passed" ordinary)))
       (ok (eql 1 (gethash "failed" ordinary)))
       (ok (not (gethash "isError" ordinary)))
+      (let* ((failures (gethash "failed_tests" ordinary))
+             (failure (and (vectorp failures) (= 1 (length failures)) (aref failures 0))))
+        (ok (hash-table-p failure) "the selected assertion has one structured failure")
+        (when (hash-table-p failure)
+          (ok (equal "ordinary Rove assertion failure" (gethash "description" failure)))
+          (ok (not (gethash "reason" failure)) "no framework-crash fallback reason")))
       (let* ((source (%worker-eval
                       "(mapcar (lambda (component)
                                  (namestring (asdf:component-pathname component)))
