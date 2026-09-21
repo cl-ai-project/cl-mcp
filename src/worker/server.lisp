@@ -12,6 +12,12 @@
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
                 #:+leaked-thread-exit-code+)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*
+                #:call-with-request-debugger-boundary
+                #:request-debugger-result-status
+                #:request-debugger-result-values
+                #:request-debugger-result-error)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited
                 #:+max-json-line-bytes+)
@@ -230,8 +236,16 @@ the shared secret."
          (%make-error id -32601
                       (format nil "Method not found: ~A" method)))
         (handler-case
-            (let ((result (funcall handler params)))
-              (%encode-response (%make-result id result)))
+            (let ((*request-debugger-boundary-active* t))
+              (let ((outcome
+                      (call-with-request-debugger-boundary
+                       (lambda ()
+                         (%encode-response
+                          (%make-result id (funcall handler params)))))))
+                (ecase (request-debugger-result-status outcome)
+                  (:ok (first (request-debugger-result-values outcome)))
+                  (:debugger
+                   (error (request-debugger-result-error outcome))))))
           (serious-condition (e)
             (log-event :warn "worker.handler.error"
                        "method" method

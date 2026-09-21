@@ -8,6 +8,10 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:request-debugger-escape-error-p
+                #:request-debugger-escape-error-context
+                #:request-debugger-escape-error-display-text)
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
                 #:bounded-output-string)
@@ -335,6 +339,11 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
   "Build the five-element `repl-eval` result list describing CONDITION.
 Shaped like the error returns of `%do-repl-eval`: printed value, raw value,
 stdout, stderr, error-context."
+  (when (request-debugger-escape-error-p condition)
+    (let ((msg (format nil "Evaluation error: ~A"
+                       (request-debugger-escape-error-display-text condition))))
+      (return-from %thunk-error-result
+        (list msg msg "" "" (request-debugger-escape-error-context condition)))))
   (let ((msg (or (ignore-errors (format nil "Evaluation error: ~A" condition))
                  "Evaluation error: <unprintable condition>"))
         (type-name (or (ignore-errors (princ-to-string (type-of condition)))
@@ -366,14 +375,10 @@ result is returned -- completed work is never discarded as a timeout."
              ;; This is intentionally a SERIOUS-CONDITION boundary, not a
              ;; generic CONDITION handler.  The latter would turn ordinary
              ;; SIGNAL notifications, warnings, and restart-based control flow
-             ;; into failures.  Therefore a non-SERIOUS-CONDITION passed to
-             ;; ERROR is not handled by this layer; if it reaches the debugger,
-             ;; then, in pooled-worker mode, the parent observes worker
-             ;; termination and begins its normal crash handling.  The circuit
-             ;; breaker may stop replacement after repeated crashes.  Inline
-             ;; mode has no child-worker recovery boundary.  A future hardening
-             ;; boundary belongs at the request/debugger boundary, including
-             ;; this deadline thread.
+             ;; into failures. Under request policy, actual debugger entry is
+             ;; contained by the deadline thread's separate debugger boundary.
+             ;; Its saved private error reaches the :ERROR result below only
+             ;; after the original frames and handlers have unwound.
              ;; The deadline unwind is a THROW, not a condition, so this does
              ;; not defeat it.
              (handler-case (funcall thunk)
@@ -392,8 +397,8 @@ result is returned -- completed work is never discarded as a timeout."
                                      "timeout" timeout-seconds)))
         (ecase status
           (:ok (values-list result))
-          ;; The wrapper above converts every SERIOUS-CONDITION, so :ERROR can
-          ;; only mean the conversion itself failed.  Report it the same way.
+          ;; A debugger escape carries the snapshot saved before unwinding;
+          ;; this also handles a failure in the wrapper's error conversion.
           (:error (values-list (%thunk-error-result result)))
           (:timeout
            (values

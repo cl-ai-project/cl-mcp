@@ -41,6 +41,10 @@
                 #:code-describe-symbol)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:request-debugger-escape-error-p
+                #:request-debugger-escape-error-context
+                #:request-debugger-escape-error-display-text)
   (:export #:list-report
            #:+result-statuses+
            #:+call-statuses+
@@ -1726,7 +1730,11 @@ have not written the function."
       ;; somewhere else entirely.  The message is the only evidence available,
       ;; and it is reported rather than interpreted -- except for the one
       ;; phrase the backend-missing condition is guaranteed to carry.
-      ((search "generator backend" (princ-to-string condition)) :generator-error)
+      ((search "generator backend"
+               (if (request-debugger-escape-error-p condition)
+                   (request-debugger-escape-error-display-text condition)
+                   (princ-to-string condition)))
+       :generator-error)
       (t :internal-error))))
 
 (defun %condition-report (condition max-chars)
@@ -1746,10 +1754,16 @@ datum, and its report is then as large as that value."
 
 The object id lets the existing inspect-object tool reach the condition's
 slots, which is where a signalled datum a caller needs is actually kept: the
-report text is a rendering, not the value."
-  (list :type (princ-to-string (type-of condition))
-        :message (%condition-report condition max-chars)
-        :object-id (ignore-errors (register-object condition))))
+report text is a rendering, not the value. Debugger escapes expose their saved
+type and message; their object id names the safe wrapper holding the snapshot."
+  (let ((context (when (request-debugger-escape-error-p condition)
+                   (request-debugger-escape-error-context condition))))
+    (list :type (if context
+                    (getf context :condition-type)
+                    (princ-to-string (type-of condition)))
+          :message (%condition-report (if context (getf context :message) condition)
+                                      max-chars)
+          :object-id (ignore-errors (register-object condition)))))
 
 (defun %named-values (plist max-value-chars)
   "Return cl-spec's {variable value} counterexample PLIST as a list of plists."

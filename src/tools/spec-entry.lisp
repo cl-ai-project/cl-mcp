@@ -23,6 +23,9 @@
                 #:build-spec-check-response)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:request-debugger-escape-error-p
+                #:request-debugger-escape-error-display-text)
   (:export #:spec-list-response
            #:spec-symbol-response
            #:spec-describe-response
@@ -160,7 +163,10 @@ timeout_seconds or narrow the request."
                             :verified nil
                             :message
                             (format nil "reading the registry failed in ~
-cl-mcp: ~A" value)
+cl-mcp: ~A"
+                                    (if (request-debugger-escape-error-p value)
+                                        (request-debugger-escape-error-display-text value)
+                                        value))
                             :environment (%environment-stub)))))))))
 
 (defun spec-list-response (params)

@@ -20,9 +20,37 @@
                 #:describe-report
                 #:check-report)
   (:import-from #:cl-mcp/src/utils/deadline
-                #:forget-leaked-threads))
+                #:forget-leaked-threads)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*
+                #:call-with-request-debugger-boundary
+                #:request-debugger-result-error))
 
 (in-package #:cl-mcp/tests/spec-adapter-report-test)
+
+(define-condition adapter-boundary-condition (condition)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string "adapter debugger snapshot" stream))))
+
+(deftest debugger-condition-data-preserves-original-type-and-message
+  (let* ((*request-debugger-boundary-active* t)
+         (outcome (call-with-request-debugger-boundary
+                   (lambda ()
+                     (invoke-debugger (make-condition 'adapter-boundary-condition)))))
+         (condition (request-debugger-result-error outcome))
+         (data (cl-mcp/src/spec-adapter-report::%condition-data condition)))
+    (ok (search "ADAPTER-BOUNDARY-CONDITION" (getf data :type)))
+    (ok (not (search "REQUEST-DEBUGGER-ESCAPE-ERROR" (getf data :type))))
+    (ok (equal "adapter debugger snapshot" (getf data :message)))
+    (ok (eq :internal-error
+            (cl-mcp/src/spec-adapter-report::%classify-condition
+             (make-cl-spec-api) condition)))
+    (let ((bounded (cl-mcp/src/spec-adapter-report::%condition-data
+                    condition :max-chars 7)))
+      (ok (search "adapter" (getf bounded :message)))
+      (ok (not (search "snapshot" (getf bounded :message)))))))
 
 (deftest result-digest-uses-captured-core-metadata
   (let* ((data '(:schema-version 1 :record-kind :result :entity-kind :property

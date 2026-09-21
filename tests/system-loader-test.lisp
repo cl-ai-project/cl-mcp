@@ -7,9 +7,45 @@
   (:import-from #:cl-mcp/src/system-loader
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core
-                #:%load-with-timeout))
+                #:%load-with-timeout)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*
+                #:request-debugger-escape-error-p
+                #:request-debugger-escape-error-display-text))
 
 (in-package #:cl-mcp/tests/system-loader-test)
+
+(define-condition loader-boundary-condition (condition)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string "loader debugger snapshot" stream))))
+
+(deftest load-debugger-escape-keeps-error-result
+  (let ((*request-debugger-boundary-active* t))
+    (multiple-value-bind (result timed-out-p errored-p leaked-p)
+        (%load-with-timeout
+         (lambda () (invoke-debugger (make-condition 'loader-boundary-condition)))
+         2)
+      (ok errored-p)
+      (ok (not timed-out-p))
+      (ok (not leaked-p))
+      (ok (request-debugger-escape-error-p (first result)))
+      (let ((text (request-debugger-escape-error-display-text (first result))))
+        (ok (search "LOADER-BOUNDARY-CONDITION" text))
+        (ok (search "loader debugger snapshot" text))))))
+
+(deftest load-debugger-escape-uses-existing-error-response
+  (let ((*request-debugger-boundary-active* t)
+        (cl-mcp/src/system-loader-core:*system-load-lock-wrapper*
+          (lambda (thunk)
+            (declare (ignore thunk))
+            (invoke-debugger (make-condition 'loader-boundary-condition)))))
+    (let ((response (load-system "cl-mcp" :force nil :timeout-seconds 2)))
+      (ok (equal "error" (gethash "status" response)))
+      (ok (search "LOADER-BOUNDARY-CONDITION" (gethash "message" response)))
+      (ok (search "loader debugger snapshot" (gethash "message" response)))
+      (ok (null (gethash "worker_healthy" response))))))
 
 (deftest load-system-basic
   (testing "loads an already-available system and returns structured result"

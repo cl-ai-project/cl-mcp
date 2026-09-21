@@ -15,6 +15,8 @@
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/spec-entry #:parse-seed-string)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+result-statuses+
                 #:+call-statuses+
@@ -25,6 +27,26 @@
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/spec-tools-test)
+
+(define-condition spec-entry-boundary-condition (condition)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string "spec entry debugger snapshot" stream))))
+
+(deftest spec-entry-debugger-escape-uses-existing-internal-error
+  (let* ((*request-debugger-boundary-active* t)
+         (params (make-hash-table :test #'equal))
+         (record
+           (cl-mcp/src/tools/spec-entry::%within-deadline
+            params #'identity
+            (lambda ()
+              (invoke-debugger (make-condition 'spec-entry-boundary-condition))))))
+    (ok (eq :internal-error (getf record :status)))
+    (ok (not (getf record :verified)))
+    (ok (search "SPEC-ENTRY-BOUNDARY-CONDITION" (getf record :message)))
+    (ok (search "spec entry debugger snapshot" (getf record :message)))
+    (ok (getf record :environment))))
 
 (defvar *tools-loaded* nil
   "True once cl-mcp/main has been loaded into this image.")

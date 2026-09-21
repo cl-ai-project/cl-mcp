@@ -25,6 +25,88 @@
 
 (in-package #:cl-mcp/tests/worker-test)
 
+(define-condition dispatch-boundary-condition (condition) ())
+
+(define-condition dispatch-unprintable-condition (condition)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition stream))
+             (error "dispatch report failed"))))
+
+(defclass dispatch-debugger-value () ())
+
+(defmethod yason:encode ((value dispatch-debugger-value) &optional stream)
+  (declare (ignore value stream))
+  (invoke-debugger (make-condition 'dispatch-boundary-condition)))
+
+(defun %make-authenticated-server ()
+  "Create a synthetic server for tests of post-authentication behavior."
+  (let ((server (make-worker-server :port 0)))
+    (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t)
+    server))
+
+(deftest dispatch-encoding-and-unprintable-debugger-escapes
+  (dolist (case (list (list "test/debugger-encoding"
+                           (lambda () (make-instance 'dispatch-debugger-value))
+                           "DISPATCH-BOUNDARY-CONDITION")
+                     (list "test/debugger-report"
+                           (lambda ()
+                             (invoke-debugger
+                              (make-condition 'dispatch-unprintable-condition)))
+                           "DISPATCH-UNPRINTABLE-CONDITION")))
+    (destructuring-bind (method thunk type-name) case
+      (let ((server (%make-authenticated-server)))
+        (unwind-protect
+             (progn
+               (register-method server method
+                                (lambda (params)
+                                  (declare (ignore params))
+                                  (funcall thunk)))
+               (let ((line
+                       (block escaped
+                         (let ((sb-ext:*invoke-debugger-hook*
+                                 (lambda (condition previous-hook)
+                                   (declare (ignore condition previous-hook))
+                                   (return-from escaped nil))))
+                           (cl-mcp/src/worker/server::%dispatch-request
+                            server 18 method nil)))))
+                 (ok (stringp line) "debugger entry returns an encoded response")
+                 (when line
+                   (let ((error (gethash "error" (yason:parse line))))
+                     (ok (= -32603 (gethash "code" error)))
+                     (ok (search type-name (gethash "message" error)))))))
+          (stop-server server))))))
+
+(deftest dispatch-debugger-escape-uses-existing-internal-error
+  (let ((server (make-worker-server :port 0)))
+    (unwind-protect
+         (progn
+           (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t)
+           (register-method
+            server "test/debugger-boundary"
+            (lambda (params)
+              (declare (ignore params))
+              (invoke-debugger (make-condition 'dispatch-boundary-condition))))
+           ;; A missing request boundary must fail the test, not stop its worker.
+           (let ((line
+                   (block escaped
+                     (let ((sb-ext:*invoke-debugger-hook*
+                             (lambda (condition previous-hook)
+                               (declare (ignore condition previous-hook))
+                               (return-from escaped nil))))
+                       (cl-mcp/src/worker/server::%dispatch-request
+                        server 17 "test/debugger-boundary" nil)))))
+             (ok (stringp line) "dispatch contains explicit debugger entry")
+             (when line
+               (let* ((response (yason:parse line))
+                      (error (gethash "error" response)))
+                 (ok (= 17 (gethash "id" response)))
+                 (ok error)
+                 (ok (= -32603 (gethash "code" error)))
+                 (ok (search "DISPATCH-BOUNDARY-CONDITION"
+                             (gethash "message" error)))))))
+      (stop-server server))))
+
 (defun %restore-env (name value)
   "Set environment variable NAME to VALUE, or unset it when VALUE is NIL."
   (if value
@@ -45,7 +127,7 @@
   (testing "start worker server, connect, send ping, get pong"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
+        (let ((server (%make-authenticated-server)))
           (unwind-protect
                (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
@@ -78,7 +160,7 @@
   (testing "register a custom method and verify dispatch"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
+        (let ((server (%make-authenticated-server)))
           (register-method server "test/echo"
                            (lambda (params)
                              (let ((ht (make-hash-table :test 'equal)))
@@ -120,7 +202,7 @@
   (testing "unknown method returns JSON-RPC error -32601"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
+        (let ((server (%make-authenticated-server)))
           (unwind-protect
                (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
@@ -154,7 +236,7 @@
   (testing "handler that signals an error returns JSON-RPC -32603"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
+        (let ((server (%make-authenticated-server)))
           (register-method server "test/boom"
                            (lambda (params)
                              (declare (ignore params))
@@ -196,7 +278,7 @@
   (testing "send multiple requests on same connection"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
+        (let ((server (%make-authenticated-server)))
           (unwind-protect
                (let ((port (server-port server))
                       (thread (bordeaux-threads:make-thread
@@ -244,17 +326,19 @@
       (setf (gethash "params" ht) params))
     (with-output-to-string (s) (yason:encode ht s))))
 
-(defmacro with-handler-server ((stream-var) &body body)
+(defmacro with-handler-server ((stream-var &key authenticated) &body body)
   "Start a worker server with all handlers registered, connect to it,
 and execute BODY with STREAM-VAR bound to the connection stream.
-Cleans up server and socket on exit."
+Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
   (let ((server (gensym "SERVER"))
         (port (gensym "PORT"))
         (thread (gensym "THREAD"))
         (socket (gensym "SOCKET")))
     `(if (not (socket-available-p))
          (skip "socket unavailable")
-         (let ((,server (make-worker-server :port 0)))
+         (let ((,server (if ,authenticated
+                            (%make-authenticated-server)
+                            (make-worker-server :port 0))))
            (register-all-handlers ,server)
            (unwind-protect
                 (let* ((,port (server-port ,server))
@@ -289,7 +373,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-returns-result
   (testing "worker/eval evaluates code and returns result with content"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "code" params) "(+ 1 2)"
               (gethash "package" params) "CL-USER")
@@ -311,7 +395,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-returns-object-preview
   (testing "worker/eval returns result_preview for non-primitive results"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "code" params) "(list 1 2 3)"
               (gethash "package" params) "CL-USER")
@@ -327,7 +411,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-returns-error-context
   (testing "worker/eval returns error_context on signaled condition"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "code" params) "(error \"test-boom\")"
               (gethash "package" params) "CL-USER")
@@ -344,7 +428,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-requires-code
   (testing "worker/eval errors when code param is missing"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "package" params) "CL-USER")
         (let ((response (%send-and-receive stream 103 "worker/eval" params)))
@@ -353,7 +437,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-code-describe-returns-info
   (testing "worker/code-describe returns symbol info for cl:car"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "symbol" params) "cl:car")
         (let* ((response (%send-and-receive stream 200 "worker/code-describe" params))
@@ -369,7 +453,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-macroexpand-expands-form
   (testing "worker/macroexpand expands a form in an existing package"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((entry (make-hash-table :test 'equal))
             (params (make-hash-table :test 'equal)))
         (setf (gethash "label" entry) "probe")
@@ -388,7 +472,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-macroexpand-missing-package-is-actionable
   (testing "worker/macroexpand reports an absent package as a tool error"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((entry (make-hash-table :test 'equal))
             (params (make-hash-table :test 'equal)))
         (setf (gethash "label" entry) "probe")
@@ -406,7 +490,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-code-find-not-found
   (testing "worker/code-find returns error for nonexistent symbol"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "symbol" params) "nonexistent-pkg:nonexistent-sym-xyz")
         (let* ((response (%send-and-receive stream 201 "worker/code-find" params))
@@ -419,7 +503,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-set-project-root-changes-root
   (testing "worker/set-project-root updates *project-root*"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "path" params) "/var/tmp")
         (let* ((response (%send-and-receive stream 300 "worker/set-project-root" params))
@@ -430,7 +514,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-set-project-root-requires-path
   (testing "worker/set-project-root errors when path missing"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (let ((response (%send-and-receive stream 301 "worker/set-project-root" params)))
           (ok (gethash "error" response)
@@ -438,7 +522,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-set-project-root-rejects-nonexistent
   (testing "worker/set-project-root errors for nonexistent directory"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "path" params) "/nonexistent-path-xyz-12345")
         (let ((response (%send-and-receive stream 302 "worker/set-project-root" params)))
@@ -447,7 +531,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-inspect-object-not-found
   (testing "worker/inspect-object returns isError for invalid ID"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "id" params) 999999)
         (let* ((response (%send-and-receive stream 400 "worker/inspect-object" params))
@@ -462,7 +546,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-error-context-has-frames
   (testing "error_context contains frames with index, function, and locals"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "code" params)
               "(labels ((foo () (bar)) (bar () (error \"deep-stack-error\"))) (foo))"
@@ -487,7 +571,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-then-inspect-round-trip
   (testing "eval returns result_object_id, inspect-object resolves it"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       ;; Step 1: eval (list 1 2 3) to get a result_object_id
       (let ((eval-params (make-hash-table :test 'equal)))
         (setf (gethash "code" eval-params) "(list 1 2 3)"
@@ -514,7 +598,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-locals-preview-frames
   (testing "locals_preview_frames adds preview to frame locals"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       ;; Use locals_preview_skip_internal=false so infrastructure frames
       ;; (which have non-primitive locals like condition objects) also
       ;; get previews.  SBCL does not reliably preserve locals for
@@ -553,7 +637,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-eval-inspect-hash-table
   (testing "eval a hash-table, then inspect it to verify structure"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       ;; Step 1: eval to create a hash-table
       (let ((eval-params (make-hash-table :test 'equal)))
         (setf (gethash "code" eval-params)
@@ -636,7 +720,7 @@ Cleans up server and socket on exit."
         ;; start-accept-loop.  Instead, verify the components work
         ;; together: create server, register handlers, output
         ;; handshake, then connect and ping.
-        (let* ((server (make-worker-server :port 0))
+        (let* ((server (%make-authenticated-server))
                (tcp-port (server-port server))
                (handshake-output
                  (with-output-to-string (s)
@@ -793,7 +877,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-load-system-returns-result
   (testing "worker/load-system with a known system returns content"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "system" params) "cl-mcp")
         (let* ((response (%send-and-receive
@@ -805,7 +889,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-run-tests-requires-system
   (testing "worker/run-tests without system param returns error"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let* ((params (make-hash-table :test 'equal))
              (response (%send-and-receive
                         stream 301 "worker/run-tests" params))
@@ -814,7 +898,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-code-find-references-returns-result
   (testing "worker/code-find-references with cl:car returns result"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "symbol" params) "cl:car"
               (gethash "project_only" params) nil)
@@ -832,7 +916,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-clos-describe-returns-the-report
   (testing "worker/clos-describe returns the report, which the parent renders"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "symbol" params) "cl:print-object"
               (gethash "limit" params) 1)
@@ -844,14 +928,14 @@ Cleans up server and socket on exit."
           (ok (= 1 (length (gethash "methods" (elt gfs 0)))))
           (ok (not (nth-value 1 (gethash "content" result))) "no content text yet")))))
   (testing "worker/clos-describe needs a symbol"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((response (%send-and-receive stream 421 "worker/clos-describe"
                                          (make-hash-table :test 'equal))))
         (ok (gethash "error" response))))))
 
 (deftest worker-clos-verify-source-judges-entries-over-json
   (testing "worker/clos-verify-source resolves a matching defgeneric name over the wire"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((name-identity (make-hash-table :test 'equal))
             (identity (make-hash-table :test 'equal))
             (head (make-hash-table :test 'equal))
@@ -883,7 +967,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-code-find-references-resolves-scan-sites
   (testing "worker/code-find-references resolves the sites the parent scanned"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((site (make-hash-table :test 'equal))
             (form (make-hash-table :test 'equal))
             (scan (make-hash-table :test 'equal))
@@ -965,7 +1049,7 @@ Cleans up server and socket on exit."
 
 (deftest worker-set-project-root-rejects-filesystem-root
   (testing "worker/set-project-root rejects / as root"
-    (with-handler-server (stream)
+    (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
         (setf (gethash "path" params) "/")
         (let* ((response (%send-and-receive

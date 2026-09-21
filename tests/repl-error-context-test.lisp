@@ -7,9 +7,42 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/repl
-                #:repl-eval))
+                #:repl-eval)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*))
 
 (in-package #:cl-mcp/tests/repl-error-context-test)
+
+(define-condition repl-boundary-condition (condition)
+  ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (write-string "repl debugger snapshot" stream))))
+
+(defun repl-boundary-frame ()
+  "Enter the debugger with a user frame and restart still live."
+  (declare (optimize (debug 3) (speed 0)))
+  (restart-case (invoke-debugger (make-condition 'repl-boundary-condition))
+    (repl-boundary-restart () :recovered)))
+
+(deftest repl-debugger-escape-preserves-pre-unwind-context
+  (let ((*request-debugger-boundary-active* t))
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(repl-boundary-frame)"
+                   :package "CL-MCP/TESTS/REPL-ERROR-CONTEXT-TEST"
+                   :timeout-seconds 2)
+      (declare (ignore stdout stderr))
+      (ok (equal printed raw))
+      (ok (search "repl debugger snapshot" printed))
+      (ok (search "REPL-BOUNDARY-CONDITION" (getf error-context :condition-type)))
+      (ok (equal "repl debugger snapshot" (getf error-context :message)))
+      (ok (find-if (lambda (frame)
+                     (search "REPL-BOUNDARY-FRAME"
+                             (or (getf frame :function) "")))
+                   (getf error-context :frames)))
+      (ok (find "REPL-BOUNDARY-RESTART" (getf error-context :restarts)
+                :key (lambda (restart) (getf restart :name))
+                :test #'search)))))
 
 (deftest repl-eval-returns-error-context
   (testing "repl-eval returns structured error context on error"
