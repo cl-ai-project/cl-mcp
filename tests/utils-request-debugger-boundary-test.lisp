@@ -338,20 +338,20 @@
 
 #+sbcl
 (deftest boundary-keeps-execution-diagnostics-and-cleanup-interruptible
-  (let* ((*boundary-interrupt-events* nil)
-         (result
-           (%boundary-result
-            (lambda ()
-              (%probe-boundary-interrupts :thunk)
-              (unwind-protect
-                   (error 'boundary-interruptible-report-condition)
-                (%probe-boundary-interrupts :cleanup))))))
-    (ok (eq :debugger (request-debugger-result-status result)))
-    (ok (equal '((:thunk :interrupt) (:thunk :returned)
-                 (:diagnostics :interrupt) (:diagnostics :returned)
-                 (:cleanup :interrupt) (:cleanup :returned))
-               (nreverse *boundary-interrupt-events*))
-        "all user phases deliver interrupts immediately instead of deferring them")))
+  (let ((*boundary-interrupt-events* nil))
+    (let ((result
+            (%boundary-result
+             (lambda ()
+               (%probe-boundary-interrupts :thunk)
+               (unwind-protect
+                    (error 'boundary-interruptible-report-condition)
+                 (%probe-boundary-interrupts :cleanup))))))
+      (ok (eq :debugger (request-debugger-result-status result)))
+      (ok (equal '((:thunk :interrupt) (:thunk :returned)
+                   (:diagnostics :interrupt) (:diagnostics :returned)
+                   (:cleanup :interrupt) (:cleanup :returned))
+                 (nreverse *boundary-interrupt-events*))
+          "all user phases deliver interrupts immediately instead of deferring them"))))
 
 #+sbcl
 (deftest managed-deadline-children-inherit-policy-with-distinct-contexts

@@ -1,6 +1,6 @@
 (defpackage #:cl-mcp/tests/debugger-boundary-worker-test
   (:use #:cl)
-  (:import-from #:rove #:deftest #:ok #:skip #:testing)
+  (:import-from #:rove #:deftest #:ok #:skip)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool* #:proxy-to-worker)
   (:import-from #:cl-mcp/src/state #:*current-session-id*)
@@ -171,13 +171,13 @@
   (with-boundary-worker (worker "debugger-boundary-output")
     (%worker-eval "(defparameter *boundary-state* 73)
                   (define-condition worker-output-condition (condition) ())")
-    (let* ((pid (worker-pid worker))
-           (result
-             (%worker-eval
-              "(progn
-                 (write-string \"stdout before debugger\")
-                 (write-string \"stderr before debugger\" *error-output*)
-                 (invoke-debugger (make-condition 'worker-output-condition)))")))
+    (let ((pid (worker-pid worker))
+          (result
+            (%worker-eval
+             "(progn
+                (write-string \"stdout before debugger\")
+                (write-string \"stderr before debugger\" *error-output*)
+                (invoke-debugger (make-condition 'worker-output-condition)))")))
       (ok (equal "stdout before debugger" (gethash "stdout" result)))
       ;; SBCL may append its compilation-unit abort note during the unwind.
       (ok (eql 0 (search "stderr before debugger" (gethash "stderr" result))))
@@ -357,8 +357,8 @@
 (deftest pooled-run-tests-distinguishes-assertion-failure-from-debugger-escape
   (with-boundary-worker (worker "debugger-boundary-run-tests")
     (%worker-eval "(defparameter *boundary-state* 73)")
-    (let* ((pid (worker-pid worker))
-           (ordinary (%worker-run-fixture "ordinary-rove-failure")))
+    (let ((pid (worker-pid worker))
+          (ordinary (%worker-run-fixture "ordinary-rove-failure")))
       (%note "ordinary run-tests pid=~D passed=~S failed=~S text=~A"
              pid (gethash "passed" ordinary) (gethash "failed" ordinary)
              (%worker-text ordinary))
@@ -396,10 +396,10 @@
 
 (deftest pooled-real-process-exit-is-reaped-and-replaced
   (with-boundary-worker (worker "debugger-boundary-real-exit")
-    (let* ((pid (worker-pid worker))
-           (process (worker-process-info worker))
-           (result (%worker-eval "(sb-ext:exit :code 71)"))
-           (deadline (+ (get-internal-real-time) (* 5 internal-time-units-per-second))))
+    (let ((pid (worker-pid worker))
+          (process (worker-process-info worker))
+          (result (%worker-eval "(sb-ext:exit :code 71)"))
+          (deadline (+ (get-internal-real-time) (* 5 internal-time-units-per-second))))
       (loop until (or (eq :exited (sb-ext:process-status process))
                       (>= (get-internal-real-time) deadline))
             do (sleep 0.01))

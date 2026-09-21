@@ -78,18 +78,18 @@
   ;; nested printer therefore identifies preview collection, not :VALUE.
   ;; Rove's whole-package runner otherwise prints imported capture functions
   ;; unqualified, which the existing frame filter cannot identify as internal.
-  (let* ((*package* (find-package '#:cl-user))
-         (context
-          (if ordinary-p
-              (capture-error-context
-               (make-condition 'simple-error :format-control "preview source")
-               :max-frames 1 :filter-internal t :locals-preview-frames 1
-               :preview-max-depth 2)
-              (capture-debugger-error-context
-               (make-condition 'simple-error :format-control "preview source") callback
-               :max-frames 1 :filter-internal t :locals-preview-frames 1
-               :preview-max-depth 2))))
-    (values context object)))
+  (let ((*package* (find-package '#:cl-user)))
+    (let ((context
+            (if ordinary-p
+                (capture-error-context
+                 (make-condition 'simple-error :format-control "preview source")
+                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :preview-max-depth 2)
+                (capture-debugger-error-context
+                 (make-condition 'simple-error :format-control "preview source") callback
+                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :preview-max-depth 2))))
+      (values context object))))
 
 #+sbcl
 (deftest debugger-positive-preview-transfers-secondary-conditions
