@@ -15,6 +15,12 @@
                 #:interrupt-thread
                 #:make-lock
                 #:with-lock-held)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary-protocol
+                #:*request-debugger-boundary-active*
+                #:call-with-request-debugger-boundary
+                #:request-debugger-result-status
+                #:request-debugger-result-error
+                #:request-debugger-deadline-interrupt)
   (:export #:call-with-deadline-thread
            #:leaked-threads
            #:*retired-leaked-thread-reason*
@@ -25,6 +31,8 @@
            #:*destroy-grace-seconds*))
 
 (in-package #:cl-mcp/src/utils/deadline)
+
+(declaim (optimize (debug 3) (safety 3)))
 
 (defparameter *poll-interval* 0.05d0
   "Seconds between liveness checks while waiting on a deadline thread.")
@@ -142,10 +150,24 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
   (if (not (and timeout-seconds (realp timeout-seconds) (plusp timeout-seconds)))
       (values (multiple-value-list (funcall thunk)) :ok nil)
       (let ((tag (list :deadline))
+            (deadline-marker (list :deadline-marker))
+            (request-active *request-debugger-boundary-active*)
             (outcome nil)
             (thread nil)
             (answered nil))
-        (flet ((stop ()
+        (flet ((run ()
+                 ;; Only user execution is interruptible. Publishing its
+                 ;; values or serious condition remains one short region.
+                 (sb-sys:without-interrupts
+                   (handler-case
+                       (setf outcome
+                             (cons :ok
+                                   (multiple-value-list
+                                    (sb-sys:with-local-interrupts
+                                      (funcall thunk)))))
+                     (serious-condition (condition)
+                       (setf outcome (cons :error condition))))))
+               (stop ()
                  ;; Cooperative unwind first: it runs the thread's
                  ;; UNWIND-PROTECT cleanups and releases the locks it holds.
                  (when (and thread (thread-alive-p thread))
@@ -159,23 +181,15 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                      ;; expired is therefore left to return normally instead
                      ;; of being unwound out of its own result.
                      ;;
-                     ;; IGNORE-ERRORS around the throw, and not only around
-                     ;; INTERRUPT-THREAD: this closure runs later, on the run
-                     ;; thread, outside any handler of ours.  A thread can be
-                     ;; alive with the CATCH already gone -- an earlier throw
-                     ;; consumed it and the thread is still winding down --
-                     ;; and a throw to a tag that no longer exists is an
-                     ;; unhandled CONTROL-ERROR there.  The worker runs under
-                     ;; SB-EXT:DISABLE-DEBUGGER, where that kills the process
-                     ;; outright: the session would lose all its state to a
-                     ;; deadline whose whole purpose is to answer gracefully.
-                     ;; The window is narrow -- STOP has to run twice, which
-                     ;; takes a non-local exit between FINISH and ANSWERED --
-                     ;; but the guard costs nothing and the failure it
-                     ;; prevents is total.
+                     ;; A request unwind must select a still-live tag: a
+                     ;; debugger transfer may already have left the deadline
+                     ;; catch. Outside a live request context the selector
+                     ;; retains the guarded throw for a thread winding down
+                     ;; after its catch has disappeared.
                      (lambda ()
                        (unless outcome
-                         (ignore-errors (throw tag :deadline))))))
+                         (request-debugger-deadline-interrupt
+                          tag deadline-marker)))))
                    (%wait-until-dead thread *unwind-grace-seconds*))
                  (when (and thread (thread-alive-p thread))
                    (ignore-errors (destroy-thread thread))
@@ -224,16 +238,27 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (setf thread
                          (make-thread
                           (lambda ()
-                            (catch tag
-                              (sb-sys:without-interrupts
-                                (handler-case
-                                    (setf outcome
-                                          (cons :ok
-                                                (multiple-value-list
-                                                 (sb-sys:with-local-interrupts
-                                                   (funcall thunk)))))
-                                  (serious-condition (e)
-                                    (setf outcome (cons :error e)))))))
+                            ;; Inherit only the Boolean policy. The boundary
+                            ;; allocates this child's context, hook, and tags.
+                            (let ((*request-debugger-boundary-active* request-active))
+                              (if request-active
+                                  (sb-sys:without-interrupts
+                                    (let ((boundary-result
+                                            ;; Permit the boundary to enable
+                                            ;; delivery only in its user extent.
+                                            (sb-sys:allow-with-interrupts
+                                              (call-with-request-debugger-boundary
+                                               (lambda () (catch tag (run)))))))
+                                      (case (request-debugger-result-status boundary-result)
+                                        (:ok nil)
+                                        (:debugger
+                                         (setf outcome
+                                               (cons :error
+                                                     (request-debugger-result-error
+                                                      boundary-result))))
+                                        (:timeout
+                                         (setf outcome (cons :timeout timeout-seconds))))))
+                                  (catch tag (run)))))
                           :name name))
                    (sb-sys:with-local-interrupts
                      (%wait-until-dead thread timeout-seconds)

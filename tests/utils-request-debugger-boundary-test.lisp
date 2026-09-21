@@ -1,6 +1,11 @@
 (defpackage #:cl-mcp/tests/utils-request-debugger-boundary-test
   (:use #:cl)
   (:import-from #:rove #:deftest #:ok)
+  (:import-from #:bordeaux-threads
+                #:make-semaphore #:signal-semaphore #:wait-on-semaphore
+                #:make-thread #:thread-alive-p #:destroy-thread #:join-thread)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:*request-debugger-boundary-active*
                 #:call-with-request-debugger-boundary
@@ -340,3 +345,155 @@
                  (:cleanup :interrupt) (:cleanup :returned))
                (nreverse *boundary-interrupt-events*))
         "all user phases deliver interrupts immediately instead of deferring them")))
+
+#+sbcl
+(deftest managed-deadline-children-inherit-policy-with-distinct-contexts
+  (let ((*request-debugger-boundary-active* t)
+        (outer-context nil)
+        (inner-context nil)
+        (inner-error nil)
+        (inner-leaked nil))
+    (multiple-value-bind (result status leaked)
+        (call-with-deadline-thread
+         (lambda ()
+           (setf outer-context
+                 cl-mcp/src/utils/request-debugger-boundary::*request-debugger-context*)
+           (multiple-value-bind (result status leaked)
+               (call-with-deadline-thread
+                (lambda ()
+                  (setf inner-context
+                        cl-mcp/src/utils/request-debugger-boundary::*request-debugger-context*)
+                  (error 'boundary-direct-condition))
+                2 :name "nested-debugger-child")
+             (setf inner-error result
+                   inner-leaked leaked)
+             status))
+         5 :name "outer-debugger-child")
+      (ok (eq :ok status))
+      (ok (equal '(:error) result))
+      (ok outer-context)
+      (ok inner-context)
+      (ok (not (eq outer-context inner-context)))
+      (ok (request-debugger-escape-error-p inner-error))
+      (ok (not inner-leaked))
+      (ok (not leaked)))))
+
+#+sbcl
+(deftest managed-deadline-keeps-user-phases-interruptible
+  (let ((*request-debugger-boundary-active* t)
+        (events nil))
+    (multiple-value-bind (result status leaked)
+        (call-with-deadline-thread
+         (lambda ()
+           (let ((*boundary-interrupt-events* nil))
+             (unwind-protect
+                  (progn
+                    (%probe-boundary-interrupts :thunk)
+                    (error 'boundary-interruptible-report-condition))
+               (%probe-boundary-interrupts :cleanup)
+               (setf events (reverse *boundary-interrupt-events*)))))
+         2 :name "interruptible-debugger-child")
+      (ok (eq :error status))
+      (ok (request-debugger-escape-error-p result))
+      (ok (not leaked))
+      (ok (equal '((:thunk :interrupt) (:thunk :returned)
+                   (:diagnostics :interrupt) (:diagnostics :returned)
+                   (:cleanup :interrupt) (:cleanup :returned))
+                 events)
+          "the deadline's publication protection permits interrupts in every user phase"))))
+
+#+sbcl
+(defun %assert-deadline-race (thunk entered)
+  ;; ENTERED proves that the child is in the intended user phase before the
+  ;; deadline is observed. Nothing releases that phase except the interrupt.
+  (let ((answer-ready (make-semaphore))
+        (answer nil))
+    (let ((caller
+            (make-thread
+             (lambda ()
+               (let ((*request-debugger-boundary-active* t))
+                 (setf answer
+                       (multiple-value-list
+                        (call-with-deadline-thread
+                         thunk 0.25 :name "debugger-cleanup-race"))))
+               (signal-semaphore answer-ready))
+             :name "deadline-debugger-race")))
+      (unwind-protect
+           (progn
+             (ok (wait-on-semaphore entered :timeout 2)
+                 "the intended user phase started before the deadline")
+             (ok (wait-on-semaphore answer-ready :timeout 5)
+                 "deadline terminates through the outer terminal tag")
+             (ok (eq :timeout (second answer)))
+             (ok (eql 0.25 (first answer)))
+             (ok (not (third answer))
+                 "the controlled timeout did not leak the deadline child"))
+        (when (thread-alive-p caller)
+          (destroy-thread caller))
+        (ignore-errors (join-thread caller))))))
+
+#+sbcl
+(deftest deadline-during-debugger-cleanup-prefers-timeout
+  (let ((cleanup-started (make-semaphore)))
+    (%assert-deadline-race
+     (lambda ()
+       (unwind-protect
+            (error 'boundary-direct-condition)
+         (signal-semaphore cleanup-started)
+         (wait-on-semaphore (make-semaphore))))
+     cleanup-started)))
+
+#+sbcl
+(define-condition boundary-blocking-report-condition (condition)
+  ((report-started :initarg :report-started :reader report-started)
+   (cleanup-started :initarg :cleanup-started :reader cleanup-started)))
+
+#+sbcl
+(define-condition boundary-deadline-reentrant-report-condition
+    (boundary-blocking-report-condition) ()
+  (:report
+   (lambda (condition stream)
+     (declare (ignore stream))
+     (unwind-protect
+          (progn
+            (signal-semaphore (report-started condition))
+            (wait-on-semaphore (make-semaphore)))
+       (signal-semaphore (cleanup-started condition))
+       (invoke-debugger (make-condition 'boundary-direct-condition))))))
+
+#+sbcl
+(define-condition boundary-deadline-signalling-report-condition
+    (boundary-blocking-report-condition) ()
+  (:report
+   (lambda (condition stream)
+     (declare (ignore stream))
+     (unwind-protect
+          (progn
+            (signal-semaphore (report-started condition))
+            (wait-on-semaphore (make-semaphore)))
+       (signal-semaphore (cleanup-started condition))
+       (signal 'boundary-direct-condition)))))
+
+#+sbcl
+(deftest deadline-during-report-debugger-reentry-preserves-timeout
+  (let ((report-started (make-semaphore))
+        (cleanup-started (make-semaphore)))
+    (%assert-deadline-race
+     (lambda ()
+       (error 'boundary-deadline-reentrant-report-condition
+              :report-started report-started :cleanup-started cleanup-started))
+     report-started)
+    (ok (wait-on-semaphore cleanup-started :timeout 1)
+        "deadline unwind entered the condition report's debugger cleanup")))
+
+#+sbcl
+(deftest deadline-during-report-signal-preserves-timeout
+  (let ((report-started (make-semaphore))
+        (cleanup-started (make-semaphore)))
+    (%assert-deadline-race
+     (lambda ()
+       (error 'boundary-deadline-signalling-report-condition
+              :report-started report-started :cleanup-started cleanup-started))
+     report-started)
+    (ok (wait-on-semaphore cleanup-started :timeout 1)
+        "deadline unwind entered the condition report's signalling cleanup")))

@@ -1,5 +1,11 @@
 (defpackage #:cl-mcp/src/utils/request-debugger-boundary
   (:use #:cl)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary-protocol
+                #:*request-debugger-boundary-active*
+                #:call-with-request-debugger-boundary
+                #:request-debugger-deadline-interrupt
+                #:request-debugger-result-status
+                #:request-debugger-result-error)
   (:import-from #:cl-mcp/src/frame-inspector
                 #:capture-debugger-error-context)
   (:export #:*request-debugger-boundary-active*
@@ -16,27 +22,26 @@
 
 (declaim (optimize (debug 3) (safety 3)))
 
-(defvar *request-debugger-boundary-active* nil
-  "Boolean policy enabled only around authenticated request execution.
-Managed children may inherit this policy, but must create their own boundary.")
-
-(declaim (type boolean *request-debugger-boundary-active*))
-
 (defvar *request-debugger-context* nil
   "Private same-thread state; never propagate this binding to a child thread.")
 
-(defstruct (request-debugger-result (:constructor %make-result (status &key values error)))
+(defstruct (request-debugger-result
+            (:constructor %make-result (status &key values error))
+            (:conc-name %result-))
   "The settled request outcome, containing values or a saved debugger error."
   (status :ok :type (member :ok :debugger :timeout) :read-only t)
   (values nil :type list :read-only t)
   (error nil :read-only t))
 
-(setf (documentation 'request-debugger-result-status 'function)
-      "Return :OK, :DEBUGGER, or :TIMEOUT for the settled boundary result."
-      (documentation 'request-debugger-result-values 'function)
-      "Return the thunk's multiple-value list only for an :OK result."
-      (documentation 'request-debugger-result-error 'function)
-      "Return the saved escape error only for a :DEBUGGER result.")
+(defmethod request-debugger-result-status ((result request-debugger-result))
+  (%result-status result))
+
+(defmethod request-debugger-result-error ((result request-debugger-result))
+  (%result-error result))
+
+(defun request-debugger-result-values (result)
+  "Return the thunk's multiple-value list only for an :OK result."
+  (%result-values result))
 
 (define-condition request-debugger-escape-error (error)
   ((context :initarg :context :reader request-debugger-escape-error-context)
@@ -139,7 +144,7 @@ No original condition is retained or printed, and no user restart is selected.")
        :terminal)
       (:deadline-unwinding nil))))
 
-(defun request-debugger-deadline-interrupt (deadline-tag deadline-marker)
+(defmethod request-debugger-deadline-interrupt :around (deadline-tag deadline-marker)
   "Transfer a deadline interrupt to a live tag on the executing request thread.
 Repeated interrupts return during a deadline unwind. Outside a request, retain
 the guarded transfer used by ordinary deadline callers."
@@ -150,9 +155,9 @@ the guarded transfer used by ordinary deadline callers."
         (:deadline (throw deadline-tag deadline-marker))
         (:terminal
          (throw (%context-terminal-tag *request-debugger-context*) deadline-marker)))))
-  (ignore-errors (throw deadline-tag deadline-marker)))
+  (call-next-method))
 
-(defun call-with-request-debugger-boundary (thunk)
+(defmethod call-with-request-debugger-boundary (thunk)
   "Run THUNK and return a settled request debugger result with its values.
 On SBCL, the authenticated request policy installs a dynamic debugger hook.
 Ordinary signalling and user recovery are untouched until debugger entry."

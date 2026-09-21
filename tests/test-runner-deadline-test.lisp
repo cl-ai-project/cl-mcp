@@ -10,12 +10,113 @@
                 #:deftest #:testing #:ok)
   (:import-from #:bordeaux-threads
                 #:current-thread)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:*request-debugger-boundary-active*
+                #:request-debugger-escape-error-p)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:call-with-test-run-deadline
                 #:coerce-timeout-seconds
                 #:make-timeout-result))
 
 (in-package #:cl-mcp/tests/test-runner-deadline-test)
+
+(declaim (optimize (debug 3) (safety 3)))
+
+(define-condition deadline-direct-condition (condition) ())
+
+#+sbcl
+(deftest deadline-thread-converts-a-debugger-escape-to-error
+  (let ((*request-debugger-boundary-active* t))
+    (multiple-value-bind (result status leaked)
+        (call-with-deadline-thread
+         (lambda () (error 'deadline-direct-condition))
+         2 :name "deadline-debugger-test")
+      (ok (eq :error status))
+      (ok (not leaked))
+      (ok (request-debugger-escape-error-p result)))))
+
+(deftest deadline-request-policy-preserves-normal-values-and-serious-conditions
+  (let ((*request-debugger-boundary-active* t))
+    (dolist (values '(nil (nil) (:one :two) (:deadline)))
+      (multiple-value-bind (result status leaked)
+          (call-with-deadline-thread (lambda () (values-list values)) 2)
+        (ok (eq :ok status))
+        (ok (equal values result))
+        (ok (not leaked))))
+    (dolist (condition (list (make-condition 'simple-error :format-control "ordinary")
+                            (make-condition 'sb-ext:timeout)))
+      (multiple-value-bind (result status leaked)
+          (call-with-deadline-thread (lambda () (error condition)) 2)
+        (ok (eq :error status))
+        (ok (eq condition result) "ordinary serious conditions retain their identity")
+        (ok (not leaked))))))
+
+(deftest deadline-request-policy-preserves-inline-execution
+  (let ((*request-debugger-boundary-active* t)
+        (caller (current-thread)))
+    (dolist (timeout '(nil 0 -1 :invalid))
+      (multiple-value-bind (result status leaked)
+          (call-with-deadline-thread
+           (lambda () (values (eq caller (current-thread)) :inline)) timeout)
+        (ok (equal '(t :inline) result))
+        (ok (eq :ok status))
+        (ok (not leaked)))
+      (let ((condition (make-condition 'simple-error :format-control "inline")))
+        (ok (eq condition
+                (handler-case
+                    (call-with-deadline-thread (lambda () (error condition)) timeout)
+                  (error (caught) caught)))
+            "inline errors still propagate to the caller")))))
+
+#+sbcl
+(deftest deadline-request-completion-wins-before-boundary-finalization
+  (let* ((*request-debugger-boundary-active* t)
+         (constructor 'cl-mcp/src/utils/request-debugger-boundary::%make-result)
+         (original-constructor (fdefinition constructor))
+         (original-interrupt (fdefinition 'bt:interrupt-thread))
+         (release-thunk (bt:make-semaphore))
+         (child nil)
+         (deadline-interrupt nil)
+         (injected nil)
+         (transfer-error nil))
+    ;; Delay the real deadline closure until the child's user thunk has
+    ;; returned, then invoke it synchronously at boundary result construction.
+    ;; This is the narrow interval where OUTCOME must already protect values.
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'bt:interrupt-thread)
+                 (lambda (thread function)
+                   (if (eq child thread)
+                       (progn
+                         (setf deadline-interrupt function)
+                         (bt:signal-semaphore release-thunk))
+                       (funcall original-interrupt thread function))))
+           (setf (fdefinition constructor)
+                 (lambda (status &rest arguments)
+                   (when (and (eq :ok status)
+                              (eq child (current-thread))
+                              deadline-interrupt
+                              (not injected))
+                     (setf injected t)
+                     (handler-case (funcall deadline-interrupt)
+                       (control-error (condition) (setf transfer-error condition))))
+                   (apply original-constructor status arguments)))
+           (multiple-value-bind (result status leaked)
+               (call-with-deadline-thread
+                (lambda ()
+                  (setf child (current-thread))
+                  (bt:wait-on-semaphore release-thunk)
+                  (values :complete :also))
+                0.25 :name "deadline-completion-test")
+             (ok injected "the real deadline callback ran after normal value publication")
+             (ok (null transfer-error) "completed work never attempts a stale-tag transfer")
+             (ok (eq :ok status))
+             (ok (equal '(:complete :also) result))
+             (ok (not leaked))))
+      (setf (fdefinition constructor) original-constructor
+            (fdefinition 'bt:interrupt-thread) original-interrupt))))
 
 (deftest coerce-timeout-seconds-accepts-numbers-and-strings
   (testing "a number passes through"
