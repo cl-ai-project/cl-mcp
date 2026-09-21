@@ -74,6 +74,10 @@ use cl-mcp tools effectively:
   troubleshooting recipes
 - **`common-lisp-expert.md`** — Production-quality Common Lisp coding standards,
   CLOS/conditions/restarts conventions, and TDD with Rove
+- **`cl-spec-driven-development.md`** — Contract-driven workflow for the
+  optional `cl-spec` tool group: finding and writing Function Specs and
+  Properties, baselines, seed replay, and reading `spec-check` verdicts.
+  Supplements the two prompts above rather than replacing them
 
 Reference them from your project's `CLAUDE.md` (or equivalent) so the agent
 loads them at conversation start:
@@ -82,6 +86,15 @@ loads them at conversation start:
 # CLAUDE.md
 @prompts/repl-driven-development.md
 @prompts/common-lisp-expert.md
+```
+
+If you enable the `cl-spec` tool group (see
+[Optional tool groups](docs/tools.md#optional-tool-groups)), add the third
+prompt as well. Leave it out otherwise: without the group, the tools it
+describes are not in the agent's tool list.
+
+```markdown
+@prompts/cl-spec-driven-development.md
 ```
 
 ### Claude Code
