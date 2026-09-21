@@ -191,6 +191,12 @@ breaker can halt automatic recovery after repeated crashes. In diagnostic logs,
 is a provisional snapshot. Use the later `worker.reaped` event for the final
 process exit status.
 
+For a pooled SBCL worker request, a condition that no existing handler resolves
+and that reaches the debugger path is observed and aborted as that request's
+structured failure. This preserves the worker for later requests, but it does
+not roll back side effects made before the failure. A process exit such as
+SB-EXT:EXIT remains a real worker crash and follows normal EOF/reaper recovery.
+
 Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keyword:
 
 ```lisp
