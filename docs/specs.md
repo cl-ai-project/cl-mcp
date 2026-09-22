@@ -36,10 +36,18 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/spec-adapter-report::%select-properties` (internal) | none | `check-routing-selection-names-only-what-was-asked` |
 | `cl-mcp/src/spec-adapter-report::%trials-budget` (internal) | none | `check-routing-budget-comes-from-its-stated-source` |
 | `cl-mcp/src/spec-adapter-report::%definition-match` (internal) | none | `check-routing-digest-comparison-has-four-answers` |
+| `cl-mcp/src/spec-adapter-core:api-backend-available-p` | none (see *Inspection*) | `spec-inspection-operations-need-their-own-handles` |
+| `cl-mcp/src/spec-adapter-report::contract-operation-missing` (internal) | none | `spec-inspection-operations-need-their-own-handles` |
+| `cl-mcp/src/spec-adapter-report:list-report` | none | `spec-inspection-listing-separates-capability-from-count` |
+| `cl-mcp/src/spec-adapter-report:symbol-report` | none | `spec-inspection-registration-is-not-read-failure` |
+| `cl-mcp/src/spec-adapter-report:describe-report` | none | `spec-inspection-registration-is-not-read-failure` |
+| `cl-mcp/src/spec-adapter-report::%describe-function-spec` (internal) | none | `spec-inspection-contract-declaration-survives-describe` |
+| `cl-mcp/src/spec-adapter-core:definition-digest` | none | `spec-inspection-digest-comes-from-the-record-or-the-readers` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
-`cl-mcp/specs/check-verdicts` and `cl-mcp/specs/check-routing`. Each Function Spec is
+`cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing` and
+`cl-mcp/specs/spec-inspection`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -854,9 +862,139 @@ Found while writing this, and left as they are:
 - `%definition-match` compares digests without regard to case. The fixtures
   never rely on that either way.
 
-Not covered: symbol resolution beyond these names; the listing and describe
-paths; the renderer; JSON-RPC end to end; real timeouts; and anything after
-the runner is called, which *Verdicts* covers.
+Not covered: symbol resolution beyond these names; the renderer; JSON-RPC end
+to end; real timeouts; and anything after the runner is called, which
+*Verdicts* covers. The listing and describe paths are *Inspection* below.
+
+## Inspection
+
+Before anything runs, an agent reads: what this cl-spec can serve, what is
+registered, what a declaration says, and which digest stands for it. The
+danger here is the false negative — an empty answer given for something that
+could not be read — so every check keeps three answers apart: present, absent,
+and unreadable.
+
+`specs/spec-inspection.lisp` checks the functions that decide these:
+
+| Function | Decides |
+|---|---|
+| `api-backend-available-p`, `contract-operation-missing` | which operations this cl-spec can serve |
+| `list-report` | what is registered, and what could not be enumerated |
+| `symbol-report`, `describe-report` | registration against read failure |
+| `%describe-function-spec` | what a contract declares |
+| `definition-digest` | which digest stands for a declaration |
+
+Expectations come from `specs/spec-inspection-fixtures.lisp`, stated once:
+`+operation-handles+` (which handles each operation needs),
+`+required-handles+`, a registry descriptor's definitions with their packages,
+tags and `:about` relation, and a contract descriptor's own arguments, clauses
+and cases. None of it is read from cl-mcp's `+listing-kinds+`,
+`+contract-operations+`, `+required-functions+` or record shapes.
+
+The stub records every reader call — its key, the name asked for and the
+registry it was handed — so a check can say what was read as well as what came
+back. Its runners signal if a read ever reaches them.
+
+| Property | Run in every trial | Drawn |
+|---|---|---|
+| `spec-inspection-operations-need-their-own-handles` | every handle combination for describing and running a contract, with unrelated handles beside them; the four backend states | which handles, and the backend state |
+| `spec-inspection-listing-separates-capability-from-count` | the drawn request, then all four kinds under the full handle set; the three tag states | the registry, handles, kind, package, tag and limit |
+| `spec-inspection-registration-is-not-read-failure` | the drawn subject under all four reader behaviours | the registry, the subject, the kind asked for |
+| `spec-inspection-contract-declaration-survives-describe` | the drawn declaration, and both sides of one character budget | the arguments, clauses, cases, generator, schema and budget |
+| `spec-inspection-digest-comes-from-the-record-or-the-readers` | five rows: a complete v1 digest, a refused one, an unknown version, the old shape, and an explicitly unread definition | the metadata state, the version, and the spec the old shape references |
+
+What the properties hold to:
+- **An operation needs its own handles.** A cl-spec that cannot run a contract
+  can still describe one; one that cannot project a contract can do neither.
+  A backend is available only as an object — a special bound to `NIL`, a
+  reader that signals and a missing reader are all unavailable, and none of
+  them is an error. Reading a registry needs no backend at all.
+- **A listing keeps capability, scope and count apart.** A kind not asked for,
+  or one that cannot be listed, has no count — never 0, which would say the
+  registry holds none. The `*_listable` flags describe the revision, not the
+  request. A package narrows by the home package of the registered name. A tag
+  narrows properties only, and its three states (not requested, known, no such
+  keyword here) stay apart without interning the unknown one. A limit cuts the
+  lists and sets `truncated`, and changes no count. Only the kinds asked for
+  are enumerated.
+- **Registration is not read failure.** cl-spec saying "unknown name" gives
+  not-registered; a reader that breaks gives an internal error; and
+  `CL:UNDEFINED-FUNCTION` means the target is undefined only for a contract —
+  out of a property or spec reader it is an adapter fault.
+  `nothing_registered` is said only about a lookup that worked, and
+  `include_runtime` false reads no runtime and says why.
+- **A declaration arrives as written.** Arguments in order with their kind
+  (`:required` where version 1 omits the key), supplied-p and keyword; range
+  ends as `*` and `"0"`; clauses as forms that can be pasted back, one as
+  itself and several joined by `AND`; a clause that is not there reported as
+  not applicable, and one that is there and `NIL` reported as a clause; cases
+  in declared order with their guards, outcomes and clauses. A clause of a
+  stated length is whole at that budget and cut one character under it. A
+  record of a version this cl-mcp does not know, one missing required
+  metadata, one of the wrong kind, and a projection that came back `NIL` are
+  all refused rather than read as an empty contract.
+- **A digest comes from the record when the record has one.** A complete
+  version 1 digest is used as it stands, and no dependency reader is called.
+  A digest that is missing, incomplete or of an unknown version gives no
+  digest at all — never one computed from the readers instead. The old shape,
+  with no version key, digests from the readers, which it does read, and its
+  digest follows the spec it references. An explicitly unread definition is
+  not fetched again.
+
+Clause text is compared by reading it back with `*read-eval*` off, not by
+matching characters: the projector prints package-qualified, and every form
+compared this way was written in the fixtures. Where a printed length matters,
+the form is a string, whose length does not depend on the printer's package.
+
+**Fixed cases, default suite** (`tests/spec-inspection-test.lisp`, 14 tests):
+each row above with concrete values, including the four backend states, a
+count of none against not looking, the three tag states, a package filter, a
+limit, the four reader behaviours, the declaration fields, a cut clause at its
+own length and one character under, the four schema refusals, and the five
+digest rows.
+
+**Real cl-spec, opt-in** (`tests/spec-inspection-specs-test.lisp`, 6 tests).
+Declarations of its own in registries of its own:
+- a spec, a property of the subject's name, a property `(:about ...)` it, a
+  plain contract and one with named cases, a capture and a state
+  postcondition;
+- introspection with no backend installed, which still lists and describes;
+- cl-spec's own projection: the argument's kind, the open range end, the
+  clauses, the case order, the capture and the argument generator;
+- **a read runs nothing**: the target, the generator, `:pre`, the capture, a
+  case guard, `:post` and `:state-post` each increment a counter, and a
+  snapshot taken after registration is unchanged after six reads and an entry
+  call. That is a statement about the forms a contract holds, not about
+  everything an implementation may do while printing;
+- declaring a contract again changes what describe says, and leaves another
+  registry alone;
+- the three entries keep the kind, name, limit and character budget they were
+  given.
+
+That suite installs its registry as `cl-spec:*registry*`'s global value and
+puts the previous one back: the entry functions read the registry on a
+deadline thread of their own, which does not see a dynamic binding. That is
+why it runs in a process of its own, not in an MCP worker in use.
+
+**Resolving the API** (`tests/spec-api-resolution-test.lisp`, 9 tests).
+`resolve-cl-spec-api` reads the real `CL-SPEC` package, so this suite builds
+one of its own — and refuses to run when a `CL-SPEC` package already exists,
+rather than renaming or deleting someone else's. It needs no cl-spec at all,
+and the `specs` job runs it as its own step:
+- no package is `:not-loaded`, with no API;
+- a missing required function, one that is not fbound, and an unbound required
+  special are each `:incomplete`, naming only what is missing;
+- a special bound to `NIL` is bound: the adapter is `:ok`, and the backend is
+  reported absent, which is a different fact;
+- optional functions and condition classes cost their own operation only;
+- a complete cl-spec resolves to that package's own definitions, with the
+  special named and read through;
+- resolving calls none of them and interns nothing it did not find;
+- the package is gone again afterwards.
+
+Not covered: the renderer and JSON-RPC end to end; cl-spec revisions other
+than the one pinned; the listing of specs and properties beyond these
+fixtures; and instrumentation.
 
 ## Dependencies
 
@@ -876,18 +1014,23 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
            ──> cl-mcp/tests/check-routing-test ──> cl-mcp/specs/check-routing-fixtures
                                                 ──> cl-mcp/specs/core-record-fixtures
            ──> cl-mcp/tests/suite-judge-test ──> cl-mcp/specs/suite-judge ──> rove
+           ──> cl-mcp/tests/spec-inspection-test ──> cl-mcp/specs/spec-inspection-fixtures
                (no cl-spec; not the bundle)
 self-test   ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
-integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test
-                ──> cl-spec (opt-in), judged by cl-mcp/specs/suite-judge
+integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test,
+                cl-mcp/tests/spec-inspection-specs-test ──> cl-spec (opt-in)
+            ──> cl-mcp/tests/spec-api-resolution-test ──> NO cl-spec, by design
+                all judged by cl-mcp/specs/suite-judge
 ```
 
 Nothing in `cl-mcp.asd` or `main.lisp` refers to the bundle. `cl-mcp` is a
 package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 (`specs/*.lisp`) exist without any `.asd` entry. The runner's own tests,
 `cl-mcp/tests/specs-runner-test`, the real-record tests,
-`cl-mcp/tests/core-record-specs-test`, and the real routing tests,
-`cl-mcp/tests/check-routing-specs-test`, are left out of `tests.lisp`.
+`cl-mcp/tests/core-record-specs-test`, the real routing tests,
+`cl-mcp/tests/check-routing-specs-test`, the real inspection tests,
+`cl-mcp/tests/spec-inspection-specs-test`, and the API resolution tests,
+`cl-mcp/tests/spec-api-resolution-test`, are left out of `tests.lisp`.
 (`cl-mcp/tests/spec-integration-test` is in it, and skips there when cl-spec
 cannot be found.)
 The default suite does load these tests and the fixture libraries they use:
@@ -896,7 +1039,8 @@ The default suite does load these tests and the fixture libraries they use:
 - `tests/spec-core-record-test.lisp`, with `specs/core-record-fixtures.lisp`;
 - `tests/check-verdict-test.lisp`, with `specs/check-verdict-fixtures.lisp`;
 - `tests/check-routing-test.lisp`, with `specs/check-routing-fixtures.lisp`;
-- `tests/suite-judge-test.lisp`, with `specs/suite-judge.lisp`.
+- `tests/suite-judge-test.lisp`, with `specs/suite-judge.lisp`;
+- `tests/spec-inspection-test.lisp`, with `specs/spec-inspection-fixtures.lisp`.
 
 None of them needs cl-spec or loads the bundle.
 
@@ -1040,7 +1184,7 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
 from each property's `:trials` table: 200 for the string properties, 12 for the
-read- and write-access ones, and 25 for the record, verdict and routing ones. Function Specs run with 200 trials. Each target has a
+read- and write-access ones, and 25 for the record, verdict, routing and inspection ones. Function Specs run with 200 trials. Each target has a
 120-second deadline per seed. A local `check` takes about 20 s, most of it the
 dependency-registration property.
 
@@ -1125,13 +1269,15 @@ something failed, `2` the script could not run them.
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
 - `integration` runs the one real-cl-spec suite `CL_MCP_SPECS_SUITE` names,
   `cl-mcp/tests/spec-integration-test` or
-  `cl-mcp/tests/check-routing-specs-test`, and judges it from Rove's per-test
-  results (see *Routing*). A test that is missing, failed, skipped or asserted
+  `cl-mcp/tests/check-routing-specs-test`, `cl-mcp/tests/spec-inspection-specs-test`
+  or `cl-mcp/tests/spec-api-resolution-test`, and judges it from Rove's
+  per-test results (see *Routing*).  The last one is the odd case: it needs a
+  process with no cl-spec, and refuses to run when one is there. A test that is missing, failed, skipped or asserted
   nothing fails the run with status `1`. A suite it does not know, or one that
   does not load, exits `2`. Both suites swap the cl-spec registry, or bind
   one, while they run: use a process of their own, not the MCP worker you
   are working in.
-- `negative-control` swaps in twenty-five wrong implementations, one at a time:
+- `negative-control` swaps in twenty-nine wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -1198,8 +1344,16 @@ something failed, `2` the script could not run them.
   - a `%definition-match` that counts an incomplete digest equal to the
     expected one as a match. The digest property must fail.
 
-  Each wrong record, verdict and routing function calls the real one and bends
-  one rule of its answer. The verdict properties' own outcome is read from cl-spec's
+  - a `list-report` that reports a count it never looked for as 0. The
+    listing property must fail.
+  - a `%describe-function-spec` that reports every argument as required, and
+    one that reports a cut precondition as complete. The declaration property
+    must fail for each.
+  - a `definition-digest` that digests from the readers when the record's own
+    digest was refused. The digest-source property must fail.
+
+  Each wrong record, verdict, routing and inspection function calls the real
+  one and bends one rule of its answer. The verdict properties' own outcome is read from cl-spec's
   result, as for every control; `verified` and the MCP rendering play no part
   in judging a control.
 
@@ -1243,8 +1397,9 @@ The `specs` job in `.github/workflows/ci.yml` does the following:
    `ros install cl-ai-project/cl-mcp`, and the runner also fails when cl-mcp
    comes from anywhere but the checkout.
 4. Runs `self-test`, `check`, `negative-control` and `integration` for each of
-   the two real-cl-spec suites, as separate processes, each under
-   `timeout 900` inside a 30-minute job, and uploads the report files.
+   the three real-cl-spec suites and for the API resolution suite, as separate
+   processes, each under `timeout 900` inside a 30-minute job, and uploads the
+   report files.
 
 check-it and cl-mcp's other dependencies come from the current Quicklisp dist;
 the report records which one. The job uses no cache. The default `test` job is
