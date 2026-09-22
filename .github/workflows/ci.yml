@@ -109,6 +109,18 @@ jobs:
           CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/check-routing-specs-test \
             timeout 900 ros run --load scripts/check-specs.lisp
 
+      - name: Real cl-spec inspection tests
+        run: |
+          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-inspection-specs-test \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
+      # The opposite requirement: this one needs a process with no cl-spec in
+      # it, because it builds a CL-SPEC package of its own to resolve against.
+      - name: API resolution against a synthetic cl-spec
+        run: |
+          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-api-resolution-test \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

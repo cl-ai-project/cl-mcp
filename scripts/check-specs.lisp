@@ -126,7 +126,27 @@ test counts as a failure, not a pass."
      "real-budgets-and-seeds-reach-cl-spec"
      "real-replay-and-a-changed-declaration"
      "real-entry-reads-seed-text-and-reports-what-ran"
-     "real-entry-delivers-trials-to-a-contract-run"))
+     "real-entry-delivers-trials-to-a-contract-run")
+    ("cl-mcp/tests/spec-inspection-specs-test"
+     "real-registrations-of-one-name-stay-apart"
+     "real-introspection-works-without-a-backend"
+     "real-declarations-arrive-as-cl-spec-projects-them"
+     "real-reads-run-no-form-of-the-declaration"
+     "real-redefinition-reaches-describe-and-leaves-another-registry-alone"
+     "real-entries-keep-the-kind-name-and-bounds-they-were-given")
+    ;; This one is the other way round: it needs a process with NO cl-spec,
+    ;; because it builds a CL-SPEC package of its own to resolve against.  It
+    ;; refuses to run when one is already there.
+    ("cl-mcp/tests/spec-api-resolution-test"
+     "this-process-has-no-cl-spec-of-its-own"
+     "no-package-at-all-is-not-loaded"
+     "a-missing-required-name-is-incomplete-and-named"
+     "a-special-bound-to-nil-is-not-an-unbound-one"
+     "optional-names-cost-their-own-operation-only"
+     "a-complete-cl-spec-resolves-to-its-own-definitions"
+     "resolving-again-sees-the-bindings-as-they-are"
+     "resolving-interns-nothing-it-did-not-find"
+     "the-package-is-gone-again"))
   "The real-cl-spec suites integration mode runs, each with the tests it must
 see run.  The names are listed here, apart from the suites, so that a test
 that is deleted or renamed fails the step instead of quietly leaving it.

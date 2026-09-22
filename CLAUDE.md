@@ -58,7 +58,11 @@ change, then `property=`, and run `check-verdict-test` and `spec-adapter-report-
 routing (`%target-argument-error`, `%resolve-profile`, `%select-properties`, `%trials-budget`,
 `%definition-match` there, and `parse-seed-string` in `src/tools/spec-entry.lisp`): the same
 steps, then `check-routing-test`; run the real-cl-spec suites only in a process of their own
-(`CL_MCP_SPECS_MODE=integration`, see `docs/specs.md`). Elsewhere the bundle is not required.
+(`CL_MCP_SPECS_MODE=integration`, see `docs/specs.md`). The same goes for the inspection layer
+(`api-backend-available-p` and `definition-digest` in `src/spec-adapter-core.lisp`;
+`contract-operation-missing`, `list-report`, `symbol-report`, `describe-report` and
+`%describe-function-spec` in `src/spec-adapter-report.lisp`): `symbol=`, then `property=`, and
+run `spec-inspection-test`. Elsewhere the bundle is not required.
 
 ## Architecture
 
