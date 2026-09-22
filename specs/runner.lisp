@@ -669,6 +669,19 @@ this control, so this is the real read decision."
   (or (allowed-read-path path)
       (%refuse-write-for-control path)))
 
+(defun %write-path-misreading-doubled-separators (real)
+  "Return a wrong ENSURE-WRITE-PATH, for the negative control: a string with a
+doubled separator comes back as the file beside the right one, its name with
+-other appended, still inside the project; anything else goes to REAL, the
+real function.  Every answer is allowed and nothing escapes, so only a
+comparison of spellings that include a doubled separator can tell."
+  (lambda (path)
+    (let ((result (funcall real path)))
+      (if (and (stringp path) (search "//" path))
+          (make-pathname :name (format nil "~A-other" (pathname-name result))
+                         :defaults result)
+          result))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -689,8 +702,10 @@ the argument as it is after the call cannot see."
         (refused-writes (%bundle-name :property "WRITE-REFUSES-OUTSIDE-AND-ABSOLUTE"))
         (link-writes (%bundle-name :property "WRITE-FOLLOWS-EXISTING-LINKS"))
         (writes (%bundle-name :property "WRITER-CHANGES-ONLY-THE-EXPECTED-ENTRIES"))
+        (spellings (%bundle-name :property "WRITE-PRESERVES-SAFE-SPELLINGS"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
-        (real-read (fdefinition 'allowed-read-path)))
+        (real-read (fdefinition 'allowed-read-path))
+        (real-write (fdefinition 'ensure-write-path)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -745,8 +760,10 @@ the argument as it is after the call cannot see."
      (list :function 'ensure-write-path
            :description "refuses every path"
            :replacement #'%refuse-write-for-control
-           :targets (list (list :property project-writes) (list :property writes))
-           :must-fail (list (list :property project-writes) (list :property writes)))
+           :targets (list (list :property project-writes) (list :property writes)
+                          (list :property spellings))
+           :must-fail (list (list :property project-writes) (list :property writes)
+                            (list :property spellings)))
      (list :function 'ensure-write-path
            :description "resolves lexically, as before the fix, trusting new names below a link"
            :replacement #'%write-path-lexically
@@ -756,7 +773,14 @@ the argument as it is after the call cannot see."
            :description "allows whatever the read policy allows"
            :replacement #'%write-path-by-read-policy
            :targets (list (list :property refused-writes))
-           :must-fail (list (list :property refused-writes))))))
+           :must-fail (list (list :property refused-writes)))
+     ;; The project property runs too, to show whether the existing generated
+     ;; checks see this fault: no existing generator spells a doubled separator.
+     (list :function 'ensure-write-path
+           :description "sends a spelling with a doubled separator to the file beside the right one"
+           :replacement (%write-path-misreading-doubled-separators real-write)
+           :targets (list (list :property spellings) (list :property project-writes))
+           :must-fail (list (list :property spellings))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
