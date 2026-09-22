@@ -253,6 +253,22 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
       (ok (refused-p (validate fixture ".") :no-file-name))
       (ok (refused-p (validate fixture "src/..") :no-file-name)))))
 
+(deftest write-refuses-a-directory-as-the-file-to-write
+  ;; An existing directory named as the target, or a link to one.  At 8eeae3d
+  ;; the directory itself came back, and fs-write-file returned T after
+  ;; creating src/.file.<pid>.<serial>, a name no caller gave; on main it
+  ;; returned T and wrote nothing.  With the trailing slash it has no file name.
+  (with-table-tree (fixture)
+    (testing "the validator refuses and creates nothing"
+      (ok (refused-p (validate fixture "src") :directory-target))
+      (ok (refused-p (validate fixture "x[1]") :directory-target))
+      (ok (refused-p (validate fixture "link-a") :directory-target))
+      (ok (refused-p (validate fixture "src/") :no-file-name)))
+    (testing "the writer refuses and leaves the whole tree as it was"
+      (ok (refused-p (write-to fixture "src") :directory-target))
+      (ok (refused-p (write-to fixture "link-a") :directory-target))
+      (ok (refused-p (write-to fixture "src/") :no-file-name)))))
+
 (deftest write-refuses-an-unresolvable-root
   (with-tree (fixture)
     (let ((*project-root* (uiop:parse-native-namestring

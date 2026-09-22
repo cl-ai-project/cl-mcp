@@ -267,6 +267,12 @@ own, before anything was fixed. Fixed tests pin each one (`e7b410a`,
   reporting success. `rename-file` merges its new name with the temporary
   file's pathname, which supplied the type `tmp`. `3284844` renames onto a
   type of `:unspecific`, which merging leaves alone.
+- An existing directory named as the file to write (`src`, or a link to it)
+  came back as the directory itself. On main, `fs-write-file` then renamed its
+  temporary file onto itself, deleted it, and returned `T`, having written
+  nothing. After `3284844` the name was merged in instead, and a file named
+  `src/.file.<pid>.<serial>` appeared. Found in review of #171, and now
+  refused as `:directory-target`.
 
 `44ca65f` replaces the resolver. From the project root's truename, it takes the
 argument one name at a time, split natively (so a bracket or an asterisk is
@@ -288,14 +294,17 @@ What changes for callers:
 - An allowed path comes back as its real path. `link-a/new.txt`, with `link-a`
   a link to `src/`, returns `project/src/new.txt`.
 - These are refused now, each with its own reason. Before, they were allowed,
-  and a write then failed or replaced a dangling link:
+  and a write then failed, replaced a dangling link, or (for a directory)
+  returned `T` without writing the file asked for:
   - no file name: `""`, `dir/`, `.`, `dir/..` (`:no-file-name`);
   - a project root that does not resolve (`:unresolvable-root`);
   - an ancestor that is a file, or a link to one (`:non-directory-ancestor`);
   - an ancestor that is a dangling link (`:unresolvable-ancestor`);
   - `..` right after a link (`:parent-after-link`);
   - `..` after a name that does not exist yet (`:parent-after-missing`);
-  - a final link that leads nowhere (`:unresolvable-target`).
+  - a final link that leads nowhere (`:unresolvable-target`);
+  - an existing directory, or a link to one, as the file to write
+    (`:directory-target`).
 - `:absolute` and `:outside-project` keep their old messages.
 - The read side is unchanged, and still resolves `..` lexically (see *Known
   issues*).
@@ -351,7 +360,8 @@ writes nowhere else. The negative control relies on that.
   the link property and 21 % in the writer property. The fixed tests do not
   depend on that.
 - Fixed tests only: dangling links, a file as an ancestor, no file name, an
-  unset or unresolvable root, `..` in a relative pathname.
+  existing directory or a link to one as the target, an unset or unresolvable
+  root, `..` in a relative pathname.
 - Not covered: races with the filesystem (TOCTOU), permissions and ACLs, hard
   links, link chains and loops, mount namespaces, Windows paths, and what the
   MCP tools do around `fs-write-file`.

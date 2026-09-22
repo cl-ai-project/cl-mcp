@@ -115,8 +115,9 @@ symlink-based path traversal."
   ((path :initarg :path :reader write-path-refused-path)
    (reason :initarg :reason :reader write-path-refused-reason))
   (:documentation "ENSURE-WRITE-PATH declined PATH before anything was written.
-REASON is a keyword naming why: :ABSOLUTE, :OUTSIDE-PROJECT, and for a path it
-cannot check safely :NO-FILE-NAME, :UNRESOLVABLE-ROOT, :NON-DIRECTORY-ANCESTOR,
+REASON is a keyword naming why: :ABSOLUTE, :OUTSIDE-PROJECT, :DIRECTORY-TARGET
+for an existing directory or a link to one, and for a path it cannot check
+safely :NO-FILE-NAME, :UNRESOLVABLE-ROOT, :NON-DIRECTORY-ANCESTOR,
 :UNRESOLVABLE-ANCESTOR, :PARENT-AFTER-LINK, :PARENT-AFTER-MISSING or
 :UNRESOLVABLE-TARGET.  A SIMPLE-ERROR, so handlers written for the plain errors
 this function used to signal still see it."))
@@ -215,18 +216,29 @@ and the OS disagree."
 
 (defun %write-leaf (path directory new leaf)
   "Return the pathname PATH writes: LEAF below the real DIRECTORY and the NEW
-names under it.  An existing LEAF comes back as its truename; a symlink as the
-truename of what it leads to, or a refusal when it leads nowhere."
+names under it.  An existing file comes back as its truename, and a symlink to
+one as the truename of what it leads to.  A LEAF that is a directory, or a
+symlink to one, is refused: no file can be written there, and a writer handed
+the directory would have to invent a name inside it.  A symlink that leads
+nowhere is refused too."
   (if new
       (uiop:parse-native-namestring (format nil "~A~{~A/~}~A" directory new leaf))
       (let ((native (concatenate 'string directory leaf)))
         (case (%entry-kind native)
           ((:missing :file) (uiop:parse-native-namestring native))
-          (:directory (uiop:parse-native-namestring native :ensure-directory t))
-          (:link (or (%link-destination native)
-                     (%refuse-write path :unresolvable-target
-                                    "Write path ~A cannot be checked: ~A leads nowhere"
-                                    path leaf)))
+          (:directory
+           (%refuse-write path :directory-target
+                          "Write path ~A names a directory, not a file" path))
+          (:link
+           (multiple-value-bind (destination kind) (%link-destination native)
+             (case kind
+               (:file destination)
+               (:directory
+                (%refuse-write path :directory-target
+                               "Write path ~A names a directory, not a file" path))
+               (t (%refuse-write path :unresolvable-target
+                                 "Write path ~A cannot be checked: ~A leads nowhere"
+                                 path leaf)))))
           (t (%refuse-write path :unresolvable-target
                             "Write path ~A cannot be checked: ~A cannot be examined"
                             path leaf))))))
@@ -247,7 +259,8 @@ outside the project is never writable, though it is readable.
 
 Refuses, with REASON (see WRITE-PATH-REFUSED): an absolute PATH (:ABSOLUTE);
 a real path outside the project root (:OUTSIDE-PROJECT, with the message
-\"... is outside project root\" this function has always used); and a PATH it
+\"... is outside project root\" this function has always used); an existing
+directory, or a symlink to one, as the file to write (:DIRECTORY-TARGET); and a PATH it
 cannot check: no file name (:NO-FILE-NAME, for \"\", \"dir/\", \".\" or
 \"dir/..\"), a project root that does not resolve (:UNRESOLVABLE-ROOT), an
 ancestor that is a file or a link to one (:NON-DIRECTORY-ANCESTOR) or that does
@@ -261,7 +274,8 @@ project was therefore allowed as the symlink's own spelling, and written
 outside; a new file under a symlinked project root was refused.  Both now
 follow the real path.  The refusals for what cannot be checked are new; before,
 those paths were allowed and a write failed later, or wrote a file in place of a
-dangling link.  The result can differ from the old one for an allowed path too:
+dangling link.  An existing directory used to come back as itself, and
+FS-WRITE-FILE then reported success without writing the file asked for.  The result can differ from the old one for an allowed path too:
 it is the real path, not the spelling through a link.
 
 Checks the filesystem as it is when called.  A directory swapped for a symlink
