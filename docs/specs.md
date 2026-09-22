@@ -20,7 +20,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
-| `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries` |
+| `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries`, `write-preserves-safe-spellings` |
 | `cl-mcp/src/fs:fs-write-file` | none | `write-refuses-outside-and-absolute`, `writer-changes-only-the-expected-entries` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
@@ -391,6 +391,81 @@ suite:
 Each write property runs 12 trials at `:normal` and 3 at `:smoke`. Each takes
 0.01–0.06 s per seed, in the native runner and in an MCP worker alike.
 
+### Safe spellings
+
+`write-preserves-safe-spellings` (`:about ensure-write-path`, `:kind
+:equivalence`) is a relation, not another permission rule. For one allowed case
+it calls `ensure-write-path` with four spellings of the same file, one call
+each, in every trial:
+
+| Spelling | Built from the base `s` by | `src/new.txt` | `Makefile` |
+|---|---|---|---|
+| `:relative-string` | nothing: `s` itself | `src/new.txt` | `Makefile` |
+| `:relative-pathname` | a native parse of `s` | `#P"src/new.txt"` | `#P"Makefile"` |
+| `:leading-dot` | `./` in front | `./src/new.txt` | `./Makefile` |
+| `:repeated-separator` | one `/` doubled, or `.//` in front when `s` has none | `src//new.txt` | `.//Makefile` |
+
+POSIX pathname resolution ignores a `.` segment, and a repeated separator
+anywhere but at the very start, so all four name one file. A leading `/` or
+`//`, a trailing `/`, `D/../D`, and `..` after a link do not follow that rule,
+and none of them is generated. The variants are made from `s` by string
+operations and a native parse only, never by resolving it, so the differences
+are still there when the function is called. Each argument is a fresh object.
+The pathname is parsed from `s` alone, so it is physical and never wild, with
+brackets taken literally. The three strings go to the function as they are.
+
+The property demands, in this order, each as its own condition in the body:
+
+1. All four spellings were called once, a pathname and at least two strings
+   among them (`safe-spelling-coverage-p`). An empty list, or the base alone,
+   fails.
+2. The base returned an absolute path equal to `expected-write-native`, fixed
+   before the first call. This is the constructive oracle again, so refusing
+   everything, or sending every spelling to one wrong file, cannot pass by
+   agreeing with itself.
+3. Every other spelling returned an absolute path equal to the base's.
+4. No call changed the tree.
+
+A refusal in any spelling fails the trial; two refusals are not agreement.
+Each result is kept as a native string the moment it is observed. If a call
+changes the tree, observation stops there, and the trial fails.
+
+The domain is `draw-safe-spelling-case`. The target is a project file, existing
+or new, below zero to two existing directories and zero to two new ones. It is
+reached directly, or through one directory link at the root of `project/` that
+leads to the target's existing directory. The project root is given directly or
+as an alias. Names are the fixture's plain, spaced, Japanese, dotted and
+bracketed parts, with or without a type. Over 2000 draws: 39 % go through a
+link, 32 % use the root alias, 18 % target an existing file, 40 % have new
+directories, 33 % have no type, and 12 % have no separator, so they use
+`.//`. The existing generators and their digests are unchanged.
+
+A counterexample reports the case descriptor only.
+`(cl-mcp/specs/write-fixtures:explain-safe-spellings case)` rebuilds that case in
+a fresh fixture and returns, per spelling, the input's type and text, the
+returned path or the refusal's reason, and the tree's changes. It makes the
+calls again; it does not replay the failed run.
+
+Cost: 12 trials make 48 calls on 12 descriptors (four spellings each, not 48
+independent cases), in about 0.02 s per seed. The fixed tests cover specific
+cases:
+
+- a file without a type at the root, new and existing;
+- an existing file;
+- two new directories;
+- a link with spaces, Japanese and brackets;
+- the root alias;
+- a link to the root under the alias.
+
+They also check the spellings themselves: relative, the same file name, no
+`..`, no trailing slash, a physical pathname, no shared strings. Finally, they
+check that coverage refuses an empty list, the base alone, and a missing
+pathname.
+
+Not covered here: the writer, a link compared with the direct path it leads
+to, and anything outside the project. Refusals are the other properties' job.
+Those are the next unit of work.
+
 ## Dependencies
 
 ```
@@ -629,7 +704,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in eleven wrong implementations, one at a time:
+- `negative-control` swaps in twelve wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -644,13 +719,19 @@ something failed, `2` the script could not run them.
   - one that treats a string prefix of the project root as containment. Only
     the `project-other/` denial can catch it, in the unlisted-regions property.
 
-  - an `ensure-write-path` that refuses every path. The project and writer
-    properties must fail.
+  - an `ensure-write-path` that refuses every path. The project, writer and
+    safe-spelling properties must fail.
   - the resolver from before the fix, which trusts new names below a link. The
     link and writer properties must fail.
   - one that allows whatever the read policy allows, so an absolute project
     path and a registered dependency become writable. The refusal property
     must fail.
+  - one that sends a string with a doubled separator to the file beside the
+    right one, inside the project, and defers to the real function otherwise.
+    The safe-spelling property must fail. The project property runs against it
+    too, and passes: no existing generator spells `//`. Among the fixed Rove
+    tests, `write-allows-project-targets-as-their-real-path` (its `src//./new.txt`
+    case) catches it as well.
 
   `resolve-readable-path` is not replaced; it calls `allowed-read-path` for
   its decision. Nothing is written to a path that should be denied.
