@@ -126,26 +126,171 @@ this function used to signal still see it."))
   (error 'write-path-refused :path path :reason reason
                              :format-control control :format-arguments arguments))
 
+(defun %entry-kind (native)
+  "Return what the directory entry NATIVE is, without following it: :DIRECTORY,
+:LINK or :FILE (anything else that exists), :MISSING when nothing is there, or
+NIL when it cannot be examined."
+  (handler-case
+      (let ((type (logand (sb-posix:stat-mode (sb-posix:lstat native)) sb-posix:s-ifmt)))
+        (cond ((= type sb-posix:s-ifdir) :directory)
+              ((= type sb-posix:s-iflnk) :link)
+              (t :file)))
+    (sb-posix:syscall-error (condition)
+      (if (= (sb-posix:syscall-errno condition) sb-posix:enoent) :missing nil))))
+
+(defun %link-destination (native)
+  "Return the truename of what the symlink NATIVE leads to, and :DIRECTORY or
+:FILE as a second value; NIL when it leads nowhere.  Checked with stat first,
+because SBCL's TRUENAME returns a dangling link as itself."
+  (handler-case
+      (let ((type (logand (sb-posix:stat-mode (sb-posix:stat native)) sb-posix:s-ifmt)))
+        (values (truename (uiop:parse-native-namestring native))
+                (if (= type sb-posix:s-ifdir) :directory :file)))
+    ((or sb-posix:syscall-error file-error) () nil)))
+
+(defun %parent-native (directory)
+  "Return the parent of DIRECTORY, a native directory path ending in /."
+  (let ((trimmed (string-right-trim "/" directory)))
+    (if (string= trimmed "")
+        "/"
+        (subseq trimmed 0 (1+ (position #\/ trimmed :from-end t))))))
+
+(defun %write-parent (path directory segments)
+  "Walk SEGMENTS, the directory names of PATH, from DIRECTORY, the resolved
+project root as a native path ending in /.  Return the deepest real directory
+reached, as a native path ending in /, and the names below it that do not
+exist yet.  Each existing name is examined as it is: a directory is entered, a
+symlink is replaced by the real directory it leads to, and .. leaves the real
+directory reached so far, as the OS resolves it.  Refuses what it cannot
+check: an ancestor that is not a directory or does not resolve, and a .. right
+after a symlink or after a name that does not exist, where a lexical reading
+and the OS disagree."
+  (let ((after-link nil)
+        (new '()))
+    (dolist (segment segments)
+      (cond ((member segment '("" ".") :test #'string=))
+            ((string= segment "..")
+             (cond (new
+                    (%refuse-write path :parent-after-missing
+                                   "Write path ~A cannot be checked: .. follows ~A, ~
+                                    which does not exist"
+                                   path (car (last new))))
+                   (after-link
+                    (%refuse-write path :parent-after-link
+                                   "Write path ~A cannot be checked: .. follows a symlink"
+                                   path))
+                   (t (setf directory (%parent-native directory)))))
+            (new (setf new (append new (list segment))))
+            (t
+             (let ((native (concatenate 'string directory segment)))
+               (ecase (%entry-kind native)
+                 (:directory
+                  (setf directory (concatenate 'string native "/")
+                        after-link nil))
+                 (:link
+                  (multiple-value-bind (destination kind) (%link-destination native)
+                    (case kind
+                      (:directory
+                       (setf directory (uiop:native-namestring
+                                        (uiop/pathname:ensure-directory-pathname destination))
+                             after-link t))
+                      (:file
+                       (%refuse-write path :non-directory-ancestor
+                                      "Write path ~A cannot be checked: ~A is not a directory"
+                                      path segment))
+                      (t
+                       (%refuse-write path :unresolvable-ancestor
+                                      "Write path ~A cannot be checked: ~A leads nowhere"
+                                      path segment)))))
+                 (:file
+                  (%refuse-write path :non-directory-ancestor
+                                 "Write path ~A cannot be checked: ~A is not a directory"
+                                 path segment))
+                 (:missing (setf new (list segment)))
+                 ((nil)
+                  (%refuse-write path :unresolvable-ancestor
+                                 "Write path ~A cannot be checked: ~A cannot be examined"
+                                 path segment)))))))
+    (values directory new)))
+
+(defun %write-leaf (path directory new leaf)
+  "Return the pathname PATH writes: LEAF below the real DIRECTORY and the NEW
+names under it.  An existing LEAF comes back as its truename; a symlink as the
+truename of what it leads to, or a refusal when it leads nowhere."
+  (if new
+      (uiop:parse-native-namestring (format nil "~A~{~A/~}~A" directory new leaf))
+      (let ((native (concatenate 'string directory leaf)))
+        (case (%entry-kind native)
+          ((:missing :file) (uiop:parse-native-namestring native))
+          (:directory (uiop:parse-native-namestring native :ensure-directory t))
+          (:link (or (%link-destination native)
+                     (%refuse-write path :unresolvable-target
+                                    "Write path ~A cannot be checked: ~A leads nowhere"
+                                    path leaf)))
+          (t (%refuse-write path :unresolvable-target
+                            "Write path ~A cannot be checked: ~A cannot be examined"
+                            path leaf))))))
+
 (defun ensure-write-path (path)
-  "Ensure PATH is relative to project root and return absolute pathname.
-Resolves symlinks via TRUENAME to prevent symlink-based path traversal.
-Signals WRITE-PATH-REFUSED if outside project root or absolute."
+  "Return the absolute pathname a write to PATH lands on, or signal
+WRITE-PATH-REFUSED.  Creates nothing.
+
+PATH must be relative to the project root, and is read natively: a bracket or
+an asterisk is part of a name.  It is resolved the way the OS will resolve it
+when the file is created, one name at a time from the project root's truename:
+every existing directory and symlink on the way is followed to where it really
+is, so the result is a real path, and only names that do not exist yet are
+taken as written.  The write is allowed when that real path lies inside the
+project root's truename, whatever the spelling or the links on the way, and
+whether or not the target exists yet.  A registered ASDF system's directory
+outside the project is never writable, though it is readable.
+
+Refuses, with REASON (see WRITE-PATH-REFUSED): an absolute PATH (:ABSOLUTE);
+a real path outside the project root (:OUTSIDE-PROJECT, with the message
+\"... is outside project root\" this function has always used); and a PATH it
+cannot check: no file name (:NO-FILE-NAME, for \"\", \"dir/\", \".\" or
+\"dir/..\"), a project root that does not resolve (:UNRESOLVABLE-ROOT), an
+ancestor that is a file or a link to one (:NON-DIRECTORY-ANCESTOR) or that does
+not resolve (:UNRESOLVABLE-ANCESTOR), a .. right after a symlink
+\(:PARENT-AFTER-LINK) or after a name that does not exist (:PARENT-AFTER-MISSING),
+and a final symlink that leads nowhere (:UNRESOLVABLE-TARGET).
+
+Before 2026-09, PATH was resolved lexically and TRUENAME was applied only when
+the whole path existed.  A new file or directory under a symlink to outside the
+project was therefore allowed as the symlink's own spelling, and written
+outside; a new file under a symlinked project root was refused.  Both now
+follow the real path.  The refusals for what cannot be checked are new; before,
+those paths were allowed and a write failed later, or wrote a file in place of a
+dangling link.  The result can differ from the old one for an allowed path too:
+it is the real path, not the spelling through a link.
+
+Checks the filesystem as it is when called.  A directory swapped for a symlink
+between this check and the write is not detected."
   (ensure-project-root)
-  (let ((pn (uiop/pathname:ensure-pathname path)))
-    (when (uiop/pathname:absolute-pathname-p pn)
+  (let ((native (if (pathnamep path) (uiop:native-namestring path) path)))
+    (when (or (and (pathnamep path) (uiop/pathname:absolute-pathname-p path))
+              (uiop:string-prefix-p "/" native))
       (%refuse-write path :absolute "Write path ~A must be relative to the project root"
                      path))
-    (let* ((abs (canonical-path pn :relative-to *project-root*))
-           (real (or (handler-case (truename abs) (file-error () nil)) abs))
-           (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
-           (resolved-project-dir (or (handler-case
-                                         (uiop/pathname:ensure-directory-pathname
-                                          (truename project-dir))
-                                       (file-error () nil))
-                                     project-dir)))
-      (unless (path-inside-p real resolved-project-dir)
-        (%refuse-write path :outside-project "Write path ~A is outside project root" path))
-      real)))
+    (let* ((segments (uiop:split-string native :separator "/"))
+           ;; SPLIT-STRING returns no segment at all for "".
+           (leaf (or (car (last segments)) ""))
+           (root (handler-case (uiop/pathname:ensure-directory-pathname
+                                (truename (uiop/pathname:ensure-directory-pathname
+                                           *project-root*)))
+                   (file-error () nil))))
+      (when (member leaf '("" "." "..") :test #'string=)
+        (%refuse-write path :no-file-name "Write path ~A names no file" path))
+      (unless root
+        (%refuse-write path :unresolvable-root
+                       "Write path ~A cannot be checked: the project root does not resolve"
+                       path))
+      (multiple-value-bind (directory new)
+          (%write-parent path (uiop:native-namestring root) (butlast segments))
+        (let ((result (%write-leaf path directory new leaf)))
+          (unless (path-inside-p result root)
+            (%refuse-write path :outside-project "Write path ~A is outside project root" path))
+          result)))))
 
 (declaim (ftype (function ((or null string pathname) &key (:must-exist boolean))
                            pathname)
