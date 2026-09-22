@@ -217,6 +217,13 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
       (ok (refused-p (validate fixture "../outside/src/o.txt") :outside-project))
       (ok (refused-p (validate fixture "../project-other/new.txt") :outside-project))
       (ok (refused-p (validate fixture "src/../../outside/new.txt") :outside-project)))
+    (testing "through .. in a relative pathname, where it is kept as :UP, not collapsed"
+      (ok (refused-p (validate fixture (uiop:parse-native-namestring "../outside/new.txt"))
+                     :outside-project))
+      (ok (refused-p (validate fixture (uiop:parse-native-namestring "../outside/n1/new.txt"))
+                     :outside-project))
+      (ok (refused-p (write-to fixture (uiop:parse-native-namestring "../outside/n1/new.txt"))
+                     :outside-project)))
     (testing "absolute arguments, even inside the project"
       (ok (refused-p (validate fixture (real-path fixture"project/src/new.txt")) :absolute))
       (ok (refused-p (validate fixture (real-path fixture"project/src/a.txt")) :absolute))
