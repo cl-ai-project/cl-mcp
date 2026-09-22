@@ -51,8 +51,11 @@ write-path change with the MCP write tools on the working tree; the properties a
 only into scratch trees of their own. The record layer of the cl-spec adapter
 (`field-availability`, `validate-versioned-record`, `project-record`, `project-core-record` in
 `src/spec-core-record.lisp`) has properties too: `symbol=` on the one you change, then `property=`,
-and run `spec-core-record-test` and, with cl-spec loaded, `core-record-specs-test`. Elsewhere the
-bundle is not required.
+and run `spec-core-record-test` and, with cl-spec loaded, `core-record-specs-test`. So does the
+verdict layer (`%counts`, `%contract-plist`, `%verified-p`, `%verification-gaps` in
+`src/spec-adapter-report.lisp`; internal, so qualify them with `::`): `symbol=` on the one you
+change, then `property=`, and run `check-verdict-test` and `spec-adapter-report-test`. Elsewhere
+the bundle is not required.
 
 ## Architecture
 

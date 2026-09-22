@@ -70,6 +70,7 @@
   (:import-from #:cl-mcp/tests/spec-adapter-core-test)
   (:import-from #:cl-mcp/tests/spec-core-record-test)
   (:import-from #:cl-mcp/tests/spec-adapter-report-test)
+  (:import-from #:cl-mcp/tests/check-verdict-test)
   (:import-from #:cl-mcp/tests/spec-response-builders-test)
   (:import-from #:cl-mcp/tests/spec-tools-test)
   (:import-from #:cl-mcp/tests/spec-integration-test)

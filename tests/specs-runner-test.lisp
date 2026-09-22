@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 24 (length (property-names))))
-    (ok (= 24 (length (remove-duplicates (property-names)))))
+    (ok (= 28 (length (property-names))))
+    (ok (= 28 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
@@ -191,7 +191,19 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            "CORE-RECORD-REPORTS-EVERY-CUT"
                            "CORE-RECORD-VALIDATION-SEPARATES-OK-UNSUPPORTED-MALFORMED")
                      #'string<))
-        "the record properties are exactly the six of specs/core-records.lisp"))
+        "the record properties are exactly the six of specs/core-records.lisp")
+    (ok (equal (sort (mapcar #'symbol-name
+                             (remove-if-not (lambda (name)
+                                              (string= "CL-MCP/SPECS/CHECK-VERDICTS"
+                                                       (package-name (symbol-package name))))
+                                            (property-names)))
+                     #'string<)
+               (sort (list "CHECK-VERDICT-COUNTS-KEEP-EVERY-STATUS"
+                           "CHECK-VERDICT-EFFECTIVE-TRIALS-ONLY-FROM-A-USABLE-COUNT"
+                           "CHECK-VERDICT-VERIFIED-NEEDS-EVIDENCE-FROM-EVERY-RESULT"
+                           "CHECK-VERDICT-GAPS-NAME-EACH-SHORTFALL-AND-NOTHING-ELSE")
+                     #'string<))
+        "the verdict properties are exactly the four of specs/check-verdicts.lisp"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -206,7 +218,11 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/spec-core-record:field-availability
                            cl-mcp/src/spec-core-record:validate-versioned-record
                            cl-mcp/src/spec-core-record:project-record
-                           cl-mcp/src/spec-core-record:project-core-record)))))
+                           cl-mcp/src/spec-core-record:project-core-record
+                           cl-mcp/src/spec-adapter-report::%counts
+                           cl-mcp/src/spec-adapter-report::%contract-plist
+                           cl-mcp/src/spec-adapter-report::%verified-p
+                           cl-mcp/src/spec-adapter-report::%verification-gaps)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
