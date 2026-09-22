@@ -125,7 +125,8 @@ test counts as a failure, not a pass."
      "real-registries-answer-for-themselves"
      "real-budgets-and-seeds-reach-cl-spec"
      "real-replay-and-a-changed-declaration"
-     "real-entry-reads-seed-text-and-reports-what-ran"))
+     "real-entry-reads-seed-text-and-reports-what-ran"
+     "real-entry-delivers-trials-to-a-contract-run"))
   "The real-cl-spec suites integration mode runs, each with the tests it must
 see run.  The names are listed here, apart from the suites, so that a test
 that is deleted or renamed fails the step instead of quietly leaving it.

@@ -237,26 +237,51 @@ REGISTRY through the recording API."
             (ok (eq :passed (getf rerun :status)))
             (ok (not (equal digest (getf rerun :definition-digest))))))))))
 
+(defun %respond (registry &rest pairs)
+  "Return SPEC-CHECK-RESPONSE's hash-table for the tool arguments PAIRS, with
+REGISTRY installed -- the whole entry, from the raw arguments down."
+  (let ((params (make-hash-table :test #'equal)))
+    (loop for (key value) on pairs by #'cddr
+          do (setf (gethash key params) value))
+    (let ((*registry* registry))
+      (spec-check-response params))))
+
+(defun %field (response &rest keys)
+  "Return the value KEYS name in RESPONSE's first result."
+  (let ((value (aref (gethash "results" response) 0)))
+    (dolist (key keys value)
+      (setf value (gethash key value)))))
+
 (deftest real-entry-reads-seed-text-and-reports-what-ran
   (let ((registry (%registry)))
-    (flet ((respond (&rest pairs)
-             (let ((params (make-hash-table :test #'equal)))
-               (loop for (key value) on pairs by #'cddr
-                     do (setf (gethash key params) value))
-               (let ((*registry* registry))
-                 (spec-check-response params))))
-           (field (response &rest keys)
-             (let ((value (aref (gethash "results" response) 0)))
-               (dolist (key keys value)
-                 (setf value (gethash key value))))))
-      (testing "\"00042\" runs seed 42 and is reported as 42"
-        (let ((response (respond "property" (%name "ROUTING-REAL-P1")
-                                 "seed" "00042" "profile" "smoke")))
-          (ok (equal "completed" (gethash "status" response)))
-          (ok (equal "42" (field response "seed")))
-          (ok (equal "42" (field response "core_result" "data" "seed")))))
-      (testing "no seed: the seed reported is the one cl-spec drew, not 0"
-        (let* ((response (respond "property" (%name "ROUTING-REAL-P1") "profile" "smoke"))
-               (reported (field response "seed")))
-          (ok (stringp reported))
-          (ok (equal reported (field response "core_result" "data" "seed"))))))))
+    (testing "\"00042\" runs seed 42 and is reported as 42"
+      (let ((response (%respond registry "property" (%name "ROUTING-REAL-P1")
+                                "seed" "00042" "profile" "smoke")))
+        (ok (equal "completed" (gethash "status" response)))
+        (ok (equal "42" (%field response "seed")))
+        (ok (equal "42" (%field response "core_result" "data" "seed")))))
+    (testing "no seed: the seed reported is the one cl-spec drew, not 0"
+      (let* ((response (%respond registry "property" (%name "ROUTING-REAL-P1")
+                                 "profile" "smoke"))
+             (reported (%field response "seed")))
+        (ok (stringp reported))
+        (ok (equal reported (%field response "core_result" "data" "seed")))))))
+
+(deftest real-entry-delivers-trials-to-a-contract-run
+  ;; The seam the other checks leave open: the entry reads trials, and
+  ;; CHECK-REPORT hands it to CHECK-FUNCTION.  Checked from the entry, so a
+  ;; trials that was accepted and then dropped would show -- the run would
+  ;; take the backend default, which is a different number here.
+  (let* ((registry (%registry))
+         (response (%respond registry "function" (%name "ROUTING-REAL-F")
+                             "trials" 3 "seed" "0"))
+         (trials (%field response "trials")))
+    (ok (equal "completed" (gethash "status" response)))
+    (ok (equal "contract" (%field response "kind")) "the contract ran")
+    (ok (equal "0" (%field response "seed")))
+    (ok (eql 3 (gethash "budget" trials)) "the budget cl-spec recorded is the one asked for")
+    (ok (equal "cl-spec result" (gethash "budget_source" trials)))
+    (ok (eql 3 (gethash "executed" trials)))
+    (ok (eql 3 (%field response "contract" "effective_trials")))
+    (ok (not (eql 3 (gethash "backend_default" trials)))
+        "and the backend default is another number, so this was not it")))
