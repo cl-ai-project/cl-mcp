@@ -51,6 +51,13 @@
                 #:project-record
                 #:project-core-record
                 #:*projection-max-length*)
+  ;; Internal symbols, imported for the negative control only: it swaps these
+  ;; functions' definitions, and nothing here calls them.
+  (:import-from #:cl-mcp/src/spec-adapter-report
+                #:%counts
+                #:%contract-plist
+                #:%verified-p
+                #:%verification-gaps)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -747,6 +754,71 @@ items are wrong."
              descriptor
              options))))
 
+(defun %counts-dropping-unnamed-statuses (real)
+  "Return a wrong %COUNTS, for the negative control: REAL's tally with every
+status that has no field of its own dropped from OTHER and BY-STATUS, as the
+named fields alone once did.  SELECTED still counts them."
+  (lambda (results)
+    (let ((counts (copy-list (funcall real results))))
+      (setf (getf counts :other) 0
+            (getf counts :by-status)
+            (remove-if-not (lambda (entry)
+                             (member (car entry) '(:passed :failed :error :timeout :not-run)))
+                           (getf counts :by-status)))
+      counts)))
+
+(defun %contract-plist-falling-back-to-raw-trials (real)
+  "Return a wrong %CONTRACT-PLIST, for the negative control: REAL's contract
+half, with the raw trial count published as effective trials whenever the
+refusal count cannot be subtracted with."
+  (lambda (api result executed max-value-chars source &optional (precondition-p :unknown))
+    (let ((half (copy-list (funcall real api result executed max-value-chars source
+                                    precondition-p))))
+      (when (and (null (getf half :effective-trials)) (integerp executed))
+        (setf (getf half :effective-trials) executed))
+      half)))
+
+(defun %verified-when-nothing-ran (real)
+  "Return a wrong %VERIFIED-P, for the negative control: an empty list of
+results is verified; any other list goes to REAL."
+  (lambda (results)
+    (or (null results) (funcall real results))))
+
+(defun %claiming-every-case-reached (result)
+  "Return RESULT, or a copy of it whose case report lists no declared case as
+never called.  The copy shares nothing it changes with RESULT."
+  (let* ((core (getf result :core-record))
+         (source (getf core :source))
+         (report (getf source :case-report)))
+    (if (and (consp report) (getf report :never-called))
+        (let ((report (copy-list report))
+              (source (copy-list source))
+              (core (copy-list core))
+              (result (copy-list result)))
+          (setf (getf report :never-called) nil
+                (getf source :case-report) report
+                (getf core :source) source
+                (getf result :core-record) core)
+          result)
+        result)))
+
+(defun %verified-ignoring-unreached-cases (real)
+  "Return a wrong %VERIFIED-P, for the negative control: REAL's verdict over
+the results as if every declared case had been reached."
+  (lambda (results)
+    (funcall real (mapcar #'%claiming-every-case-reached results))))
+
+(defun %gaps-measuring-rejections-from-any-contract (real)
+  "Return a wrong %VERIFICATION-GAPS, for the negative control: REAL's gaps,
+without rejection-counts-unmeasured whenever any one result, rather than every
+one, is a contract run whose refusal count is usable."
+  (lambda (results &optional selection)
+    (let ((gaps (funcall real results selection)))
+      (if (some (lambda (result) (getf (getf result :contract) :rejected-usable))
+                results)
+          (remove :rejection-counts-unmeasured gaps)
+          gaps))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -772,12 +844,23 @@ the argument as it is after the call cannot see."
                                     "CORE-RECORD-AVAILABILITY-SEPARATES-ABSENCE-FROM-NIL"))
         (seeds (%bundle-name :property "CORE-RECORD-SEEDS-STAY-DECIMAL-TEXT"))
         (cuts (%bundle-name :property "CORE-RECORD-REPORTS-EVERY-CUT"))
+        (counts (%bundle-name :property "CHECK-VERDICT-COUNTS-KEEP-EVERY-STATUS"))
+        (effective (%bundle-name :property
+                                 "CHECK-VERDICT-EFFECTIVE-TRIALS-ONLY-FROM-A-USABLE-COUNT"))
+        (verified (%bundle-name :property
+                                "CHECK-VERDICT-VERIFIED-NEEDS-EVIDENCE-FROM-EVERY-RESULT"))
+        (gaps (%bundle-name :property
+                            "CHECK-VERDICT-GAPS-NAME-EACH-SHORTFALL-AND-NOTHING-ELSE"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
         (real-availability (fdefinition 'field-availability))
         (real-projection (fdefinition 'project-record))
-        (real-core-record (fdefinition 'project-core-record)))
+        (real-core-record (fdefinition 'project-core-record))
+        (real-counts (fdefinition '%counts))
+        (real-contract-plist (fdefinition '%contract-plist))
+        (real-verified (fdefinition '%verified-p))
+        (real-gaps (fdefinition '%verification-gaps)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -876,7 +959,36 @@ the argument as it is after the call cannot see."
            :description "keeps the tail of an over-long list, reporting the cut correctly"
            :replacement (%project-record-keeping-tails real-projection)
            :targets (list (list :property cuts))
-           :must-fail (list (list :property cuts))))))
+           :must-fail (list (list :property cuts)))
+     ;; Verdicts.  The same shape: each wrong function calls the real one and
+     ;; bends one rule of its answer.  The properties call these internal
+     ;; functions on results they build, on their own thread; nothing goes
+     ;; through CHECK-REPORT, a worker or the MCP server.
+     (list :function '%counts
+           :description "drops statuses without a field of their own from other and by-status"
+           :replacement (%counts-dropping-unnamed-statuses real-counts)
+           :targets (list (list :property counts))
+           :must-fail (list (list :property counts)))
+     (list :function '%contract-plist
+           :description "publishes raw trials as effective trials when the count is unusable"
+           :replacement (%contract-plist-falling-back-to-raw-trials real-contract-plist)
+           :targets (list (list :property effective))
+           :must-fail (list (list :property effective)))
+     (list :function '%verified-p
+           :description "verifies an empty list of results"
+           :replacement (%verified-when-nothing-ran real-verified)
+           :targets (list (list :property verified))
+           :must-fail (list (list :property verified)))
+     (list :function '%verified-p
+           :description "verifies a contract whose declared case was never reached"
+           :replacement (%verified-ignoring-unreached-cases real-verified)
+           :targets (list (list :property verified))
+           :must-fail (list (list :property verified)))
+     (list :function '%verification-gaps
+           :description "measures refusals when any one result, not every one, has a usable count"
+           :replacement (%gaps-measuring-rejections-from-any-contract real-gaps)
+           :targets (list (list :property gaps))
+           :must-fail (list (list :property gaps))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
