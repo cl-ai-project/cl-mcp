@@ -34,6 +34,14 @@
 ;;;; relative pathname, with a ./ and D/../D detour, or absolute; with the
 ;;;; project root given directly or as a symlink alias.
 ;;;;
+;;;; WRITE-PRESERVES-SAFE-SPELLINGS is a relation on top of that oracle: for one
+;;;; allowed case it calls ENSURE-WRITE-PATH with the base relative string, the
+;;;; same string parsed into a relative pathname, ./ in front of it, and one
+;;;; separator doubled, and demands the same real path from all four.  The base
+;;;; is first checked against EXPECTED-WRITE-NATIVE, so refusing everything, or
+;;;; sending every spelling to one wrong file, does not pass as agreement.  It
+;;;; adds no rule about what is allowed.
+;;;;
 ;;;; Fixed cases only (tests/write-path-specs-test.lisp): dangling links, a file
 ;;;; as an ancestor, no file name, an unset or unresolvable root.  Not covered:
 ;;;; races with the filesystem (TOCTOU), permissions, ACLs, hard links, mount
@@ -62,7 +70,13 @@
                 #:with-write-fixture
                 #:expected-write-decision
                 #:validator-agrees-p
-                #:writer-agrees-p)
+                #:writer-agrees-p
+                #:expected-write-native
+                #:no-changes-p
+                #:draw-safe-spelling-case
+                #:safe-spelling-variants
+                #:observe-spellings
+                #:safe-spelling-coverage-p)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -81,16 +95,19 @@
   '(write-resolves-project-targets-without-creating
     write-refuses-outside-and-absolute
     write-follows-existing-links
-    writer-changes-only-the-expected-entries))
+    writer-changes-only-the-expected-entries
+    write-preserves-safe-spellings))
 
 (defun spec-names ()
   "Return the named data specs this file defines."
-  '(project-write-case refused-write-case link-write-case any-write-case))
+  '(project-write-case refused-write-case link-write-case any-write-case
+    safe-spelling-write-case))
 
 (defun generator-names ()
   "Return the custom generators this file defines."
   '(project-write-case-generator refused-write-case-generator
-    link-write-case-generator any-write-case-generator))
+    link-write-case-generator any-write-case-generator
+    safe-spelling-write-case-generator))
 
 (defun call-examples ()
   "Return the concrete CHECK-CALL examples of this file: none, as it has no
@@ -190,4 +207,43 @@ temporary file included -- or signals WRITE-PATH-REFUSED and changes nothing."
     (:trials (:smoke 3 :normal 12))
     (with-write-fixture (fixture case)
       (writer-agrees-p fixture case)))
+  (defgenerator safe-spelling-write-case-generator ()
+    "Draw an allowed project write and the separator to double (DRAW-SAFE-SPELLING-CASE)."
+    (draw-safe-spelling-case))
+  (defspec safe-spelling-write-case list
+    (:generator safe-spelling-write-case-generator))
+  (defproperty write-preserves-safe-spellings
+      ((case safe-spelling-write-case))
+    "An allowed target in the project comes back as one and the same real path
+however it is safely spelled.  Domain: an existing or not yet created file below
+existing and new directories, reached directly or through one directory link
+inside the project, under the project root or its alias.  The base spelling, a
+relative native string with no .., no . and no trailing slash, must return
+EXPECTED-WRITE-NATIVE.  Then that string parsed natively into a relative
+pathname, ./ in front of it, and one of its separators doubled (.// in front
+when it has none) must each be allowed and return exactly the base's path.  No
+call may change the tree.  Every trial makes all four calls, one each.  A
+refusal in any spelling fails the trial, since two refusals are not agreement."
+    (:about ensure-write-path)
+    (:kind :equivalence)
+    (:trials (:smoke 3 :normal 12))
+    (with-write-fixture (fixture case)
+      ;; The expected path is fixed before the first call to the target.
+      (let* ((expected (expected-write-native fixture case))
+             (records (observe-spellings fixture (safe-spelling-variants case)))
+             (base (first records)))
+        (and
+         ;; Every spelling was called once, a pathname and two strings among them.
+         (safe-spelling-coverage-p records)
+         ;; The base lands where the constructive oracle says, and creates nothing.
+         (getf base :absolute)
+         (equal expected (getf base :returned))
+         (no-changes-p (getf base :changes))
+         ;; Every other spelling is allowed, lands on the base's path, and
+         ;; creates nothing.
+         (every (lambda (record)
+                  (and (getf record :absolute)
+                       (equal (getf base :returned) (getf record :returned))
+                       (no-changes-p (getf record :changes))))
+                (rest records))))))
   (values))

@@ -79,7 +79,13 @@
            #:validator-allows-as-p
            #:validator-refuses-p
            #:validator-agrees-p
-           #:writer-agrees-p))
+           #:writer-agrees-p
+           #:*safe-spellings*
+           #:draw-safe-spelling-case
+           #:safe-spelling-variants
+           #:observe-spellings
+           #:safe-spelling-coverage-p
+           #:explain-safe-spellings))
 
 (in-package #:cl-mcp/specs/write-fixtures)
 
@@ -413,3 +419,120 @@ the whole tree; a refused one signals WRITE-PATH-REFUSED and changes nothing."
        (and (getf observed :refused)
             (no-changes-p changes)
             t)))))
+
+;;; ------------------------------------------------------------------------
+;;; Safe spellings of one allowed target
+;;;
+;;; For WRITE-PRESERVES-SAFE-SPELLINGS: the same allowed case, spelled in ways
+;;; that name the same file, must come back as the same real path.  The base
+;;; spelling is checked against EXPECTED-WRITE-NATIVE, so a function that
+;;; refuses everything, or sends every spelling to one wrong file, cannot pass
+;;; by agreeing with itself.
+
+(defparameter *safe-spellings*
+  '(:relative-string :relative-pathname :leading-dot :repeated-separator)
+  "The spellings WRITE-PRESERVES-SAFE-SPELLINGS compares, base first: the
+relative native string S; S parsed natively into a relative pathname; ./ and
+then S; and S with one separator doubled, or .// and then S when S has none.
+POSIX pathname resolution ignores a . segment and a repeated separator
+anywhere but at the very start, so all four name one file.  A leading / or //,
+a trailing /, and .. are not among them.")
+
+(defun draw-safe-spelling-case ()
+  "Return a case the policy allows in every safe spelling: a target in project/
+-- existing directories, then new ones, then a new or existing file -- reached
+directly or through one directory link at the root of project/ that leads to
+the target's existing directory, under the project root or its alias.  Its
+relative argument has no .. and no trailing slash.  :DOUBLED-SEPARATOR says
+which separator of that argument the repeated-separator spelling doubles,
+counting from 0, or is NIL when the argument has none."
+  ;; LET* draws in order, so a seed replays the same case.
+  (let* ((target (draw-write-target :project))
+         (link (when (%chance 40)
+                 (list :region :project :kind :directory :name (%pick *link-names*))))
+         (root-alias (%chance 30))
+         (case (write-case target :link link :root-alias root-alias))
+         (separators (1- (length (write-segments case)))))
+    (append case (list :doubled-separator (and (plusp separators) (random separators))))))
+
+(defun %double-separator (base index)
+  "Return a fresh copy of BASE with its separator number INDEX, counting from 0,
+doubled; or .// and then BASE when INDEX is NIL."
+  (if index
+      (let ((position (loop for i from 0 below (length base)
+                            count (char= (char base i) #\/) into seen
+                            when (and (char= (char base i) #\/) (= seen (1+ index)))
+                              return i)))
+        (assert position () "~S has no separator number ~D." base index)
+        (concatenate 'string (subseq base 0 position) "/" (subseq base position)))
+      (concatenate 'string ".//" base)))
+
+(defun safe-spelling-variants (case)
+  "Return ((SPELLING . ARGUMENT) ...) for CASE, one per *SAFE-SPELLINGS*, base
+first.  The base is CASE's relative argument.  Every other argument is built
+from it by string operations or a native parse only, never by resolving it,
+so a difference the function under test must cope with is still there when it
+is called.  Each argument is a fresh object.  Signals unless the base is
+relative, ends in a file name, and has no empty, . or .. segment."
+  (let* ((base (write-argument nil (list :target (getf case :target) :link (getf case :link)
+                                         :spelling :relative)))
+         (segments (uiop:split-string base :separator "/")))
+    (unless (and (plusp (length base))
+                 (notany (lambda (segment) (member segment '("" "." "..") :test #'string=))
+                         segments))
+      (error "~S is not a safe base spelling." base))
+    (list (cons :relative-string base)
+          (cons :relative-pathname (uiop:parse-native-namestring base))
+          (cons :leading-dot (concatenate 'string "./" base))
+          (cons :repeated-separator
+                (%double-separator base (getf case :doubled-separator))))))
+
+(defun observe-spellings (fixture variants)
+  "Call ENSURE-WRITE-PATH once for each of VARIANTS, in order, observing each
+call as OBSERVE-VALIDATOR does, and return one record per call, made right
+after it:
+
+  (:SPELLING S :INPUT-TYPE :STRING or :PATHNAME :INPUT the argument, native
+   :RETURNED the result's native namestring or NIL :ABSOLUTE its absoluteness
+   :REFUSED the refusal's reason or NIL :CHANGES the tree's changes)
+
+The result is kept as a native string, so nothing a later call does to a
+shared object can change it.  Stops after the first call that changed the tree:
+a later call would run against a tree the case does not describe.  Only
+WRITE-PATH-REFUSED counts as a refusal; any other condition goes on."
+  (let ((records '()))
+    (loop for (spelling . argument) in variants
+          do (let* ((pathname-p (pathnamep argument))
+                    (input (if pathname-p (uiop:native-namestring argument) (copy-seq argument)))
+                    (observed (observe-validator fixture argument))
+                    (result (getf observed :returned)))
+               (push (list :spelling spelling
+                           :input-type (if pathname-p :pathname :string)
+                           :input input
+                           :returned (and (pathnamep result) (uiop:native-namestring result))
+                           :absolute (and (pathnamep result) (uiop:absolute-pathname-p result) t)
+                           :refused (getf observed :refused)
+                           :changes (getf observed :changes))
+                     records)
+               (unless (no-changes-p (getf observed :changes))
+                 (loop-finish))))
+    (nreverse records)))
+
+(defun safe-spelling-coverage-p (records)
+  "True when RECORDS observe every spelling of *SAFE-SPELLINGS*, in that order,
+one call each, a pathname and at least two strings among them.  An empty list,
+the base alone, or strings alone do not cover the relation."
+  (flet ((input-type (record) (getf record :input-type)))
+    (and (equal (mapcar (lambda (record) (getf record :spelling)) records) *safe-spellings*)
+         (find :pathname records :key #'input-type)
+         (>= (count :string records :key #'input-type) 2)
+         t)))
+
+(defun explain-safe-spellings (case)
+  "Build CASE in a fresh fixture and return what WRITE-PRESERVES-SAFE-SPELLINGS
+sees for it, as (:EXPECTED native :RECORDS records), for reading a
+counterexample.  The calls are made again; nothing from a failed run is
+replayed."
+  (with-write-fixture (fixture case)
+    (list :expected (expected-write-native fixture case)
+          :records (observe-spellings fixture (safe-spelling-variants case)))))

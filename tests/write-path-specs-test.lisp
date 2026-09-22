@@ -45,7 +45,13 @@
                 #:no-changes-p
                 #:same-entries-p
                 #:validator-agrees-p
-                #:writer-agrees-p))
+                #:writer-agrees-p
+                #:expected-write-native
+                #:*safe-spellings*
+                #:draw-safe-spelling-case
+                #:safe-spelling-variants
+                #:observe-spellings
+                #:safe-spelling-coverage-p))
 
 (in-package #:cl-mcp/tests/write-path-specs-test)
 
@@ -179,33 +185,35 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
 (deftest write-allows-project-targets-as-their-real-path
   (with-table-tree (fixture)
     (testing "an existing file, and new leaves below existing directories"
-      (ok (allowed-as-p (validate fixture "src/a.txt") (real-path fixture"project/src/a.txt")))
-      (ok (allowed-as-p (validate fixture "src/new.txt") (real-path fixture"project/src/new.txt")))
-      (ok (allowed-as-p (validate fixture "new.txt") (real-path fixture"project/new.txt"))))
+      (ok (allowed-as-p (validate fixture "src/a.txt") (real-path fixture "project/src/a.txt")))
+      (ok (allowed-as-p (validate fixture "src/new.txt") (real-path fixture "project/src/new.txt")))
+      (ok (allowed-as-p (validate fixture "new.txt") (real-path fixture "project/new.txt"))))
     (testing "one and two new directories, none of them created"
       (ok (allowed-as-p (validate fixture "src/n1/new.txt")
-                        (real-path fixture"project/src/n1/new.txt")))
+                        (real-path fixture "project/src/n1/new.txt")))
       (ok (allowed-as-p (validate fixture "n1/n2/new.txt")
-                        (real-path fixture"project/n1/n2/new.txt"))))
+                        (real-path fixture "project/n1/n2/new.txt"))))
     (testing "names with brackets, spaces and Japanese are taken literally"
       (ok (allowed-as-p (validate fixture "x[1]/v[old] 2.txt")
-                        (real-path fixture"project/x[1]/v[old] 2.txt")))
+                        (real-path fixture "project/x[1]/v[old] 2.txt")))
       (ok (allowed-as-p (validate fixture "日本語/データ.d/新規.lisp")
-                        (real-path fixture"project/日本語/データ.d/新規.lisp")))
-      (ok (allowed-as-p (validate fixture "a b/c d") (real-path fixture"project/a b/c d"))))
+                        (real-path fixture "project/日本語/データ.d/新規.lisp")))
+      (ok (allowed-as-p (validate fixture "a b/c d") (real-path fixture "project/a b/c d"))))
     (testing "through a link that stays inside the project"
-      (ok (allowed-as-p (validate fixture "link-a/new.txt") (real-path fixture"project/src/new.txt")))
+      (ok (allowed-as-p (validate fixture "link-a/new.txt")
+                        (real-path fixture "project/src/new.txt")))
       (ok (allowed-as-p (validate fixture "link-a/n1/new.txt")
-                        (real-path fixture"project/src/n1/new.txt")))
-      (ok (allowed-as-p (validate fixture "link-リンク") (real-path fixture"project/src/a.txt"))))
+                        (real-path fixture "project/src/n1/new.txt")))
+      (ok (allowed-as-p (validate fixture "link-リンク") (real-path fixture "project/src/a.txt"))))
     (testing "other spellings of the same targets"
       (ok (allowed-as-p (validate fixture (uiop:parse-native-namestring "src/n1/new.txt"))
-                        (real-path fixture"project/src/n1/new.txt")))
+                        (real-path fixture "project/src/n1/new.txt")))
       (ok (allowed-as-p (validate fixture "./src/../src/new.txt")
-                        (real-path fixture"project/src/new.txt")))
+                        (real-path fixture "project/src/new.txt")))
       (ok (allowed-as-p (validate fixture "../project/src/new.txt")
-                        (real-path fixture"project/src/new.txt")))
-      (ok (allowed-as-p (validate fixture "src//./new.txt") (real-path fixture"project/src/new.txt"))))))
+                        (real-path fixture "project/src/new.txt")))
+      (ok (allowed-as-p (validate fixture "src//./new.txt")
+                        (real-path fixture "project/src/new.txt"))))))
 
 (deftest write-refuses-targets-outside-the-project
   (with-table-tree (fixture)
@@ -227,12 +235,12 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
       (ok (refused-p (write-to fixture (uiop:parse-native-namestring "../outside/n1/new.txt"))
                      :outside-project)))
     (testing "absolute arguments, even inside the project"
-      (ok (refused-p (validate fixture (real-path fixture"project/src/new.txt")) :absolute))
-      (ok (refused-p (validate fixture (real-path fixture"project/src/a.txt")) :absolute))
+      (ok (refused-p (validate fixture (real-path fixture "project/src/new.txt")) :absolute))
+      (ok (refused-p (validate fixture (real-path fixture "project/src/a.txt")) :absolute))
       (ok (refused-p (validate fixture (uiop:parse-native-namestring
-                                        (real-path fixture"project/new.txt")))
+                                        (real-path fixture "project/new.txt")))
                      :absolute))
-      (ok (refused-p (validate fixture (real-path fixture"outside/new.txt")) :absolute)))))
+      (ok (refused-p (validate fixture (real-path fixture "outside/new.txt")) :absolute)))))
 
 (deftest write-refuses-what-it-cannot-check
   (with-table-tree (fixture)
@@ -292,13 +300,14 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
   ;; to be refused here while existing ones were allowed.
   (with-tree (fixture :places (list (place :project '("src") "a" "txt")) :root-alias t)
     (ok (search "project-alias" (uiop:native-namestring *project-root*)))
-    (ok (allowed-as-p (validate fixture "src/a.txt") (real-path fixture"project/src/a.txt")))
-    (ok (allowed-as-p (validate fixture "brand-new.txt") (real-path fixture"project/brand-new.txt")))
-    (ok (allowed-as-p (validate fixture "src/new.txt") (real-path fixture"project/src/new.txt")))
-    (ok (allowed-as-p (validate fixture "n1/new.txt") (real-path fixture"project/n1/new.txt")))
+    (ok (allowed-as-p (validate fixture "src/a.txt") (real-path fixture "project/src/a.txt")))
+    (ok (allowed-as-p (validate fixture "brand-new.txt")
+                      (real-path fixture "project/brand-new.txt")))
+    (ok (allowed-as-p (validate fixture "src/new.txt") (real-path fixture "project/src/new.txt")))
+    (ok (allowed-as-p (validate fixture "n1/new.txt") (real-path fixture "project/n1/new.txt")))
     (ok (refused-p (validate fixture "../outside/new.txt") :outside-project))
     (ok (allowed-as-p (validate fixture "../project-alias/new.txt")
-                      (real-path fixture"project/new.txt"))
+                      (real-path fixture "project/new.txt"))
         "out of the real directory and back in through the alias, as the OS resolves it")))
 
 (deftest write-never-allows-a-registered-dependency
@@ -544,3 +553,132 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
         (with-write-fixture (fixture case)
           (ok (validator-agrees-p fixture case) (prin1-to-string case))
           (ok (writer-agrees-p fixture case) (prin1-to-string case)))))))
+
+(defun spelling-case (target doubled &rest options)
+  "A write case for TARGET with OPTIONS, whose repeated-separator spelling
+doubles separator number DOUBLED, or prefixes .// when DOUBLED is NIL."
+  (append (apply #'write-case target options) (list :doubled-separator doubled)))
+
+(defun safe-segments-p (argument leaf)
+  "True when ARGUMENT, a string or a pathname, is relative, ends in the file
+name LEAF, and has neither a .. segment nor a trailing slash."
+  (let* ((native (if (pathnamep argument) (uiop:native-namestring argument) argument))
+         (segments (uiop:split-string native :separator "/")))
+    (and (plusp (length native))
+         (char/= (char native 0) #\/)
+         (char/= (char native (1- (length native))) #\/)
+         (not (member ".." segments :test #'string=))
+         (string= leaf (car (last segments))))))
+
+(defun check-safe-spellings (case label)
+  "Assert with Rove, one assertion per condition, what
+WRITE-PRESERVES-SAFE-SPELLINGS demands of CASE, labelled LABEL."
+  (with-write-fixture (fixture case)
+    (let* ((expected (expected-write-native fixture case))
+           (records (observe-spellings fixture (safe-spelling-variants case)))
+           (base (first records)))
+      (ok (safe-spelling-coverage-p records)
+          (format nil "~A: every spelling is called once" label))
+      (ok (equal '(:string :pathname :string :string)
+                 (mapcar (lambda (record) (getf record :input-type)) records))
+          (format nil "~A: strings and a pathname reach the target as such" label))
+      (ok (and (getf base :absolute) (equal expected (getf base :returned)))
+          (format nil "~A: the base lands on ~A" label expected))
+      (dolist (record records)
+        (ok (and (getf record :absolute)
+                 (equal (getf base :returned) (getf record :returned)))
+            (format nil "~A: ~S lands on the base's path" label (getf record :input)))
+        (ok (no-changes-p (getf record :changes))
+            (format nil "~A: ~S creates nothing" label (getf record :input)))))))
+
+(deftest safe-spelling-variants-keep-the-file-and-add-nothing-unsafe
+  (loop for (case leaf natives)
+          in (list (list (spelling-case (write-target :project '() '() "Makefile") nil)
+                         "Makefile"
+                         '("Makefile" "Makefile" "./Makefile" ".//Makefile"))
+                   (list (spelling-case (write-target :project '("src") '() "new" "txt") 0)
+                         "new.txt"
+                         '("src/new.txt" "src/new.txt" "./src/new.txt" "src//new.txt"))
+                   (list (spelling-case (write-target :project '("x[1]") '("日本語") "a b" "lisp") 1
+                                        :link '(:region :project :kind :directory
+                                                :name "link b"))
+                         "a b.lisp"
+                         '("link b/日本語/a b.lisp" "link b/日本語/a b.lisp"
+                           "./link b/日本語/a b.lisp" "link b/日本語//a b.lisp")))
+        do (let* ((variants (safe-spelling-variants case))
+                  (arguments (mapcar #'cdr variants))
+                  (strings (remove-if-not #'stringp arguments))
+                  (pathname (cdr (assoc :relative-pathname variants))))
+             (ok (equal (mapcar #'car variants) *safe-spellings*)
+                 (format nil "~A: every spelling, base first" leaf))
+             (ok (equal natives (mapcar (lambda (argument)
+                                          (if (pathnamep argument)
+                                              (uiop:native-namestring argument)
+                                              argument))
+                                        arguments))
+                 (format nil "~A: exactly the planned spellings" leaf))
+             (ok (every (lambda (argument) (safe-segments-p argument leaf)) arguments)
+                 (format nil "~A: relative, same file name, no .. or trailing slash" leaf))
+             (ok (and (pathnamep pathname)
+                      (not (uiop:absolute-pathname-p pathname))
+                      (not (wild-pathname-p pathname))
+                      (not (typep pathname 'logical-pathname)))
+                 (format nil "~A: a relative, physical, non-wild pathname" leaf))
+             (ok (and (= 3 (length strings))
+                      (loop for (string . others) on strings
+                            never (member string others :test #'eq)))
+                 (format nil "~A: three strings, no two the same object" leaf))))
+  (testing "a base spelling with .. is refused, not transformed"
+    (ok (handler-case
+            (progn (safe-spelling-variants
+                    (spelling-case (write-target :outside '() '() "new" "txt") 0))
+                   nil)
+          (simple-error (condition)
+            (and (search "not a safe base spelling" (princ-to-string condition)) t))))))
+
+(deftest safe-spelling-coverage-requires-every-spelling
+  (flet ((record (spelling type) (list :spelling spelling :input-type type)))
+    (let ((full (list (record :relative-string :string)
+                      (record :relative-pathname :pathname)
+                      (record :leading-dot :string)
+                      (record :repeated-separator :string))))
+      (ok (safe-spelling-coverage-p full) "all four spellings, a pathname among them")
+      (ng (safe-spelling-coverage-p '()) "no record at all")
+      (ng (safe-spelling-coverage-p (subseq full 0 1)) "the base alone")
+      (ng (safe-spelling-coverage-p (subseq full 0 3)) "a spelling missing")
+      (ng (safe-spelling-coverage-p
+           (substitute (record :relative-pathname :string) (second full) full))
+          "the pathname passed as a string"))))
+
+(deftest safe-spellings-agree-on-fixed-cases
+  (loop for (label case)
+          in (list (list "a new file without a type at the root"
+                         (spelling-case (write-target :project '() '() "Makefile") nil))
+                   (list "an existing file without a type at the root"
+                         (spelling-case (write-target :project '() '() "Makefile" nil t) nil))
+                   (list "an existing file"
+                         (spelling-case (write-target :project '("src") '() "a" "txt" t) 0))
+                   (list "a new file below two new directories"
+                         (spelling-case
+                          (write-target :project '("src") '("n1" "n2") "new" "txt") 2))
+                   (list "a directory link, spaces, Japanese and brackets"
+                         (spelling-case (write-target :project '("x[1]") '("日本語") "a b" "lisp") 0
+                                        :link '(:region :project :kind :directory
+                                                :name "link b")))
+                   (list "the root alias and a dotted name without a type"
+                         (spelling-case (write-target :project '("v[old] 2") '() "データ.d") 0
+                                        :root-alias t))
+                   (list "a link to the project root, under the root alias"
+                         (spelling-case (write-target :project '() '("n1") "new") 1
+                                        :link '(:region :project :kind :directory
+                                                :name "link-[x]")
+                                        :root-alias t)))
+        do (check-safe-spellings case label)))
+
+(deftest generated-safe-spelling-cases-agree-on-a-fixed-sample
+  ;; Draws of the property's own generator under a fixed random state, so the
+  ;; default suite runs its checks without cl-spec.
+  (let ((*random-state* (sb-ext:seed-random-state 20260922)))
+    (dotimes (i 6)
+      (let ((case (draw-safe-spelling-case)))
+        (check-safe-spellings case (prin1-to-string case))))))
