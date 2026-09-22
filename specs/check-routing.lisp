@@ -208,7 +208,12 @@ was given."
                   (equal (getf expected :mode) (getf selection :mode))
                   (eql (length wanted) (getf selection :count))
                   (%same-keys-p wanted (getf selection :selected))
-                  (getf (getf selection :requested) (getf expected :requested-key))
+                  ;; The request is reported as the symbol that was asked
+                  ;; for, under the key for its kind -- not merely as
+                  ;; something non-NIL.
+                  (equal (%symbol-key (target-symbol target))
+                         (%plist-key (getf (getf selection :requested)
+                                           (getf expected :requested-key))))
                   (equal (and (getf expected :contract-not-run)
                               (%symbol-key (getf expected :contract-not-run)))
                          (%plist-key (getf selection :contract-not-run)))
@@ -361,8 +366,8 @@ internal-error -- never an empty selection -- and the same name in another
 package is another symbol.  Every trial runs sixteen requests, in drawn
 qualified or unqualified form, against a drawn registry and against the same
 one with a contract, a same-named property and a readable index, checking the
-names, their count, kind, mode, what is reported as not run, and that every
-reader was handed the registry given.  Then adding the unrelated property or
+names, their count, kind, mode, the symbol reported as requested, what is
+reported as not run, and that every reader was handed the registry given.  Then adding the unrelated property or
 reversing the registration order changes nothing, and removing one related
 property removes exactly it.  Thirty-eight to forty selections a trial,
 forty when the drawn registry has a related property to remove."
