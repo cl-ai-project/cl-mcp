@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 38 (length (property-names))))
-    (ok (= 38 (length (remove-duplicates (property-names)))))
+    (ok (= 44 (length (property-names))))
+    (ok (= 44 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))

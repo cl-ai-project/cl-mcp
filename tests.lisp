@@ -75,6 +75,7 @@
   (:import-from #:cl-mcp/tests/suite-judge-test)
   (:import-from #:cl-mcp/tests/spec-inspection-test)
   (:import-from #:cl-mcp/tests/spec-response-builders-test)
+  (:import-from #:cl-mcp/tests/spec-responses-test)
   (:import-from #:cl-mcp/tests/spec-tools-test)
   (:import-from #:cl-mcp/tests/spec-integration-test)
   (:import-from #:cl-mcp/tests/spec-worker-test)

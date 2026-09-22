@@ -66,6 +66,9 @@
                 #:%describe-function-spec)
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:parse-seed-string)
+  (:import-from #:cl-mcp/src/tools/spec-response-builders
+                #:build-spec-list-response
+                #:build-spec-check-response)
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:api-fn
                 #:definition-digest)
@@ -897,6 +900,70 @@ the registry went missing, which is why the check has to read it."
     (declare (ignore registry))
     (funcall real api name nil)))
 
+(defun %response-counting-what-nobody-looked-at (real)
+  "Return a wrong BUILD-SPEC-LIST-RESPONSE, for the negative control: a count
+that is null -- the kind nobody could look at -- is published as 0, which says
+the registry holds none of them."
+  (lambda (report)
+    (let* ((response (funcall real report))
+           (counts (gethash "counts" response)))
+      (when (hash-table-p counts)
+        (maphash (lambda (key value)
+                   (unless value (setf (gethash key counts) 0)))
+                 counts))
+      response)))
+
+(defun %response-with-a-false-turned-null (real)
+  "Return a wrong BUILD-SPEC-CHECK-RESPONSE, for the negative control: a
+verified of false is published as null.
+
+Not an invented fault: this is what the worker's own JSON round trip does to
+every false cl-mcp produces, because the parent parses the worker's answer
+with YASON:PARSE and no arguments and re-encodes the NIL it gets.  Here the
+builder is made to do it directly, so a check that reads the document can say
+whether it would notice."
+  (lambda (report)
+    (let ((response (funcall real report)))
+      (when (eq yason:false (gethash "verified" response))
+        (setf (gethash "verified" response) nil))
+      response)))
+
+(defun %response-with-a-verified-headline (real)
+  "Return a wrong BUILD-SPEC-CHECK-RESPONSE, for the negative control: the
+first line says VERIFIED whatever the run did, while every field beside it
+stays right.  Only a check that reads the text can see it."
+  (lambda (report)
+    (let* ((response (funcall real report))
+           (content (gethash "content" response)))
+      (when (and (vectorp content) (plusp (length content)))
+        (let* ((part (aref content 0))
+               (text (gethash "text" part))
+               (break (position #\Newline text)))
+          (setf (gethash "text" part)
+                (concatenate 'string "✓ VERIFIED"
+                             (if break (subseq text break) "")))))
+      response)))
+
+(defun %response-replaying-a-contract-as-a-property (real)
+  "Return a wrong BUILD-SPEC-CHECK-RESPONSE, for the negative control: a
+contract's replay line asks for property=, which names a property that does
+not exist.  The line still looks like an instruction, and following it runs
+nothing."
+  (let ((from "spec-check function=")
+        (to "spec-check property="))
+    (lambda (report)
+      (let* ((response (funcall real report))
+             (content (gethash "content" response)))
+        (when (and (vectorp content) (plusp (length content)))
+          (let* ((part (aref content 0))
+                 (text (gethash "text" part))
+                 (at (search from text)))
+            (when at
+              (setf (gethash "text" part)
+                    (concatenate 'string (subseq text 0 at) to
+                                 (subseq text (+ at (length from))))))))
+        response))))
+
 (defun %declaration-with-required-arguments (real)
   "Return a wrong %DESCRIBE-FUNCTION-SPEC, for the negative control: every
 argument is reported as required, which is what version 1's omitted :KIND is
@@ -986,6 +1053,13 @@ the argument as it is after the call cannot see."
                                    "SPEC-INSPECTION-CONTRACT-DECLARATION-SURVIVES-DESCRIBE"))
         (digest-source (%bundle-name :property
                                      "SPEC-INSPECTION-DIGEST-COMES-FROM-THE-RECORD-OR-THE-READERS"))
+        (response-list (%bundle-name :property
+                                     "SPEC-LIST-RESPONSE-SAYS-WHY-A-KIND-HAS-NO-NAMES"))
+        (response-check
+          (%bundle-name :property
+                        "SPEC-CHECK-RESPONSE-CARRIES-THE-VERDICT-AND-ITS-RESERVATIONS"))
+        (response-replay
+          (%bundle-name :property "SPEC-CHECK-REPLAY-LINE-ASKS-FOR-THE-RUN-IT-REPORTS"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1002,6 +1076,8 @@ the argument as it is after the call cannot see."
         (real-match (fdefinition '%definition-match))
         (real-listing (fdefinition 'list-report))
         (real-row (fdefinition '%property-listing))
+        (real-list-response (fdefinition 'build-spec-list-response))
+        (real-check-response (fdefinition 'build-spec-check-response))
         (real-declaration (fdefinition '%describe-function-spec))
         (real-digest (fdefinition 'definition-digest)))
     (list
@@ -1178,6 +1254,29 @@ the argument as it is after the call cannot see."
            :replacement (%declaration-claiming-whole-clauses real-declaration)
            :targets (list (list :property declaration))
            :must-fail (list (list :property declaration)))
+     ;; Responses.  Each fault is one a caller acts on: a count nobody took
+     ;; published as none, a measurement published as absence, a headline that
+     ;; disagrees with its own payload, and an instruction that runs nothing.
+     (list :function 'build-spec-list-response
+           :description "publishes a count nobody took as zero"
+           :replacement (%response-counting-what-nobody-looked-at real-list-response)
+           :targets (list (list :property response-list))
+           :must-fail (list (list :property response-list)))
+     (list :function 'build-spec-check-response
+           :description "publishes a verified of false as null"
+           :replacement (%response-with-a-false-turned-null real-check-response)
+           :targets (list (list :property response-check))
+           :must-fail (list (list :property response-check)))
+     (list :function 'build-spec-check-response
+           :description "opens every headline with VERIFIED"
+           :replacement (%response-with-a-verified-headline real-check-response)
+           :targets (list (list :property response-check))
+           :must-fail (list (list :property response-check)))
+     (list :function 'build-spec-check-response
+           :description "replays a contract as property="
+           :replacement (%response-replaying-a-contract-as-a-property real-check-response)
+           :targets (list (list :property response-replay))
+           :must-fail (list (list :property response-replay)))
      (list :function 'definition-digest
            :description "digests from the readers when the record's own digest was refused"
            :replacement (%digest-falling-back-from-a-refused-record real-digest)

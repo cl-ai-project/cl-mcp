@@ -62,7 +62,11 @@ steps, then `check-routing-test`; run the real-cl-spec suites only in a process 
 (`api-backend-available-p` and `definition-digest` in `src/spec-adapter-core.lisp`;
 `contract-operation-missing`, `list-report`, `symbol-report`, `describe-report` and
 `%describe-function-spec` in `src/spec-adapter-report.lisp`): `symbol=`, then `property=`, and
-run `spec-inspection-test`. Elsewhere the bundle is not required.
+run `spec-inspection-test`. So does the response layer (the four
+`build-spec-*-response` in `src/tools/spec-response-builders.lisp`): `symbol=`, then
+`property=`, and run `spec-responses-test` and `spec-response-builders-test`; a change to the
+replay line or to a JSON field also needs `spec-responses-specs-test` in its own process.
+Elsewhere the bundle is not required.
 
 ## Architecture
 

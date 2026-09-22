@@ -43,11 +43,15 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/spec-adapter-report:describe-report` | none | `spec-inspection-registration-is-not-read-failure` |
 | `cl-mcp/src/spec-adapter-report::%describe-function-spec` (internal) | none | `spec-inspection-contract-declaration-survives-describe` |
 | `cl-mcp/src/spec-adapter-core:definition-digest` | none | `spec-inspection-digest-comes-from-the-record-or-the-readers` |
+| `cl-mcp/src/tools/spec-response-builders:build-spec-list-response` | none (see *Responses*) | `spec-list-response-says-why-a-kind-has-no-names`, `spec-response-json-keeps-false-null-and-absent-apart` |
+| `cl-mcp/src/tools/spec-response-builders:build-spec-symbol-response` | none | `spec-symbol-response-separates-registration-from-failure`, `spec-response-json-…` |
+| `cl-mcp/src/tools/spec-response-builders:build-spec-describe-response` | none | `spec-describe-response-carries-the-declaration-it-was-given`, `spec-response-json-…` |
+| `cl-mcp/src/tools/spec-response-builders:build-spec-check-response` | none | `spec-check-response-carries-the-verdict-and-its-reservations`, `spec-check-replay-line-asks-for-the-run-it-reports`, `spec-response-json-…` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
-`cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing` and
-`cl-mcp/specs/spec-inspection`. Each Function Spec is
+`cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection` and
+`cl-mcp/specs/spec-responses`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -1015,9 +1019,150 @@ and the `specs` job runs it as its own step:
 - resolving calls none of them and interns nothing it did not find;
 - the package is gone again afterwards.
 
-Not covered: the renderer and JSON-RPC end to end; cl-spec revisions other
-than the one pinned; the listing of specs and properties beyond these
-fixtures; and instrumentation.
+Not covered: cl-spec revisions other than the one pinned; the listing of
+specs and properties beyond these fixtures; and instrumentation. The renderer
+is *Responses* below; JSON-RPC and the transports are not covered anywhere yet.
+
+## Responses
+
+The last step before a caller. `specs/spec-responses.lisp` checks the four
+builders of `src/tools/spec-response-builders.lisp` —
+`build-spec-list-response`, `build-spec-symbol-response`,
+`build-spec-describe-response` and `build-spec-check-response` — through the
+two things that actually arrive: the JSON document, and the text an MCP client
+renders.
+
+Three kinds of correctness, kept apart:
+
+1. the structured fields keep the meaning of the report they were given;
+2. the text makes no claim about that report that is not so;
+3. both survive being encoded and read back.
+
+The first two are checked against the scenario descriptors of
+`specs/spec-response-fixtures.lisp`, never against each other. A field and a
+sentence rendered from the same mistake agree perfectly.
+
+**Everything goes through JSON.** A builder's hash-table cannot answer whether
+a field is false or absent: `yason:false` and `NIL` are both objects in Lisp,
+and only the document tells them apart. The fixtures encode with the call the
+server makes and parse with `:json-booleans-as-symbols t`,
+`:json-nulls-as-keyword t`, `:json-arrays-as-vectors t` and
+`:object-as :hash-table`, which keeps five answers apart:
+
+| In the document | Read back as | Means |
+|---|---|---|
+| `false` | `yason:false` | measured, and it is not so |
+| `true` | `yason:true` | measured, and it is so |
+| `null` | `:null` | there is no such value — nobody looked, or the definition has no such part |
+| `[]` | an empty vector | looked, and there are none |
+| key absent | `(values nil nil)` | this answer has no such field at all |
+
+Note that the server's own reader is not this one: `yason:parse` with no
+arguments, where `false` and `null` are both `NIL`. That is right for reading
+a request and useless for asking what a response said, which is why the
+fixtures carry a decoder of their own — and why the fixed cases guard it with
+a document of known shape before anything else runs.
+
+Two Lisp traps the helpers exist for, each with a fixed case of its own:
+`yason:false` is a symbol, so `(when value ...)` reads a JSON false as true;
+and a string is a vector, so `vectorp` and `equalp` cannot tell `""` from `[]`.
+
+| Property | Function(s) | Run in every trial | Drawn |
+|---|---|---|---|
+| `spec-response-json-keeps-false-null-and-absent-apart` | all four builders | every listing answer, every spec-symbol answer, every kind of declaration, and the drawn spec-check answer | the spec-check answer |
+| `spec-list-response-says-why-a-kind-has-no-names` | `build-spec-list-response` | all five listing answers under the drawn limit | the answer, the limit |
+| `spec-symbol-response-separates-registration-from-failure` | `build-spec-symbol-response` | all six spec-symbol answers | the answer |
+| `spec-describe-response-carries-the-declaration-it-was-given` | `build-spec-describe-response` | the drawn declaration in all four clause states | the declaration, the clause state, the documentation |
+| `spec-check-response-carries-the-verdict-and-its-reservations` | `build-spec-check-response` | all seventeen spec-check answers | the answer |
+| `spec-check-replay-line-asks-for-the-run-it-reports` | `build-spec-check-response` | all seventeen, through the printed line | the answer |
+
+What they hold to:
+- **A count is a number only where someone looked.** A kind that was not
+  requested, one this cl-spec cannot enumerate and a tag it cannot filter by
+  each give `null` and a text that prints no zero for them; a kind that was
+  asked for and holds none gives `0` and an empty array. The capability flags
+  stay booleans whatever the request was. A limit cuts the list and sets
+  `truncated`; it never touches the count.
+- **Registration is not read failure.** A lookup that worked and found nothing
+  says `nothing_registered`; an image without cl-spec and a reader that broke
+  carry a status and no such claim at all — not even the key. A registration
+  that is absent is `null`, not an empty object. A runtime nobody read says
+  why.
+- **A declaration arrives as written.** Kind and name, arguments in order with
+  their own kinds, cases in order, and `returns` or `signals` — never both.
+  The documentation crosses as itself through JSON escaping, for text with
+  quotes, a backslash, a newline and characters outside ASCII. A clause that
+  is whole, one that was cut and a definition with no such clause are `true`,
+  `false` and `null`, with the count of what was dropped beside the second and
+  a truncation notice in the text. A key that is not part of that kind of
+  definition is `null`, never a `false` that says the definition turned it off.
+- **A verdict carries what it does not cover.** The three verdicts are three
+  words, and the word a reader stops at names the coverage it stands on: a
+  declared case nobody reached, a contract that was not run, the properties
+  that were not. A status with no run reports the status and claims no verdict
+  at all. The gaps reach the text as well as the payload. A counterexample
+  that is empty, absent, unavailable or never generated stays four answers; a
+  captured `NIL` is application data where an unavailable capture is not a
+  value. Every seed stays a decimal string, every symbol stays a package and a
+  name, and cl-spec's raw record stays behind the projection.
+- **The replay line asks for the run it reports.** It is read out of the text
+  the response produced — by the grammar the line is written in, never by
+  evaluating it — and checked as the request it asks for: the first result
+  that did not pass, with that result's own seed and digest. A property is
+  asked for by `property=` and a profile; a contract by `function=` and a
+  trial budget, and never by `property=` or a profile it did not use. A run
+  with no seed prints no line at all, rather than one whose arguments are
+  `NIL`.
+
+**Fixed cases, default suite** (`tests/spec-responses-test.lisp`, 24 tests):
+the decoder's own guard, the two Lisp traps, each listing answer, each
+spec-symbol answer, the clause states, the documentation strings, the verdict
+words, the four counterexample answers, a captured `NIL` against an
+unavailable capture, the seed, and the replay line for a property, for a
+contract and for a run with nothing to replay.
+
+**Real cl-spec, opt-in** (`tests/spec-responses-specs-test.lisp`, 2 tests): a
+descriptor cannot say whether the printed line, handed back to the tool it
+names, runs the same thing again. These two do that. A failing property and a
+failing contract are run through `spec-check-response`; the line is read back
+by the same grammar an agent would read it by, its arguments are passed to
+`spec-check-response`, and the second run names the same target, carries the
+same seed, compares `match` against the digest the line carried, and produces
+the same counterexample — not merely another failure.
+
+**Where the fields actually are.** A tool result here is
+`{"content": [{"type":"text","text":…}], …}` with every structured field a
+sibling of `content`, inside the JSON-RPC `result`. cl-mcp emits no
+`structuredContent` and declares no `outputSchema` — grep for either in `src/`
+and there is nothing — so an MCP client that renders only `content[].text`,
+which is all the protocol requires of it, sees the text and nothing else.
+That is why the properties here check the text for the reservations and not
+only the payload. Moving to standard structured output is a separate
+proposal, not part of this.
+
+Not covered here: the tool entry points beyond that one round trip, the
+worker's own JSON round trip, JSON-RPC and the transports. Those are 3E-2.
+
+### A false becomes a null on the way through a worker
+
+Measured while writing this, not fixed here. With the worker pool enabled —
+the default — a response crosses JSON twice: the worker encodes it, the parent
+parses it with `yason:parse` and no arguments, and the parent encodes the
+result again. That middle parse turns every `false` into `NIL`, and the second
+encode writes `NIL` as `null`:
+
+```text
+builder   {"verified":false,"gaps":[],"name":"","count":0,"absent":null}
+client    {"verified":null, "gaps":[],"name":"","count":0,"absent":null}
+```
+
+`[]`, `""`, `0` and `null` survive; only `false` does not. So a caller reading
+a spec tool's result through a pooled worker sees `verified: null` where the
+builder said `false`. The properties here are about the builder, and they run
+against its own output, so they do not see this; the negative control
+"publishes a verified of false as null" is that exact fault, planted at the
+builder so a check can say whether it would be noticed. Fixing the boundary
+belongs to 3E-2, where the real transport is under test.
 
 ## Dependencies
 
@@ -1300,7 +1445,7 @@ something failed, `2` the script could not run them.
   does not load, exits `2`. Both suites swap the cl-spec registry, or bind
   one, while they run: use a process of their own, not the MCP worker you
   are working in.
-- `negative-control` swaps in thirty wrong implementations, one at a time:
+- `negative-control` swaps in thirty-four wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -1380,6 +1525,13 @@ something failed, `2` the script could not run them.
   - a `definition-digest` that digests from the readers when the record's own
     digest was refused. The digest-source property must fail.
 
+  - a `build-spec-list-response` that publishes a count nobody took as 0, and
+    three `build-spec-check-response`s: one that publishes a verified of false
+    as null (the fault the worker boundary has today, planted at the builder),
+    one that opens every headline with VERIFIED while every field beside it
+    stays right, and one that replays a contract as `property=`. The response
+    properties must fail for each.
+
   Each wrong record, verdict, routing and inspection function calls the real
   one and bends one rule of its answer. The verdict properties' own outcome is read from cl-spec's
   result, as for every control; `verified` and the MCP rendering play no part
@@ -1425,7 +1577,9 @@ The `specs` job in `.github/workflows/ci.yml` does the following:
    `ros install cl-ai-project/cl-mcp`, and the runner also fails when cl-mcp
    comes from anywhere but the checkout.
 4. Runs `self-test`, `check`, `negative-control` and `integration` for each of
-   the three real-cl-spec suites and for the API resolution suite, as separate
+   the four real-cl-spec suites (`spec-integration-test`,
+   `check-routing-specs-test`, `spec-inspection-specs-test`,
+   `spec-responses-specs-test`) and for the API resolution suite, as separate
    processes, each under `timeout 900` inside a 30-minute job, and uploads the
    report files.
 
