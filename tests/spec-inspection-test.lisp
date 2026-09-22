@@ -34,7 +34,9 @@
                 #:definition-symbol
                 #:definition-name
                 #:inspection-api
+                #:api-calls
                 #:calls-of
+                #:calls-carry-registry-p
                 #:contract-descriptor
                 #:contract-record
                 #:clause-reads-back-p
@@ -199,6 +201,34 @@
     (ok (getf report :truncated))
     (ok (eql 2 (getf report :limit)))))
 
+(deftest every-reader-is-handed-the-registry-the-listing-is-about
+  (multiple-value-bind (api calls registry-object)
+      (inspection-api :handles +all-handles+
+                      :registry (%registry :spec-a :property-a :contract-a))
+    (let ((report (list-report api :ok :kind "both" :limit 200)))
+      (ok (eq :ok (getf report :status))))
+    (testing "the enumerators and the row readers alike"
+      (ok (calls-of calls :list-specs))
+      (ok (calls-of calls :property-data) "a row is read, not only enumerated")
+      (ok (calls-carry-registry-p calls registry-object))
+      (ok (every (lambda (call) (eq registry-object (third call)))
+                 (api-calls calls))
+          "and this listing hands one to every reader it calls"))
+    (testing "a call handed none fails, however right its answer looked"
+      ;; The stub answers out of the descriptor it closes over either way, so
+      ;; the rows of such a listing still look correct.  The recorded call is
+      ;; the only place the omission shows.
+      (ok (not (calls-carry-registry-p
+                (list (list (list :property-data 'name nil)))
+                registry-object)))
+      (ok (not (calls-carry-registry-p
+                (list (list (list :list-specs nil (list :some-other-registry))))
+                registry-object))))
+    (testing "a reader that takes no registry is not asked to carry one"
+      (ok (calls-carry-registry-p
+           (list (list (list :run-property 'name '(:trials 5))))
+           registry-object)))))
+
 ;;; ------------------------------------------------------------------------
 ;;; C. Registration against read failure
 
@@ -308,6 +338,27 @@
     (testing "no clause at all is not applicable"
       (ok (null (getf absent :preconditions)))
       (ok (eq :not-applicable (getf absent :preconditions-complete))))))
+
+(deftest a-clause-that-could-not-be-read-is-not-a-clause-that-means-nil
+  (testing "the text of the clause reads back as the clause"
+    (ok (clause-reads-back-p (clause-forms :present-nil) "NIL"))
+    (ok (clause-reads-back-p (clause-forms :present-nil) "COMMON-LISP:NIL")
+        "printed package-qualified, as the projector prints")
+    (ok (clause-reads-back-p (clause-forms :one) "(> X 0)"))
+    (ok (clause-reads-back-p (clause-forms :two) "(AND (> X 0) (< X 100))")))
+  (testing "a read that failed answers NIL, which is not the clause (NIL)"
+    ;; Both of these end the text before a form is complete.  Told apart from
+    ;; a clause that means NIL only because the failure is caught: the second
+    ;; value of a failed read is a condition, which is not a position.
+    (ok (not (clause-reads-back-p (clause-forms :present-nil) "")))
+    (ok (not (clause-reads-back-p (clause-forms :present-nil) "(")))
+    (ok (not (clause-reads-back-p (clause-forms :one) "(> X"))))
+  (testing "a form with something after it is the text of something else"
+    (ok (not (clause-reads-back-p (clause-forms :present-nil) "NIL TRAILING-JUNK")))
+    (ok (not (clause-reads-back-p (clause-forms :one) "(> X 0) (< X 100)")))
+    (ok (not (clause-reads-back-p (clause-forms :present-nil) "NIL)"))))
+  (testing "and what is not a string is not a clause"
+    (ok (not (clause-reads-back-p (clause-forms :present-nil) nil)))))
 
 (deftest a-cut-clause-says-it-was-cut
   (multiple-value-bind (form text) (long-form 60)

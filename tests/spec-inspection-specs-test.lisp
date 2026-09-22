@@ -252,16 +252,47 @@ their own rather than in an MCP worker someone is using."
 
 (deftest real-reads-run-no-form-of-the-declaration
   (let ((registry (%registry)))
-    (let ((*registry* registry))
+    ;; Installed globally rather than bound.  SPEC-DESCRIBE-RESPONSE reads the
+    ;; registry on a deadline thread of its own, which sees no binding made
+    ;; here -- and a read that found nothing leaves every counter unchanged
+    ;; for the wrong reason, so what was read is checked before what did not
+    ;; run is claimed.
+    (with-installed-registry (registry)
       (let ((before (snapshot)))
-        (list-report (%api) :ok :kind "both")
-        (symbol-report (%api) :ok (%name "INSPECTION-REAL-F") :include-runtime nil)
-        (describe-report (%api) :ok "function-spec" (%name "INSPECTION-REAL-F"))
-        (describe-report (%api) :ok "function-spec" (%name "INSPECTION-CASED-F"))
-        (describe-report (%api) :ok "property" (%name "INSPECTION-ABOUT-F"))
-        (describe-report (%api) :ok "spec" (%name "INSPECTION-SMALL"))
-        (spec-describe-response (%params "kind" "function-spec"
-                                         "name" (%name "INSPECTION-CASED-F")))
+        (testing "each read finds the declaration it asked for"
+          (let ((listing (list-report (%api) :ok :kind "both")))
+            (ok (eq :ok (getf listing :status)))
+            (ok (plusp (getf (getf listing :counts) :function-specs))))
+          (let ((registered (getf (symbol-report (%api) :ok (%name "INSPECTION-REAL-F")
+                                                 :include-runtime nil)
+                                  :registry)))
+            (ok (getf registered :function-spec))
+            (ok (getf registered :property)))
+          (let ((described (describe-report (%api) :ok "function-spec"
+                                            (%name "INSPECTION-REAL-F"))))
+            (ok (eq :ok (getf described :status)))
+            (ok (equal "Twice its argument." (getf described :documentation))))
+          (let ((described (describe-report (%api) :ok "function-spec"
+                                            (%name "INSPECTION-CASED-F"))))
+            (ok (eq :ok (getf described :status)))
+            (ok (eql 2 (length (getf described :cases))))
+            (ok (getf described :capture))
+            (ok (getf described :argument-generator)))
+          (let ((described (describe-report (%api) :ok "property"
+                                            (%name "INSPECTION-ABOUT-F"))))
+            (ok (eq :ok (getf described :status))))
+          (let ((described (describe-report (%api) :ok "spec"
+                                            (%name "INSPECTION-SMALL"))))
+            (ok (eq :ok (getf described :status))))
+          (testing "and so does the entry, on its own thread"
+            (let* ((response (spec-describe-response
+                              (%params "kind" "function-spec"
+                                       "name" (%name "INSPECTION-CASED-F"))))
+                   (cases (gethash "cases" response)))
+              (ok (equal "ok" (gethash "status" response)))
+              (ok (equal "INSPECTION-CASED-F" (gethash "name" (gethash "name" response))))
+              (ok (eql 2 (length cases))
+                  "the declaration this registry holds, not another image's"))))
         (ok (equal before (snapshot))
             "no target, generator, :pre, capture, guard, :post or :state-post ran")))))
 

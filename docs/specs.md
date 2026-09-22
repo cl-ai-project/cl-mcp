@@ -895,9 +895,16 @@ The stub records every reader call — its key, the name asked for and the
 registry it was handed — so a check can say what was read as well as what came
 back. Its runners signal if a read ever reaches them.
 
+The recorded registry is checked by identity, against the object the stub's own
+`registry` handle answered. It has to be: a reader called without a registry
+still answers, out of whatever registry the image holds, and the stub answers
+from the descriptor it closes over either way. Accepting a call that carries
+`NIL` would accept exactly that. `+registry-taking-handles+` names the readers
+this applies to; a handle that takes no registry is not asked to carry one.
+
 | Property | Run in every trial | Drawn |
 |---|---|---|
-| `spec-inspection-operations-need-their-own-handles` | every handle combination for describing and running a contract, with unrelated handles beside them; the four backend states | which handles, and the backend state |
+| `spec-inspection-operations-need-their-own-handles` | every subset of the handles each of the two contract operations needs — enumerated, not drawn — with unrelated handles beside them; the four backend states | the unrelated handles, and the backend state |
 | `spec-inspection-listing-separates-capability-from-count` | the drawn request, then all four kinds under the full handle set; the three tag states | the registry, handles, kind, package, tag and limit |
 | `spec-inspection-registration-is-not-read-failure` | the drawn subject under all four reader behaviours | the registry, the subject, the kind asked for |
 | `spec-inspection-contract-declaration-survives-describe` | the drawn declaration, and both sides of one character budget | the arguments, clauses, cases, generator, schema and budget |
@@ -912,11 +919,16 @@ What the properties hold to:
 - **A listing keeps capability, scope and count apart.** A kind not asked for,
   or one that cannot be listed, has no count — never 0, which would say the
   registry holds none. The `*_listable` flags describe the revision, not the
-  request. A package narrows by the home package of the registered name. A tag
-  narrows properties only, and its three states (not requested, known, no such
-  keyword here) stay apart without interning the unknown one. A limit cuts the
-  lists and sets `truncated`, and changes no count. Only the kinds asked for
-  are enumerated.
+  request. `tag_filterable` is the narrower statement its name reads as —
+  whether this request's tag could be applied — so it is true when no tag was
+  asked for, there being nothing to filter with. A package narrows by the home
+  package of the registered name. A tag narrows properties only, and its three
+  states (not requested, known, no such keyword here) stay apart without
+  interning the unknown one. A limit cuts the lists and sets `truncated`, and
+  changes no count. The names come back with the counts, and are the
+  definitions the filters leave — a listing that returns the right number of
+  the wrong names is not right. Only the kinds asked for are enumerated, and
+  every reader is handed the registry the listing is about.
 - **Registration is not read failure.** cl-spec saying "unknown name" gives
   not-registered; a reader that breaks gives an internal error; and
   `CL:UNDEFINED-FUNCTION` means the target is undefined only for a contract —
@@ -928,8 +940,12 @@ What the properties hold to:
   ends as `*` and `"0"`; clauses as forms that can be pasted back, one as
   itself and several joined by `AND`; a clause that is not there reported as
   not applicable, and one that is there and `NIL` reported as a clause; cases
-  in declared order with their guards, outcomes and clauses. A clause of a
-  stated length is whole at that budget and cut one character under it. A
+  in declared order with their guards, outcomes and clauses. The argument
+  generator, the whole-argument schema and the `:returns` and `:signals` nodes
+  are absent or are the ones the record declares, by name and by type — not
+  merely something non-`NIL`. A clause of a stated length is whole at that
+  budget; one character under it, what comes back is that clause's own
+  beginning and the remainder is counted exactly. A
   record of a version this cl-mcp does not know, one missing required
   metadata, one of the wrong kind, and a projection that came back `NIL` are
   all refused rather than read as an empty contract.
@@ -945,13 +961,17 @@ Clause text is compared by reading it back with `*read-eval*` off, not by
 matching characters: the projector prints package-qualified, and every form
 compared this way was written in the fixtures. Where a printed length matters,
 the form is a string, whose length does not depend on the printer's package.
+A read that fails is not a clause that means `NIL`, and a form with anything
+after it is the text of something longer than the clause; both are told apart
+from the clause `(NIL)` rather than counted as it.
 
-**Fixed cases, default suite** (`tests/spec-inspection-test.lisp`, 14 tests):
+**Fixed cases, default suite** (`tests/spec-inspection-test.lisp`, 16 tests):
 each row above with concrete values, including the four backend states, a
 count of none against not looking, the three tag states, a package filter, a
-limit, the four reader behaviours, the declaration fields, a cut clause at its
-own length and one character under, the four schema refusals, and the five
-digest rows.
+limit, registry delivery (and a recorded call that carries none), the four
+reader behaviours, the declaration fields, a clause that could not be read
+against one that means `NIL`, a cut clause at its own length and one character
+under, the four schema refusals, and the five digest rows.
 
 **Real cl-spec, opt-in** (`tests/spec-inspection-specs-test.lisp`, 6 tests).
 Declarations of its own in registries of its own:
@@ -964,8 +984,11 @@ Declarations of its own in registries of its own:
 - **a read runs nothing**: the target, the generator, `:pre`, the capture, a
   case guard, `:post` and `:state-post` each increment a counter, and a
   snapshot taken after registration is unchanged after six reads and an entry
-  call. That is a statement about the forms a contract holds, not about
-  everything an implementation may do while printing;
+  call. Each of those reads is first checked to have found the declaration it
+  asked for — otherwise every counter would be unchanged for the wrong reason,
+  which is what an entry call reading some other registry would look like.
+  That is a statement about the forms a contract holds, not about everything
+  an implementation may do while printing;
 - declaring a contract again changes what describe says, and leaves another
   registry alone;
 - the three entries keep the kind, name, limit and character budget they were
@@ -1277,7 +1300,7 @@ something failed, `2` the script could not run them.
   does not load, exits `2`. Both suites swap the cl-spec registry, or bind
   one, while they run: use a process of their own, not the MCP worker you
   are working in.
-- `negative-control` swaps in twenty-nine wrong implementations, one at a time:
+- `negative-control` swaps in thirty wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -1346,6 +1369,11 @@ something failed, `2` the script could not run them.
 
   - a `list-report` that reports a count it never looked for as 0. The
     listing property must fail.
+  - a `%property-listing` that reads a row without the registry it was given,
+    so the reader answers out of whatever registry the image holds. The rows
+    still come back right — the stub answers from its own descriptor either
+    way — so only the recorded call shows it, and the listing property must
+    fail.
   - a `%describe-function-spec` that reports every argument as required, and
     one that reports a cut precondition as complete. The declaration property
     must fail for each.

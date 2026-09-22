@@ -32,6 +32,7 @@
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:make-cl-spec-api)
   (:export #:+operation-handles+
+           #:handle-subsets
            #:+required-handles+
            #:+listing-handles+
            #:+home-package-name+
@@ -46,6 +47,8 @@
            #:inspection-api
            #:api-calls
            #:calls-of
+           #:+registry-taking-handles+
+           #:calls-carry-registry-p
            #:contract-record
            #:contract-descriptor
            #:draw-contract
@@ -116,6 +119,18 @@ away.")
   "Return the handles OPERATION needs."
   (rest (or (assoc operation +operation-handles+)
             (error "No such operation ~S." operation))))
+
+(defun handle-subsets (operation)
+  "Return every subset of the handles OPERATION needs, smallest first.
+
+Enumerated rather than drawn: an operation here needs one or two handles, so
+the whole domain is two or four subsets, and a check that runs all of them can
+say it covers every combination without a seed's help."
+  (let ((subsets (list '())))
+    (dolist (handle (operation-handles operation) subsets)
+      (setf subsets (append subsets
+                            (mapcar (lambda (subset) (append subset (list handle)))
+                                    subsets))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Definitions, as descriptors
@@ -224,14 +239,23 @@ A clause is printed package-qualified, from whichever package the projector
 prints in, so its text is compared by reading it rather than by matching
 characters.  Reading is safe here because every form compared this way was
 written in this file: *READ-EVAL* is off, and nothing from outside reaches
-the reader."
+the reader.
+
+Two things a read gives back are not the clause.  A read that failed answers
+NIL, so an empty text or an unfinished form would stand for the clause (NIL) --
+which is why the failure is caught here rather than read off a second value
+that is a condition, not a position, whenever there was an error at all.  And a
+form with anything after it is the text of something longer than this clause,
+so what follows must be nothing."
   (and (stringp text)
        (let ((*read-eval* nil)
-             (*package* (find-package +home-package-name+)))
-         (multiple-value-bind (form position)
-             (ignore-errors (read-from-string text))
-           (and position
-                (equal form (if (rest forms) (cons 'and forms) (first forms))))))))
+             (*package* (find-package +home-package-name+))
+             (nothing (list :nothing-follows)))
+         (handler-case
+             (multiple-value-bind (form position) (read-from-string text)
+               (and (equal form (if (rest forms) (cons 'and forms) (first forms)))
+                    (eq nothing (read-from-string text nil nothing :start position))))
+           (error () nil)))))
 
 (defun contract-descriptor (&key (arguments '((:required) (:optional :supplied-p t)
                                               (:key :keyword :size)))
@@ -487,37 +511,85 @@ recent first."
   "Return the calls CALLS recorded for the handle KEY, oldest first."
   (remove-if-not (lambda (call) (eq key (first call))) (api-calls calls)))
 
+(defparameter +registry-taking-handles+
+  '(:semantic-data :property-data :function-spec-data :spec-data
+    :list-specs :list-properties :list-function-specs :properties-with-tag)
+  "The readers that must be handed the registry the report is about.
+
+Every one of them takes a registry, and a call that omits it reads whatever
+the image holds instead -- a different registry, answering about definitions
+the caller never asked about.  The stub cannot show that in what it returns,
+because it answers from the descriptor it closes over either way; the recorded
+call is where the omission is visible, so this is the list an assertion about
+delivery has to consult.")
+
+(defun calls-carry-registry-p (calls registry)
+  "Return true when every call CALLS recorded to a reader of
++REGISTRY-TAKING-HANDLES+ was handed REGISTRY itself.
+
+A call handed NIL fails.  Accepting NIL would accept exactly the fault this
+asks about: a reader called without the registry still answers, and answers
+from somewhere else."
+  (every (lambda (call)
+           (or (not (member (first call) +registry-taking-handles+))
+               (eq registry (third call))))
+         (api-calls calls)))
+
 ;;; ------------------------------------------------------------------------
 ;;; Expected listings
 
 (defun expected-listing (registry handles &key kind package tag)
   "Return what a listing of KIND should say, as a plist: :SPECS, :PROPERTIES
 and :FUNCTION-SPECS counts (NIL for a kind not asked for or not listable),
-the three listable flags, whether a tag could be applied, and whether any
-asked-for kind can be listed at all."
+the names behind those counts under :SPEC-NAMES, :PROPERTY-NAMES and
+:FUNCTION-SPEC-NAMES, the three listable flags, whether a tag could be
+applied, and whether any asked-for kind can be listed at all.
+
+The names are here because a count is not the answer a reader acts on: a
+listing that returns as many names as it should, of definitions it was not
+asked about, is wrong in the way that matters and right in the number."
   (flet ((has (key) (and (member key handles) t))
          (wanted (this) (or (string= kind "both") (string= kind this))))
-    (let (;; Resolved, never interned: a tag this image does not know cannot
-          ;; be on any property, and asking must not make it exist.
-          (tag-keyword (and tag (find-symbol (string-upcase tag) "KEYWORD")))
-          (specs-listable (has :list-specs))
-          (properties-listable (has :list-properties))
-          (function-specs-listable (and (has :list-function-specs)
-                                        (has :function-spec-data)))
-          (tag-filterable (or (null tag) (has :properties-with-tag)))
-          (want-specs (wanted "specs"))
-          (want-properties (wanted "properties"))
-          (want-function-specs (wanted "function-specs")))
-      (list :specs (when (and want-specs specs-listable)
-                     (length (registry-names registry :spec :package package)))
+    (let* (;; Resolved, never interned: a tag this image does not know cannot
+           ;; be on any property, and asking must not make it exist.
+           (tag-keyword (and tag (find-symbol (string-upcase tag) "KEYWORD")))
+           (specs-listable (has :list-specs))
+           (properties-listable (has :list-properties))
+           (function-specs-listable (and (has :list-function-specs)
+                                         (has :function-spec-data)))
+           (tag-filterable (or (null tag) (has :properties-with-tag)))
+           (want-specs (wanted "specs"))
+           (want-properties (wanted "properties"))
+           (want-function-specs (wanted "function-specs"))
+           (spec-names
+             (when (and want-specs specs-listable)
+               (mapcar #'second (mapcar #'definition-name
+                                        (registry-names registry :spec
+                                                        :package package)))))
+           (property-names
+             (when (and want-properties properties-listable tag-filterable)
+               (if (and tag (null tag-keyword))
+                   '()
+                   (mapcar #'second
+                           (mapcar #'definition-name
+                                   (registry-names registry :property :package package
+                                                            :tag tag-keyword))))))
+           (function-spec-names
+             (when (and want-function-specs function-specs-listable)
+               (mapcar #'second (mapcar #'definition-name
+                                        (registry-names registry :function-spec
+                                                        :package package))))))
+      ;; A count of none and no count at all are different answers, so each
+      ;; count follows the same condition as its names rather than the names
+      ;; themselves: an empty list of names still counts 0.
+      (list :specs (when (and want-specs specs-listable) (length spec-names))
             :properties (when (and want-properties properties-listable tag-filterable)
-                          (if (and tag (null tag-keyword))
-                              0
-                              (length (registry-names registry :property :package package
-                                                               :tag tag-keyword))))
+                          (length property-names))
             :function-specs (when (and want-function-specs function-specs-listable)
-                              (length (registry-names registry :function-spec
-                                                               :package package)))
+                              (length function-spec-names))
+            :spec-names spec-names
+            :property-names property-names
+            :function-spec-names function-spec-names
             :specs-listable specs-listable
             :properties-listable properties-listable
             :function-specs-listable function-specs-listable
@@ -533,13 +605,14 @@ asked-for kind can be listed at all."
 (defun %pick (list) (nth (random (length list)) list))
 
 (defun draw-availability-case ()
-  "Return an availability case: a handle subset for every operation, and a
-backend state."
-  (list :subsets (loop for (operation) in +operation-handles+
-                       collect (list operation
-                                     (loop for handle in (operation-handles operation)
-                                           when (zerop (random 2)) collect handle)))
-        :backend (%pick '(:object :none :signals))
+  "Return an availability case: a backend state, and unrelated handles to put
+beside the ones an operation needs.
+
+The subsets an operation is asked about are not drawn.  CONTRACT-OPERATION-MISSING
+answers for the two contract operations, which need one and two handles, so
+every subset of them is six calls -- cheaper than drawing one and claiming the
+rest."
+  (list :backend (%pick '(:object :none :signals))
         :noise (loop for handle in +listing-handles+
                      when (zerop (random 2)) collect handle)))
 

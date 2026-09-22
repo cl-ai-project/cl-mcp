@@ -23,7 +23,8 @@
 ;;;; descriptor's relations, and a contract descriptor's own order and
 ;;;; content -- never from cl-mcp's tables or record shapes.
 ;;;;
-;;;; Verified domain: handle subsets over the six operations; registries built
+;;;; Verified domain: every subset of the handles the two contract operations
+;;;; need, with unrelated handles drawn beside them; registries built
 ;;;; from nine fixed definitions across two packages, with tags and one
 ;;;; (:about ...) relation; listings of each kind under a package, a tag and a
 ;;;; limit; declarations of one to three arguments of each kind, every clause
@@ -50,6 +51,7 @@
                 #:%describe-function-spec)
   (:import-from #:cl-mcp/specs/spec-inspection-fixtures
                 #:+operation-handles+
+                #:handle-subsets
                 #:+required-handles+
                 #:+listing-handles+
                 #:+home-package-name+
@@ -57,8 +59,8 @@
                 #:definition-name
                 #:expected-listing
                 #:inspection-api
-                #:api-calls
                 #:calls-of
+                #:calls-carry-registry-p
                 #:contract-record
                 #:contract-descriptor
                 #:clause-forms
@@ -133,10 +135,31 @@ missing reader are not -- and none of them is an error."
 ;;; ------------------------------------------------------------------------
 ;;; B. Listings
 
+(defun %row-names (rows)
+  "Return the symbol names listing ROWS name.  A spec row is the symbol's own
+data; a property or contract row carries it under :NAME."
+  (mapcar (lambda (row)
+            (let ((name (getf row :name)))
+              (if (stringp name) name (getf name :name))))
+          rows))
+
+(defun %names-hold-p (rows expected limit)
+  "Return true when ROWS name definitions out of EXPECTED: all of them when
+LIMIT did not cut, and that many of them when it did.
+
+The count alone would hold for a listing that returned the right number of the
+wrong names -- names from a package the filter excluded, or properties without
+the tag it was narrowed by."
+  (let ((names (%row-names rows)))
+    (and (= (length names) (min (length expected) limit))
+         (subsetp names expected :test #'string=)
+         (or (> (length expected) limit)
+             (null (set-difference expected names :test #'string=))))))
+
 (defun %listing-holds-p (registry handles kind package tag limit)
   "Return true when LIST-REPORT reports the capability, the scope and the
-counts the descriptor says, reads only what the kind asks for, and hands every
-reader the registry it was given."
+counts the descriptor says, names the definitions behind those counts, reads
+only what the kind asks for, and hands every reader the registry it was given."
   (multiple-value-bind (api calls registry-object)
       (inspection-api :handles (append +required-handles+ handles) :registry registry)
     (let* ((expected (expected-listing registry handles :kind kind :package package
@@ -145,9 +168,9 @@ reader the registry it was given."
                                        :limit limit))
            (counts (getf report :counts)))
       (and
-       ;; Every reader was handed the registry, and no runner was called.
-       (every (lambda (call) (or (null (third call)) (eq registry-object (third call))))
-              (api-calls calls))
+       ;; Every reader was handed this registry -- not NIL, which reads the
+       ;; image's own -- and no runner was called.
+       (calls-carry-registry-p calls registry-object)
        (null (calls-of calls :run-property))
        (null (calls-of calls :check-function))
        (if (getf expected :reachable)
@@ -165,12 +188,14 @@ reader the registry it was given."
                 (getf report :function-specs-listable))
             (eq (getf expected :tag-filterable) (getf report :tag-filterable))
             (eq (getf expected :tag-applied) (getf (getf report :filters) :tag-applied))
-            ;; A limit cuts the lists and says so; it never changes a count.
-            (eql (min (or (getf expected :specs) 0) limit) (length (getf report :specs)))
-            (eql (min (or (getf expected :properties) 0) limit)
-                 (length (getf report :properties)))
-            (eql (min (or (getf expected :function-specs) 0) limit)
-                 (length (getf report :function-specs)))
+            ;; The definitions behind the counts, and not some other set of
+            ;; the same size.  A limit cuts the lists and says so; it never
+            ;; changes a count.
+            (%names-hold-p (getf report :specs) (getf expected :spec-names) limit)
+            (%names-hold-p (getf report :properties) (getf expected :property-names)
+                           limit)
+            (%names-hold-p (getf report :function-specs)
+                           (getf expected :function-spec-names) limit)
             (eq (or (> (or (getf expected :specs) 0) limit)
                     (> (or (getf expected :properties) 0) limit)
                     (> (or (getf expected :function-specs) 0) limit))
@@ -375,27 +400,69 @@ guard, outcome and clauses, and a contract with no cases declares none."
                                    (clause-reads-back-p (clause-forms :one)
                                                         (getf case :state-post)))))))))
 
+(defun %generator-holds-p (declared description)
+  "Return true when the argument generator is absent, or is the one the record
+names: SCRIPTED-ARGUMENTS, of the fixtures' own package.
+
+Presence alone would hold for a description that named some other generator,
+which is the difference between \"these inputs are scripted\" and \"these
+inputs are scripted by that\"."
+  (let ((given (getf description :argument-generator)))
+    (if declared
+        (and (equal "SCRIPTED-ARGUMENTS" (getf given :name))
+             (equal +home-package-name+ (getf given :package)))
+        (null given))))
+
+(defun %schema-holds-p (declared description)
+  "Return true when the whole-argument schema is absent, or is the tuple node
+the record declares, carrying the generator it names."
+  (let ((given (getf description :argument-schema)))
+    (if declared
+        (and (eq :tuple (getf given :kind))
+             (equal "TUPLE-GENERATOR" (getf (getf given :generator) :name))
+             (equal +home-package-name+ (getf (getf given :generator) :package)))
+        (null given))))
+
+(defun %outcome-holds-p (declared given type)
+  "Return true when an outcome node -- a contract's :RETURNS or :SIGNALS -- is
+absent, or is the type node the record declares TYPE for.
+
+The node's type is printed text, so it is read back rather than matched
+character by character, for the same reason a clause is."
+  (if declared
+      (and (eq :type (getf given :kind))
+           (clause-reads-back-p (list type) (getf given :type)))
+      (null given)))
+
 (defun %cut-holds-p (length max-chars)
   "Return true when a precondition whose text is exactly LENGTH characters is
 whole under a budget of MAX-CHARS or more, cut under less, and says which.
 
 The form is built here rather than drawn: this case needs a printed length it
 states, and the text it must print as is written beside it, never taken from
-the printer under test."
+the printer under test.  The cut text is compared against that same text, so a
+clause cut out of something else, or a remainder counted wrong, is not a cut
+clause either."
   (multiple-value-bind (form text) (long-form length)
     (let* ((record (contract-record (contract-descriptor :pre :none)))
            (record (append (list :preconditions (list form))
                            (%without record :preconditions)))
-           (description (%describe-record record max-chars)))
+           (description (%describe-record record max-chars))
+           (shown (getf description :preconditions)))
       (if (<= length max-chars)
-          (and (equal text (getf description :preconditions))
+          (and (equal text shown)
                (eq t (getf description :preconditions-complete)))
           (and (null (getf description :preconditions-complete))
-               (integerp (getf description :preconditions-omitted-chars))
-               (plusp (getf description :preconditions-omitted-chars))
                ;; Cut, not absent: a clause that is not there answers
                ;; :NOT-APPLICABLE, which this one must not.
-               (stringp (getf description :preconditions)))))))
+               (stringp shown)
+               (<= (length shown) max-chars)
+               ;; What is shown is this clause's own beginning, and what is
+               ;; missing is the rest of it, counted exactly.
+               (string= text shown :end1 (length shown))
+               (eql (- length (length shown))
+                    (getf description :preconditions-omitted-chars))
+               (plusp (getf description :preconditions-omitted-chars)))))))
 
 (defun %without (plist key)
   "Return PLIST without KEY."
@@ -439,7 +506,7 @@ DEFINITION-DIGEST as the definition already read."
   "Install this file's generators, specs and properties in CL-SPEC:*REGISTRY*.
 Registering again replaces each definition by name.  Registering runs nothing."
   (defgenerator availability-case-generator ()
-    "Draw a handle subset per operation and a backend state (DRAW-AVAILABILITY-CASE)."
+    "Draw a backend state and unrelated handles (DRAW-AVAILABILITY-CASE)."
     (draw-availability-case))
   (defspec availability-case list (:generator availability-case-generator))
   (defgenerator listing-case-generator ()
@@ -462,23 +529,23 @@ Registering again replaces each definition by name.  Registering runs nothing."
   (defproperty spec-inspection-operations-need-their-own-handles
       ((case availability-case))
     "An operation is available when the handles it needs are there, and not
-otherwise.  Every trial runs every combination of the handles each of the six
-operations needs, with unrelated handles drawn in beside them:
-CONTRACT-OPERATION-MISSING names exactly the ones that are absent, so a
-cl-spec that cannot run a contract can still describe one.  A backend is
-available only as an object: a special bound to NIL, a reader that signals and
-a missing reader are all unavailable, and none of them is an error -- reading
-a registry needs no backend."
+otherwise.  Every trial runs every combination of the handles the two contract
+operations need -- the operations CONTRACT-OPERATION-MISSING answers for --
+with unrelated handles drawn in beside them: it names exactly the ones that
+are absent, so a cl-spec that cannot run a contract can still describe one.  A
+backend is available only as an object: a special bound to NIL, a reader that
+signals and a missing reader are all unavailable, and none of them is an error
+-- reading a registry needs no backend."
     (:about contract-operation-missing api-backend-available-p)
     (:kind :resolution)
     (:trials (:smoke 5 :normal 25))
-    (destructuring-bind (&key subsets backend noise) case
+    (destructuring-bind (&key backend noise) case
       (and (%backend-availability-holds-p backend)
-           (every (lambda (row)
-                    (destructuring-bind (operation present) row
-                      (or (not (member operation '(:describe-contract :run-contract)))
-                          (%operation-missing-holds-p operation present noise))))
-                  subsets)
+           (every (lambda (operation)
+                    (every (lambda (present)
+                             (%operation-missing-holds-p operation present noise))
+                           (handle-subsets operation)))
+                  '(:describe-contract :run-contract))
            (every #'%backend-availability-holds-p '(:object :none :signals :missing)))))
 
   (defproperty spec-inspection-listing-separates-capability-from-count
@@ -486,13 +553,16 @@ a registry needs no backend."
     "A listing keeps three things apart: what this cl-spec can enumerate, what
 this request asked for, and how many are registered.  A kind that was not
 asked for, or that cannot be listed, has no count -- never 0, which would say
-the registry holds none.  The three listable flags and tag-filterable describe
-the revision, not the request.  A package narrows by the home package of the
-registered name; a tag narrows properties only, and its three states -- not
-requested, known, and no such keyword in this image -- stay apart without
-interning the unknown one.  A limit cuts the lists and sets truncated, and
-changes no count.  Only the kinds asked for are enumerated, every reader is
-handed the registry it was given, and nothing is run."
+the registry holds none.  The three listable flags describe the revision, not
+the request.  TAG-FILTERABLE is the narrower statement its name reads as --
+whether this request's tag could be applied -- so it is true when no tag was
+asked for, there being nothing to filter with.  A package narrows by the home
+package of the registered name; a tag narrows properties only, and its three
+states -- not requested, known, and no such keyword in this image -- stay
+apart without interning the unknown one.  A limit cuts the lists and sets
+truncated, and changes no count.  The names come back with the counts, only
+the kinds asked for are enumerated, every reader is handed the registry it was
+given rather than none, and nothing is run."
     (:about list-report)
     (:kind :preservation)
     (:trials (:smoke 5 :normal 25))
@@ -542,21 +612,26 @@ of one budget."
     (destructuring-bind (&key arguments pre post state-post cases returns signals
                            generator schema max-chars)
         case
-      (let* ((descriptor (contract-descriptor :arguments arguments :pre pre :post post
-                                              :state-post state-post :cases cases
-                                              :returns returns :signals signals
-                                              :generator generator :schema schema))
-             (description (%contract-describe descriptor 8000)))
-        (and (eq :ok (getf description :status))
-             (%arguments-hold-p descriptor description)
-             (%clauses-hold-p descriptor description)
-             (%cases-hold-p descriptor description)
-             (eq (and generator t) (and (getf description :argument-generator) t))
-             (eq (and schema t) (and (getf description :argument-schema) t))
-             (eq (and returns t) (and (getf description :returns) t))
-             (eq (and signals t) (and (getf description :signals) t))
-             (%cut-holds-p max-chars max-chars)
-             (%cut-holds-p (1+ max-chars) max-chars)))))
+      (let ((descriptor (contract-descriptor :arguments arguments :pre pre :post post
+                                             :state-post state-post :cases cases
+                                             :returns returns :signals signals
+                                             :generator generator :schema schema)))
+        (multiple-value-bind (description calls) (%contract-describe descriptor 8000)
+          (and (eq :ok (getf description :status))
+               ;; Read out of the registry the description was asked about.
+               (calls-carry-registry-p calls :inspection-registry)
+               (%arguments-hold-p descriptor description)
+               (%clauses-hold-p descriptor description)
+               (%cases-hold-p descriptor description)
+               ;; Each of these is absent or is the one the record declares --
+               ;; not merely something non-NIL, which a generator or a spec
+               ;; taken from elsewhere would also be.
+               (%generator-holds-p generator description)
+               (%schema-holds-p schema description)
+               (%outcome-holds-p returns (getf description :returns) 'integer)
+               (%outcome-holds-p signals (getf description :signals) 'error)
+               (%cut-holds-p max-chars max-chars)
+               (%cut-holds-p (1+ max-chars) max-chars))))))
 
   (defproperty spec-inspection-digest-comes-from-the-record-or-the-readers
       ((case digest-case))
@@ -587,6 +662,7 @@ passed NIL definition is unread, and no reader is called to replace it."
              (%digest-of (contract-record (contract-descriptor :reference t)))
            (and (equal "fnv1a64-v1:00000000000000dd" digest)
                 (eq t complete)
+                (calls-carry-registry-p calls :inspection-registry)
                 (null (calls-of calls :spec-data))))
          ;; A record that cannot stand for itself gives no digest, and does
          ;; not fall back to the readers.
@@ -601,6 +677,9 @@ passed NIL definition is unread, and no reader is called to replace it."
          ;; the digest follows the spec it references.
          (multiple-value-bind (digest complete calls) (%digest-of old)
            (and (stringp digest) (eq t complete) (calls-of calls :spec-data)
+                ;; The readers it falls back to read the registry it was
+                ;; handed, not the image's own.
+                (calls-carry-registry-p calls :inspection-registry)
                 (not (equal digest
                             (%digest-of old :spec-record
                                         (spec-node :kind :range :type 'integer

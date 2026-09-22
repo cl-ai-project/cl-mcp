@@ -62,6 +62,7 @@
                 #:%trials-budget
                 #:%definition-match
                 #:list-report
+                #:%property-listing
                 #:%describe-function-spec)
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:parse-seed-string)
@@ -884,6 +885,18 @@ reported as 0, which says the registry holds none of them."
                     append (list key (or value 0)))))
       report)))
 
+(defun %listing-reading-another-registry (real)
+  "Return a wrong %PROPERTY-LISTING, for the negative control: the row is read
+without the registry the listing is about, so the reader answers out of
+whatever registry the image holds.
+
+The rows still come back right here, because the stub answers from the
+descriptor it closes over however it is called.  Only the recorded call shows
+the registry went missing, which is why the check has to read it."
+  (lambda (api name registry)
+    (declare (ignore registry))
+    (funcall real api name nil)))
+
 (defun %declaration-with-required-arguments (real)
   "Return a wrong %DESCRIBE-FUNCTION-SPEC, for the negative control: every
 argument is reported as required, which is what version 1's omitted :KIND is
@@ -988,6 +1001,7 @@ the argument as it is after the call cannot see."
         (real-seed (fdefinition 'parse-seed-string))
         (real-match (fdefinition '%definition-match))
         (real-listing (fdefinition 'list-report))
+        (real-row (fdefinition '%property-listing))
         (real-declaration (fdefinition '%describe-function-spec))
         (real-digest (fdefinition 'definition-digest)))
     (list
@@ -1147,6 +1161,11 @@ the argument as it is after the call cannot see."
      (list :function 'list-report
            :description "reports a count it never looked for as zero"
            :replacement (%listing-counting-what-it-did-not-look-at real-listing)
+           :targets (list (list :property listing))
+           :must-fail (list (list :property listing)))
+     (list :function '%property-listing
+           :description "reads a listing row without the registry it was given"
+           :replacement (%listing-reading-another-registry real-row)
            :targets (list (list :property listing))
            :must-fail (list (list :property listing)))
      (list :function '%describe-function-spec
