@@ -14,7 +14,12 @@
 ;;;;                      self-test: run cl-mcp/tests/specs-runner-test,
 ;;;;                        cl-mcp/tests/path-specs-test,
 ;;;;                        cl-mcp/tests/write-path-specs-test and
-;;;;                        cl-mcp/tests/core-record-specs-test.
+;;;;                        cl-mcp/tests/core-record-specs-test;
+;;;;                      integration: run the real-cl-spec suite
+;;;;                        CL_MCP_SPECS_SUITE names, and fail unless every
+;;;;                        test it must run ran and passed, and none skipped.
+;;;; CL_MCP_SPECS_SUITE   for integration: cl-mcp/tests/spec-integration-test
+;;;;                      or cl-mcp/tests/check-routing-specs-test.
 ;;;; CL_MCP_SPECS_REPORT  file to write the check or negative-control report
 ;;;;                      to, as one Lisp form.
 ;;;;
@@ -99,6 +104,60 @@ test counts as a failure, not a pass."
                      (uiop:symbol-call :rove :run system))
           (setf code 1))))))
 
+(defparameter *integration-suites*
+  '(("cl-mcp/tests/spec-integration-test"
+     "real-function-core-schema-survives-check"
+     "real-core-schema-survives-describe-and-check"
+     "cl-spec-adapter-discovers-and-describes"
+     "cl-spec-adapter-runs-and-replays"
+     "cl-spec-adapter-sees-a-redefinition"
+     "cl-spec-adapter-reads-a-contract"
+     "cl-spec-adapter-runs-a-contract"
+     "real-named-cases-report-the-one-never-reached"
+     "real-state-post-failure-keeps-the-target-outcome"
+     "real-case-selection-error-does-not-blame-the-target"
+     "real-generation-exhaustion-is-not-a-target-failure"
+     "real-state-contract-says-why-it-was-not-shrunk"
+     "real-postcondition-failure-is-read-whole"
+     "real-capture-availability-records-survive-both-branches")
+    ("cl-mcp/tests/check-routing-specs-test"
+     "real-selections-run-only-what-they-name"
+     "real-registries-answer-for-themselves"
+     "real-budgets-and-seeds-reach-cl-spec"
+     "real-replay-and-a-changed-declaration"
+     "real-entry-reads-seed-text-and-reports-what-ran"
+     "real-entry-delivers-trials-to-a-contract-run"))
+  "The real-cl-spec suites integration mode runs, each with the tests it must
+see run.  The names are listed here, apart from the suites, so that a test
+that is deleted or renamed fails the step instead of quietly leaving it.
+spec-integration-test skips each test when cl-spec cannot be found, which is
+right for the default suite and wrong here, where cl-spec is pinned.")
+
+(defun run-integration ()
+  "Run the suite CL_MCP_SPECS_SUITE names and return an exit code: 0 when every
+test it must run ran and passed and nothing skipped, 1 when the suite ran and
+something did not, 2 when the suite is not one of *INTEGRATION-SUITES*.  The
+verdict is read from Rove's per-test results, not from ROVE:RUN's answer,
+which counts a skipped test as passed."
+  (let* ((system (uiop:getenv "CL_MCP_SPECS_SUITE"))
+         (entry (assoc system *integration-suites* :test #'equal)))
+    (if (null entry)
+        (progn
+          (format *error-output* "~&check-specs: CL_MCP_SPECS_SUITE must be one of ~
+~{~A~^, ~}; got ~S~%" (mapcar #'first *integration-suites*) system)
+          2)
+        (progn
+          (load-system* "rove")
+          (load-system* "cl-mcp/specs/suite-judge")
+          (load-system* system)
+          (uiop:symbol-call :rove :run system)
+          (let ((verdict (uiop:symbol-call
+                          :cl-mcp/specs/suite-judge :judge-suite-results
+                          (symbol-value (uiop:find-symbol* "*LAST-SUITE-REPORT*" :rove))
+                          (rest entry))))
+            (uiop:symbol-call :cl-mcp/specs/suite-judge :print-suite-verdict system verdict)
+            (if (getf verdict :ok) 0 1))))))
+
 (defun main ()
   "Run the mode CL_MCP_SPECS_MODE names and exit with its code."
   (handler-bind ((error (lambda (condition)
@@ -114,6 +173,7 @@ test counts as a failure, not a pass."
        (cond ((string= mode "check") (run-runner :check))
              ((string= mode "negative-control") (run-runner :negative-control))
              ((string= mode "self-test") (run-self-test))
+             ((string= mode "integration") (run-integration))
              (t (format *error-output* "~&check-specs: unknown CL_MCP_SPECS_MODE ~S~%" mode)
                 2))))))
 

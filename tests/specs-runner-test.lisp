@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 28 (length (property-names))))
-    (ok (= 28 (length (remove-duplicates (property-names)))))
+    (ok (= 33 (length (property-names))))
+    (ok (= 33 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
@@ -203,7 +203,20 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            "CHECK-VERDICT-VERIFIED-NEEDS-EVIDENCE-FROM-EVERY-RESULT"
                            "CHECK-VERDICT-GAPS-NAME-EACH-SHORTFALL-AND-NOTHING-ELSE")
                      #'string<))
-        "the verdict properties are exactly the four of specs/check-verdicts.lisp"))
+        "the verdict properties are exactly the four of specs/check-verdicts.lisp")
+    (ok (equal (sort (mapcar #'symbol-name
+                             (remove-if-not (lambda (name)
+                                              (string= "CL-MCP/SPECS/CHECK-ROUTING"
+                                                       (package-name (symbol-package name))))
+                                            (property-names)))
+                     #'string<)
+               (sort (list "CHECK-ROUTING-TARGET-ARGUMENTS-ARE-EXCLUSIVE"
+                           "CHECK-ROUTING-SEED-TEXT-KEEPS-EVERY-DIGIT"
+                           "CHECK-ROUTING-SELECTION-NAMES-ONLY-WHAT-WAS-ASKED"
+                           "CHECK-ROUTING-BUDGET-COMES-FROM-ITS-STATED-SOURCE"
+                           "CHECK-ROUTING-DIGEST-COMPARISON-HAS-FOUR-ANSWERS")
+                     #'string<))
+        "the routing properties are exactly the five of specs/check-routing.lisp"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -222,7 +235,13 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/spec-adapter-report::%counts
                            cl-mcp/src/spec-adapter-report::%contract-plist
                            cl-mcp/src/spec-adapter-report::%verified-p
-                           cl-mcp/src/spec-adapter-report::%verification-gaps)))))
+                           cl-mcp/src/spec-adapter-report::%verification-gaps
+                           cl-mcp/src/spec-adapter-report::%target-argument-error
+                           cl-mcp/src/spec-adapter-report::%resolve-profile
+                           cl-mcp/src/tools/spec-entry:parse-seed-string
+                           cl-mcp/src/spec-adapter-report::%select-properties
+                           cl-mcp/src/spec-adapter-report::%trials-budget
+                           cl-mcp/src/spec-adapter-report::%definition-match)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)

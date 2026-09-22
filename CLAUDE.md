@@ -54,8 +54,11 @@ only into scratch trees of their own. The record layer of the cl-spec adapter
 and run `spec-core-record-test` and, with cl-spec loaded, `core-record-specs-test`. So does the
 verdict layer (`%counts`, `%contract-plist`, `%verified-p`, `%verification-gaps` in
 `src/spec-adapter-report.lisp`; internal, so qualify them with `::`): `symbol=` on the one you
-change, then `property=`, and run `check-verdict-test` and `spec-adapter-report-test`. Elsewhere
-the bundle is not required.
+change, then `property=`, and run `check-verdict-test` and `spec-adapter-report-test`. So does
+routing (`%target-argument-error`, `%resolve-profile`, `%select-properties`, `%trials-budget`,
+`%definition-match` there, and `parse-seed-string` in `src/tools/spec-entry.lisp`): the same
+steps, then `check-routing-test`; run the real-cl-spec suites only in a process of their own
+(`CL_MCP_SPECS_MODE=integration`, see `docs/specs.md`). Elsewhere the bundle is not required.
 
 ## Architecture
 
