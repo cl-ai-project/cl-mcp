@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 33 (length (property-names))))
-    (ok (= 33 (length (remove-duplicates (property-names)))))
+    (ok (= 38 (length (property-names))))
+    (ok (= 38 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
@@ -216,7 +216,20 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            "CHECK-ROUTING-BUDGET-COMES-FROM-ITS-STATED-SOURCE"
                            "CHECK-ROUTING-DIGEST-COMPARISON-HAS-FOUR-ANSWERS")
                      #'string<))
-        "the routing properties are exactly the five of specs/check-routing.lisp"))
+        "the routing properties are exactly the five of specs/check-routing.lisp")
+    (ok (equal (sort (mapcar #'symbol-name
+                             (remove-if-not (lambda (name)
+                                              (string= "CL-MCP/SPECS/SPEC-INSPECTION"
+                                                       (package-name (symbol-package name))))
+                                            (property-names)))
+                     #'string<)
+               (sort (list "SPEC-INSPECTION-OPERATIONS-NEED-THEIR-OWN-HANDLES"
+                           "SPEC-INSPECTION-LISTING-SEPARATES-CAPABILITY-FROM-COUNT"
+                           "SPEC-INSPECTION-REGISTRATION-IS-NOT-READ-FAILURE"
+                           "SPEC-INSPECTION-CONTRACT-DECLARATION-SURVIVES-DESCRIBE"
+                           "SPEC-INSPECTION-DIGEST-COMES-FROM-THE-RECORD-OR-THE-READERS")
+                     #'string<))
+        "the inspection properties are exactly the five of specs/spec-inspection.lisp"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -241,7 +254,14 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/tools/spec-entry:parse-seed-string
                            cl-mcp/src/spec-adapter-report::%select-properties
                            cl-mcp/src/spec-adapter-report::%trials-budget
-                           cl-mcp/src/spec-adapter-report::%definition-match)))))
+                           cl-mcp/src/spec-adapter-report::%definition-match
+                           cl-mcp/src/spec-adapter-core:api-backend-available-p
+                           cl-mcp/src/spec-adapter-core:definition-digest
+                           cl-mcp/src/spec-adapter-report::contract-operation-missing
+                           cl-mcp/src/spec-adapter-report:list-report
+                           cl-mcp/src/spec-adapter-report:symbol-report
+                           cl-mcp/src/spec-adapter-report:describe-report
+                           cl-mcp/src/spec-adapter-report::%describe-function-spec)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
