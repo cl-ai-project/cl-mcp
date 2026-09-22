@@ -96,6 +96,19 @@ jobs:
           CL_MCP_SPECS_MODE=negative-control CL_MCP_SPECS_REPORT=specs-negative-control.sexp \
             timeout 900 ros run --load scripts/check-specs.lisp
 
+      # The real-cl-spec suites, each in a process of its own.  Judged from
+      # Rove's per-test results: a missing, failing or skipped test fails the
+      # step, where the default test job lets them skip.
+      - name: Real cl-spec integration tests
+        run: |
+          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-integration-test \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
+      - name: Real cl-spec routing tests
+        run: |
+          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/check-routing-specs-test \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
