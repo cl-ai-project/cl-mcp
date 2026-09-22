@@ -12,6 +12,9 @@
            #:canonical-path
            #:allowed-read-path
            #:ensure-write-path
+           #:write-path-refused
+           #:write-path-refused-path
+           #:write-path-refused-reason
            #:resolve-path-in-project
            #:resolve-readable-path
            #:native-path-namestring
@@ -108,23 +111,41 @@ symlink-based path traversal."
 
 (declaim (ftype (function ((or string pathname)) pathname) ensure-write-path))
 
+(define-condition write-path-refused (simple-error)
+  ((path :initarg :path :reader write-path-refused-path)
+   (reason :initarg :reason :reader write-path-refused-reason))
+  (:documentation "ENSURE-WRITE-PATH declined PATH before anything was written.
+REASON is a keyword naming why: :ABSOLUTE, :OUTSIDE-PROJECT, and for a path it
+cannot check safely :NO-FILE-NAME, :UNRESOLVABLE-ROOT, :NON-DIRECTORY-ANCESTOR,
+:UNRESOLVABLE-ANCESTOR, :PARENT-AFTER-LINK, :PARENT-AFTER-MISSING or
+:UNRESOLVABLE-TARGET.  A SIMPLE-ERROR, so handlers written for the plain errors
+this function used to signal still see it."))
+
+(defun %refuse-write (path reason control &rest arguments)
+  "Signal WRITE-PATH-REFUSED for PATH with REASON and the message CONTROL."
+  (error 'write-path-refused :path path :reason reason
+                             :format-control control :format-arguments arguments))
+
 (defun ensure-write-path (path)
   "Ensure PATH is relative to project root and return absolute pathname.
 Resolves symlinks via TRUENAME to prevent symlink-based path traversal.
-Signals an error if outside project root or absolute."
+Signals WRITE-PATH-REFUSED if outside project root or absolute."
   (ensure-project-root)
-  (let* ((pn (uiop/pathname:ensure-pathname path :want-relative t))
-         (abs (canonical-path pn :relative-to *project-root*))
-         (real (or (handler-case (truename abs) (file-error () nil)) abs))
-         (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
-         (resolved-project-dir (or (handler-case
-                                       (uiop/pathname:ensure-directory-pathname
-                                        (truename project-dir))
-                                     (file-error () nil))
-                                   project-dir)))
-    (unless (path-inside-p real resolved-project-dir)
-      (error "Write path ~A is outside project root" path))
-    real))
+  (let ((pn (uiop/pathname:ensure-pathname path)))
+    (when (uiop/pathname:absolute-pathname-p pn)
+      (%refuse-write path :absolute "Write path ~A must be relative to the project root"
+                     path))
+    (let* ((abs (canonical-path pn :relative-to *project-root*))
+           (real (or (handler-case (truename abs) (file-error () nil)) abs))
+           (project-dir (uiop/pathname:ensure-directory-pathname *project-root*))
+           (resolved-project-dir (or (handler-case
+                                         (uiop/pathname:ensure-directory-pathname
+                                          (truename project-dir))
+                                       (file-error () nil))
+                                     project-dir)))
+      (unless (path-inside-p real resolved-project-dir)
+        (%refuse-write path :outside-project "Write path ~A is outside project root" path))
+      real)))
 
 (declaim (ftype (function ((or null string pathname) &key (:must-exist boolean))
                            pathname)
