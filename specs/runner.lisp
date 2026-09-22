@@ -57,7 +57,12 @@
                 #:%counts
                 #:%contract-plist
                 #:%verified-p
-                #:%verification-gaps)
+                #:%verification-gaps
+                #:%select-properties
+                #:%trials-budget
+                #:%definition-match)
+  (:import-from #:cl-mcp/src/tools/spec-entry
+                #:parse-seed-string)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -819,6 +824,49 @@ one, is a contract run whose refusal count is usable."
           (remove :rejection-counts-unmeasured gaps)
           gaps))))
 
+(defun %selection-adding-the-subject (real)
+  "Return a wrong %SELECT-PROPERTIES, for the negative control: an :about
+selection that also runs the symbol's own contract or same-named property,
+which the real one reports as not run.  Everything else goes to REAL."
+  (lambda (api property symbol function package registry)
+    (multiple-value-bind (names selection error kind data)
+        (funcall real api property symbol function package registry)
+      (let ((subject (and symbol (null error)
+                          (or (getf selection :own-property-not-run)
+                              (getf selection :contract-not-run)))))
+        (values (if subject
+                    (append names
+                            (list (find-symbol (getf subject :name) (getf subject :package))))
+                    names)
+                selection error kind data)))))
+
+(defun %budget-from-the-backend-only (real)
+  "Return a wrong %TRIALS-BUDGET, for the negative control: REAL's answer as if
+the property had no :TRIALS table and the caller had asked for no trials, so
+every budget is the backend default."
+  (lambda (api facts profile backend &optional requested)
+    (declare (ignore requested))
+    (funcall real api (list* :trials-table nil facts) profile backend nil)))
+
+(defun %seed-through-a-double (real)
+  "Return a wrong PARSE-SEED-STRING, for the negative control: REAL's seed
+taken through a binary64 double, as a JSON consumer would, so a seed past 2^53
+comes back rounded."
+  (lambda (text)
+    (multiple-value-bind (seed message) (funcall real text)
+      (values (and seed (round (coerce seed 'double-float))) message))))
+
+(defun %incomplete-digest-matching (real)
+  "Return a wrong %DEFINITION-MATCH, for the negative control: an incomplete
+digest whose text equals the expected one counts as a match.  Everything else
+goes to REAL."
+  (lambda (digest expected)
+    (let ((answer (funcall real digest expected))
+          (value (getf digest :value)))
+      (if (and (eq answer :unknown) value expected (string= value expected))
+          :true
+          answer))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -851,6 +899,10 @@ the argument as it is after the call cannot see."
                                 "CHECK-VERDICT-VERIFIED-NEEDS-EVIDENCE-FROM-EVERY-RESULT"))
         (gaps (%bundle-name :property
                             "CHECK-VERDICT-GAPS-NAME-EACH-SHORTFALL-AND-NOTHING-ELSE"))
+        (selection (%bundle-name :property "CHECK-ROUTING-SELECTION-NAMES-ONLY-WHAT-WAS-ASKED"))
+        (budget (%bundle-name :property "CHECK-ROUTING-BUDGET-COMES-FROM-ITS-STATED-SOURCE"))
+        (seed-text (%bundle-name :property "CHECK-ROUTING-SEED-TEXT-KEEPS-EVERY-DIGIT"))
+        (digest (%bundle-name :property "CHECK-ROUTING-DIGEST-COMPARISON-HAS-FOUR-ANSWERS"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -860,7 +912,11 @@ the argument as it is after the call cannot see."
         (real-counts (fdefinition '%counts))
         (real-contract-plist (fdefinition '%contract-plist))
         (real-verified (fdefinition '%verified-p))
-        (real-gaps (fdefinition '%verification-gaps)))
+        (real-gaps (fdefinition '%verification-gaps))
+        (real-selection (fdefinition '%select-properties))
+        (real-budget (fdefinition '%trials-budget))
+        (real-seed (fdefinition 'parse-seed-string))
+        (real-match (fdefinition '%definition-match)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -988,7 +1044,31 @@ the argument as it is after the call cannot see."
            :description "measures refusals when any one result, not every one, has a usable count"
            :replacement (%gaps-measuring-rejections-from-any-contract real-gaps)
            :targets (list (list :property gaps))
-           :must-fail (list (list :property gaps))))))
+           :must-fail (list (list :property gaps)))
+     ;; Routing.  The same shape again.  Each fault lies in a state every
+     ;; trial of its property runs: symbol= against a registry with a contract
+     ;; and a same-named property, a profile entry beside a different
+     ;; default, the seed 2^53+1, an incomplete digest equal to the expected.
+     (list :function '%select-properties
+           :description "runs a symbol's own contract or same-named property on symbol="
+           :replacement (%selection-adding-the-subject real-selection)
+           :targets (list (list :property selection))
+           :must-fail (list (list :property selection)))
+     (list :function '%trials-budget
+           :description "ignores the profile entry and explicit trials for the backend default"
+           :replacement (%budget-from-the-backend-only real-budget)
+           :targets (list (list :property budget))
+           :must-fail (list (list :property budget)))
+     (list :function 'parse-seed-string
+           :description "takes the seed through a double, rounding it past 2^53"
+           :replacement (%seed-through-a-double real-seed)
+           :targets (list (list :property seed-text))
+           :must-fail (list (list :property seed-text)))
+     (list :function '%definition-match
+           :description "counts an incomplete digest equal to the expected one as a match"
+           :replacement (%incomplete-digest-matching real-match)
+           :targets (list (list :property digest))
+           :must-fail (list (list :property digest))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
