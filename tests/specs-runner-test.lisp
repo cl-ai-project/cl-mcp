@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 17 (length (property-names))))
-    (ok (= 17 (length (remove-duplicates (property-names)))))
+    (ok (= 18 (length (property-names))))
+    (ok (= 18 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
@@ -175,7 +175,9 @@ fixture did not create, so the cleanup fails while the body unwinds."
                                                  (package-name (symbol-package name))))
                                       (property-names))
                        (cl-mcp/specs/write-paths:property-names))
-        "the write-path properties are the four of specs/write-paths.lisp"))
+        "the write-path properties are the five of specs/write-paths.lisp")
+    (ok (member 'cl-mcp/specs/write-paths::write-preserves-safe-spellings (property-names))
+        "the safe-spelling relation is listed under its own name"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
