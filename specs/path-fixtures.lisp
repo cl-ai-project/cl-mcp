@@ -26,8 +26,10 @@
 ;;;; Cleanup removes exactly what was created, newest first, by unlinking files
 ;;;; and links and removing directories one by one.  It never recurses and never
 ;;;; follows a link.  A cleanup failure after a normal exit signals
-;;;; READ-FIXTURE-CLEANUP-ERROR; after an error it is reported on
-;;;; *ERROR-OUTPUT* and the original error goes on.
+;;;; READ-FIXTURE-CLEANUP-ERROR; while an error unwinds it signals
+;;;; READ-FIXTURE-CLEANUP-WARNING and the original error goes on.  The fixture's
+;;;; ASDF system is its to remove from before LOAD-ASD runs, so a load that
+;;;; fails after DEFSYSTEM is undone as well.
 
 (defpackage #:cl-mcp/specs/path-fixtures
   (:use #:cl)
@@ -53,6 +55,7 @@
            #:access-argument
            #:expected-target
            #:fixture-symlink
+           #:fixture-asd-native
            #:register-dependency
            #:unregister-dependency
            #:expected-read-decision
@@ -64,7 +67,9 @@
            #:environment-problems
            #:read-fixture-environment-error
            #:read-fixture-cleanup-error
-           #:read-fixture-cleanup-error-failures))
+           #:read-fixture-cleanup-error-failures
+           #:read-fixture-cleanup-warning
+           #:read-fixture-cleanup-warning-failures))
 
 (in-package #:cl-mcp/specs/path-fixtures)
 
@@ -180,11 +185,16 @@ does not matter; where it leads does."
 ;;; Fixtures
 
 (defstruct (read-fixture (:constructor %make-read-fixture (scratch system-name)))
-  "One scratch tree.  CREATED lists (KIND NATIVE-PATH) newest first."
+  "One scratch tree.  CREATED lists (KIND NATIVE-PATH) newest first.
+REGISTERED says the fixture's ASDF system is registered and checked -- the
+state the policy is judged by.  OWNS-REGISTRATION says cleanup must make sure
+the system is gone; it turns true before registration starts, so a load that
+fails halfway is still undone."
   (scratch nil :read-only t)
   (system-name nil :read-only t)
   (created '())
   (registered nil)
+  (owns-registration nil)
   (root nil))
 
 (define-condition read-fixture-environment-error (error)
@@ -204,6 +214,17 @@ about the functions under test."))
              (format stream "Read fixture cleanup failed: ~S"
                      (read-fixture-cleanup-error-failures condition))))
   (:documentation "Something a fixture created could not be removed."))
+
+(define-condition read-fixture-cleanup-warning (warning)
+  ((failures :initarg :failures :reader read-fixture-cleanup-warning-failures))
+  (:report (lambda (condition stream)
+             (format stream "Read fixture cleanup failed while its body was unwinding; ~
+                             not removed: ~S"
+                     (read-fixture-cleanup-warning-failures condition))))
+  (:documentation "Something a fixture created could not be removed while its
+body was already unwinding from a condition.  Signalled as a warning, so the
+body's own condition goes on, and a caller that collects warnings keeps this
+one apart from anything else written to *ERROR-OUTPUT*."))
 
 (defvar *fixture-serial* (list 0)
   "Counter behind fixture names; a cons so SB-EXT:ATOMIC-INCF can bump it.")
@@ -381,7 +402,7 @@ cleanup unlinks the link itself and never what it points to."
                                                              :name nil :type nil)))))))
     (fixture-symlink fixture (%link-native fixture link) destination)))
 
-(defun %asd-native (fixture)
+(defun fixture-asd-native (fixture)
   "Return the native path of FIXTURE's .asd, in dependency/ itself."
   (format nil "~A~A.asd" (region-native fixture :dependency)
           (read-fixture-system-name fixture)))
@@ -394,7 +415,7 @@ project-alias link when ROOT-ALIAS; set the root the body will see."
     (%make-directory fixture (region-native fixture region))
     (%make-file fixture (concatenate 'string (region-native fixture region) "decoy.txt")
                 "decoy"))
-  (%make-file fixture (%asd-native fixture)
+  (%make-file fixture (fixture-asd-native fixture)
               (format nil "(asdf:defsystem ~S)~%" (read-fixture-system-name fixture)))
   (dolist (place places)
     (%make-place fixture place))
@@ -410,33 +431,43 @@ project-alias link when ROOT-ALIAS; set the root the body will see."
 
 (defun register-dependency (fixture)
   "Register FIXTURE's own ASDF system, whose source directory is dependency/,
-and check that ASDF now reports exactly that directory."
+and check that ASDF now reports exactly that directory.
+
+The fixture takes charge of removing the system before LOAD-ASD runs, not after
+it returns: loading the .asd registers the system as soon as its DEFSYSTEM is
+evaluated, so a failure, or a deadline, later in the load would otherwise leave
+a registration behind that nothing removes.  REGISTERED, which the policy is
+judged by, turns true only once the registration is complete and checked."
   (let ((name (read-fixture-system-name fixture)))
     (when (asdf:registered-system name)
       (error "Fixture system ~A is registered already." name))
-    (asdf:load-asd (uiop:parse-native-namestring (%asd-native fixture)))
-    (setf (read-fixture-registered fixture) t)
+    (setf (read-fixture-owns-registration fixture) t)
+    (asdf:load-asd (uiop:parse-native-namestring (fixture-asd-native fixture)))
     (let ((system (asdf:registered-system name)))
       (unless (and system
                    (string= (%native (truename (asdf:system-source-directory system)))
                             (%native (truename (%directory-pathname
                                                 (region-native fixture :dependency))))))
         (error "Fixture system ~A did not register dependency/ as its source directory."
-               name)))))
+               name)))
+    (setf (read-fixture-registered fixture) t)))
 
 (defun unregister-dependency (fixture)
-  "Remove FIXTURE's own ASDF system from the registry, and nothing else."
+  "Remove FIXTURE's own ASDF system from the registry, and nothing else.  Asks
+the registry itself, so a registration a failed load left half-made goes too."
   (let ((name (read-fixture-system-name fixture)))
-    (asdf:clear-system name)
+    (when (asdf:registered-system name)
+      (asdf:clear-system name))
     (when (asdf:registered-system name)
       (error "Fixture system ~A is still registered." name))
-    (setf (read-fixture-registered fixture) nil)))
+    (setf (read-fixture-registered fixture) nil
+          (read-fixture-owns-registration fixture) nil)))
 
 (defun %cleanup (fixture)
   "Unregister FIXTURE's system and remove what it created, newest first, one
 object at a time.  Return the failures; an empty list means everything went."
   (let ((failures '()))
-    (when (read-fixture-registered fixture)
+    (when (read-fixture-owns-registration fixture)
       (handler-case (unregister-dependency fixture)
         (error (condition) (push (list :unregister (princ-to-string condition)) failures))))
     (loop for (kind native) in (read-fixture-created fixture)
@@ -465,7 +496,10 @@ when REGISTER-DEPENDENCY, and call THUNK with the fixture while *PROJECT-ROOT*
 is bound to project/ -- or to project-alias, a symlink to it, when ROOT-ALIAS.
 Everything created is removed afterwards, however THUNK exits.  Signals
 READ-FIXTURE-ENVIRONMENT-ERROR, before creating anything, when a registered
-system's source directory contains the temporary directory."
+system's source directory contains the temporary directory.  A cleanup failure
+signals READ-FIXTURE-CLEANUP-ERROR after a normal exit, and
+READ-FIXTURE-CLEANUP-WARNING while THUNK's condition is unwinding, so that
+condition goes on and the failure is still reported as data."
   (%check-environment)
   (let ((fixture (%fresh-fixture))
         (normal-exit nil))
@@ -482,8 +516,7 @@ system's source directory contains the temporary directory."
         (when failures
           (if normal-exit
               (error 'read-fixture-cleanup-error :failures failures)
-              (format *error-output* "~&;; read fixture cleanup failed while unwinding: ~S~%"
-                      failures)))))))
+              (warn 'read-fixture-cleanup-warning :failures failures)))))))
 
 (defmacro with-read-fixture ((fixture &rest options) &body body)
   "Run BODY with FIXTURE bound to a fresh read fixture (see CALL-WITH-READ-FIXTURE)."

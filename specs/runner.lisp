@@ -137,24 +137,52 @@ value: (:STATUS :TIMEOUT) past SECONDS, (:STATUS :SIGNALLED ...) on an error."
       (values nil (list :status :signalled :condition (%condition-record condition))))))
 
 (defun %call-capturing-error-output (thunk)
-  "Call THUNK with *ERROR-OUTPUT* captured, and return THUNK's two values and a
-record of what it wrote there: (:ERROR-OUTPUT-LINES N :ERROR-OUTPUT-SAMPLE
-FIRST-LINE), or NIL when it wrote nothing.  The read-path properties call code
-that makes ASDF reload .asd files and warn about each one; kept apart, that
-noise is counted in the report instead of burying it.  It plays no part in a
-verdict."
-  (let ((captured (make-string-output-stream)))
-    (multiple-value-bind (value failure)
-        (let ((*error-output* captured))
-          (funcall thunk))
-      (let ((text (get-output-stream-string captured)))
-        (values value failure
-                (when (plusp (length text))
-                  (list :error-output-lines (max 1 (count #\Newline text))
-                        :error-output-sample
-                        (%safe-text (subseq text 0 (or (position #\Newline text)
-                                                       (length text)))
-                                    :limit 200))))))))
+  "Call THUNK with *ERROR-OUTPUT* captured and its warnings recorded, and return
+THUNK's two values and a record of both, or NIL when there was neither.
+
+Output: (:ERROR-OUTPUT-LINES N :ERROR-OUTPUT-SAMPLE FIRST-LINE); the text beyond
+its first line is not kept.  The read-path properties make ASDF reload .asd
+files and warn about each one; counted, that noise no longer buries the report.
+
+Warnings: (:WARNINGS ((:TYPE NAME :COUNT N :REPORTS (TEXT ...)) ...)), one row
+per condition type in order of first appearance, with up to three distinct
+reports each, kept whole up to 2000 characters.  A warning is recorded, never
+muffled, so it is printed as before.  This is where a failure that must not be
+lost next to that noise goes -- a read fixture's cleanup failing while a
+property's own condition unwinds, say.
+
+Neither plays any part in a verdict."
+  (let ((captured (make-string-output-stream))
+        (rows '()))
+    (flet ((record (warning)
+             (let* ((type (%qualified-name (type-of warning)))
+                    (row (or (find type rows :key (lambda (row) (getf row :type))
+                                             :test #'string=)
+                             (let ((new (list :type type :count 0 :reports '())))
+                               (push new rows)
+                               new)))
+                    (text (%safe-text (handler-case (princ-to-string warning)
+                                        (error () "<report signalled>"))
+                                      :limit 2000)))
+               (incf (getf row :count))
+               (when (and (< (length (getf row :reports)) 3)
+                          (not (member text (getf row :reports) :test #'string=)))
+                 (setf (getf row :reports) (append (getf row :reports) (list text)))))))
+      (multiple-value-bind (value failure)
+          (handler-bind ((warning #'record))
+            (let ((*error-output* captured))
+              (funcall thunk)))
+        (let ((text (get-output-stream-string captured)))
+          (values value failure
+                  (append
+                   (when (plusp (length text))
+                     (list :error-output-lines (max 1 (count #\Newline text))
+                           :error-output-sample
+                           (%safe-text (subseq text 0 (or (position #\Newline text)
+                                                          (length text)))
+                                       :limit 200)))
+                   (when rows
+                     (list :warnings (reverse rows))))))))))
 
 (defun %result-record (result)
   "Return what the runner keeps of a cl-spec RESULT, read from its version 1
@@ -819,8 +847,13 @@ the real one, and both runs used definitions with the same digests."
       (format stream "      digest ~A (~:[incomplete~;complete~])~%"
               (getf entry :digest) (getf entry :digest-complete)))
     (when (getf entry :error-output-lines)
-      (format stream "      stderr ~D line~:P captured, first: ~A~%"
+      (format stream "      stderr ~D line~:P captured (first line only kept): ~A~%"
               (getf entry :error-output-lines) (getf entry :error-output-sample)))
+    (dolist (row (getf entry :warnings))
+      (format stream "      warning ~A x~D~%" (getf row :type) (getf row :count))
+      (dolist (text (getf row :reports))
+        ;; Whole for a failed run, where a warning may explain it; a line otherwise.
+        (format stream "        ~A~%" (%safe-text text :limit (if problems 2000 160)))))
     (when (getf entry :declared-cases)
       (format stream "      cases ~{~A~^, ~}~%"
               (if (consp report)

@@ -25,6 +25,7 @@
                 #:region-native
                 #:place-native
                 #:fixture-symlink
+                #:fixture-asd-native
                 #:register-dependency
                 #:unregister-dependency
                 #:expected-read-decision
@@ -33,7 +34,9 @@
                 #:environment-problems
                 #:read-fixture-environment-error
                 #:read-fixture-cleanup-error
-                #:read-fixture-cleanup-error-failures))
+                #:read-fixture-cleanup-error-failures
+                #:read-fixture-cleanup-warning
+                #:read-fixture-cleanup-warning-failures))
 
 (in-package #:cl-mcp/tests/path-specs-test)
 
@@ -96,7 +99,8 @@
       (ng (native-directory-exists-p scratch))
       (ng (asdf:registered-system system))
       (ok (eq root-before *project-root*))
-      (ok (asdf-snapshot-kept-p snapshot) "every other system is still registered as itself"))))
+      (let ((kept (asdf-snapshot-kept-p snapshot)))
+        (ok kept "every other system is still registered as itself")))))
 
 (deftest read-fixture-cleans-up-when-its-body-signals
   (let ((root-before *project-root*)
@@ -114,7 +118,45 @@
     (ng (native-directory-exists-p scratch))
     (ng (asdf:registered-system system))
     (ok (eq root-before *project-root*))
-    (ok (asdf-snapshot-kept-p snapshot))))
+    (let ((kept (asdf-snapshot-kept-p snapshot)))
+      (ok kept "every other system is still registered as itself"))))
+
+(deftest read-fixture-removes-a-registration-that-failed-halfway
+  ;; The fixture's own .asd defines the system and then fails, so ASDF has
+  ;; registered it by the time REGISTER-DEPENDENCY unwinds.  The cleanup must
+  ;; still remove it: a registration left behind would point a later check in
+  ;; the same image at a directory that no longer exists.
+  (let ((system nil)
+        (scratch nil)
+        (snapshot (asdf-snapshot)))
+    (unwind-protect
+         (progn
+           (ok (handler-case
+                   (with-read-fixture (fixture)
+                     (setf system (read-fixture-system-name fixture)
+                           scratch (read-fixture-scratch fixture))
+                     (with-open-file (out (uiop:parse-native-namestring
+                                           (fixture-asd-native fixture))
+                                          :direction :output :if-exists :supersede)
+                       (format out "(asdf:defsystem ~S)~%~
+                                    (error \"planned failure after registration\")~%"
+                               system))
+                     (register-dependency fixture)
+                     :registered)
+                 (error (condition)
+                   (and (search "planned failure after registration"
+                                (princ-to-string condition))
+                        t)))
+               "the planned failure inside the .asd comes out")
+           (let ((left (and (asdf:registered-system system) t))
+                 (kept (asdf-snapshot-kept-p snapshot)))
+             (ng left "the half-made registration is gone")
+             (ng (native-directory-exists-p scratch))
+             (ok kept "every other system is still registered as itself")))
+      ;; Only after the checks: keep a failure here from leaking into the
+      ;; tests that follow in this image.
+      (when (and system (asdf:registered-system system))
+        (asdf:clear-system system)))))
 
 (deftest read-fixture-cleanup-leaves-link-targets-alone
   (let* ((outside (format nil "~Acl-mcp-read-spec-owned-~D-~D/"
@@ -152,6 +194,35 @@
     ;; Remove what the failed cleanup had to leave: the stray file, then the two
     ;; directories it kept from being removed, one at a time.
     (let ((project (subseq stray 0 (- (length stray) (length "stray.txt")))))
+      (sb-posix:unlink stray)
+      (sb-posix:rmdir project)
+      (sb-posix:rmdir (subseq project 0 (- (length project) (length "project/")))))))
+
+(deftest read-fixture-warns-when-cleanup-fails-during-an-error
+  ;; The body's own condition must come out, and the cleanup failure must not
+  ;; be lost: it arrives as a structured warning, which a caller can keep apart
+  ;; from other output.
+  (let ((stray nil)
+        (warnings '()))
+    (ok (handler-case
+            (handler-bind ((read-fixture-cleanup-warning
+                             (lambda (warning)
+                               (push warning warnings)
+                               (muffle-warning warning))))
+              (with-read-fixture (fixture)
+                (setf stray (concatenate 'string (region-native fixture :project)
+                                         "stray.txt"))
+                (with-open-file (out (uiop:parse-native-namestring stray)
+                                     :direction :output)
+                  (write-string "not recorded" out))
+                (error 'planned-failure)))
+          (planned-failure () t))
+        "the body's failure is the one that comes out")
+    (ok (= 1 (length warnings)) "and the cleanup failure is reported once, as a warning")
+    (let ((project (subseq stray 0 (- (length stray) (length "stray.txt")))))
+      (ok (find project (read-fixture-cleanup-warning-failures (first warnings))
+                :key #'second :test #'equal)
+          "naming the directory it could not remove")
       (sb-posix:unlink stray)
       (sb-posix:rmdir project)
       (sb-posix:rmdir (subseq project 0 (- (length project) (length "project/")))))))

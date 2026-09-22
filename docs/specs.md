@@ -128,7 +128,11 @@ the descriptor inside the property, and removes it before the trial ends:
   the scratch root. Registration uses `asdf:load-asd`, removal
   `asdf:clear-system` of that name. No other system is removed or changed, and
   the tests check that every other registered system is still there as the
-  same object. The cl-spec registry and the ASDF registry are separate: a
+  same object. The fixture takes charge of removing its system before
+  `load-asd` runs, not after it returns. ASDF registers the system as soon as
+  its `defsystem` is evaluated, so a load that fails later, or is cut short by
+  a deadline, is still undone; cleanup asks the registry itself whether the
+  system is there. The cl-spec registry and the ASDF registry are separate: a
   fresh cl-spec registry isolates neither ASDF nor the filesystem.
 - Before building anything, the fixture refuses to run if a registered
   system's source directory contains the temporary directory. Such a system
@@ -136,8 +140,12 @@ the descriptor inside the property, and removes it before the trial ends:
   refusal is an error, so the trial fails; it is not counted as a pass.
 - Cleanup removes exactly what was created, newest first: it unlinks files and
   links and removes directories one at a time. It never recurses and never
-  follows a link. A failure to remove something fails the trial after a normal
-  exit, and is printed to `*error-output*` when the body is already unwinding.
+  follows a link. A failure to remove something signals
+  `read-fixture-cleanup-error` after a normal exit, which fails the trial.
+  When the body is already unwinding from its own condition, the failure is
+  signalled as a `read-fixture-cleanup-warning` instead, so the body's
+  condition goes on. The runner keeps that warning, with the paths it could
+  not remove, in the report.
   A process killed outright (SIGKILL, CI timeout) runs no Lisp cleanup, so its
   scratch directory stays under the temporary directory, recognisable by the
   `cl-mcp-read-spec-` prefix. CI throws the whole runner away afterwards.
@@ -174,10 +182,13 @@ draw:
 - `outside/` and `project-other/`, including `../project-other/p.lisp`;
 - seven link topologies, each with and without a root alias.
 
-The same file tests the fixtures themselves: the tree and registration are
-gone after a normal exit and after an error, cleanup does not follow a link
-out of the scratch tree, a failed cleanup fails the run, and the environment
-check refuses a covering source directory.
+The same file tests the fixtures themselves:
+- the tree and registration are gone after a normal exit, after an error, and
+  after a registration that failed inside the `.asd` once `defsystem` had run;
+- cleanup does not follow a link out of the scratch tree;
+- a failed cleanup fails the run, or arrives as a warning while an error
+  unwinds;
+- the environment check refuses a covering source directory.
 
 Each property runs 12 trials at `:normal` and 3 at `:smoke`, far fewer than
 the string properties, because every trial touches the disk and ASDF.
@@ -375,9 +386,16 @@ list but different uncommitted code get different fingerprints
 (`cl-mcp/specs/runner:git-state`).
 
 Anything a run writes to `*error-output*` is captured. The report shows how
-many lines were written and the first one, but not the text itself. The
-read-access runs make ASDF reload `.asd` files and warn hundreds of times, and
-that would otherwise bury the report. Captured output plays no part in a
+many lines were written and the first one; the rest of the text is not kept.
+The read-access runs make ASDF reload `.asd` files and warn hundreds of times,
+and that would otherwise bury the report.
+
+Warnings are recorded as data instead, without muffling them. The report has
+one row per condition type, with a count and up to three distinct reports of
+up to 2000 characters each. The reports are printed whole when the run failed
+and cut to a line when it passed. This is how a read fixture's cleanup
+failure, signalled while a property's own condition unwinds, survives next to
+the ASDF noise. Neither the output nor the warnings play any part in a
 verdict.
 
 ### From the command line
@@ -404,7 +422,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in nine wrong implementations, one at a time:
+- `negative-control` swaps in eight wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
