@@ -492,10 +492,10 @@ used. The opt-in tests check the restated required metadata against the real
 | Property | Checks, every trial |
 |---|---|
 | `core-record-availability-separates-absence-from-nil` | a missing key is `:absent`; a present NIL is `:collected`; `:not-collected` is `:not-collected` in a sentinel field and `:collected` in an ordinary one; at the front or the back of a record |
-| `core-record-projects-each-field-by-its-role` | a boolean NIL is `(:bool nil)` (false); an absent observation is null; an empty collection is `[]`; a missing key is missing from `:data` while a present NIL phase is null; a collected capture value, even one shaped like cl-spec's unavailable marker, is an externalized value, with no invented `reason` or `type` |
+| `core-record-projects-each-field-by-its-role` | a boolean NIL is `(:bool nil)` (false); an absent observation is null; an empty collection is `[]`; a missing key is missing from `:data` while a present NIL phase is null; a collected capture value, even one shaped like cl-spec's unavailable marker, is an externalized value, with no invented `reason` or `type`. The value itself survives: its printed text is the standard printer's, and a list's object id names the record's own list in the same registry, while an atom has none |
 | `core-record-seeds-stay-decimal-text` | five seeds: small, around 2^53, just under cl-spec's 2^62 draw bound, anywhere below it, and past it. Each reaches `:data` as its decimal text, computed by integer division, while a small trial count stays a number |
 | `core-record-ignores-order-duplicates-and-unknown-keys` | reordered pairs, a later duplicate with another value (the first wins), and unknown keys leave every known field's projection and availability as they were; unknown keys are named, not guessed into `:data`, and change neither `complete` nor `schema_supported` |
-| `core-record-reports-every-cut` | one limit at a time, of list length, depth or characters, pushed just under, to, just past and far past its bound. Under and at the bound, nothing is cut and `complete` is true. Past it, there is exactly one issue, at the field's path with the limit's reason, and `complete` is false. An omitted count is the true excess when it says it is exact, and less when it says it is not. No issue appears inside `:data` |
+| `core-record-reports-every-cut` | all three limits, list length, characters and depth, each on its own record, pushed just under, to, just past and far past its bound. Under and at the bound, nothing is cut and `complete` is true. Past it, there is exactly one issue, at the field's path with the limit's reason, and `complete` is false. The kept part is the head, compared item by item and character by character. Every item and character differs from its neighbours, so a projector that kept the tail or reordered would show. An omitted count is the true excess when it says it is exact, and less when it says it is not. No issue appears inside `:data` |
 | `core-record-validation-separates-ok-unsupported-malformed` | three records, each one cause from a valid one: `:ok` and projected; `:malformed` (a dropped required key, NIL, an improper, odd-length or string-keyed plist, a wrong record or entity kind, no version) with no report; `:unsupported-schema` for another integer version, reported collected with `schema_supported` false and no `:data` |
 
 JSON's grammar allows any integer as a number. A seed stays text because a
@@ -524,10 +524,14 @@ The fixed cases are in the default suite (`tests/spec-core-record-test.lisp`):
 - the JSON decoder setting itself;
 - a record taken to JSON with false, null, `[]`, a missing key and a present
   null apart, and no `source`;
+- an array check that asks for a vector that is not a string before it looks
+  at the length. `(equalp #() "")` is true, so neither `""` nor `"lost"` may
+  pass for `[]` or for a non-empty array;
 - nine seeds from 0 to 2^64+1, before and after JSON;
 - every sentinel and value field in every state;
 - one reordered, duplicated and extended record;
-- each limit at 39/40/41 items, 29/30/31 characters, and depth 3/4/5;
+- each limit at 39/40/41 items, 29/30/31 characters, and depth 3/4/5, with
+  the kept items and characters compared, not only counted;
 - every single-cause malformation and four unsupported versions;
 - an opaque value's id resolving in the bound registry while the global
   registry is unchanged.
@@ -801,7 +805,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in fifteen wrong implementations, one at a time:
+- `negative-control` swaps in sixteen wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -835,7 +839,10 @@ something failed, `2` the script could not run them.
   - a `project-record` that turns a record's seed back into a JSON number. The
     seed property must fail.
   - a `project-core-record` that claims a complete projection whatever its
-    issues say. The cut property must fail. Of the default suite's record tests,
+    issues say. The cut property must fail.
+  - a `project-record` that keeps the tail of an over-long list. It still cuts
+    the list and reports the cut correctly, so only the kept items are wrong.
+    The cut property must fail. Of the default suite's record tests,
     only the new limit test catches this one. The first two are also caught by
     older fixed tests (`present-nil-is-not-absent` and
     `a-seed-is-decimal-text-even-inside-the-safe-range` among them).
