@@ -112,8 +112,13 @@ symlink-based path traversal."
 (declaim (ftype (function ((or string pathname)) pathname) ensure-write-path))
 
 (define-condition write-path-refused (simple-error)
-  ((path :initarg :path :reader write-path-refused-path)
-   (reason :initarg :reason :reader write-path-refused-reason))
+  ((path :initarg :path :reader write-path-refused-path
+         :documentation "The argument ENSURE-WRITE-PATH was given, a string or a
+pathname, exactly as the caller passed it.  WRITE-PATH-REFUSED-PATH reads it.")
+   (reason :initarg :reason :reader write-path-refused-reason
+           :documentation "A keyword saying why the path was refused; the
+condition's documentation lists them.  WRITE-PATH-REFUSED-REASON reads it, so a
+caller can tell the reasons apart without parsing the message."))
   (:documentation "ENSURE-WRITE-PATH declined PATH before anything was written.
 REASON is a keyword naming why: :ABSOLUTE, :OUTSIDE-PROJECT, :DIRECTORY-TARGET
 for an existing directory or a link to one, and for a path it cannot check
