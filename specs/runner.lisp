@@ -49,7 +49,8 @@
   (:import-from #:cl-mcp/src/spec-core-record
                 #:field-availability
                 #:project-record
-                #:project-core-record)
+                #:project-core-record
+                #:*projection-max-length*)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -725,6 +726,27 @@ with PROJECTION.COMPLETE true even when its issues say something was cut."
               status
               reason))))
 
+(defun %project-record-keeping-tails (real)
+  "Return a wrong PROJECT-RECORD, for the negative control: a record's
+top-level list longer than *PROJECTION-MAX-LENGTH* keeps its last items instead
+of its first.  REAL still makes the cut, so the issue, its path, the omitted
+count and PROJECTION.COMPLETE are exactly what they should be; only the kept
+items are wrong."
+  (lambda (value descriptor &rest options)
+    (let ((limit *projection-max-length*))
+      (apply real
+             (if (and (consp value) (keywordp (first value)))
+                 (loop for (key item) on value by #'cddr
+                       append (list key
+                                    (if (and (consp item) (> (length item) limit))
+                                        ;; The last LIMIT items first, so the
+                                        ;; head REAL keeps is the old tail.
+                                        (append (last item limit) (butlast item limit))
+                                        item)))
+                 value)
+             descriptor
+             options))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -848,6 +870,11 @@ the argument as it is after the call cannot see."
      (list :function 'project-core-record
            :description "claims a complete projection whatever its issues say"
            :replacement (%core-record-claiming-completeness real-core-record)
+           :targets (list (list :property cuts))
+           :must-fail (list (list :property cuts)))
+     (list :function 'project-record
+           :description "keeps the tail of an over-long list, reporting the cut correctly"
+           :replacement (%project-record-keeping-tails real-projection)
            :targets (list (list :property cuts))
            :must-fail (list (list :property cuts))))))
 
