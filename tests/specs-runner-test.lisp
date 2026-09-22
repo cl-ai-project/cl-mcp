@@ -162,14 +162,20 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 13 (length (property-names))))
-    (ok (= 13 (length (remove-duplicates (property-names)))))
+    (ok (= 17 (length (property-names))))
+    (ok (= 17 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
                                       (property-names))
                        (cl-mcp/specs/paths:property-names))
-        "the read-path properties are the four of specs/paths.lisp"))
+        "the read-path properties are the four of specs/paths.lisp")
+    (ok (%same-names-p (remove-if-not (lambda (name)
+                                        (string= "CL-MCP/SPECS/WRITE-PATHS"
+                                                 (package-name (symbol-package name))))
+                                      (property-names))
+                       (cl-mcp/specs/write-paths:property-names))
+        "the write-path properties are the four of specs/write-paths.lisp"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -178,7 +184,9 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/utils/sanitize:sanitize-for-json
                            cl-mcp/src/utils/sanitize:sanitize-error-message
                            cl-mcp/src/utils/paths:allowed-read-path
-                           cl-mcp/src/utils/paths:resolve-readable-path)))))
+                           cl-mcp/src/utils/paths:resolve-readable-path
+                           cl-mcp/src/utils/paths:ensure-write-path
+                           cl-mcp/src/fs:fs-write-file)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)

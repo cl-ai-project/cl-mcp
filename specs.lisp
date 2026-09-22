@@ -5,11 +5,12 @@
 ;;;; or tests.lisp refers to this system, so loading or running cl-mcp never
 ;;;; needs cl-spec.  The dependency points one way only:
 ;;;;
-;;;;   cl-mcp/specs --> cl-mcp/src/utils/{strings,sanitize,paths}, cl-spec/main,
-;;;;                    cl-spec/src/backends/check-it
+;;;;   cl-mcp/specs --> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
+;;;;                    cl-spec/main, cl-spec/src/backends/check-it
 ;;;;
-;;;; (The default suite does load specs/path-fixtures.lisp, for its fixed read
-;;;; cases; that file needs no cl-spec and loads nothing of this bundle.)
+;;;; (The default suite does load specs/path-fixtures.lisp and
+;;;; specs/write-fixtures.lisp, for its fixed read and write cases; those files
+;;;; need no cl-spec and load nothing of this bundle.)
 ;;;;
 ;;;; Loading this system registers the bundle in CL-SPEC:*REGISTRY* and does
 ;;;; nothing else: no check runs, no function is instrumented, no server or
@@ -27,6 +28,7 @@
   (:import-from #:cl-mcp/specs/strings)
   (:import-from #:cl-mcp/specs/sanitize)
   (:import-from #:cl-mcp/specs/paths)
+  (:import-from #:cl-mcp/specs/write-paths)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -42,32 +44,37 @@ production symbol itself, so a Function Spec is listed under the home package
 of the function it describes, not under a CL-MCP/SPECS package."
   (append (cl-mcp/specs/strings:contract-names)
           (cl-mcp/specs/sanitize:contract-names)
-          (cl-mcp/specs/paths:contract-names)))
+          (cl-mcp/specs/paths:contract-names)
+          (cl-mcp/specs/write-paths:contract-names)))
 
 (defun property-names ()
   "Return the properties this bundle defines."
   (append (cl-mcp/specs/strings:property-names)
           (cl-mcp/specs/sanitize:property-names)
-          (cl-mcp/specs/paths:property-names)))
+          (cl-mcp/specs/paths:property-names)
+          (cl-mcp/specs/write-paths:property-names)))
 
 (defun spec-names ()
   "Return the named data specs this bundle defines."
   (append (cl-mcp/specs/strings:spec-names)
           (cl-mcp/specs/sanitize:spec-names)
-          (cl-mcp/specs/paths:spec-names)))
+          (cl-mcp/specs/paths:spec-names)
+          (cl-mcp/specs/write-paths:spec-names)))
 
 (defun generator-names ()
   "Return the custom generators this bundle defines."
   (append (cl-mcp/specs/strings:generator-names)
           (cl-mcp/specs/sanitize:generator-names)
-          (cl-mcp/specs/paths:generator-names)))
+          (cl-mcp/specs/paths:generator-names)
+          (cl-mcp/specs/write-paths:generator-names)))
 
 (defun call-examples ()
   "Return the bundle's concrete calls, as (FUNCTION ARGUMENTS [CASE]), which the
 runner checks with CL-SPEC:CHECK-CALL apart from generated trials."
   (append (cl-mcp/specs/strings:call-examples)
           (cl-mcp/specs/sanitize:call-examples)
-          (cl-mcp/specs/paths:call-examples)))
+          (cl-mcp/specs/paths:call-examples)
+          (cl-mcp/specs/write-paths:call-examples)))
 
 (defun register-specifications (&optional (registry *registry*))
   "Install every definition of this bundle in REGISTRY, the current
@@ -80,7 +87,8 @@ REGISTRY after the call returns: this does not bind a registry of its own."
   (let ((*registry* registry))
     (cl-mcp/specs/strings:register-specifications)
     (cl-mcp/specs/sanitize:register-specifications)
-    (cl-mcp/specs/paths:register-specifications))
+    (cl-mcp/specs/paths:register-specifications)
+    (cl-mcp/specs/write-paths:register-specifications))
   (values (contract-names) (property-names)))
 
 ;;; Loading the bundle registers it where MCP's spec-list and spec-symbol look.
