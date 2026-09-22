@@ -638,8 +638,19 @@ Each property runs 25 trials at `:normal` and 5 at `:smoke`. Calls per trial:
 - verified: 64 `%verified-p` calls and 1 `%verification-gaps` call;
 - gaps: 8 to 15 `%verification-gaps` calls.
 
-Every trial reaches every row. A planted fault therefore needs no lucky draw to
-be caught.
+The fixed tests below cover every row of the three tables. The properties do
+not. Each trial runs a fixed set of states and draws the numbers, combinations
+and order within them.
+
+| Property | Run in every trial | Drawn |
+|---|---|---|
+| counts | all 13 statuses, in the second list | the counts, the order, and which kind of result carries each status |
+| effective trials | every refusal-count row on both paths, and all seven ways a count can be missing | the numbers, and the free `:pre` and failure-reason choices |
+| verified | the empty list, and each of the 30 kinds that are not evidence, alone and among good results | the one to four good results, and the selection |
+| gaps | a property or symbol run, a contract run, and a mixed list that pairs a usable count with a result without one | each list's result kinds and its selection |
+
+Each of the five planted faults in the negative control lies in a state that
+every trial runs. Catching it therefore needs no lucky draw.
 
 The fixed cases are in the default suite (`tests/check-verdict-test.lisp`).
 They need no cl-spec:
@@ -668,6 +679,11 @@ reads a real contract through `spec-check` in each of these cases:
 - skipped when every input is refused;
 - a case never reached;
 - generation exhaustion.
+
+That suite skips each test when the image has no cl-spec recent enough, and
+in CI it does. The default `test` job has none, and the `specs` job, which has
+the pinned cl-spec, does not run the suite. Until a job runs it with a skip
+counted as a failure, those real results are checked locally only.
 
 Not covered: selecting from a real registry, profile/trials/seed/digest routing,
 the deadline and real timeouts, rendering and JSON-RPC, the legacy fallback

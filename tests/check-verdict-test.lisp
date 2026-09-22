@@ -209,7 +209,16 @@
                    ;; Not zero, and not the raw trial count.
                    (ok (null (getf half :effective-trials)))
                    (ok (eq (eq row :overcounted) (getf half :rejected-overcounted)))
-                   (ok (eq (eq row :contradicted) (getf half :rejected-contradicted)))))))))
+                   (ok (eq (eq row :contradicted) (getf half :rejected-contradicted))))))
+      (testing "more refusals than trials, and no :pre: both flags, still no count"
+        ;; Two causes at once.  Either may name the status; neither may let a
+        ;; count through.
+        (let ((half (%half (%instance :overcounted-without-pre path 1 2 nil))))
+          (ok (member (getf half :rejection-status) '(:overcounted :contradicted)))
+          (ok (not (getf half :rejected-usable)))
+          (ok (null (getf half :effective-trials)))
+          (ok (getf half :rejected-overcounted))
+          (ok (getf half :rejected-contradicted)))))))
 
 (deftest a-missing-count-is-unmeasured-and-says-why
   (loop for (path form rejected readable) in
