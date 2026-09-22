@@ -39,6 +39,12 @@
 ;;;; below the scratch root that the fixture did not create, one by one, and
 ;;;; lists them in READ-FIXTURE-ADOPTED.  Those are the only entries it removes
 ;;;; that it did not make, and they are all inside its own tree.
+;;;;
+;;;; A tree is the fixture's own only once its mkdir of the scratch directory
+;;;; has returned; mkdir fails on anything already at that path, a directory
+;;;; or a symlink.  Until then cleanup lists, adopts and reports nothing below
+;;;; the path.  *SCRATCH-NAME-FUNCTION* chooses the path, so a test can aim a
+;;;; fixture at one that exists.
 
 (defpackage #:cl-mcp/specs/path-fixtures
   (:use #:cl)
@@ -64,6 +70,8 @@
            #:read-fixture-adopted
            #:call-with-read-fixture
            #:with-read-fixture
+           #:*scratch-name-function*
+           #:default-scratch-name
            #:region-native
            #:place-native
            #:relative-to-project
@@ -204,14 +212,17 @@ does not matter; where it leads does."
 
 (defstruct (read-fixture (:constructor %make-read-fixture (scratch system-name)))
   "One scratch tree.  CREATED lists (KIND NATIVE-PATH) newest first.
-REGISTERED says the fixture's ASDF system is registered and checked -- the
-state the policy is judged by.  OWNS-REGISTRATION says cleanup must make sure
-the system is gone; it turns true before registration starts, so a load that
-fails halfway is still undone.  ADOPT-NEW-ENTRIES lets cleanup also remove
-entries the code under test created in the tree; ADOPTED lists them."
+OWNS-SCRATCH says this fixture created the scratch directory itself; nothing
+below a path it did not create is ever listed or removed.  REGISTERED says the
+fixture's ASDF system is registered and checked -- the state the policy is
+judged by.  OWNS-REGISTRATION says cleanup must make sure the system is gone;
+it turns true before registration starts, so a load that fails halfway is
+still undone.  ADOPT-NEW-ENTRIES lets cleanup also remove entries the code
+under test created in the tree; ADOPTED lists them."
   (scratch nil :read-only t)
   (system-name nil :read-only t)
   (created '())
+  (owns-scratch nil)
   (registered nil)
   (owns-registration nil)
   (adopt-new-entries nil)
@@ -431,7 +442,10 @@ cleanup unlinks the link itself and never what it points to."
 (defun %materialize (fixture places links root-alias)
   "Create FIXTURE's tree: regions, PLACES, LINKS, the dependency's .asd, and the
 project-alias link when ROOT-ALIAS; set the root the body will see."
+  ;; mkdir fails on anything already at that path, a directory or a link, so
+  ;; once it returns the scratch directory is this fixture's own.
   (%make-directory fixture (read-fixture-scratch fixture))
+  (setf (read-fixture-owns-scratch fixture) t)
   (dolist (region *regions*)
     (%make-directory fixture (region-native fixture region))
     (%make-file fixture (concatenate 'string (region-native fixture region) "decoy.txt")
@@ -565,16 +579,22 @@ lists are empty when nothing changed."
   "Unregister FIXTURE's system and remove what it created, newest first, one
 object at a time.  When FIXTURE adopts new entries, first remove, deepest first,
 every entry of the scratch tree it did not create -- what the code under test
-wrote -- and list each in ADOPTED.  Nothing outside the scratch tree is
-touched and no link is followed.  Return the failures; an empty list means
-everything went."
-  (let ((failures '()))
+wrote -- and list each in ADOPTED.  That happens only when FIXTURE created the
+scratch directory itself and it is still a directory, not a link: a path whose
+mkdir failed belongs to someone else, and nothing below it is listed, removed
+or reported.  Nothing outside the scratch tree is touched and no link is
+followed.  Return the failures; an empty list means everything went."
+  (let ((failures '())
+        (scratch (read-fixture-scratch fixture))
+        (owned (read-fixture-owns-scratch fixture)))
     (when (read-fixture-owns-registration fixture)
       (handler-case (unregister-dependency fixture)
         (error (condition) (push (list :unregister (princ-to-string condition)) failures))))
-    (when (read-fixture-adopt-new-entries fixture)
+    (when (and owned
+               (read-fixture-adopt-new-entries fixture)
+               (eq :directory (%entry-kind (string-right-trim "/" scratch))))
       (let ((recorded (mapcar #'second (read-fixture-created fixture))))
-        (loop for (native kind) in (reverse (%walk-tree (read-fixture-scratch fixture)))
+        (loop for (native kind) in (reverse (%walk-tree scratch))
               unless (member native recorded :test #'string=)
                 do (push (list kind native) (read-fixture-adopted fixture))
                    (handler-case (if (eq kind :directory)
@@ -590,17 +610,27 @@ everything went."
                (error (condition)
                  (push (list kind native (princ-to-string condition)) failures))))
     (setf (read-fixture-created fixture) '())
-    (when (probe-file (%directory-pathname (read-fixture-scratch fixture)))
-      (push (list :scratch-remains (read-fixture-scratch fixture)) failures))
+    (when (and owned (probe-file (%directory-pathname scratch)))
+      (push (list :scratch-remains scratch) failures))
     (nreverse failures)))
+
+(defun default-scratch-name (pid serial)
+  "Return the native path, ending in /, of the scratch directory the fixture
+numbered SERIAL in process PID tries to create under the temporary directory."
+  (format nil "~Acl-mcp-read-spec-~D-~D-~D/" (%native (uiop:temporary-directory))
+          pid serial (get-universal-time)))
+
+(defvar *scratch-name-function* 'default-scratch-name
+  "Function of a process id and a fixture serial that returns the native path,
+ending in /, of the scratch directory a new fixture tries to create.  Tests
+rebind it to aim a fixture at a path that already exists.")
 
 (defun %fresh-fixture ()
   "Return a fixture with a scratch path and a system name nothing uses yet."
   (let ((serial (sb-ext:atomic-incf (car *fixture-serial*)))
         (pid (sb-posix:getpid)))
     (%make-read-fixture
-     (format nil "~Acl-mcp-read-spec-~D-~D-~D/" (%native (uiop:temporary-directory))
-             pid serial (get-universal-time))
+     (funcall *scratch-name-function* pid serial)
      (format nil "cl-mcp-read-fixture-~D-~D" pid serial))))
 
 (defun call-with-read-fixture (thunk &key places links root-alias register-dependency

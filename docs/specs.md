@@ -331,6 +331,12 @@ Write cases use the read fixture (see *Fixtures* above) with three additions:
 - `:adopt-new-entries` makes cleanup also remove, deepest first, whatever below
   the scratch root the fixture did not create. It removes one entry at a time,
   never follows a link, and lists each entry in `read-fixture-adopted`.
+  Adoption runs only when the fixture's own mkdir of the scratch directory
+  succeeded, and the path is still a directory. When the path was already
+  taken, by a directory or a symlink, mkdir fails, and cleanup lists, removes
+  and reports nothing below it. Before this check, a taken path had all its
+  entries adopted and deleted (found in review of #171). A test aims a fixture
+  at a taken path through `*scratch-name-function*`.
 
 Each check makes exactly one call, snapshots the tree just before and just
 after, and judges from those two snapshots while the tree still exists. Only
@@ -376,8 +382,10 @@ suite:
 - the writer's exact effects: new directories and file, an in-place update,
   names without a type, and links;
 - the fixtures themselves: no new directory is created before the call, what
-  a write created is seen before it is adopted, and adoption unlinks a link
-  without following it and also runs when the body signals;
+  a write created is seen before it is adopted, adoption unlinks a link
+  without following it and also runs when the body signals, and a scratch
+  path that already exists, as a directory or a link, is neither adopted nor
+  reported, and every file in it keeps its bytes;
 - a fixed sample of the generators.
 
 Each write property runs 12 trials at `:normal` and 3 at `:smoke`. Each takes

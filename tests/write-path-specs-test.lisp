@@ -25,6 +25,8 @@
                 #:read-fixture-adopted
                 #:call-with-read-fixture
                 #:with-read-fixture
+                #:*scratch-name-function*
+                #:read-fixture-cleanup-warning
                 #:region-native
                 #:fixture-symlink
                 #:register-dependency
@@ -434,6 +436,69 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
               (error 'planned-failure))
           (planned-failure () t)))
     (ng (probe-file (uiop:parse-native-namestring scratch :ensure-directory t)))))
+
+(deftest write-fixture-never-adopts-a-scratch-it-did-not-create
+  ;; The scratch path a fixture tries already exists: a directory holding files,
+  ;; or a symlink to one.  Its mkdir fails, so the fixture owns nothing there.
+  ;; Cleanup must then neither remove what it finds nor report it as a leftover
+  ;; of its own.  Everything here lives in a directory this test creates.
+  (let* ((owned (format nil "~Acl-mcp-write-spec-owned-~D-~D/"
+                        (uiop:native-namestring (uiop:temporary-directory))
+                        (sb-posix:getpid) (get-universal-time)))
+         (taken (concatenate 'string owned "taken/"))
+         (inner (concatenate 'string taken "inner/"))
+         (aimed (concatenate 'string owned "aimed/"))
+         (alias (concatenate 'string owned "alias"))
+         (sentinels (list (concatenate 'string taken "keep.txt")
+                          (concatenate 'string inner "keep.txt")
+                          (concatenate 'string aimed "keep.txt"))))
+    (flet ((quietly (function native)
+             (handler-case (funcall function native)
+               (sb-posix:syscall-error () nil)))
+           (contents (native)
+             (and (probe-file (uiop:parse-native-namestring native))
+                  (uiop:read-file-string (uiop:parse-native-namestring native)))))
+      (sb-posix:mkdir owned #o700)
+      (unwind-protect
+           (progn
+             (dolist (directory (list taken inner aimed))
+               (sb-posix:mkdir directory #o700))
+             (dolist (native sentinels)
+               (with-open-file (out (uiop:parse-native-namestring native) :direction :output)
+                 (write-string "keep" out)))
+             (sb-posix:symlink "aimed" alias)
+             (dolist (candidate (list taken (concatenate 'string alias "/")))
+               (dolist (adopt '(t nil))
+                 (let ((ran nil)
+                       (warned nil))
+                   (ok (eq :not-created
+                           (handler-bind ((read-fixture-cleanup-warning
+                                            (lambda (condition)
+                                              (setf warned t)
+                                              (muffle-warning condition))))
+                             (handler-case
+                                 (let ((*scratch-name-function*
+                                         (lambda (pid serial)
+                                           (declare (ignore pid serial))
+                                           candidate)))
+                                   (with-read-fixture (fixture :adopt-new-entries adopt)
+                                     (declare (ignore fixture))
+                                     (setf ran t)))
+                               (sb-posix:syscall-error () :not-created))))
+                       (format nil "~A (adopt ~A): building fails" candidate adopt))
+                   (ng ran (format nil "~A (adopt ~A): the body never runs" candidate adopt))
+                   (ng warned (format nil "~A (adopt ~A): no leftover is reported"
+                                      candidate adopt)))))
+             (dolist (native sentinels)
+               (ok (equal "keep" (contents native)) (format nil "~A is kept" native)))
+             (ok (probe-file (uiop:parse-native-namestring inner :ensure-directory t))
+                 "the inner directory is kept"))
+        ;; Only what this test made, one entry at a time, missing ones skipped.
+        (quietly #'sb-posix:unlink alias)
+        (dolist (native (reverse sentinels))
+          (quietly #'sb-posix:unlink native))
+        (dolist (directory (list inner taken aimed owned))
+          (quietly #'sb-posix:rmdir directory))))))
 
 (deftest snapshot-changes-reports-additions-removals-and-changes
   (let ((before '(("a/" :directory nil) ("a/f" :file #(1 2)) ("l" :link "x")))
